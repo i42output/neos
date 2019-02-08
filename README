@@ -1,0 +1,17 @@
+Introduction
+------------
+
+"neos" is a cross-platform language agnostic scripting engine with a WASM JIT.
+
+
+Dependencies
+------------
+
+Boost
+neolib
+
+
+Features
+--------
+
+<TBD>
