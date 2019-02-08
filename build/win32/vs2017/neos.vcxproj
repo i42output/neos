@@ -19,10 +19,15 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\..\src\context.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\test\neoscript.neos" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>
@@ -102,8 +107,9 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NEOLIB_HOSTED_ENVIRONMENT;WIN32;_DEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;$(DevDirNeos)\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -118,8 +124,9 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NEOLIB_HOSTED_ENVIRONMENT;_DEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;$(DevDirNeos)\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -136,8 +143,9 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NEOLIB_HOSTED_ENVIRONMENT;WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;$(DevDirNeos)\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -156,8 +164,9 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NEOLIB_HOSTED_ENVIRONMENT;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(DevDirBoost);$(DevDirNeolib)\include;$(DevDirNeos)\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

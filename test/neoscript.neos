@@ -1,0 +1,55 @@
+{
+    meta : {
+        language: "neoscript"
+        copyright: "Copyright (C) 2019 Leigh Johnston"
+        version: "1.0.0"
+    }
+
+    modules : [
+        math
+        string
+        io
+        gc
+        i42.magic
+    ]
+
+    tokens : {
+        "+": math.operator.addition
+        "-": math.operator.subtraction
+        "*": math.operator.multiplication
+        "/": math.operator.division
+        "(": math.expression.open
+        ")": math.expression.close
+        "\"": string.open
+    }
+
+    string : {
+        tokens : {
+            "\"": close
+            "\\": escape.open
+            escape : {
+                "\"": character.quote
+                "n": character.LF
+                "r": character.CR
+                "t": character.TAB
+                "u": unicode1
+                character: close
+                unicode1 : {
+                    character.hexdigit : unicode2
+                    unicode2 : {
+                        character.hexdigit : unicode3
+                        unicode3 : {
+                            character.hexdigit : unicode4
+                            unicode4 : {
+                                character.hexdigit : code_unit
+                                code_unit : {
+                                    make.character.utf16 : [unicode1, unicode2, unicode3, unicode4]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
