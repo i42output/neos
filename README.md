@@ -1,5 +1,5 @@
 # Introduction
-"neos" is a cross-platform language agnostic scripting engine with a WASM JIT. 
+"neos" is a cross-platform language agnostic scripting engine with a custom bytecode JIT. 
 
 Development started on 7 Feb 2019 so don't expect a release anytime soon.
 
