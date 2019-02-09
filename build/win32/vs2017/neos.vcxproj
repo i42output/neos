@@ -20,12 +20,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\api\context.cpp" />
+    <ClCompile Include="..\..\..\src\bytecode\vm.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\registers.hpp" />
+    <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\test\neoscript.neos" />

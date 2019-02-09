@@ -30,6 +30,9 @@
     <ClCompile Include="..\..\..\src\api\context.cpp">
       <Filter>Source Files\api</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\src\bytecode\vm.cpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\neos.hpp">
@@ -39,6 +42,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\src\bytecode\registers.hpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\bytecode\vm.hpp">
       <Filter>Source Files\bytecode</Filter>
     </ClInclude>
   </ItemGroup>

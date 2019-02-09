@@ -120,5 +120,10 @@ namespace neos
             SF = 0x0000000000000008ull, // Sign flag
             OF = 0x0000000000000010ull  // Overflow flag
         };
+
+        inline uint8_t operator-(reg lhs, reg rhs)
+        {
+            return static_cast<uint8_t>(lhs) - static_cast<uint8_t>(rhs);
+        }
     }
 }
