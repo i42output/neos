@@ -57,12 +57,26 @@ namespace neos
                     i64 i64;
                     f32 f32;
                     f64 f64;
+                };
+                union simd_128
+                {
+                    std::array<data, 2> d;
+                    // todo: add SIMD data types
+                };
+                union simd_256
+                {
+                    std::array<data, 4> d;
+                    // todo: add SIMD data types
+                };
+                union simd_512
+                {
+                    std::array<data, 8> d;
                     // todo: add SIMD data types
                 };
                 thread_local data r[16];
-                thread_local std::array<data, 2> x[16]; // todo: use SIMD data types
-                thread_local std::array<data, 4> y[16]; // todo: use SIMD data types
-                thread_local std::array<data, 8> z[16]; // todo: use SIMD data types
+                thread_local simd_128 x[16];
+                thread_local simd_256 y[16];
+                thread_local simd_512 z[16];
             }
 
             template <typename DataType> inline DataType& crack_data(registers::data& aData);
@@ -79,12 +93,12 @@ namespace neos
 
             template <typename DataType> inline DataType& r(reg aRegister) { return crack_data<DataType>(registers::r[aRegister - reg::R0]); }
             template <typename DataType, reg Register> inline DataType& r() { return crack_data<DataType>(registers::r[Register - reg::R0]); }
-            template <typename DataType> inline DataType& x(reg aRegister) { return crack_data<DataType>(registers::x[aRegister - reg::X0][0]); }
-            template <typename DataType, reg Register> inline DataType& x() { return crack_data<DataType>(registers::x[Register - reg::X0][0]); }
-            template <typename DataType> inline DataType& y(reg aRegister) { return crack_data<DataType>(registers::y[aRegister - reg::Y0][0]); }
-            template <typename DataType, reg Register> inline DataType& y() { return crack_data<DataType>(registers::y[Register - reg::Y0][0]); }
-            template <typename DataType> inline DataType& z(reg aRegister) { return crack_data<DataType>(registers::z[aRegister - reg::Z0][0]); }
-            template <typename DataType, reg Register> inline DataType& z() { return crack_data<DataType>(registers::z[Register - reg::Z0][0]); }
+            template <typename DataType> inline DataType& x(reg aRegister) { return crack_data<DataType>(registers::x[aRegister - reg::X0].d[0]); }
+            template <typename DataType, reg Register> inline DataType& x() { return crack_data<DataType>(registers::x[Register - reg::X0].d[0]); }
+            template <typename DataType> inline DataType& y(reg aRegister) { return crack_data<DataType>(registers::y[aRegister - reg::Y0].d[0]); }
+            template <typename DataType, reg Register> inline DataType& y() { return crack_data<DataType>(registers::y[Register - reg::Y0].d[0]); }
+            template <typename DataType> inline DataType& z(reg aRegister) { return crack_data<DataType>(registers::z[aRegister - reg::Z0].d[0]); }
+            template <typename DataType, reg Register> inline DataType& z() { return crack_data<DataType>(registers::z[Register - reg::Z0].d[0]); }
 
             typedef std::vector<std::byte> text;
 
