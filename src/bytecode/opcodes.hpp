@@ -17,101 +17,149 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <neolib/neolib.hpp>
+#pragma once
+
+#include <neos/neos.hpp>
+#include "registers.hpp"
 
 namespace neos
 {
     namespace bytecode
     {
+        typedef uint32_t opcode_base_t;
+
         /// @brief Opcode types
-        enum class opcode_type : uint16_t
+        enum class opcode_type : opcode_base_t
         {
             // Masks
-            DATA_MASK       = 0b0000000011100000,
-            CLASS_MASK      = 0b0000001100000000,
-            LINK_MASK       = 0b0000010000000000,
-            COND_MASK       = 0b0000100000000000,
-            COND_OP_MASK    = 0b1111000000000000,
-            // Data
-            D8              = 0b0000000000000000,
-            D16             = 0b0000000000100000,
-            D32             = 0b0000000001000000,
-            D64             = 0b0000000001100000,
-            Integer         = 0b0000000000000000,
-            Float           = 0b0000000010000000,
-            // Class                    
-            Branch          = 0b0000000000000000,
-            Data            = 0b0000000100000000,
-            Memory          = 0b0000001000000000,
-            Priviledged     = 0b0000001100000000,
-            // Link register                
-            Link            = 0b0000010000000000,
-            // Conditional execute
-            Cond            = 0b0000100000000000,
-            // Conditions
-            CondEQ          = 0b0000000000000000,
-            CondNE          = 0b0001000000000000,
-            CondLT          = 0b0010000000000000,
-            CondLTU         = 0b0011000000000000,
-            CondLTE         = 0b0100000000000000,
-            CondLTEU        = 0b0101000000000000,
-            CondGT          = 0b0110000000000000,
-            CondGTU         = 0b0111000000000000,
-            CondGTE         = 0b1000000000000000,
-            CondGTEU        = 0b1001000000000000,
-            CondNG          = 0b1010000000000000,
-            CondPS          = 0b1011000000000000,
-            CondVS          = 0b1100000000000000,
-            CondVC          = 0b1101000000000000,
+            D8_MASK         = 0b00000000000000000000000011111111,
+            REG2_MASK       = 0b00000000000000000000000000111111,
+            REG1_MASK       = 0b00000000000000000011111100000000,
+            IMMEDIATE_MASK  = 0b00000000000000000100000000000000,
+            OPCODE_MASK     = 0b00000011100111110000000000000000,
+            DATA_MASK       = 0b00000000111000000000000000000000,
+            CLASS_MASK      = 0b00000011000000000000000000000000,
+            LINK_MASK       = 0b00000100000000000000000000000000,
+            COND_MASK       = 0b00001000000000000000000000000000,
+            COND_OP_MASK    = 0b11110000000000000000000000000000,
+            // Data                             
+            Immediate       = 0b00000000000000000100000000000000,
+            D8              = 0b00000000000000000000000000000000,
+            D16             = 0b00000000001000000000000000000000,
+            D32             = 0b00000000010000000000000000000000,
+            D64             = 0b00000000011000000000000000000000,
+            Integer         = 0b00000000000000000000000000000000,
+            Float           = 0b00000000100000000000000000000000,
+            // Class                            
+            Branch          = 0b00000000000000000000000000000000,
+            Data            = 0b00000001000000000000000000000000,
+            Memory          = 0b00000010000000000000000000000000,
+            Priviledged     = 0b00000011000000000000000000000000,
+            // Link register                    
+            Link            = 0b00000100000000000000000000000000,
+            // Conditional execute              
+            Cond            = 0b00001000000000000000000000000000,
+            // Conditions                       
+            CondEQ          = 0b00000000000000000000000000000000,
+            CondNE          = 0b00010000000000000000000000000000,
+            CondLT          = 0b00100000000000000000000000000000,
+            CondLTU         = 0b00110000000000000000000000000000,
+            CondLTE         = 0b01000000000000000000000000000000,
+            CondLTEU        = 0b01010000000000000000000000000000,
+            CondGT          = 0b01100000000000000000000000000000,
+            CondGTU         = 0b01110000000000000000000000000000,
+            CondGTE         = 0b10000000000000000000000000000000,
+            CondGTEU        = 0b10010000000000000000000000000000,
+            CondNG          = 0b10100000000000000000000000000000,
+            CondPS          = 0b10110000000000000000000000000000,
+            CondVS          = 0b11000000000000000000000000000000,
+            CondVC          = 0b11010000000000000000000000000000,
         };
+
+        constexpr opcode_base_t REG1_SHIFT = 8;
 
         inline constexpr opcode_type operator|(opcode_type lhs, opcode_type rhs)
         {
-            return static_cast<opcode_type>(static_cast<uint16_t>(lhs) | static_cast<uint16_t>(rhs));
+            return static_cast<opcode_type>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
         }
 
-        inline constexpr uint16_t operator|(uint16_t lhs, opcode_type rhs)
+        inline constexpr opcode_base_t operator|(opcode_base_t lhs, opcode_type rhs)
         {
-            return lhs | static_cast<uint16_t>(rhs);
+            return lhs | static_cast<opcode_base_t>(rhs);
         }
 
         inline constexpr opcode_type operator&(opcode_type lhs, opcode_type rhs)
         {
-            return static_cast<opcode_type>(static_cast<uint16_t>(lhs) & static_cast<uint16_t>(rhs));
+            return static_cast<opcode_type>(static_cast<opcode_base_t>(lhs) & static_cast<opcode_base_t>(rhs));
         }
 
         /// @brief Opcodes
-        enum class opcode : uint16_t
+        enum class opcode : opcode_base_t
         {
-            B       = 0b00000000 | opcode_type::Branch,
-            BL      = 0b00000000 | opcode_type::Branch | opcode_type::Link,
-            BEQ     = 0b00000000 | opcode_type::Branch | opcode_type::CondEQ,
-            BNE     = 0b00000000 | opcode_type::Branch | opcode_type::CondNE,
-            BLT     = 0b00000000 | opcode_type::Branch | opcode_type::CondLT,
-            BLTU    = 0b00000000 | opcode_type::Branch | opcode_type::CondLTU,
-            BGE     = 0b00000000 | opcode_type::Branch | opcode_type::CondGTE,
-            BGEU    = 0b00000000 | opcode_type::Branch | opcode_type::CondGTEU,
-            MOV     = 0b00000001 | opcode_type::Data,
-            LDR     = 0b00000010 | opcode_type::Memory,
-            STR     = 0b00000011 | opcode_type::Memory,
-            CMP     = 0b00000100 | opcode_type::Data,
-            ADD     = 0b00000101 | opcode_type::Data,
-            ADDF    = 0b00000101 | opcode_type::Data | opcode_type::Float,
-            ADC     = 0b00000110 | opcode_type::Data,
-            SUB     = 0b00000111 | opcode_type::Data,
-            SUBF    = 0b00000111 | opcode_type::Data | opcode_type::Float,
-            SBC     = 0b00001000 | opcode_type::Data,
-            MUL     = 0b00001001 | opcode_type::Data,
-            MULF    = 0b00001001 | opcode_type::Data | opcode_type::Float,
-            DIV     = 0b00001010 | opcode_type::Data,
-            DIVF    = 0b00001010 | opcode_type::Data | opcode_type::Float,
-            AND     = 0b00001011 | opcode_type::Data,
-            OR      = 0b00001100 | opcode_type::Data,
-            XOR     = 0b00001101 | opcode_type::Data,
-            TEQ     = 0b00001110 | opcode_type::Data,
-            TST     = 0b00001111 | opcode_type::Data,
-            EPRIV   = 0b00010000 | opcode_type::Priviledged,
-            LPRIV   = 0b00011000 | opcode_type::Priviledged
+            B       = 0b00000000000000000000000000000000 | opcode_type::Branch,
+            BL      = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::Link,
+            BEQ     = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondEQ,
+            BNE     = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondNE,
+            BLT     = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondLT,
+            BLTU    = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondLTU,
+            BGE     = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondGTE,
+            BGEU    = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondGTEU,
+            MOV     = 0b00000000000000010000000000000000 | opcode_type::Data,
+            LDR     = 0b00000000000000100000000000000000 | opcode_type::Memory,
+            STR     = 0b00000000000000110000000000000000 | opcode_type::Memory,
+            CMP     = 0b00000000000001000000000000000000 | opcode_type::Data,
+            ADD     = 0b00000000000001010000000000000000 | opcode_type::Data,
+            ADDF    = 0b00000000000001010000000000000000 | opcode_type::Data | opcode_type::Float,
+            ADC     = 0b00000000000001100000000000000000 | opcode_type::Data,
+            SUB     = 0b00000000000001110000000000000000 | opcode_type::Data,
+            SUBF    = 0b00000000000001110000000000000000 | opcode_type::Data | opcode_type::Float,
+            SBC     = 0b00000000000010000000000000000000 | opcode_type::Data,
+            MUL     = 0b00000000000010010000000000000000 | opcode_type::Data,
+            MULF    = 0b00000000000010010000000000000000 | opcode_type::Data | opcode_type::Float,
+            DIV     = 0b00000000000010100000000000000000 | opcode_type::Data,
+            DIVF    = 0b00000000000010100000000000000000 | opcode_type::Data | opcode_type::Float,
+            AND     = 0b00000000000010110000000000000000 | opcode_type::Data,
+            OR      = 0b00000000000011000000000000000000 | opcode_type::Data,
+            XOR     = 0b00000000000011010000000000000000 | opcode_type::Data,
+            TEQ     = 0b00000000000011100000000000000000 | opcode_type::Data,
+            TST     = 0b00000000000011110000000000000000 | opcode_type::Data,
+            EPRIV   = 0b00000000000100000000000000000000 | opcode_type::Priviledged,
+            LPRIV   = 0b00000000000110000000000000000000 | opcode_type::Priviledged
         };
+
+        inline constexpr opcode operator|(opcode lhs, uint8_t rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
+        }
+
+        inline constexpr opcode operator|(opcode lhs, reg rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | (static_cast<opcode_base_t>(rhs) << REG1_SHIFT));
+        }
+
+        inline constexpr opcode operator|(opcode lhs, const std::pair<reg, reg>& rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | (static_cast<opcode_base_t>(rhs.first) << REG1_SHIFT) | static_cast<opcode_base_t>(rhs.second));
+        }
+
+        inline constexpr opcode operator|(opcode lhs, opcode_type rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
+        }
+
+        inline constexpr opcode operator&(opcode lhs, opcode_type rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) & static_cast<opcode_base_t>(rhs));
+        }
+
+        inline reg r1(opcode aOpcode)
+        {
+            return static_cast<reg>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG1_MASK) >> REG1_SHIFT);
+        }
+
+        inline reg r2(opcode aOpcode)
+        {
+            return static_cast<reg>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG2_MASK));
+        }
     }
 }

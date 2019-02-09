@@ -1,5 +1,5 @@
 /*
-  neos.hpp
+  text.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -19,13 +19,15 @@
 
 #pragma once
 
-#include <neolib/neolib.hpp>
-#include <vector>
-#include <neolib/version.hpp>
+#include <neos/neos.hpp>
+#include "registers.hpp"
+#include "opcodes.hpp"
 
 namespace neos
 {
-	const neolib::version NEOS_VERSION = { 1u, 0u, 0u, 0u, "Jaffa Cake"};
-
-    typedef std::vector<std::byte> text_t;
+    namespace bytecode
+    {
+        uint64_t emit(text_t& aText, opcode aOpcode, uint64_t aImmediate);
+        uint64_t emit(text_t& aText, opcode aOpcode, reg aRegister, uint64_t aImmediate);
+    }
 }

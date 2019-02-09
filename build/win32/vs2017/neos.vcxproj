@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\api\context.cpp" />
+    <ClCompile Include="..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\vm.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
@@ -28,6 +29,7 @@
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\registers.hpp" />
+    <ClInclude Include="..\..\..\src\bytecode\text.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
   </ItemGroup>
   <ItemGroup>

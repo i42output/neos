@@ -20,13 +20,19 @@
 #include <neolib/neolib.hpp>
 #include <iostream>
 #include <neos/context.hpp>
+#include "../bytecode/vm.hpp"
+#include "../bytecode/opcodes.hpp"
+#include "../bytecode/text.hpp"
 
 namespace neos
 {
-	context::context() :
-		iRunning{ false }
+	context::context()
 	{
 	}
+
+    context::~context()
+    {
+    }
 
 	bool context::schema_loaded() const
 	{
@@ -38,20 +44,39 @@ namespace neos
 		std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
 		iSchema.emplace(aSchemaPath);
 		iLanguage = iSchema->root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>();
-	}
+        // todo
+        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, 1);
+        emit(iText, bytecode::opcode::B, loop);
+    }
 
 	const std::string& context::language() const
 	{
 		return iLanguage;
 	}
 
+    const text_t& context::text() const
+    {
+        return iText;
+    }
+
 	bool context::running() const
 	{
-		return iRunning;
+        for (auto const& t : iThreads)
+            if (t->joinable())
+                return true;
+        return false;
 	}
 
 	void context::run()
 	{
-		iRunning = true;
+        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
 	}
+
+    std::string context::metrics() const
+    {
+        std::string result;
+        for (auto const& t : iThreads)
+            result += t->metrics();
+        return result;
+    }
 }

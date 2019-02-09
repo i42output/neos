@@ -17,25 +17,43 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <neolib/neolib.hpp>
+#pragma once
+
+#include <neos/neos.hpp>
+#include <string>
+#include <optional>
+#include <vector>
+#include <memory>
 #include <neolib/json.hpp>
 
 namespace neos
 {
+    namespace bytecode
+    {
+        namespace vm
+        {
+            class thread;
+        }
+    }
+
 	class context
 	{
 	public:
 		context();
+        ~context();
 	public:
 		bool schema_loaded() const;
 		void load_schema(const std::string& aSchemaPath);
 		const std::string& language() const;
+        const text_t& text() const;
 	public:
 		bool running() const;
 		void run();
+        std::string metrics() const;
 	private:
 		std::optional<neolib::rjson> iSchema;
-		std::string iLanguage;
-		bool iRunning;
+        std::string iLanguage;
+        text_t iText;
+        std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
 	};
 }

@@ -17,7 +17,9 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <neolib/neolib.hpp>
+#pragma once
+
+#include <neos/neos.hpp>
 
 namespace neos
 {

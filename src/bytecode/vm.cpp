@@ -18,6 +18,7 @@
 */
 
 #include "vm.hpp"
+#include <sstream>
 
 namespace neos
 {
@@ -25,8 +26,97 @@ namespace neos
     {
         namespace vm
         {
-            thread::thread(const text& aText) : 
+            namespace registers
+            {
+                thread_local data r[16];
+                thread_local simd_128 x[16];
+                thread_local simd_256 y[16];
+                thread_local simd_512 z[16];
+            }
+
+            namespace
+            {
+                template <typename DataType>
+                inline DataType read(opcode aOpcode)
+                {
+                    return vm::read<DataType>(r1(aOpcode));
+                }
+
+                template <typename DataType>
+                inline DataType& write(opcode aOpcode)
+                {
+                    return vm::write<DataType>(r1(aOpcode));
+                }
+
+                template <typename DataType>
+                inline DataType immediate(opcode aOpcode, const std::byte* aText)
+                {
+                    switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
+                    {
+                    case opcode_type::D8:
+                        return static_cast<DataType>(aOpcode & opcode_type::D8_MASK);
+                    default:
+                        return *reinterpret_cast<const DataType*>(aText);
+                    }
+                }
+            }
+
+            namespace instruction
+            {
+                inline void B(opcode aOpcode, const std::byte* aText)
+                {
+                    if ((static_cast<opcode_type>(aOpcode & opcode_type::Immediate)) == opcode_type::Immediate)
+                    {
+                        switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
+                        {
+                        case opcode_type::D8:
+                            r<u64, reg::PC>() += immediate<i8>(aOpcode, aText);
+                            break;
+                        case opcode_type::D16:
+                            r<u64, reg::PC>() += immediate<i16>(aOpcode, aText);
+                            break;
+                        case opcode_type::D32:
+                            r<u64, reg::PC>() += immediate<i32>(aOpcode, aText);
+                            break;
+                        case opcode_type::D64:
+                            r<u64, reg::PC>() = immediate<u64>(aOpcode, aText);
+                            break;
+                        }
+                    }
+                }
+                inline uint32_t ADD(opcode aOpcode, const std::byte* aText)
+                {
+                    uint32_t consumed = 0u;
+                    // todo: update flags based on result of arithmetic
+                    if ((static_cast<opcode_type>(aOpcode & opcode_type::Immediate)) == opcode_type::Immediate)
+                    {
+                        switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
+                        {
+                        case opcode_type::D8:
+                            write<u8>(aOpcode) += immediate<u8>(aOpcode, aText);
+                            break;
+                        case opcode_type::D16:
+                            write<u16>(aOpcode) += immediate<u16>(aOpcode, aText);
+                            consumed = 2u;
+                            break;
+                        case opcode_type::D32:
+                            write<u32>(aOpcode) += immediate<u32>(aOpcode, aText);
+                            consumed = 4u;
+                            break;
+                        case opcode_type::D64:
+                            write<u64>(aOpcode) += immediate<u64>(aOpcode, aText);
+                            consumed = 8u;
+                            break;
+                        }
+                    }
+                    return consumed;
+                }
+            }
+
+            thread::thread(const text_t& aText) : 
                 iText{ aText },
+                iCount{ 0ull },
+                iTerminate{ false },
                 iResult{}
             {
                 iNativeThread.emplace([this]()
@@ -42,12 +132,43 @@ namespace neos
 
             void thread::join()
             {
-                iNativeThread->join();
+                try
+                {
+                    iNativeThread->join();
+                }
+                catch (std::invalid_argument)
+                {
+                }
             }
 
             void thread::terminate()
             {
-                // todo
+                iTerminate = true;
+                join();
+            }
+
+            const std::chrono::steady_clock::time_point& thread::start_time() const
+            {
+                return iStartTime;
+            }
+
+            uint64_t thread::count() const
+            {
+                return iCountSample;
+            }
+
+            std::string thread::metrics() const
+            {
+                std::ostringstream oss;
+                auto threadId = iNativeThread->get_id();
+                oss << "[Thread " << threadId << "] Instruction count (approx): " << count() << std::endl;
+                auto instructionsPerSecond = count() / (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time()).count() / 1000000.0);
+                auto ghzFrequency = instructionsPerSecond / 1000000000.0;
+                if (ghzFrequency >= 1.0)
+                    oss << "[Thread " << threadId << "] Virtual CPU clock frequency: " << ghzFrequency << " GHz" << std::endl;
+                else
+                    oss << "[Thread " << threadId << "] Virtual CPU clock frequency: " << ghzFrequency * 1000.0 << " MHz" << std::endl;
+                return oss.str();
             }
 
             i64 thread::result() const
@@ -57,7 +178,31 @@ namespace neos
 
             i64 thread::execute()
             {
-                // todo
+                iStartTime = std::chrono::steady_clock::now();
+                if (iText.empty())
+                    throw exceptions::no_text();
+                for(;;)
+                {
+                    auto& pc = r<u64, reg::PC>();
+                    bytecode::opcode const opcode = *reinterpret_cast<const bytecode::opcode*>(&iText[pc]);
+                    pc += 4u;
+                    bytecode::opcode const opcodeInstruction = (opcode & opcode_type::OPCODE_MASK);
+                    switch (opcodeInstruction)
+                    {
+                    case bytecode::opcode::B:
+                        instruction::B(opcode, &iText[pc]);
+                        break;
+                    case bytecode::opcode::ADD:
+                        pc += instruction::ADD(opcode, &iText[pc]);
+                        break;
+                    }
+                    if ((++iCount & 0x3FFFF) == 0)
+                    {
+                        if (iTerminate)
+                            break;
+                        iCountSample = iCount;
+                    }
+                }
                 return r<i64, reg::R1>();
             }
         }
