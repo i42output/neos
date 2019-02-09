@@ -45,59 +45,45 @@ namespace neos
 
             namespace registers
             {
-                thread_local uint64_t r[16];
-                thread_local std::array<double, 2> x[16];
-                thread_local std::array<double, 4> y[16];
-                thread_local std::array<double, 8> z[16];
+                union data
+                {
+                    u8 u8;
+                    u16 u16;
+                    u32 u32;
+                    u64 u64;
+                    i8 i8;
+                    i16 i16;
+                    i32 i32;
+                    i64 i64;
+                    f32 f32;
+                    f64 f64;
+                };
+                thread_local data r[16];
+                thread_local std::array<data, 2> x[16];
+                thread_local std::array<data, 4> y[16];
+                thread_local std::array<data, 8> z[16];
             }
 
-            template <typename DataType>
-            inline DataType& r(reg aRegister)
-            {
-                return *reinterpret_cast<DataType*>(&registers::r[aRegister - reg::R0]);
-            }
+            template <typename DataType> inline DataType& crack_data(registers::data& aData);
+            template <> inline u8& crack_data<u8>(registers::data& aData) { return aData.u8; }
+            template <> inline u16& crack_data<u16>(registers::data& aData) { return aData.u16; }
+            template <> inline u32& crack_data<u32>(registers::data& aData) { return aData.u32; }
+            template <> inline u64& crack_data<u64>(registers::data& aData) { return aData.u64; }
+            template <> inline i8& crack_data<i8>(registers::data& aData) { return aData.i8; }
+            template <> inline i16& crack_data<i16>(registers::data& aData) { return aData.i16; }
+            template <> inline i32& crack_data<i32>(registers::data& aData) { return aData.i32; }
+            template <> inline i64& crack_data<i64>(registers::data& aData) { return aData.i64; }
+            template <> inline f32& crack_data<f32>(registers::data& aData) { return aData.f32; }
+            template <> inline f64& crack_data<f64>(registers::data& aData) { return aData.f64; }
 
-            template <typename DataType, reg Register>
-            inline DataType& r()
-            {
-                return *reinterpret_cast<DataType*>(&registers::r[Register - reg::R0]);
-            }
-
-            template <typename DataType>
-            inline DataType& x(reg aRegister)
-            {
-                return *reinterpret_cast<DataType*>(&registers::x[aRegister - reg::X0][0]);
-            }
-
-            template <typename DataType, reg Register>
-            inline DataType& x()
-            {
-                return *reinterpret_cast<DataType*>(&registers::x[Register - reg::X0][0]);
-            }
-
-            template <typename DataType>
-            inline DataType& y(reg aRegister)
-            {
-                return *reinterpret_cast<DataType*>(&registers::y[aRegister - reg::Y0][0]);
-            }
-
-            template <typename DataType, reg Register>
-            inline DataType& y()
-            {
-                return *reinterpret_cast<DataType*>(&registers::y[Register - reg::Y0][0]);
-            }
-
-            template <typename DataType>
-            inline DataType& z(reg aRegister)
-            {
-                return *reinterpret_cast<DataType*>(&registers::y[aRegister - reg::Z0][0]);
-            }
-
-            template <typename DataType, reg Register>
-            inline DataType& z()
-            {
-                return *reinterpret_cast<DataType*>(&registers::y[Register - reg::Z0][0]);
-            }
+            template <typename DataType> inline DataType& r(reg aRegister) { return crack_data<DataType>(registers::r[aRegister - reg::R0]); }
+            template <typename DataType, reg Register> inline DataType& r() { return crack_data<DataType>(registers::r[Register - reg::R0]); }
+            template <typename DataType> inline DataType& x(reg aRegister) { return crack_data<DataType>(registers::x[aRegister - reg::X0]); }
+            template <typename DataType, reg Register> inline DataType& x() { return crack_data<DataType>(registers::x[Register - reg::X0]); }
+            template <typename DataType> inline DataType& y(reg aRegister) { return crack_data<DataType>(registers::y[aRegister - reg::Y0]); }
+            template <typename DataType, reg Register> inline DataType& y() { return crack_data<DataType>(registers::y[Register - reg::Y0]); }
+            template <typename DataType> inline DataType& z(reg aRegister) { return crack_data<DataType>(registers::z[aRegister - reg::Z0]); }
+            template <typename DataType, reg Register> inline DataType& z() { return crack_data<DataType>(registers::z[Register - reg::Z0]); }
 
             typedef std::vector<std::byte> text;
 
