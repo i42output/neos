@@ -78,12 +78,12 @@ namespace neos
 
             template <typename DataType> inline DataType& r(reg aRegister) { return crack_data<DataType>(registers::r[aRegister - reg::R0]); }
             template <typename DataType, reg Register> inline DataType& r() { return crack_data<DataType>(registers::r[Register - reg::R0]); }
-            template <typename DataType> inline DataType& x(reg aRegister) { return crack_data<DataType>(registers::x[aRegister - reg::X0]); }
-            template <typename DataType, reg Register> inline DataType& x() { return crack_data<DataType>(registers::x[Register - reg::X0]); }
-            template <typename DataType> inline DataType& y(reg aRegister) { return crack_data<DataType>(registers::y[aRegister - reg::Y0]); }
-            template <typename DataType, reg Register> inline DataType& y() { return crack_data<DataType>(registers::y[Register - reg::Y0]); }
-            template <typename DataType> inline DataType& z(reg aRegister) { return crack_data<DataType>(registers::z[aRegister - reg::Z0]); }
-            template <typename DataType, reg Register> inline DataType& z() { return crack_data<DataType>(registers::z[Register - reg::Z0]); }
+            template <typename DataType> inline DataType& x(reg aRegister) { return crack_data<DataType>(registers::x[aRegister - reg::X0][0]); }
+            template <typename DataType, reg Register> inline DataType& x() { return crack_data<DataType>(registers::x[Register - reg::X0][0]); }
+            template <typename DataType> inline DataType& y(reg aRegister) { return crack_data<DataType>(registers::y[aRegister - reg::Y0][0]); }
+            template <typename DataType, reg Register> inline DataType& y() { return crack_data<DataType>(registers::y[Register - reg::Y0][0]); }
+            template <typename DataType> inline DataType& z(reg aRegister) { return crack_data<DataType>(registers::z[aRegister - reg::Z0][0]); }
+            template <typename DataType, reg Register> inline DataType& z() { return crack_data<DataType>(registers::z[Register - reg::Z0][0]); }
 
             typedef std::vector<std::byte> text;
 
