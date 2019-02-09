@@ -57,11 +57,12 @@ namespace neos
                     i64 i64;
                     f32 f32;
                     f64 f64;
+                    // todo: add SIMD data types
                 };
                 thread_local data r[16];
-                thread_local std::array<data, 2> x[16];
-                thread_local std::array<data, 4> y[16];
-                thread_local std::array<data, 8> z[16];
+                thread_local std::array<data, 2> x[16]; // todo: use SIMD data types
+                thread_local std::array<data, 4> y[16]; // todo: use SIMD data types
+                thread_local std::array<data, 8> z[16]; // todo: use SIMD data types
             }
 
             template <typename DataType> inline DataType& crack_data(registers::data& aData);
