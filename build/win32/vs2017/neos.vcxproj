@@ -26,6 +26,7 @@
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
+    <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\registers.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
   </ItemGroup>

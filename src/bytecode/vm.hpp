@@ -23,6 +23,7 @@
 #include <optional>
 #include <thread>
 #include "registers.hpp"
+#include "opcodes.hpp"
 
 namespace neos
 {

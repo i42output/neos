@@ -102,15 +102,6 @@ namespace neos
             FLAGS = R15
         };
 
-        /// @brief Register data size
-        enum class data : uint8_t
-        {
-            D8  = 0x00,
-            D16 = 0x40,
-            D32 = 0x80,
-            D64 = 0xC0,
-        };
-
         /// @brief Flag register
         enum class flag : uint64_t
         {
@@ -118,7 +109,11 @@ namespace neos
             PF = 0x0000000000000002ull, // Parity flag
             ZF = 0x0000000000000004ull, // Zero flag
             SF = 0x0000000000000008ull, // Sign flag
-            OF = 0x0000000000000010ull  // Overflow flag
+            OF = 0x0000000000000010ull, // Overflow flag
+            P0 = 0x0000000000000000ull, // Ring-0 privilege
+            P1 = 0x0100000000000000ull, // Ring-1 privilege
+            P2 = 0x1000000000000000ull, // Ring-2 privilege
+            P3 = 0x1100000000000000ull, // Ring-3 privilege
         };
 
         inline uint8_t operator-(reg lhs, reg rhs)
