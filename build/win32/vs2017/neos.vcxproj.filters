@@ -16,13 +16,19 @@
     <Filter Include="test">
       <UniqueIdentifier>{0ce7462d-3057-4cef-a8d8-3de50d2c5b14}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\api">
+      <UniqueIdentifier>{da88c4ec-0e50-4964-80df-1b1b88a4dc9e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\bytecode">
+      <UniqueIdentifier>{dee021ff-0718-41fb-8918-ad2bdd5ff79a}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\neos.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\src\context.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="..\..\..\src\api\context.cpp">
+      <Filter>Source Files\api</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -31,6 +37,9 @@
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\context.hpp">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\bytecode\registers.hpp">
+      <Filter>Source Files\bytecode</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

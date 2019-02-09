@@ -2,3 +2,5 @@
 /console/build/win32/vs2017/Debug
 /lib/*.lib
 /build/win32/vs2017/.vs
+/build/win32/vs2017/*.user
+/console/build/win32/vs2017/*.user
