@@ -1,6 +1,7 @@
 {
     meta : {
         language: "neoscript"
+        description: "Default neoGFX scripting language; similar to Ada"
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -14,13 +15,13 @@
     ]
 
     tokens : {
-        " ": whitespace
+        ' ': whitespace
         character.LF: whitespace
         character.CR: whitespace
         character.TAB: whitespace
         character.EOF: whitespace
-        "-": {
-            "-": comment.open
+        '-' : {
+            '-': comment.open
         }
         character.alpha: keyword.open
         character.underscore: keyword.open
@@ -40,37 +41,59 @@
             character.alpha: keyword
             whitespace: close
         }
-        "with" : {
-            expect: package.name
-            package.name: engine.module.import
-        }
-        "use" : {
-            expect: package.name
-            package.name: engine.module.instantiate
+        "with": with
+        "use": use
+        "packet": package
+        "body": body
+        "is": is
+        "function": function
+        "begin": begin
+        "end": end
+        "for": for
+        "loop": loop
+        "while": while
+        "return": return
+    }
+
+    with : {
+        expect: package.name
+        package.name : {
+            tokens : {
+                whitespace: whitespace
+                ';': engine.module.import
+            }
         }
     }
 
-    expression {
-        tokens {
-            "=": object.operator.equality
-            ":": {
-                "=": object.operator.assignment
+    use : {
+        expect: package.name
+        package.name : {
+            tokens : {
+                whitespace: whitespace
+                ';': engine.module.instantiate
             }
-            "+": math.operator.addition
-            "-": math.operator.subtraction
-            "*": math.operator.multiplication
-            "/": math.operator.division
-            "(": math.expression.open
-            ")": math.expression.close
-            "\"": string.open
+        }
+    }
+
+    expression : {
+        tokens : {
+            '=': object.operator.equality
+            ':': {
+                '=': object.operator.assignment
+            }
+            '+': math.operator.addition
+            '-': math.operator.subtraction
+            '*': math.operator.multiplication
+            '/': math.operator.division
+            '(': math.expression.open
+            ')': math.expression.close
+            '\"': string.open
         }
     }
 
     package.name : {
         tokens : {
             character.alpha: package.name
-            character.digit: package.name
-            character.underscore: package.name
             package.name : {
                 character.alpha: package.name
                 character.digit: package.name
@@ -83,11 +106,12 @@
                     character.alpha: package.name
                 }
                 whitespace: close
+                character: next
             }
         }
     }
 
-    comment {
+    comment : {
         tokens : {
             character.LF: close
             character : whitespace
@@ -96,17 +120,17 @@
 
     string : {
         tokens : {
-            "\"": close
-            "\\": escape.open
+            '\"': close
+            '\\': escape.open
             character: string
         }
         escape : {
             tokens : {
-                "\"": character.quote
-                "n": character.LF
-                "r": character.CR
-                "t": character.TAB
-                "u": unicode1
+                '\"': character.quote
+                'n': character.LF
+                'r': character.CR
+                't': character.TAB
+                'u': unicode1
                 character: string
                 unicode1 : {
                     character.hexdigit : unicode2
