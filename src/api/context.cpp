@@ -45,7 +45,8 @@ namespace neos
 		iSchema.emplace(aSchemaPath);
 		iLanguage = iSchema->root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>();
         // todo
-        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, 1);
+        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
+        emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
         emit(iText, bytecode::opcode::B, loop);
     }
 

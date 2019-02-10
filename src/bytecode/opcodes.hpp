@@ -36,8 +36,9 @@ namespace neos
             REG2_MASK       = 0b00000000000000000000000000111111,
             REG1_MASK       = 0b00000000000000000011111100000000,
             IMMEDIATE_MASK  = 0b00000000000000000100000000000000,
-            OPCODE_MASK     = 0b00000011100111110000000000000000,
-            DATA_MASK       = 0b00000000111000000000000000000000,
+            OPCODE_MASK     = 0b00000011100011111000000000000000,
+            DATA_MASK       = 0b00000000111100000000000000000000,
+            SIGNED_MASK     = 0b00000000010000000000000000000000,
             CLASS_MASK      = 0b00000011000000000000000000000000,
             LINK_MASK       = 0b00000100000000000000000000000000,
             COND_MASK       = 0b00001000000000000000000000000000,
@@ -45,9 +46,11 @@ namespace neos
             // Data                             
             Immediate       = 0b00000000000000000100000000000000,
             D8              = 0b00000000000000000000000000000000,
-            D16             = 0b00000000001000000000000000000000,
-            D32             = 0b00000000010000000000000000000000,
-            D64             = 0b00000000011000000000000000000000,
+            D16             = 0b00000000000100000000000000000000,
+            D32             = 0b00000000001000000000000000000000,
+            D64             = 0b00000000001100000000000000000000,
+            Unsigned        = 0b00000000000000000000000000000000,
+            Signed          = 0b00000000010000000000000000000000,
             Integer         = 0b00000000000000000000000000000000,
             Float           = 0b00000000100000000000000000000000,
             // Class                            
@@ -104,27 +107,27 @@ namespace neos
             BLTU    = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondLTU,
             BGE     = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondGTE,
             BGEU    = 0b00000000000000000000000000000000 | opcode_type::Branch | opcode_type::CondGTEU,
-            MOV     = 0b00000000000000010000000000000000 | opcode_type::Data,
-            LDR     = 0b00000000000000100000000000000000 | opcode_type::Memory,
-            STR     = 0b00000000000000110000000000000000 | opcode_type::Memory,
-            CMP     = 0b00000000000001000000000000000000 | opcode_type::Data,
-            ADD     = 0b00000000000001010000000000000000 | opcode_type::Data,
-            ADDF    = 0b00000000000001010000000000000000 | opcode_type::Data | opcode_type::Float,
-            ADC     = 0b00000000000001100000000000000000 | opcode_type::Data,
-            SUB     = 0b00000000000001110000000000000000 | opcode_type::Data,
-            SUBF    = 0b00000000000001110000000000000000 | opcode_type::Data | opcode_type::Float,
-            SBC     = 0b00000000000010000000000000000000 | opcode_type::Data,
-            MUL     = 0b00000000000010010000000000000000 | opcode_type::Data,
-            MULF    = 0b00000000000010010000000000000000 | opcode_type::Data | opcode_type::Float,
-            DIV     = 0b00000000000010100000000000000000 | opcode_type::Data,
-            DIVF    = 0b00000000000010100000000000000000 | opcode_type::Data | opcode_type::Float,
-            AND     = 0b00000000000010110000000000000000 | opcode_type::Data,
-            OR      = 0b00000000000011000000000000000000 | opcode_type::Data,
-            XOR     = 0b00000000000011010000000000000000 | opcode_type::Data,
-            TEQ     = 0b00000000000011100000000000000000 | opcode_type::Data,
-            TST     = 0b00000000000011110000000000000000 | opcode_type::Data,
-            EPRIV   = 0b00000000000100000000000000000000 | opcode_type::Priviledged,
-            LPRIV   = 0b00000000000110000000000000000000 | opcode_type::Priviledged
+            MOV     = 0b00000000000000001000000000000000 | opcode_type::Data,
+            LDR     = 0b00000000000000010000000000000000 | opcode_type::Memory,
+            STR     = 0b00000000000000011000000000000000 | opcode_type::Memory,
+            CMP     = 0b00000000000000100000000000000000 | opcode_type::Data,
+            ADD     = 0b00000000000000101000000000000000 | opcode_type::Data,
+            ADDF    = 0b00000000000000101000000000000000 | opcode_type::Data | opcode_type::Float,
+            ADC     = 0b00000000000000110000000000000000 | opcode_type::Data,
+            SUB     = 0b00000000000000111000000000000000 | opcode_type::Data,
+            SUBF    = 0b00000000000000111000000000000000 | opcode_type::Data | opcode_type::Float,
+            SBC     = 0b00000000000001000000000000000000 | opcode_type::Data,
+            MUL     = 0b00000000000001001000000000000000 | opcode_type::Data,
+            MULF    = 0b00000000000001001000000000000000 | opcode_type::Data | opcode_type::Float,
+            DIV     = 0b00000000000001010000000000000000 | opcode_type::Data,
+            DIVF    = 0b00000000000001010000000000000000 | opcode_type::Data | opcode_type::Float,
+            AND     = 0b00000000000001011000000000000000 | opcode_type::Data,
+            OR      = 0b00000000000001100000000000000000 | opcode_type::Data,
+            XOR     = 0b00000000000001101000000000000000 | opcode_type::Data,
+            TEQ     = 0b00000000000001110000000000000000 | opcode_type::Data,
+            TST     = 0b00000000000001111000000000000000 | opcode_type::Data,
+            EPRIV   = 0b00000000000010000000000000000000 | opcode_type::Priviledged,
+            LPRIV   = 0b00000000000011000000000000000000 | opcode_type::Priviledged
         };
 
         inline constexpr opcode operator|(opcode lhs, uint8_t rhs)
@@ -150,6 +153,11 @@ namespace neos
         inline constexpr opcode operator&(opcode lhs, opcode_type rhs)
         {
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) & static_cast<opcode_base_t>(rhs));
+        }
+
+        inline constexpr opcode operator|(opcode lhs, opcode rhs)
+        {
+            return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
         }
 
         inline reg r1(opcode aOpcode)

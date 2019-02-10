@@ -66,6 +66,7 @@ namespace neos
                     switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                     {
                     case opcode_type::D8:
+                    case opcode_type::D8 | opcode_type::Signed:
                         return static_cast<DataType>(aOpcode & opcode_type::D8_MASK);
                     default:
                         return *reinterpret_cast<const DataType*>(aText);
@@ -82,46 +83,66 @@ namespace neos
                         switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                         {
                         case opcode_type::D8:
-                            r<u64, reg::PC>() += immediate<i8>(aOpcode, aText);
+                            r<u64, reg::PC>() += immediate<u8>(aOpcode, aText);
                             break;
                         case opcode_type::D16:
-                            r<u64, reg::PC>() += immediate<i16>(aOpcode, aText);
+                            r<u64, reg::PC>() += immediate<u16>(aOpcode, aText);
                             break;
                         case opcode_type::D32:
-                            r<u64, reg::PC>() += immediate<i32>(aOpcode, aText);
+                            r<u64, reg::PC>() += immediate<u32>(aOpcode, aText);
                             break;
                         case opcode_type::D64:
                             r<u64, reg::PC>() = immediate<u64>(aOpcode, aText);
+                            break;
+                        case opcode_type::D8 | opcode_type::Signed:
+                            r<u64, reg::PC>() += immediate<i8>(aOpcode, aText);
+                            break;
+                        case opcode_type::D16 | opcode_type::Signed:
+                            r<u64, reg::PC>() += immediate<i16>(aOpcode, aText);
+                            break;
+                        case opcode_type::D32 | opcode_type::Signed:
+                            r<u64, reg::PC>() += immediate<i32>(aOpcode, aText);
+                            break;
+                        case opcode_type::D64 | opcode_type::Signed:
+                            r<u64, reg::PC>() = immediate<i64>(aOpcode, aText);
                             break;
                         }
                     }
                 }
                 inline uint32_t ADD(opcode aOpcode, const std::byte* aText)
                 {
-                    uint32_t consumed = 0u;
                     // todo: update flags based on result of arithmetic
                     if ((static_cast<opcode_type>(aOpcode & opcode_type::Immediate)) == opcode_type::Immediate)
                     {
                         switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                         {
                         case opcode_type::D8:
-                            write_r1<u8>(aOpcode) += immediate<u8>(aOpcode, aText);
-                            break;
+                            write_r1<u64>(aOpcode) += immediate<u8>(aOpcode, aText);
+                            return 0u;
                         case opcode_type::D16:
-                            write_r1<u16>(aOpcode) += immediate<u16>(aOpcode, aText);
-                            consumed = 2u;
-                            break;
+                            write_r1<u64>(aOpcode) += immediate<u16>(aOpcode, aText);
+                            return 2u;
                         case opcode_type::D32:
-                            write_r1<u32>(aOpcode) += immediate<u32>(aOpcode, aText);
-                            consumed = 4u;
-                            break;
+                            write_r1<u64>(aOpcode) += immediate<u32>(aOpcode, aText);
+                            return 4u;
                         case opcode_type::D64:
                             write_r1<u64>(aOpcode) += immediate<u64>(aOpcode, aText);
-                            consumed = 8u;
-                            break;
+                            return 8u;
+                        case opcode_type::D8 | opcode_type::Signed:
+                            write_r1<u64>(aOpcode) += immediate<i8>(aOpcode, aText);
+                            return 0u;
+                        case opcode_type::D16 | opcode_type::Signed:
+                            write_r1<u64>(aOpcode) += immediate<i16>(aOpcode, aText);
+                            return 2u;
+                        case opcode_type::D32 | opcode_type::Signed:
+                            write_r1<u64>(aOpcode) += immediate<i32>(aOpcode, aText);
+                            return 4u;
+                        case opcode_type::D64 | opcode_type::Signed:
+                            write_r1<u64>(aOpcode) += immediate<i64>(aOpcode, aText);
+                            return 8u;
                         }
                     }
-                    return consumed;
+                    throw exceptions::invalid_instruction();
                 }
             }
 

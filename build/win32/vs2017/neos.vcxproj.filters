@@ -56,6 +56,9 @@
     <ClInclude Include="..\..\..\src\bytecode\text.hpp">
       <Filter>Source Files\bytecode</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\test\neoscript.neos">
