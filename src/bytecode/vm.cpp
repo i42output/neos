@@ -109,36 +109,41 @@ namespace neos
                         }
                     }
                 }
-                inline uint32_t ADD(opcode aOpcode, const std::byte* aText)
+                template <typename DataType>
+                inline void do_ADD(u64& aRegister, DataType aData)
                 {
                     // todo: update flags based on result of arithmetic
+                    aRegister += aData;
+                }
+                inline uint32_t ADD(opcode aOpcode, const std::byte* aText)
+                {
                     if ((static_cast<opcode_type>(aOpcode & opcode_type::Immediate)) == opcode_type::Immediate)
                     {
                         switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                         {
                         case opcode_type::D8:
-                            write_r1<u64>(aOpcode) += immediate<u8>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<u8>(aOpcode, aText));
                             return 0u;
                         case opcode_type::D16:
-                            write_r1<u64>(aOpcode) += immediate<u16>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<u16>(aOpcode, aText));
                             return 2u;
                         case opcode_type::D32:
-                            write_r1<u64>(aOpcode) += immediate<u32>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<u32>(aOpcode, aText));
                             return 4u;
                         case opcode_type::D64:
-                            write_r1<u64>(aOpcode) += immediate<u64>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<u64>(aOpcode, aText));
                             return 8u;
                         case opcode_type::D8 | opcode_type::Signed:
-                            write_r1<u64>(aOpcode) += immediate<i8>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<i8>(aOpcode, aText));
                             return 0u;
                         case opcode_type::D16 | opcode_type::Signed:
-                            write_r1<u64>(aOpcode) += immediate<i16>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<i16>(aOpcode, aText));
                             return 2u;
                         case opcode_type::D32 | opcode_type::Signed:
-                            write_r1<u64>(aOpcode) += immediate<i32>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<i32>(aOpcode, aText));
                             return 4u;
                         case opcode_type::D64 | opcode_type::Signed:
-                            write_r1<u64>(aOpcode) += immediate<i64>(aOpcode, aText);
+                            do_ADD(write_r1<u64>(aOpcode), immediate<i64>(aOpcode, aText));
                             return 8u;
                         }
                     }
