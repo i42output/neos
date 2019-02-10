@@ -37,15 +37,27 @@ namespace neos
             namespace
             {
                 template <typename DataType>
-                inline DataType read(opcode aOpcode)
+                inline DataType read_r1(opcode aOpcode)
                 {
                     return vm::read<DataType>(r1(aOpcode));
                 }
 
                 template <typename DataType>
-                inline DataType& write(opcode aOpcode)
+                inline DataType read_r2(opcode aOpcode)
+                {
+                    return vm::read<DataType>(r2(aOpcode));
+                }
+
+                template <typename DataType>
+                inline DataType& write_r1(opcode aOpcode)
                 {
                     return vm::write<DataType>(r1(aOpcode));
+                }
+
+                template <typename DataType>
+                inline DataType& write_r2(opcode aOpcode)
+                {
+                    return vm::write<DataType>(r2(aOpcode));
                 }
 
                 template <typename DataType>
@@ -93,18 +105,18 @@ namespace neos
                         switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                         {
                         case opcode_type::D8:
-                            write<u8>(aOpcode) += immediate<u8>(aOpcode, aText);
+                            write_r1<u8>(aOpcode) += immediate<u8>(aOpcode, aText);
                             break;
                         case opcode_type::D16:
-                            write<u16>(aOpcode) += immediate<u16>(aOpcode, aText);
+                            write_r1<u16>(aOpcode) += immediate<u16>(aOpcode, aText);
                             consumed = 2u;
                             break;
                         case opcode_type::D32:
-                            write<u32>(aOpcode) += immediate<u32>(aOpcode, aText);
+                            write_r1<u32>(aOpcode) += immediate<u32>(aOpcode, aText);
                             consumed = 4u;
                             break;
                         case opcode_type::D64:
-                            write<u64>(aOpcode) += immediate<u64>(aOpcode, aText);
+                            write_r1<u64>(aOpcode) += immediate<u64>(aOpcode, aText);
                             consumed = 8u;
                             break;
                         }
