@@ -21,7 +21,6 @@
         character.EOF: whitespace
         "-": {
             "-": comment.open
-            character: error
         }
         character.alpha: keyword.open
         character.underscore: keyword.open
