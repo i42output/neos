@@ -6,11 +6,11 @@
         version: "1.0.0"
     }
 
-    modules : [
-        math
-        string
-        io
-        gc
+    libraries : [
+        neos.math
+        neos.string
+        neos.io
+        neos.gc
         i42.magic
     ]
 
@@ -21,10 +21,10 @@
         character.TAB: whitespace
         character.EOF: whitespace
         '-' : {
-            '-': comment.open
+            '-': comment
         }
-        character.alpha: keyword.open
-        character.underscore: keyword.open
+        character.alpha: keyword
+        character.underscore: keyword
     }
 
     identifier : {
@@ -32,14 +32,14 @@
             character.alpha: identifier
             character.digit: identifier
             character.underscore: identifier
-            whitespace: close
+            whitespace: emit
         }
     }
 
     keyword : {
         tokens : {
             character.alpha: keyword
-            whitespace: close
+            whitespace: emit
         }
         "with": with
         "use": use
@@ -85,9 +85,9 @@
             '-': math.operator.subtraction
             '*': math.operator.multiplication
             '/': math.operator.division
-            '(': math.expression.open
-            ')': math.expression.close
-            '\"': string.open
+            '(': math.expression
+            ')': math.expression.emit
+            '\"': string
         }
     }
 
@@ -105,7 +105,7 @@
                 character.period: {
                     character.alpha: package.name
                 }
-                whitespace: close
+                whitespace: emit
                 character: next
             }
         }
@@ -113,15 +113,15 @@
 
     comment : {
         tokens : {
-            character.LF: close
+            character.LF: emit
             character : whitespace
         }
     }
 
     string : {
         tokens : {
-            '\"': close
-            '\\': escape.open
+            '\"': emit
+            '\\': escape
             character: string
         }
         escape : {
