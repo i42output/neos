@@ -34,7 +34,7 @@
     <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\test\neoscript.neos" />
+    <None Include="..\..\..\languages\neoscript.neos" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>
