@@ -32,16 +32,6 @@
         character.underscore: keyword
     }
 
-    identifier: {
-        emit object.reference
-        tokens: {
-            character.alpha: identifier
-            character.digit: identifier
-            character.underscore: identifier
-            whitespace: emit
-        }
-    }
-
     keyword : {
         tokens : {
             character.alpha: keyword
@@ -89,13 +79,10 @@
         tokens: {
             operand: operand
             '-': object.operator.negate
-            '(': {
-                new
-                ')': emit
-            }
+            '(': subexpression
         }
         object: {
-            tokens {
+            tokens: {
                 '=': object.operator.equality
                 ':': {
                     '=': object.operator.assignment
@@ -105,6 +92,23 @@
                 '*': math.operator.multiplication
                 '/': math.operator.division
             }
+        }
+    }
+
+	subexpression: {
+		is: expression
+		tokens: {
+			')': emit
+		}
+	}
+
+    identifier: {
+        emit: object.reference
+        tokens: {
+            character.alpha: identifier
+            character.digit: identifier
+            character.underscore: identifier
+            whitespace: emit
         }
     }
 
