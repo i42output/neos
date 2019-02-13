@@ -6,13 +6,18 @@
         version: "1.0.0"
     }
 
-    libraries : [
+    libraries: [
         neos.math
         neos.string
         neos.io
         neos.gc
         i42.magic
     ]
+
+    expect: comment
+    expect: with
+    expect: use
+    expect: package
 
     tokens : {
         ' ': whitespace
@@ -27,8 +32,9 @@
         character.underscore: keyword
     }
 
-    identifier : {
-        tokens : {
+    identifier: {
+        emit object.reference
+        tokens: {
             character.alpha: identifier
             character.digit: identifier
             character.underscore: identifier
@@ -43,7 +49,7 @@
         }
         "with": with
         "use": use
-        "packet": package
+        "package": package
         "body": body
         "is": is
         "function": function
@@ -56,45 +62,76 @@
     }
 
     with : {
-        expect: package.name
-        package.name : {
-            tokens : {
-                whitespace: whitespace
-                ';': engine.module.import
-            }
-        }
-    }
-
-    use : {
-        expect: package.name
-        package.name : {
-            tokens : {
-                whitespace: whitespace
-                ';': engine.module.instantiate
-            }
-        }
-    }
-
-    expression : {
+        expect: engine.module.package.name
         tokens : {
-            '=': object.operator.equality
-            ':': {
-                '=': object.operator.assignment
-            }
-            '+': math.operator.addition
-            '-': math.operator.subtraction
-            '*': math.operator.multiplication
-            '/': math.operator.division
-            '(': math.expression
-            ')': math.expression.emit
+            whitespace: whitespace
+            ';': engine.module.import
+        }
+    }
+
+    use: {
+        expect: engine.module.package.name
+        tokens: {
+            whitespace: whitespace
+            ';': engine.module.instantiate
+        }
+    }
+
+    operand: {
+        tokens: {
+            character.digit: integer
             '\"': string
+            identifier: identifier
         }
     }
 
-    package.name : {
-        tokens : {
+    expression: {
+        tokens: {
+            operand: operand
+            '-': object.operator.negate
+            '(': {
+                new
+                ')': emit
+            }
+        }
+        object: {
+            tokens {
+                '=': object.operator.equality
+                ':': {
+                    '=': object.operator.assignment
+                }
+                '+': math.operator.addition
+                '-': math.operator.subtraction
+                '*': math.operator.multiplication
+                '/': math.operator.division
+            }
+        }
+    }
+
+    integer: {
+        emit: object.integer64
+        tokens: {
+            character.digit: integer
+            '.': float
+            whitespace: emit
+            character: next
+        }
+    }
+
+    float: {
+        emit: object.float64
+        tokens: {
+            character.digit: float
+            whitespace: emit
+            character: next
+        }
+    }
+
+    package.name: {
+        emit: engine.module.package.name
+        tokens: {
             character.alpha: package.name
-            package.name : {
+            package.name: {
                 character.alpha: package.name
                 character.digit: package.name
                 character.underscore: package.name
@@ -118,30 +155,31 @@
         }
     }
 
-    string : {
-        tokens : {
+    string: {
+        emit: object.string
+        tokens: {
             '\"': emit
             '\\': escape
             character: string
         }
-        escape : {
-            tokens : {
+        escape: {
+            tokens: {
                 '\"': character.quote
                 'n': character.LF
                 'r': character.CR
                 't': character.TAB
                 'u': unicode1
                 character: string
-                unicode1 : {
-                    character.hexdigit : unicode2
-                    unicode2 : {
-                        character.hexdigit : unicode3
-                        unicode3 : {
-                            character.hexdigit : unicode4
-                            unicode4 : {
-                                character.hexdigit : code_unit
-                                code_unit : {
-                                    make.character.utf16 : [unicode1, unicode2, unicode3, unicode4]
+                unicode1: {
+                    character.hexdigit: unicode2
+                    unicode2: {
+                        character.hexdigit: unicode3
+                        unicode3: {
+                            character.hexdigit: unicode4
+                            unicode4: {
+                                character.hexdigit: code_unit
+                                code_unit: {
+                                    make.character.utf16: [ unicode1, unicode2, unicode3, unicode4 ]
                                 }
                             }
                         }
