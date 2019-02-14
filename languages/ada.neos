@@ -33,8 +33,8 @@
         character.underscore: keyword
     }
 
-    keyword : {
-        tokens : {
+    keyword: {
+        tokens: {
             character.alpha: keyword
             whitespace: emit
         }
@@ -50,21 +50,48 @@
         "loop": loop
         "while": while
         "return": return
+        "pragma": pragma
+    }
+
+    pragma: {
+        language.identifier: {
+            "Import": Import
+            "Export": Export
+        }
+        Import: {
+            expect: [ '(', language.identifier, ',', language.identifier, ',', string, ')' ]
+            language.identifier.1: {
+                "neos": {
+                    emit: language.external.function.import
+                    language.identifier.2: language.function.name
+                    language.function.name: {
+                        emit: this
+                        string.1: language.external.function.name
+                        language.external.function.name: {
+                            emit: this
+                        }
+                    }
+                }
+            }
+        }
+        Export: {
+            emit: language.error.not_implemented
+        }
     }
 
     with : {
-        expect: engine.module.package.name
+        expect: module.package.name
         tokens : {
             whitespace: whitespace
-            ';': engine.module.import
+            ';': module.import
         }
     }
 
     use: {
-        expect: engine.module.package.name
+        expect: module.package.name
         tokens: {
             whitespace: whitespace
-            ';': engine.module.instantiate
+            ';': module.instantiate
         }
     }
 
@@ -104,7 +131,7 @@
     }
 
     identifier: {
-        emit: object.reference
+        emit: language.identifier
         tokens: {
             character.alpha: identifier
             character.digit: identifier
@@ -119,7 +146,7 @@
             character.digit: integer
             '.': float
             whitespace: emit
-            character: next
+            character: next.emit
         }
     }
 
@@ -128,12 +155,12 @@
         tokens: {
             character.digit: float
             whitespace: emit
-            character: next
+            character: next.emit
         }
     }
 
     package.name: {
-        emit: engine.module.package.name
+        emit: module.package.name
         tokens: {
             character.alpha: package.name
             package.name: {
@@ -148,15 +175,16 @@
                     character.alpha: package.name
                 }
                 whitespace: emit
-                character: next
+                character: next.emit
             }
         }
     }
 
-    comment : {
-        tokens : {
+    comment: {
+        emit: whitespace
+        tokens: {
             character.LF: emit
-            character : whitespace
+            character: whitespace
         }
     }
 

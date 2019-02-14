@@ -1,4 +1,4 @@
--- I am thinking neoscript can perhaps be a subset of Ada! :D
+-- Example Ada program
 
 with Process;
 use Process;
