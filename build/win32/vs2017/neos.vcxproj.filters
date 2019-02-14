@@ -22,6 +22,9 @@
     <Filter Include="Languages">
       <UniqueIdentifier>{0ce7462d-3057-4cef-a8d8-3de50d2c5b14}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Example Scripts">
+      <UniqueIdentifier>{05a25ebb-b0dd-48b0-89e7-3985bd929058}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\neos.cpp">
@@ -61,8 +64,11 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\languages\neoscript.neos">
+    <None Include="..\..\..\languages\ada.neos">
       <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\ada\ExitCode.ada">
+      <Filter>Example Scripts</Filter>
     </None>
   </ItemGroup>
 </Project>

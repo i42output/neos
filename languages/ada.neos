@@ -1,7 +1,8 @@
 {
     meta : {
-        language: "neoscript"
-        description: "Default neoGFX scripting language; similar to Ada"
+        language: "Ada"
+        description: "Ada (initially a subset of standard Ada, standard/scope TBD)"
+        sourcecode.file.extension: [ "adb", "ads", "ada" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
