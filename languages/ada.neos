@@ -96,12 +96,12 @@
         }
     }
 
-	subexpression: {
-		is: expression
-		tokens: {
-			')': emit
-		}
-	}
+    subexpression: {
+        is: expression
+        tokens: {
+            ')': emit
+        }
+    }
 
     identifier: {
         emit: object.reference
