@@ -53,29 +53,57 @@
         "pragma": pragma
     }
 
+    parameters: {
+        is: language.parameter.list
+        tokens: {
+            whitespace: whitespace
+            '(': item
+        }
+        item: {
+            is: language.parameter
+            expect: language.identifier
+            expect: expression
+            met: {
+                emit: this
+                tokens: {
+                    whitespace: whitespace
+                    ',': item
+                    ')': {
+                        emit: parent
+                    }
+                }
+            }
+        }
+    }
+
+    statement: {
+        is: language.statement
+        tokens: {
+            whitespace: whitespace
+            ';': emit
+        }
+    }
+
     pragma: {
+        is: statement
         language.identifier: {
             "Import": Import
             "Export": Export
         }
         Import: {
-            expect: [ '(', language.identifier, ',', language.identifier, ',', string, ')' ]
-            language.identifier.1: {
-                "neos": {
-                    emit: language.external.function.import
-                    language.identifier.2: language.function.name
+            expect: parameters
+            language.identifier: {
+                "neos": language.external.function.import
+                language.external.function.import {
+                    language.identifier: language.function.name
                     language.function.name: {
-                        emit: this
-                        string.1: language.external.function.name
-                        language.external.function.name: {
-                            emit: this
-                        }
+                        string: language.external.function.name
                     }
                 }
             }
         }
         Export: {
-            emit: language.error.not_implemented
+            is: language.error.not_implemented
         }
     }
 
@@ -131,7 +159,7 @@
     }
 
     identifier: {
-        emit: language.identifier
+        is: language.identifier
         tokens: {
             character.alpha: identifier
             character.digit: identifier
@@ -141,7 +169,7 @@
     }
 
     integer: {
-        emit: object.integer64
+        is: object.integer64
         tokens: {
             character.digit: integer
             '.': float
@@ -151,7 +179,7 @@
     }
 
     float: {
-        emit: object.float64
+        is: object.float64
         tokens: {
             character.digit: float
             whitespace: emit
@@ -160,7 +188,7 @@
     }
 
     package.name: {
-        emit: module.package.name
+        is: module.package.name
         tokens: {
             character.alpha: package.name
             package.name: {
@@ -181,7 +209,7 @@
     }
 
     comment: {
-        emit: whitespace
+        is: whitespace
         tokens: {
             character.LF: emit
             character: whitespace
@@ -189,7 +217,7 @@
     }
 
     string: {
-        emit: object.string
+        is: object.string
         tokens: {
             '\"': emit
             '\\': escape
