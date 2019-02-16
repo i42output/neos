@@ -31,12 +31,13 @@
         }
         character.alpha: keyword
         character.underscore: keyword
+        procedure: procedure.main
     }
 
     keyword: {
         tokens: {
             character.alpha: keyword
-            whitespace: emit
+            whitespace: done
         }
         "with": with
         "use": use
@@ -54,6 +55,43 @@
         "while": while
         "return": return
         "pragma": pragma
+    }
+
+    procedure.prototype: {
+        is: language.procedure.prototype
+        identifier: language.procedure.name
+        language.procedure.name: {
+            expect: parameters
+            parameters: {
+                expect: statement.end
+                statement.end: done
+            }
+            expect: statement.end
+            statement.end: done
+        }
+    }
+
+    procedure: {
+        is: language.procedure
+        identifier: language.procedure.name
+        language.procedure.name: {
+            expect: parameters
+            expect: keyword.is
+            parameters: {
+                expect: keyword.is
+            }
+        }
+        keyword.is: {
+            begin: language.scope.open
+        }
+        language.scope.open: {
+            end: language.scope.close
+        }
+    }
+
+    procedure.main: {
+        is: procedure
+        is: language.procedure.main
     }
 
     package: {
@@ -121,13 +159,10 @@
             expect: identifier
             expect: expression
             met: {
-                emit: this
                 tokens: {
                     whitespace: whitespace
                     ',': item
-                    ')': {
-                        emit: parent
-                    }
+                    ')': done
                 }
             }
         }
@@ -136,7 +171,7 @@
     statement.end: {
         tokens: {
             whitespace: whitespace
-            ';': emit
+            ';': done
         }
     }
 
@@ -150,13 +185,14 @@
             expect: parameters
             language.identifier: {
                 "neos": language.external.function.import
-                language.external.function.import: {
-                    language.identifier: language.function.name
-                    language.function.name: {
-                        string: language.external.function.name
-                    }
-                }
             }
+            language.external.function.import: {
+                language.identifier: language.function.name
+            }
+            language.function.name: {
+                string: language.external.function.name
+            }
+            language.external.function.name: done
         }
         Export: {
             is: language.error.not_implemented
@@ -210,7 +246,7 @@
     subexpression: {
         is: expression
         tokens: {
-            ')': emit
+            ')': done
         }
     }
 
@@ -220,7 +256,7 @@
             character.alpha: identifier
             character.digit: identifier
             character.underscore: identifier
-            whitespace: emit
+            whitespace: done
         }
     }
 
@@ -229,8 +265,8 @@
         tokens: {
             character.digit: integer
             '.': float
-            whitespace: emit
-            character: next.emit
+            whitespace: done
+            character: done.next
         }
     }
 
@@ -238,8 +274,8 @@
         is: object.float64
         tokens: {
             character.digit: float
-            whitespace: emit
-            character: next.emit
+            whitespace: done
+            character: done.next
         }
     }
 
@@ -258,8 +294,8 @@
                 character.period: {
                     character.alpha: package.name
                 }
-                whitespace: emit
-                character: next.emit
+                whitespace: done
+                character: done.next
             }
         }
     }
@@ -267,7 +303,7 @@
     comment: {
         is: whitespace
         tokens: {
-            character.LF: emit
+            character.LF: done
             character: whitespace
         }
     }
@@ -275,34 +311,12 @@
     string: {
         is: object.string
         tokens: {
-            '\"': emit
-            '\\': escape
-            character: string
-        }
-        escape: {
-            tokens: {
+            '\"': {
                 '\"': character.quote
-                'n': character.LF
-                'r': character.CR
-                't': character.TAB
-                'u': unicode1
-                character: string
-                unicode1: {
-                    character.hexdigit: unicode2
-                    unicode2: {
-                        character.hexdigit: unicode3
-                        unicode3: {
-                            character.hexdigit: unicode4
-                            unicode4: {
-                                character.hexdigit: code_unit
-                                code_unit: {
-                                    make.character.utf16: [ unicode1, unicode2, unicode3, unicode4 ]
-                                }
-                            }
-                        }
-                    }
-                }
+                whitespace: done
+                character: done.next
             }
+            character: string
         }
     }
 }

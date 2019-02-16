@@ -1,0 +1,146 @@
+{
+    meta: {
+        language: "neoscript"
+        description: "Default neoGFX scripting language"
+        sourcecode.file.extension: [ "ns" ]
+        copyright: "Copyright (C) 2019 Leigh Johnston"
+        version: "1.0.0"
+    }
+
+    libraries: [
+        neos.math
+        neos.string
+        neos.io
+        neos.gc
+        i42.magic
+    ]
+
+    tokens: {
+        ' ': whitespace
+        character.LF: whitespace
+        character.CR: whitespace
+        character.TAB: whitespace
+        character.EOF: whitespace
+        '-': {
+            '-': comment
+        }
+        character.alpha: keyword
+        character.underscore: keyword
+        procedure: procedure.main
+    }
+
+    keyword: {
+        tokens: {
+            character.alpha: keyword
+            whitespace: done
+        }
+        "fn": function
+    }
+
+    operand: {
+        tokens: {
+            character.digit: integer
+            '\"': string
+            identifier: identifier
+        }
+    }
+
+    expression: {
+        tokens: {
+            operand: operand
+            '-': object.operator.negate
+            '(': subexpression
+        }
+        object: {
+            tokens: {
+                '=': {
+                    '=': object.operator.assignment
+                    : object.operator.equality
+                }
+                '+': math.operator.addition
+                '-': math.operator.subtraction
+                '*': math.operator.multiplication
+                '/': math.operator.division
+            }
+        }
+    }
+
+    subexpression: {
+        is: expression
+        tokens: {
+            ')': done
+        }
+    }
+
+    identifier: {
+        is: language.identifier
+        tokens: {
+            character.alpha: identifier
+            character.digit: identifier
+            character.underscore: identifier
+            whitespace: done
+        }
+    }
+
+    integer: {
+        is: object.integer64
+        tokens: {
+            character.digit: integer
+            '.': float
+            whitespace: done
+            character: done.next
+        }
+    }
+
+    float: {
+        is: object.float64
+        tokens: {
+            character.digit: float
+            whitespace: done
+            character: done.next
+        }
+    }
+
+    comment: {
+        is: whitespace
+        tokens: {
+            character.LF: done
+            character: whitespace
+        }
+    }
+
+    string: {
+        is: object.string
+        tokens: {
+            '\"': done
+            '\\': escape
+            character: string
+        }
+        escape: {
+            tokens: {
+                '\"': character.quote
+                'n': character.LF
+                'r': character.CR
+                't': character.TAB
+                'u': unicode
+                character: string
+                unicode: {
+                    character.hexdigit: unicode1
+                    unicode2: {
+                        character.hexdigit: unicode2
+                        unicode3: {
+                            character.hexdigit: unicode3
+                            unicode4: {
+                                character.hexdigit: unicode4
+                                unicode4: {
+                                    make.character.utf16: [ unicode1, unicode2, unicode3, unicode4 ]
+                                    done: escape
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
