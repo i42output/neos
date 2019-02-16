@@ -1,13 +1,13 @@
 {
-    meta : {
-        language : "Ada"
-        description : "Ada (initially a subset of standard Ada, standard/scope TBD)"
-        sourcecode.file.extension : [ "adb", "ads", "ada" ]
-        copyright : "Copyright (C) 2019 Leigh Johnston"
-        version : "1.0.0"
+    meta: {
+        language: "Ada"
+        description: "Ada (initially a subset of standard Ada, standard/scope TBD)"
+        sourcecode.file.extension: [ "adb", "ads", "ada" ]
+        copyright: "Copyright (C) 2019 Leigh Johnston"
+        version: "1.0.0"
     }
 
-    libraries : [
+    libraries: [
         neos.math
         neos.string
         neos.io
@@ -15,232 +15,288 @@
         i42.magic
     ]
 
-    expect : comment
-    expect : with
-    expect : use
-    expect : package
+    expect: comment
+    expect: with
+    expect: use
+    expect: package
 
-    tokens : {
-        ' ' : whitespace
-        character.LF : whitespace
-        character.CR : whitespace
-        character.TAB : whitespace
-        character.EOF : whitespace
-        '-' : {
-            '-' : comment
+    tokens: {
+        ' ': whitespace
+        character.LF: whitespace
+        character.CR: whitespace
+        character.TAB: whitespace
+        character.EOF: whitespace
+        '-': {
+            '-': comment
         }
-        character.alpha : keyword
-        character.underscore : keyword
+        character.alpha: keyword
+        character.underscore: keyword
     }
 
-    keyword : {
-        tokens : {
-            character.alpha : keyword
-            whitespace : emit
+    keyword: {
+        tokens: {
+            character.alpha: keyword
+            whitespace: emit
         }
-        "with" : with
-        "use" : use
-        "package" : package
-        "body" : body
-        "is" : is
-        "function" : function
-        "begin" : begin
-        "end" : end
-        "for" : for
-        "loop" : loop
-        "while" : while
-        "return" : return
-        "pragma" : pragma
+        "with": with
+        "use": use
+        "package": package
+        "body": body
+        "is": is
+        "procedure": procedure
+        "function": function
+        "type": type
+        "private": private
+        "begin": begin
+        "end": end
+        "for": for
+        "loop": loop
+        "while": while
+        "return": return
+        "pragma": pragma
     }
 
-    parameters : {
-        is : language.parameter.list
-        tokens : {
-            whitespace : whitespace
-            '(' : item
+    package: {
+        identifier: module.package.name
+        module.package.name: {
+            keyword.is: {
+                expect: package.specification
+            }
         }
-        item : {
-            is : language.parameter
-            expect : language.identifier
-            expect : expression
-            met : {
-                emit : this
-                tokens : {
-                    whitespace : whitespace
-                    ',' : item
-                    ')' : {
-                        emit : parent
+        body: {
+            identifier: module.package.name
+            module.package.name: {
+                keyword.is: {
+                    expect: package.body
+                }
+            }
+        }
+    }
+
+    package.specification: {
+        is: module.package.specification
+        tokens: {
+            type: language.error.not_implemented
+            procedure: language.error.not_implemented
+            function: language.error.not_implemented
+            private: language.error.not_implemented
+            end: {
+                identifier: module.package.name
+            }
+        }
+        module.package.name: {
+            equals: parent.module.package.name
+            expect: statement.end
+        }
+    }
+
+    package.body: {
+        is: module.package.body
+        tokens: {
+            procedure: language.error.not_implemented
+            function: language.error.not_implemented
+            begin: package.initialization
+        }
+        package.initialization: {
+            tokens: {
+                end: {
+                    identifier: module.package.name
+                }
+            }
+            module.package.name: {
+                equals: parent.parent.module.package.name
+                expect: statement.end
+            }
+        }
+    }
+
+    parameters: {
+        is: language.parameter.list
+        tokens: {
+            whitespace: whitespace
+            '(': item
+        }
+        item: {
+            is: language.parameter
+            expect: identifier
+            expect: expression
+            met: {
+                emit: this
+                tokens: {
+                    whitespace: whitespace
+                    ',': item
+                    ')': {
+                        emit: parent
                     }
                 }
             }
         }
     }
 
-    statement : {
-        is : language.statement
-        tokens : {
-            whitespace : whitespace
-            ';' : emit
+    statement.end: {
+        tokens: {
+            whitespace: whitespace
+            ';': emit
         }
     }
 
-    pragma : {
-        is : statement
-        language.identifier : {
-            "Import" : Import
-            "Export" : Export
+    pragma: {
+        is: statement
+        language.identifier: {
+            "Import": Import
+            "Export": Export
         }
-        Import : {
-            expect : parameters
-            language.identifier : {
-                "neos" : language.external.function.import
-                language.external.function.import : {
-                    language.identifier : language.function.name
-                    language.function.name : {
-                        string : language.external.function.name
+        Import: {
+            expect: parameters
+            language.identifier: {
+                "neos": language.external.function.import
+                language.external.function.import: {
+                    language.identifier: language.function.name
+                    language.function.name: {
+                        string: language.external.function.name
                     }
                 }
             }
         }
-        Export : {
-            is : language.error.not_implemented
+        Export: {
+            is: language.error.not_implemented
         }
     }
 
-    with : {
-        expect : module.package.name
-        tokens : {
-            whitespace : whitespace
-            ';' : module.import
+    with: {
+        expect: module.package.name
+        tokens: {
+            whitespace: whitespace
+            ';': module.import
         }
     }
 
-    use : {
-        expect : module.package.name
-        tokens : {
-            whitespace : whitespace
-            ';' : module.instantiate
+    use: {
+        expect: module.package.name
+        tokens: {
+            whitespace: whitespace
+            ';': module.instantiate
         }
     }
 
-    operand : {
-        tokens : {
-            character.digit : integer
-            '\"' : string
-            identifier : identifier
+    operand: {
+        tokens: {
+            character.digit: integer
+            '\"': string
+            identifier: identifier
         }
     }
 
-    expression : {
-        tokens : {
-            operand : operand
-            '-' : object.operator.negate
-            '(' : subexpression
+    expression: {
+        tokens: {
+            operand: operand
+            '-': object.operator.negate
+            '(': subexpression
         }
-        object : {
-            tokens : {
-                '=' : object.operator.equality
-                ' :' : {
-                    '=' : object.operator.assignment
+        object: {
+            tokens: {
+                '=': object.operator.equality
+                ':': {
+                    '=': object.operator.assignment
                 }
-                '+' : math.operator.addition
-                '-' : math.operator.subtraction
-                '*' : math.operator.multiplication
-                '/' : math.operator.division
+                '+': math.operator.addition
+                '-': math.operator.subtraction
+                '*': math.operator.multiplication
+                '/': math.operator.division
             }
         }
     }
 
-    subexpression : {
-        is : expression
-        tokens : {
-            ')' : emit
+    subexpression: {
+        is: expression
+        tokens: {
+            ')': emit
         }
     }
 
-    identifier : {
-        is : language.identifier
-        tokens : {
-            character.alpha : identifier
-            character.digit : identifier
-            character.underscore : identifier
-            whitespace : emit
+    identifier: {
+        is: language.identifier
+        tokens: {
+            character.alpha: identifier
+            character.digit: identifier
+            character.underscore: identifier
+            whitespace: emit
         }
     }
 
-    integer : {
-        is : object.integer64
-        tokens : {
-            character.digit : integer
-            '.' : float
-            whitespace : emit
-            character : next.emit
+    integer: {
+        is: object.integer64
+        tokens: {
+            character.digit: integer
+            '.': float
+            whitespace: emit
+            character: next.emit
         }
     }
 
-    float : {
-        is : object.float64
-        tokens : {
-            character.digit : float
-            whitespace : emit
-            character : next.emit
+    float: {
+        is: object.float64
+        tokens: {
+            character.digit: float
+            whitespace: emit
+            character: next.emit
         }
     }
 
-    package.name : {
-        is : module.package.name
-        tokens : {
-            character.alpha : package.name
-            package.name : {
-                character.alpha : package.name
-                character.digit : package.name
-                character.underscore : package.name
-                character.underscore : {
-                    character.alpha : package.name
+    package.name: {
+        is: module.package.name
+        tokens: {
+            character.alpha: package.name
+            package.name: {
+                character.alpha: package.name
+                character.digit: package.name
+                character.underscore: package.name
+                character.underscore: {
+                    character.alpha: package.name
                 }
-                character.period : package.name
-                character.period : {
-                    character.alpha : package.name
+                character.period: package.name
+                character.period: {
+                    character.alpha: package.name
                 }
-                whitespace : emit
-                character : next.emit
+                whitespace: emit
+                character: next.emit
             }
         }
     }
 
-    comment : {
-        is : whitespace
-        tokens : {
-            character.LF : emit
-            character : whitespace
+    comment: {
+        is: whitespace
+        tokens: {
+            character.LF: emit
+            character: whitespace
         }
     }
 
-    string : {
-        is : object.string
-        tokens : {
-            '\"' : emit
-            '\\' : escape
-            character : string
+    string: {
+        is: object.string
+        tokens: {
+            '\"': emit
+            '\\': escape
+            character: string
         }
-        escape : {
-            tokens : {
-                '\"' : character.quote
-                'n' : character.LF
-                'r' : character.CR
-                't' : character.TAB
-                'u' : unicode1
-                character : string
-                unicode1 : {
-                    character.hexdigit : unicode2
-                    unicode2 : {
-                        character.hexdigit : unicode3
-                        unicode3 : {
-                            character.hexdigit : unicode4
-                            unicode4 : {
-                                character.hexdigit : code_unit
-                                code_unit : {
-                                    make.character.utf16 : [ unicode1, unicode2, unicode3, unicode4 ]
+        escape: {
+            tokens: {
+                '\"': character.quote
+                'n': character.LF
+                'r': character.CR
+                't': character.TAB
+                'u': unicode1
+                character: string
+                unicode1: {
+                    character.hexdigit: unicode2
+                    unicode2: {
+                        character.hexdigit: unicode3
+                        unicode3: {
+                            character.hexdigit: unicode4
+                            unicode4: {
+                                character.hexdigit: code_unit
+                                code_unit: {
+                                    make.character.utf16: [ unicode1, unicode2, unicode3, unicode4 ]
                                 }
                             }
                         }
