@@ -1,11 +1,25 @@
-package body Process is
+package Ada.Text_IO is
 
-	function ExitCode return Integer;
-	pragma Import (neos, ExitCode, "process.exit_code");
-	
-	procedure SetExitCode(Code : Integer);
-	pragma Import (neos, SetExitCode, "process.set_exit_code");
+    type File_Type is limited private; 
 
-begin
-	SetExitCode(0);
-end Process;
+    type Count is range 0 .. Natural'Last; 
+    subtype Positive_Count is Count range 1 .. Count'Last; 
+
+    Unbounded : constant Count := 0; 
+
+    procedure Put(File : in File_Type; Item : in Character); 
+    procedure Put(Item : in Character); 
+    procedure Put(File : in File_Type; Item : in String); 
+    procedure Put(Item : in String); 
+    procedure New_Line(File : in File_Type; Spacing : in Positive_Count := 1); 
+    procedure New_Line(Spacing : in Positive_Count := 1);     
+    procedure Put_Line(File : in File_Type; Item : in String); 
+    procedure Put_Line(Item : in String); 
+
+private
+
+    type File_Type is access all System.File.Handle; 
+
+    procedure DoPut(File : in File_Type; Item : in Character); 
+
+end Ada.Text_IO;

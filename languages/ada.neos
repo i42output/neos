@@ -2,7 +2,9 @@
     meta: {
         language: "Ada"
         description: "Ada (initially a subset of standard Ada, standard/scope TBD)"
-        sourcecode.file.extension: [ "adb", "ads", "ada" ]
+        sourcecode.file.extension: [ "ads", "adb", "ada" ]
+        sourcecode.module.package.specification.file.extension: "ads"
+        sourcecode.module.package.implementation.file.extension: [ "adb", "ada" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -13,6 +15,10 @@
         neos.io
         neos.gc
         i42.magic
+    ]
+
+    packages: [
+        "Standard"
     ]
 
     expect: comment
@@ -203,7 +209,7 @@
         expect: module.package.name
         tokens: {
             whitespace: whitespace
-            ';': module.import
+            ';': module.package.import
         }
     }
 
@@ -211,7 +217,7 @@
         expect: module.package.name
         tokens: {
             whitespace: whitespace
-            ';': module.instantiate
+            ';': module.package.instantiate
         }
     }
 
@@ -261,7 +267,7 @@
     }
 
     integer: {
-        is: object.integer64
+        is: object.integer
         tokens: {
             character.digit: integer
             '.': float
