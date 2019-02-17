@@ -25,6 +25,7 @@
 #include <vector>
 #include <memory>
 #include <neolib/json.hpp>
+#include "language.hpp"
 
 namespace neos
 {
@@ -50,7 +51,7 @@ namespace neos
 	public:
 		bool schema_loaded() const;
 		void load_schema(const std::string& aSchemaPath);
-		const std::string& language() const;
+		const neos::language& language() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
         void compile_program(const translation_unit_t& aProgram);
@@ -66,7 +67,7 @@ namespace neos
         translation_unit_t& load_unit(std::istream& aStream);
     private:
 		std::optional<neolib::rjson> iSchema;
-        std::string iLanguage;
+        std::optional<neos::language> iLanguage;
         program_t iProgram;
         text_t iText;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;

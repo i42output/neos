@@ -22,10 +22,12 @@
     <ClCompile Include="..\..\..\src\api\context.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\vm.cpp" />
+    <ClCompile Include="..\..\..\src\language.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />

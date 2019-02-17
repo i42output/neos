@@ -37,19 +37,23 @@ namespace neos
 
 	bool context::schema_loaded() const
 	{
-		return iSchema != std::nullopt;
+		return iSchema != std::nullopt && iLanguage != std::nullopt;
 	}
 
 	void context::load_schema(const std::string& aSchemaPath)
 	{
 		std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
+        iSchema.reset();
+        iLanguage.reset();
 		iSchema.emplace(aSchemaPath);
-		iLanguage = iSchema->root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>();
+        iLanguage.emplace(*iSchema);
     }
 
-	const std::string& context::language() const
+	const neos::language& context::language() const
 	{
-		return iLanguage;
+        if (!schema_loaded())
+            throw compiler_error("no schema loaded");
+        return *iLanguage;
 	}
 
     void context::load_program(const std::string& aPath)
@@ -112,7 +116,7 @@ namespace neos
 
     context::translation_unit_t& context::load_unit(const std::string& aPath)
     {
-        if (iSchema == std::nullopt)
+        if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
         std::ifstream unit{ aPath, std::ios::binary };
@@ -124,7 +128,7 @@ namespace neos
 
     context::translation_unit_t& context::load_unit(std::istream& aStream)
     {
-        if (iSchema == std::nullopt)
+        if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
         if (!aStream)
