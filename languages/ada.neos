@@ -244,6 +244,7 @@
                 '+': math.operator.addition
                 '-': math.operator.subtraction
                 '*': math.operator.multiplication
+                '**': math.operator.power
                 '/': math.operator.division
             }
         }
@@ -270,14 +271,16 @@
         is: object.integer
         tokens: {
             character.digit: integer
-            '.': float
+            '.': {
+                transform: float
+            }
             whitespace: done
             character: done.next
         }
     }
 
     float: {
-        is: object.float64
+        is: object.float
         tokens: {
             character.digit: float
             whitespace: done
