@@ -38,6 +38,12 @@ namespace neos
 
 	class context
 	{
+    public:
+        typedef std::string translation_unit_t;
+        typedef std::vector<translation_unit_t> program_t;
+    public:
+        struct no_program_loaded : std::runtime_error { no_program_loaded() : std::runtime_error("no program loaded") {} };
+        struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
 	public:
 		context();
         ~context();
@@ -45,14 +51,23 @@ namespace neos
 		bool schema_loaded() const;
 		void load_schema(const std::string& aSchemaPath);
 		const std::string& language() const;
+        void load_program(const std::string& aPath);
+        void load_program(std::istream& aStream);
+        void compile_program(const translation_unit_t& aProgram);
+        const program_t& program() const;
+        program_t& program();
         const text_t& text() const;
 	public:
 		bool running() const;
 		void run();
         std::string metrics() const;
-	private:
+    private:
+        translation_unit_t& load_unit(const std::string& aPath);
+        translation_unit_t& load_unit(std::istream& aStream);
+    private:
 		std::optional<neolib::rjson> iSchema;
         std::string iLanguage;
+        program_t iProgram;
         text_t iText;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
 	};

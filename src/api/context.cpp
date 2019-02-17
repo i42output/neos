@@ -19,6 +19,7 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
+#include <neolib/string_utf.hpp>
 #include <neos/context.hpp>
 #include "../bytecode/vm.hpp"
 #include "../bytecode/opcodes.hpp"
@@ -44,16 +45,42 @@ namespace neos
 		std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
 		iSchema.emplace(aSchemaPath);
 		iLanguage = iSchema->root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>();
-        // todo
-        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
-        emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
-        emit(iText, bytecode::opcode::B, loop);
     }
 
 	const std::string& context::language() const
 	{
 		return iLanguage;
 	}
+
+    void context::load_program(const std::string& aPath)
+    {
+        auto& unit = load_unit(aPath);
+        compile_program(unit);
+    }
+
+    void context::load_program(std::istream& aStream)
+    {
+        auto& unit = load_unit(aStream);
+        compile_program(unit);
+    }
+
+    void context::compile_program(const translation_unit_t& aProgram)
+    {
+        // todo
+        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
+        emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
+        emit(iText, bytecode::opcode::B, loop);
+    }
+
+    const context::program_t& context::program() const
+    {
+        return iProgram;
+    }
+
+    context::program_t& context::program()
+    {
+        return iProgram;
+    }
 
     const text_t& context::text() const
     {
@@ -70,6 +97,8 @@ namespace neos
 
 	void context::run()
 	{
+        if (text().empty())
+            throw no_program_loaded();
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
 	}
 
@@ -79,5 +108,65 @@ namespace neos
         for (auto const& t : iThreads)
             result += t->metrics();
         return result;
+    }
+
+    context::translation_unit_t& context::load_unit(const std::string& aPath)
+    {
+        if (iSchema == std::nullopt)
+            throw compiler_error("no schema loaded");
+
+        std::ifstream unit{ aPath, std::ios::binary };
+        if (!unit)
+            throw compiler_error("failed to open source file '" + aPath + "'");
+
+        return load_unit(unit);
+    }
+
+    context::translation_unit_t& context::load_unit(std::istream& aStream)
+    {
+        if (iSchema == std::nullopt)
+            throw compiler_error("no schema loaded");
+
+        if (!aStream)
+            throw compiler_error("input stream bad");
+
+        typedef typename std::istream::pos_type pos_type;
+        pos_type count = 0;
+        aStream.seekg(0, std::ios::end);
+        if (aStream)
+        {
+            count = aStream.tellg();
+            if (count == static_cast<pos_type>(-1))
+                count = 0;
+            aStream.seekg(0, std::ios::beg);
+        }
+        else
+            aStream.clear();
+
+        auto& unit = *program().emplace(program().end());
+
+        if (count != std::istream::pos_type(0))
+        {
+            unit.reserve(static_cast<translation_unit_t::size_type>(count) + 1);
+            unit.resize(static_cast<translation_unit_t::size_type>(count));
+            aStream.read(&unit[0], count);
+            unit.resize(static_cast<translation_unit_t::size_type>(aStream.gcount()));
+        }
+        else
+        {
+            char buffer[1024];
+            while (aStream.read(buffer, sizeof(buffer)))
+                unit.append(buffer, static_cast<translation_unit_t::size_type>(aStream.gcount()));
+            if (aStream.eof())
+                unit.append(buffer, static_cast<translation_unit_t::size_type>(aStream.gcount()));
+        }
+
+        if (unit.empty())
+            throw compiler_error("no source code");
+
+        if (!neolib::check_utf8(unit))
+            throw compiler_error("source file has invalid utf-8");
+
+        return unit;
     }
 }

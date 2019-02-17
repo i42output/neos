@@ -66,8 +66,8 @@
         is: language.procedure.prototype
         identifier: language.procedure.name
         language.procedure.name: {
-            expect: parameters
-            parameters: {
+            expect: arguments
+            arguments: {
                 expect: statement.end
                 statement.end: done
             }
@@ -80,9 +80,9 @@
         is: language.procedure
         identifier: language.procedure.name
         language.procedure.name: {
-            expect: parameters
+            expect: arguments
             expect: keyword.is
-            parameters: {
+            arguments: {
                 expect: keyword.is
             }
         }
@@ -153,17 +153,17 @@
         }
     }
 
-    parameters: {
-        is: language.parameter.list
+    arguments: {
+        is: language.argument.list
         tokens: {
             whitespace: whitespace
             '(': item
         }
         item: {
-            is: language.parameter
             expect: identifier
             expect: expression
             met: {
+                is: language.argument
                 tokens: {
                     whitespace: whitespace
                     ',': item
@@ -187,7 +187,7 @@
             "Export": Export
         }
         Import: {
-            expect: parameters
+            expect: arguments
             language.identifier: {
                 "neos": language.external.function.import
             }
@@ -231,7 +231,7 @@
     expression: {
         tokens: {
             operand: operand
-            '-': object.operator.negate
+            '-': math.operator.negate
             '(': subexpression
         }
         object: {
@@ -355,7 +355,7 @@
     }
 
     string: {
-        is: object.string
+        is: language.string.literal
         tokens: {
             '\"': {
                 '\"': character.quote
