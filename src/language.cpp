@@ -26,10 +26,40 @@ namespace neos
         iSchema{ aSchema },
         iName{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() }
     {
+        for (auto const& e : aSchema.root())
+        {
+            if (e.name() == "meta")
+            {
+                for (auto const& meta : e)
+                {
+                    if (meta.name() == "description")
+                        iDescription = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "copyright")
+                        iCopyright = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "version")
+                        iVersion = meta.as<neolib::rjson_string>();
+                }
+            }
+        }
     }
 
     const std::string& language::name() const
     {
         return iName;
+    }
+
+    const std::string& language::description() const
+    {
+        return iDescription;
+    }
+
+    const std::string& language::copyright() const
+    {
+        return iCopyright;
+    }
+
+    const std::string& language::version() const
+    {
+        return iVersion;
     }
 }

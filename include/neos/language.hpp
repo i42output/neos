@@ -30,8 +30,14 @@ namespace neos
         language(const neolib::rjson& aSchema);
     public:
         const std::string& name() const;
+        const std::string& description() const;
+        const std::string& copyright() const;
+        const std::string& version() const;
     private:
         const neolib::rjson& iSchema;
         std::string iName;
+        std::string iDescription;
+        std::string iCopyright;
+        std::string iVersion;
     };
 }
