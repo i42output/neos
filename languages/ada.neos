@@ -18,7 +18,7 @@
     ]
 
     packages: [
-        "Standard"
+        Standard
     ]
 
     expect: comment
