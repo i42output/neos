@@ -24,20 +24,25 @@
 
 namespace neos
 {
+    struct language_meta
+    {
+        std::string name;
+        std::string description;
+        std::string copyright;
+        std::string version;
+        std::vector<std::string> sourcecodeFileExtension;
+        std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
+        std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
+    };
+
     class language
     {
     public:
         language(const neolib::rjson& aSchema);
     public:
-        const std::string& name() const;
-        const std::string& description() const;
-        const std::string& copyright() const;
-        const std::string& version() const;
+        const language_meta& meta() const;
     private:
         const neolib::rjson& iSchema;
-        std::string iName;
-        std::string iDescription;
-        std::string iCopyright;
-        std::string iVersion;
+        language_meta iMeta;
     };
 }

@@ -24,7 +24,7 @@ namespace neos
 {
     language::language(const neolib::rjson& aSchema) :
         iSchema{ aSchema },
-        iName{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() }
+        iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() }
     {
         for (auto const& e : aSchema.root())
         {
@@ -33,33 +33,42 @@ namespace neos
                 for (auto const& meta : e)
                 {
                     if (meta.name() == "description")
-                        iDescription = meta.as<neolib::rjson_string>();
+                        iMeta.description = meta.as<neolib::rjson_string>();
                     else if (meta.name() == "copyright")
-                        iCopyright = meta.as<neolib::rjson_string>();
+                        iMeta.copyright = meta.as<neolib::rjson_string>();
                     else if (meta.name() == "version")
-                        iVersion = meta.as<neolib::rjson_string>();
+                        iMeta.version = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "sourcecode.file.extension")
+                    {
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeFileExtension.push_back(ext.as<neolib::rjson_string>());
+                    }
+                    else if (meta.name() == "sourcecode.module.package.specification.file.extension")
+                    {
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(ext.as<neolib::rjson_string>());
+                    }
+                    else if (meta.name() == "sourcecode.module.package.implementation.file.extension")
+                    {
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(ext.as<neolib::rjson_string>());
+                    }
                 }
             }
         }
     }
 
-    const std::string& language::name() const
+    const language_meta& language::meta() const
     {
-        return iName;
-    }
-
-    const std::string& language::description() const
-    {
-        return iDescription;
-    }
-
-    const std::string& language::copyright() const
-    {
-        return iCopyright;
-    }
-
-    const std::string& language::version() const
-    {
-        return iVersion;
+        return iMeta;
     }
 }
