@@ -1,5 +1,5 @@
 /*
-  language.hpp
+  i_concept.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -20,29 +20,23 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/json.hpp>
+#include <neolib/i_map.hpp>
+#include <neolib/i_string.hpp>
+#include <neos/language/i_concept.hpp>
 
 namespace neos
 {
-    struct language_meta
+    namespace language
     {
-        std::string name;
-        std::string description;
-        std::string copyright;
-        std::string version;
-        std::vector<std::string> sourcecodeFileExtension;
-        std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
-        std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
-    };
-
-    class language
-    {
-    public:
-        language(const neolib::rjson& aSchema);
-    public:
-        const language_meta& meta() const;
-    private:
-        const neolib::rjson& iSchema;
-        language_meta iMeta;
-    };
+        class i_library : public neolib::i_reference_counted
+        {
+        public:
+            typedef neolib::i_map<neolib::i_string, i_concept> concept_list_t;
+        public:
+            virtual const neolib::i_string& name() const = 0;
+            virtual const concept_list_t& concepts() const = 0;
+        public:
+            static const neolib::uuid& id() { static neolib::uuid sId = neolib::make_uuid("FCE746F0-D650-44E7-99F6-2F442B694F06"); return sId; }
+        };
+    }
 }

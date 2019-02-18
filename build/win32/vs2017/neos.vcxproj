@@ -22,18 +22,23 @@
     <ClCompile Include="..\..\..\src\api\context.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\vm.cpp" />
-    <ClCompile Include="..\..\..\src\language.cpp" />
+    <ClCompile Include="..\..\..\src\schema.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
-    <ClInclude Include="..\..\..\include\neos\language.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\concept.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_library.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\schema.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\library.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\registers.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\text.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
+    <ClInclude Include="..\..\..\src\compiler.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\ada.neos" />

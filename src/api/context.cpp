@@ -37,23 +37,23 @@ namespace neos
 
 	bool context::schema_loaded() const
 	{
-		return iSchema != std::nullopt && iLanguage != std::nullopt;
+		return iSchemaSource != std::nullopt && iSchema != std::nullopt;
 	}
 
 	void context::load_schema(const std::string& aSchemaPath)
 	{
 		std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
+        iSchemaSource.reset();
         iSchema.reset();
-        iLanguage.reset();
-		iSchema.emplace(aSchemaPath);
-        iLanguage.emplace(*iSchema);
+        iSchemaSource.emplace(aSchemaPath);
+        iSchema.emplace(*iSchemaSource);
     }
 
-	const neos::language& context::language() const
+	const language::schema& context::schema() const
 	{
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
-        return *iLanguage;
+        return *iSchema;
 	}
 
     void context::load_program(const std::string& aPath)

@@ -39,7 +39,7 @@
     <ClCompile Include="..\..\..\src\bytecode\text.cpp">
       <Filter>Source Files\bytecode</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\src\language.cpp">
+    <ClCompile Include="..\..\..\src\schema.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -65,7 +65,22 @@
     <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp">
       <Filter>Source Files\bytecode</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language.hpp">
+    <ClInclude Include="..\..\..\src\compiler.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_library.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\library.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\concept.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\schema.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
