@@ -1,5 +1,5 @@
 /*
-  compiler.hpp
+  compiler.cpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -17,15 +17,27 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
-
-#include <neos/neos.hpp>
-#include <neolib/json.hpp>
-#include <neolib/i_string.hpp>
+#include <neolib/neolib.hpp>
+#include <iostream>
+#include <neolib/string_utf.hpp>
+#include <neos/language/compiler.hpp>
+#include "bytecode/opcodes.hpp"
+#include "bytecode/text.hpp"
 
 namespace neos
 {
-    class compiler
+    namespace language
     {
-    };
+        compiler::compiler()
+        {
+        }
+
+        void compiler::compile(program& aProgram)
+        {
+            // todo
+            auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
+            emit(aProgram.text, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
+            emit(aProgram.text, bytecode::opcode::B, loop);
+        }
+    }
 }

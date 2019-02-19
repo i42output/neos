@@ -55,7 +55,7 @@ namespace neos
 		const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
-        void compile_program(const translation_unit_t& aProgram);
+        void compile_program();
         const program_t& program() const;
         program_t& program();
         const text_t& text() const;
@@ -70,7 +70,6 @@ namespace neos
 		std::optional<neolib::rjson> iSchemaSource;
         std::optional<language::schema> iSchema;
         program_t iProgram;
-        text_t iText;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
 	};
 }

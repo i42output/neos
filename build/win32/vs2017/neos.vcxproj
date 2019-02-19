@@ -22,6 +22,7 @@
     <ClCompile Include="..\..\..\src\api\context.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\src\bytecode\vm.cpp" />
+    <ClCompile Include="..\..\..\src\compiler.cpp" />
     <ClCompile Include="..\..\..\src\schema.cpp" />
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>

@@ -39,6 +39,15 @@ namespace neos
         {
             symbol_table_t symbolTable;
             std::vector<translation_unit> translationUnits;
+            text_t text;
+        };
+
+        class compiler
+        {
+        public:
+            compiler();
+        public:
+            void compile(program& aProgram);
         };
     }
 }

@@ -22,8 +22,6 @@
 #include <neolib/string_utf.hpp>
 #include <neos/context.hpp>
 #include "../bytecode/vm.hpp"
-#include "../bytecode/opcodes.hpp"
-#include "../bytecode/text.hpp"
 
 namespace neos
 {
@@ -59,21 +57,18 @@ namespace neos
     void context::load_program(const std::string& aPath)
     {
         auto& unit = load_unit(aPath);
-        compile_program(unit);
+        compile_program();
     }
 
     void context::load_program(std::istream& aStream)
     {
         auto& unit = load_unit(aStream);
-        compile_program(unit);
+        compile_program();
     }
 
-    void context::compile_program(const translation_unit_t& aProgram)
+    void context::compile_program()
     {
-        // todo
-        auto loop = emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
-        emit(iText, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
-        emit(iText, bytecode::opcode::B, loop);
+        language::compiler{}.compile(program());
     }
 
     const context::program_t& context::program() const
@@ -88,7 +83,7 @@ namespace neos
 
     const text_t& context::text() const
     {
-        return iText;
+        return program().text;
     }
 
 	bool context::running() const
