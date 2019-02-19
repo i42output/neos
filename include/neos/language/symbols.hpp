@@ -1,5 +1,5 @@
 /*
-  schema.hpp
+  symbols.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -20,32 +20,21 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/json.hpp>
-#include <neos/language/i_library.hpp>
+#include <string>
+#include <map>
 
 namespace neos
 {
     namespace language
     {
-        struct meta
+        enum class symbol_type : uint32_t
         {
-            std::string name;
-            std::string description;
-            std::string copyright;
-            std::string version;
-            std::vector<std::string> sourcecodeFileExtension;
-            std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
-            std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
+            Function,
+            Data
         };
-
-        class schema
-        {
-        public:
-            schema(neolib::rjson const& aSchema);
-        public:
-            language::meta const& meta() const;
-        private:
-            language::meta iMeta;
-        };
+        typedef std::string symbol_name_t;
+        typedef std::pair<symbol_type, symbol_name_t> symbol_key_t;
+        typedef void const* symbol_reference_t;
+        typedef std::map<symbol_key_t, symbol_reference_t> symbol_table_t;
     }
 }

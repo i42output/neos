@@ -147,28 +147,28 @@ namespace neos
         else
             aStream.clear();
 
-        auto& unit = *program().emplace(program().end());
+        auto& unit = *program().translationUnits.insert(program().translationUnits.end(), translation_unit_t{ translation_unit_t::source_t{}, language::ast{ program().symbolTable } });
 
         if (count != std::istream::pos_type(0))
         {
-            unit.reserve(static_cast<translation_unit_t::size_type>(count) + 1);
-            unit.resize(static_cast<translation_unit_t::size_type>(count));
-            aStream.read(&unit[0], count);
-            unit.resize(static_cast<translation_unit_t::size_type>(aStream.gcount()));
+            unit.source.reserve(static_cast<translation_unit_t::source_t::size_type>(count) + 1);
+            unit.source.resize(static_cast<translation_unit_t::source_t::size_type>(count));
+            aStream.read(&unit.source[0], count);
+            unit.source.resize(static_cast<translation_unit_t::source_t::size_type>(aStream.gcount()));
         }
         else
         {
             char buffer[1024];
             while (aStream.read(buffer, sizeof(buffer)))
-                unit.append(buffer, static_cast<translation_unit_t::size_type>(aStream.gcount()));
+                unit.source.append(buffer, static_cast<translation_unit_t::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
-                unit.append(buffer, static_cast<translation_unit_t::size_type>(aStream.gcount()));
+                unit.source.append(buffer, static_cast<translation_unit_t::source_t::size_type>(aStream.gcount()));
         }
 
-        if (unit.empty())
+        if (unit.source.empty())
             throw compiler_error("no source code");
 
-        if (!neolib::check_utf8(unit))
+        if (!neolib::check_utf8(unit.source))
             throw compiler_error("source file has invalid utf-8");
 
         return unit;

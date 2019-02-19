@@ -27,11 +27,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\ast.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\compiler.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\schema.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\library.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\symbols.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp" />
     <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />

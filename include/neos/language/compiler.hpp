@@ -1,5 +1,5 @@
 /*
-  schema.hpp
+  compiler.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -20,32 +20,25 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/json.hpp>
-#include <neos/language/i_library.hpp>
+#include <string>
+#include <neos/language/symbols.hpp>
+#include <neos/language/ast.hpp>
 
 namespace neos
 {
     namespace language
     {
-        struct meta
+        struct translation_unit
         {
-            std::string name;
-            std::string description;
-            std::string copyright;
-            std::string version;
-            std::vector<std::string> sourcecodeFileExtension;
-            std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
-            std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
+            typedef std::string source_t;
+            source_t source;
+            language::ast ast;
         };
 
-        class schema
+        struct program
         {
-        public:
-            schema(neolib::rjson const& aSchema);
-        public:
-            language::meta const& meta() const;
-        private:
-            language::meta iMeta;
+            symbol_table_t symbolTable;
+            std::vector<translation_unit> translationUnits;
         };
     }
 }

@@ -26,6 +26,7 @@
 #include <memory>
 #include <neolib/json.hpp>
 #include <neos/language/schema.hpp>
+#include <neos/language/compiler.hpp>
 
 namespace neos
 {
@@ -40,8 +41,8 @@ namespace neos
 	class context
 	{
     public:
-        typedef std::string translation_unit_t;
-        typedef std::vector<translation_unit_t> program_t;
+        typedef language::translation_unit translation_unit_t;
+        typedef language::program program_t;
     public:
         struct no_program_loaded : std::runtime_error { no_program_loaded() : std::runtime_error("no program loaded") {} };
         struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
