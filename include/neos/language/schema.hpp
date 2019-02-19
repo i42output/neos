@@ -38,10 +38,20 @@ namespace neos
             std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
         };
 
+        enum class symbol_type : uint32_t
+        {
+            Function,
+            Data
+        };
+        typedef std::string symbol_name_t;
+        typedef std::pair<symbol_type, symbol_name_t> symbol_key_t;
+        typedef void const* symbol_reference_t;
+        typedef std::map<symbol_key_t, symbol_reference_t> symbol_table_t;
+
         class ast
         {
         public:
-            class node : std::variant<i_concept const*>
+            class node : public std::variant<i_concept const*, symbol_table_t::iterator>
             {
             public:
                 typedef std::vector<std::unique_ptr<node>> children_t;
@@ -53,7 +63,7 @@ namespace neos
                 {
                 }
             public:
-                const children_t& children() const
+                children_t const& children() const
                 {
                     return iChildren;
                 }
@@ -70,9 +80,9 @@ namespace neos
         class schema
         {
         public:
-            schema(const neolib::rjson& aSchema);
+            schema(neolib::rjson const& aSchema);
         public:
-            const language::meta& meta() const;
+            language::meta const& meta() const;
         private:
             language::meta iMeta;
         };

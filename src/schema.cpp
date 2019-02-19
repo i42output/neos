@@ -24,7 +24,7 @@ namespace neos
 {
     namespace language
     {
-        schema::schema(const neolib::rjson& aSchema) :
+        schema::schema(neolib::rjson const& aSchema) :
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() }
         {
             for (auto const& e : aSchema.root())
@@ -68,7 +68,7 @@ namespace neos
             }
         }
 
-        const meta& schema::meta() const
+        meta const& schema::meta() const
         {
             return iMeta;
         }
