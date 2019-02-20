@@ -25,7 +25,7 @@
 
 namespace neos
 {
-	const neolib::version NEOS_VERSION = { 1u, 0u, 0u, 0u, "Jaffa Cake"};
+    const neolib::version NEOS_VERSION = { 1u, 0u, 0u, 0u, "Jaffa Cake"};
 
     typedef std::vector<std::byte> text_t;
 }

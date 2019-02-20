@@ -38,38 +38,38 @@ namespace neos
         }
     }
 
-	class context
-	{
+    class context
+    {
     public:
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
         struct no_program_loaded : std::runtime_error { no_program_loaded() : std::runtime_error("no program loaded") {} };
         struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
-	public:
-		context();
+    public:
+        context();
         ~context();
-	public:
-		bool schema_loaded() const;
-		void load_schema(const std::string& aSchemaPath);
-		const language::schema& schema() const;
+    public:
+        bool schema_loaded() const;
+        void load_schema(const std::string& aSchemaPath);
+        const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
         void compile_program();
         const program_t& program() const;
         program_t& program();
         const text_t& text() const;
-	public:
-		bool running() const;
-		void run();
+    public:
+        bool running() const;
+        void run();
         std::string metrics() const;
     private:
         translation_unit_t& load_unit(const std::string& aPath);
         translation_unit_t& load_unit(std::istream& aStream);
     private:
-		std::optional<neolib::rjson> iSchemaSource;
+        std::optional<neolib::rjson> iSchemaSource;
         std::optional<language::schema> iSchema;
         program_t iProgram;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
-	};
+    };
 }

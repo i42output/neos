@@ -25,34 +25,34 @@
 
 namespace neos
 {
-	context::context()
-	{
-	}
+    context::context()
+    {
+    }
 
     context::~context()
     {
     }
 
-	bool context::schema_loaded() const
-	{
-		return iSchemaSource != std::nullopt && iSchema != std::nullopt;
-	}
+    bool context::schema_loaded() const
+    {
+        return iSchemaSource != std::nullopt && iSchema != std::nullopt;
+    }
 
-	void context::load_schema(const std::string& aSchemaPath)
-	{
-		std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
+    void context::load_schema(const std::string& aSchemaPath)
+    {
+        std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
         iSchemaSource.emplace(aSchemaPath);
         iSchema.emplace(*iSchemaSource);
     }
 
-	const language::schema& context::schema() const
-	{
+    const language::schema& context::schema() const
+    {
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
         return *iSchema;
-	}
+    }
 
     void context::load_program(const std::string& aPath)
     {
@@ -86,20 +86,20 @@ namespace neos
         return program().text;
     }
 
-	bool context::running() const
-	{
+    bool context::running() const
+    {
         for (auto const& t : iThreads)
             if (t->joinable())
                 return true;
         return false;
-	}
+    }
 
-	void context::run()
-	{
+    void context::run()
+    {
         if (text().empty())
             throw no_program_loaded();
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
-	}
+    }
 
     std::string context::metrics() const
     {
