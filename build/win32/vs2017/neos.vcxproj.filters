@@ -25,6 +25,9 @@
     <Filter Include="Example Scripts">
       <UniqueIdentifier>{05a25ebb-b0dd-48b0-89e7-3985bd929058}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\language">
+      <UniqueIdentifier>{d05db517-d67a-42d7-b5a0-18182a987e2d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\neos.cpp">
@@ -71,29 +74,29 @@
     <ClInclude Include="..\..\..\src\compiler.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\i_library.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\library.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\concept.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\schema.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\ast.hpp">
-      <Filter>Header Files</Filter>
+      <Filter>Header Files\language</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\compiler.hpp">
-      <Filter>Header Files</Filter>
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\ast.hpp">
+      <Filter>Header Files\language</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\symbols.hpp">
-      <Filter>Header Files</Filter>
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\library.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\schema.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_library.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp">
+      <Filter>Header Files\language</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
