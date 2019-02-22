@@ -48,7 +48,7 @@
         "use": use
         "package": package
         "body": body
-        "is": is
+        "is": keyword.is
         "procedure": procedure
         "function": function
         "type": type
@@ -99,6 +99,45 @@
         is: language.procedure.main
     }
 
+    enumerator: {
+        is: language.enum.enumarator
+    }
+
+    enumerators: {
+        is: language.enum.enumerators
+        item: {
+            is: enumerator
+            expect: itentifier
+            expect: character.literal
+            met: {
+                is: enumerator
+                tokens: {
+                    whitespace: whitespace
+                    ',': item
+                    ')': done
+                }
+            }
+        }
+    }
+
+    type.definition: {
+        is: language.type
+        expect: identifier  
+        identifier: language.type.name
+        language.type.name: {
+            expect: keyword.is
+            keyword.is: {
+                tokens: {
+                    '(': enumerator_list
+                }
+            }
+            enumerator_list: {
+                transform.parent.parent: language.enum
+                expect: enumerators
+            }
+        }
+    }
+
     package: {
         identifier: module.package.name
         module.package.name: {
@@ -119,7 +158,7 @@
     package.specification: {
         is: module.package.specification
         tokens: {
-            type: language.error.not_implemented
+            type: type.definition
             procedure: language.error.not_implemented
             function: language.error.not_implemented
             private: language.error.not_implemented
@@ -195,7 +234,7 @@
                 language.identifier: language.function.name
             }
             language.function.name: {
-                string: language.external.function.name
+                string.literal: language.external.function.name
             }
             language.external.function.name: done
         }
@@ -223,7 +262,7 @@
     operand: {
         tokens: {
             character.digit: universal_number
-            '\"': string
+            '\"': string.literal
             identifier: identifier
         }
     }
@@ -271,9 +310,8 @@
             '#': {
                 transform.previous: universal_number.base
                 character.hexdigit: universal_number.hexdigit
-                '.': float
-                float: {
-                    this: universal_number.point
+                '.': universal_number.point
+                universal_number.point: {
                     character.hexdigit: universal_number.hexdigit
                     '#': {
                         'e': exponent
@@ -354,15 +392,35 @@
         }
     }
 
-    string: {
+    character: {
+        is: language.character
+    }
+
+    character.literal: {
+        is: language.character.literal
+        discard: '\''
+        tokens: {
+            '\'': {
+                '\'': character.literal
+                character.literal: done
+            }
+            character: character.literal
+            character.literal: {
+                '\'': done
+            }
+        }
+    }
+
+    string.literal: {
         is: language.string.literal
+        discard: '\"'
         tokens: {
             '\"': {
                 '\"': character.quote
                 whitespace: done
                 character: done.next
             }
-            character: string
+            character: string.literal
         }
     }
 }
