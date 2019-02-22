@@ -100,11 +100,14 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\languages\ada.neos">
-      <Filter>Languages</Filter>
-    </None>
     <None Include="..\..\..\languages\examples\ada\ExitCode.ada">
       <Filter>Example Scripts</Filter>
+    </None>
+    <None Include="..\..\..\languages\Ada.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\C.neos">
+      <Filter>Languages</Filter>
     </None>
   </ItemGroup>
 </Project>

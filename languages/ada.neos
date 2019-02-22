@@ -25,7 +25,7 @@
     expect: use
     expect: package
 
-    tokens: {
+    tokens.unmatched: {
         ' ': whitespace
         character.LF: whitespace
         character.CR: whitespace
@@ -34,8 +34,29 @@
         '-': {
             '-': comment
         }
+    }
+
+    whitespace: {
+        is: language.whitespace
+        tokens: {
+            ' ': whitespace
+            character.LF: whitespace
+            character.CR: whitespace
+            character.TAB: whitespace
+            character.EOF: whitespace
+        }
+    }
+
+    comment: {
+        is: language.comment
+        tokens: {
+            character.LF: done
+            character: language.comment
+        }
+    }
+
+    tokens: {
         character.alpha: keyword
-        character.underscore: keyword
         procedure: procedure.main
     }
 
@@ -386,14 +407,6 @@
                 whitespace: done
                 character: done.next
             }
-        }
-    }
-
-    comment: {
-        is: whitespace
-        tokens: {
-            character.LF: done
-            character: whitespace
         }
     }
 

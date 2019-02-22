@@ -45,7 +45,8 @@
     <ClInclude Include="..\..\..\src\compiler.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\languages\ada.neos" />
+    <None Include="..\..\..\languages\Ada.neos" />
+    <None Include="..\..\..\languages\C.neos" />
     <None Include="..\..\..\languages\examples\ada\ExitCode.ada" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
