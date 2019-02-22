@@ -114,8 +114,11 @@
                 tokens: {
                     whitespace: whitespace
                     ',': item
-                    ')': done
+                    ')': {
+                        expect: statement.end
+                    }
                 }
+                statement.end: done
             }
         }
     }
@@ -169,6 +172,7 @@
         module.package.name: {
             equals: parent.module.package.name
             expect: statement.end
+            statement.end: done
         }
     }
 
@@ -188,6 +192,7 @@
             module.package.name: {
                 equals: parent.parent.module.package.name
                 expect: statement.end
+                statement.end: done
             }
         }
     }
