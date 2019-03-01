@@ -1,3 +1,5 @@
+![](https://github.com/i42output/neos/blob/master/neos.png)
+
 # Introduction
 "neos" is a cross-platform language agnostic scripting engine with a custom bytecode JIT. 
 
