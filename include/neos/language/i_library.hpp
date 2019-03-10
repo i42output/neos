@@ -36,7 +36,7 @@ namespace neos
             virtual const neolib::i_string& name() const = 0;
             virtual const concept_list_t& concepts() const = 0;
         public:
-            static const neolib::uuid& id() { static neolib::uuid sId = neolib::make_uuid("FCE746F0-D650-44E7-99F6-2F442B694F06"); return sId; }
+            static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("FCE746F0-D650-44E7-99F6-2F442B694F06"); return sId; }
         };
     }
 }

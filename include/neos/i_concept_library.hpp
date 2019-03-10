@@ -1,5 +1,5 @@
 /*
-  i_concept.hpp
+  i_concept_library.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -20,23 +20,13 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/map.hpp>
-#include <neos/language/i_library.hpp>
-#include <neos/language/concept.hpp>
+#include <neolib/i_plugin.hpp>
 
 namespace neos
 {
-    namespace language
+    class i_concept_library : public neolib::i_plugin
     {
-        class library : public i_library
-        {
-        public:
-            typedef neolib::map<neolib::i_string, i_concept, neolib::string, _concept> concept_list_t;
-        public:
-            virtual const neolib::i_string& name() const = 0;
-            virtual const concept_list_t& concepts() const = 0;
-        public:
-            static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("FCE746F0-D650-44E7-99F6-2F442B694F06"); return sId; }
-        };
-    }
+    public:
+        static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("DF0D818D-7C3F-4958-8FCF-9FE6A9B2A501"); return sId; }
+    };
 }

@@ -19,14 +19,26 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
+#include <neolib/application.hpp>
 #include <neolib/string_utf.hpp>
 #include <neos/context.hpp>
 #include "../bytecode/vm.hpp"
 
 namespace neos
 {
-    context::context()
+    context::context() : 
+        iPrivateApplication{ std::make_unique<neolib::application>(neolib::application_info{ {}, "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
+        iApplication{ *iPrivateApplication }
     {
+        init();
+    }
+
+    context::context(neolib::i_application& aApplication) :
+        iApplication{ aApplication }
+    {
+        iApplication.plugin_manager().plugin_file_extensions().clear();
+        iApplication.plugin_manager().plugin_file_extensions().push_back(neolib::string{ ".ncl" });
+        init();
     }
 
     context::~context()
@@ -107,6 +119,11 @@ namespace neos
         for (auto const& t : iThreads)
             result += t->metrics();
         return result;
+    }
+
+    void context::init()
+    {
+        iApplication.plugin_manager().load_plugins();
     }
 
     context::translation_unit_t& context::load_unit(const std::string& aPath)

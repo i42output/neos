@@ -2,9 +2,9 @@
     meta: {
         language: "Ada"
         description: "Ada (initially a subset of standard Ada, standard/scope TBD)"
-        sourcecode.file.extension: [ "ads", "adb", "ada" ]
-        sourcecode.module.package.specification.file.extension: "ads"
-        sourcecode.module.package.implementation.file.extension: [ "adb", "ada" ]
+        language.file.extension: [ "ads", "adb", "ada" ]
+        module.package.specification.file.extension: "ads"
+        module.package.implementation.file.extension: [ "adb", "ada" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -25,14 +25,19 @@
     expect: use
     expect: package
 
-    tokens.unmatched: {
-        ' ': whitespace
-        character.LF: whitespace
-        character.CR: whitespace
-        character.TAB: whitespace
-        character.EOF: whitespace
-        '-': {
-            '-': comment
+    unmatched: {
+        is: parser.token.unmatched
+        tokens: {
+            ' ': whitespace
+            character.LF: whitespace
+            character.CR: whitespace
+            character.TAB: whitespace
+            character.EOF: whitespace
+            '-': {
+                '-': {
+                    transform: comment
+                }
+            }
         }
     }
 

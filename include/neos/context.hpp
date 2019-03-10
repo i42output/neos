@@ -25,6 +25,7 @@
 #include <vector>
 #include <memory>
 #include <neolib/json.hpp>
+#include <neolib/i_application.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
 
@@ -48,6 +49,7 @@ namespace neos
         struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
     public:
         context();
+        context(neolib::i_application& aApplication);
         ~context();
     public:
         bool schema_loaded() const;
@@ -64,9 +66,12 @@ namespace neos
         void run();
         std::string metrics() const;
     private:
+        void init();
         translation_unit_t& load_unit(const std::string& aPath);
         translation_unit_t& load_unit(std::istream& aStream);
     private:
+        std::unique_ptr<neolib::i_application> iPrivateApplication;
+        neolib::i_application& iApplication;
         std::optional<neolib::rjson> iSchemaSource;
         std::optional<language::schema> iSchema;
         program_t iProgram;

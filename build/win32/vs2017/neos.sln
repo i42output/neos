@@ -13,6 +13,14 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "console", "..\..\..\console
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "neolib", "..\..\..\..\neolib\build\win32\vs2017\neolib.vcxproj", "{5BE004BF-A083-422F-8287-E7238B633466}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "neos concept libraries", "neos concept libraries", "{B6F7125B-3B34-4793-BA1C-D97955CB435D}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "core", "..\..\..\concepts\build\win32\vs2017\core\core.vcxproj", "{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}"
+	ProjectSection(ProjectDependencies) = postProject
+		{5BE004BF-A083-422F-8287-E7238B633466} = {5BE004BF-A083-422F-8287-E7238B633466}
+		{2FD415FA-62C7-400A-87D8-2C3539FEF004} = {2FD415FA-62C7-400A-87D8-2C3539FEF004}
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -45,9 +53,20 @@ Global
 		{5BE004BF-A083-422F-8287-E7238B633466}.Release|x64.Build.0 = Release|x64
 		{5BE004BF-A083-422F-8287-E7238B633466}.Release|x86.ActiveCfg = Release|Win32
 		{5BE004BF-A083-422F-8287-E7238B633466}.Release|x86.Build.0 = Release|Win32
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Debug|x64.ActiveCfg = Debug|x64
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Debug|x64.Build.0 = Debug|x64
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Debug|x86.ActiveCfg = Debug|Win32
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Debug|x86.Build.0 = Debug|Win32
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Release|x64.ActiveCfg = Release|x64
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Release|x64.Build.0 = Release|x64
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Release|x86.ActiveCfg = Release|Win32
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{506655A5-90BA-4ACF-A5FC-8E68F9CBBB64} = {B6F7125B-3B34-4793-BA1C-D97955CB435D}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {E624FACB-81C8-4879-BAF7-8BA19E247DE4}
