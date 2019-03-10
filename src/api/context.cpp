@@ -129,9 +129,9 @@ namespace neos
     void context::init()
     {
         iApplication.plugin_manager().load_plugins();
-        for (neolib::auto_ref<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
+        for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
         {
-            iConceptLibraries.push_back(neolib::auto_ref<i_concept_library>(*plugin));
+            iConceptLibraries.push_back(neolib::ref_ptr<i_concept_library>(*plugin));
         }
     }
 

@@ -21,13 +21,20 @@
 
 #include <neos/neos.hpp>
 #include <neolib/i_discoverable.hpp>
+#include <neolib/i_map.hpp>
 #include <neolib/i_string.hpp>
 #include <neolib/i_version.hpp>
+#include <neos/i_concept.hpp>
 
 namespace neos
 {
     class i_concept_library : public neolib::i_discoverable
     {
+    public:
+        typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
+    public:
+        virtual const concepts_t& concepts() const = 0;
+        virtual concepts_t& concepts() = 0;
     public:
         virtual const neolib::uuid& id() const = 0;
         virtual const neolib::i_string& uri() const = 0;

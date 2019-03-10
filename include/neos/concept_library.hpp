@@ -20,16 +20,20 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/reference_counted.hpp>
+#include <neolib/map.hpp>
 #include <neolib/string.hpp>
 #include <neolib/version.hpp>
-#include <neolib/reference_counted.hpp>
 #include <neolib/i_application.hpp>
 #include <neos/i_concept_library.hpp>
+#include <neos/concept.hpp>
 
 namespace neos
 {
     class concept_library : public neolib::reference_counted<i_concept_library>
     {
+    public:
+        typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept>, neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
     public:
         concept_library(
             const neolib::uuid& aId, 
@@ -53,6 +57,15 @@ namespace neos
         bool discover(const neolib::uuid& aId, void*& aObject) override
         {
             return false;
+        }
+    public:
+        const concepts_t& concepts() const override
+        {
+            return iConcepts;
+        }
+        concepts_t& concepts() override
+        {
+            return iConcepts;
         }
     public:
         const neolib::uuid& id() const override
@@ -80,6 +93,7 @@ namespace neos
             return iCopyright;
         }
     private:
+        concepts_t iConcepts;
         neolib::uuid iId;
         neolib::string iUri;
         neolib::string iName;

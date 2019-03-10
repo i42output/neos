@@ -27,9 +27,11 @@
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\..\include\neos\concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\concept_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\concept_library_plugin.hpp" />
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
+    <ClInclude Include="..\..\..\include\neos\i_concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\i_concept_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\ast.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\compiler.hpp" />

@@ -43,7 +43,7 @@ namespace neos
     class context
     {
     public:
-        typedef std::vector<neolib::auto_ref<i_concept_library>> concept_libraries_t;
+        typedef std::vector<neolib::ref_ptr<i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
