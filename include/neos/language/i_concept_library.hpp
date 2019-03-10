@@ -1,5 +1,5 @@
 /*
-  i_concept.hpp
+  i_concept_library.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -20,23 +20,32 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/map.hpp>
-#include <neos/language/i_library.hpp>
-#include <neos/language/concept.hpp>
+#include <neolib/i_discoverable.hpp>
+#include <neolib/i_map.hpp>
+#include <neolib/i_string.hpp>
+#include <neolib/i_version.hpp>
+#include <neos/language/i_concept.hpp>
 
 namespace neos
 {
     namespace language
     {
-        class library : public i_library
+        class i_concept_library : public neolib::i_discoverable
         {
         public:
-            typedef neolib::map<neolib::i_string, i_concept, neolib::string, _concept> concept_list_t;
+            typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
         public:
+            virtual const concepts_t& concepts() const = 0;
+            virtual concepts_t& concepts() = 0;
+        public:
+            virtual const neolib::uuid& id() const = 0;
+            virtual const neolib::i_string& uri() const = 0;
             virtual const neolib::i_string& name() const = 0;
-            virtual const concept_list_t& concepts() const = 0;
+            virtual const neolib::i_string& description() const = 0;
+            virtual const neolib::i_version& version() const = 0;
+            virtual const neolib::i_string& copyright() const = 0;
         public:
-            static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("FCE746F0-D650-44E7-99F6-2F442B694F06"); return sId; }
+            static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("DF0D818D-7C3F-4958-8FCF-9FE6A9B2A501"); return sId; }
         };
     }
 }

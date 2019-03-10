@@ -28,7 +28,7 @@
 #include <neolib/i_application.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
-#include <neos/i_concept_library.hpp>
+#include <neos/language/i_concept_library.hpp>
 
 namespace neos
 {
@@ -43,7 +43,7 @@ namespace neos
     class context
     {
     public:
-        typedef std::vector<neolib::ref_ptr<i_concept_library>> concept_libraries_t;
+        typedef std::vector<neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:

@@ -21,7 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neolib/json.hpp>
-#include <neos/language/i_library.hpp>
+#include <neos/language/i_concept_library.hpp>
 
 namespace neos
 {

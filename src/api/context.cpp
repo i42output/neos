@@ -130,9 +130,7 @@ namespace neos
     {
         iApplication.plugin_manager().load_plugins();
         for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
-        {
-            iConceptLibraries.push_back(neolib::ref_ptr<i_concept_library>(*plugin));
-        }
+            iConceptLibraries.push_back(neolib::ref_ptr<language::i_concept_library>(*plugin));
     }
 
     context::translation_unit_t& context::load_unit(const std::string& aPath)

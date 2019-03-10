@@ -20,18 +20,28 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/reference_counted.hpp>
+#include <neolib/string.hpp>
 #include <neos/language/i_concept.hpp>
 
 namespace neos
 {
     namespace language
     {
-        class _concept : public i_concept
+        class neos_concept : public neolib::reference_counted<i_concept>
         {
+        public:
+            neos_concept(const std::string& aName) :
+                iName{ aName }
+            {
+            }
         public:
             const neolib::i_string& name() const override
             {
+                return iName;
             }
+        private:
+            neolib::string iName;
         };
     }
 }

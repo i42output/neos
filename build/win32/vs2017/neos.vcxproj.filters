@@ -86,32 +86,20 @@
     <ClInclude Include="..\..\..\include\neos\language\symbols.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\library.hpp">
-      <Filter>Header Files\language</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\schema.hpp">
-      <Filter>Header Files\language</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\language\i_library.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\concept_library.hpp">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="..\..\..\include\neos\language\concept_library.hpp">
+      <Filter>Header Files\language</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\i_concept_library.hpp">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="..\..\..\include\neos\language\concept_library_plugin.hpp">
+      <Filter>Header Files\language</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\concept_library_plugin.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\concept.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\include\neos\i_concept.hpp">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="..\..\..\include\neos\language\i_concept_library.hpp">
+      <Filter>Header Files\language</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
