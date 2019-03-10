@@ -1,5 +1,5 @@
 /*
-  concept_library.hpp
+  concept_library_plugin.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -24,14 +24,14 @@
 #include <neolib/version.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neolib/i_application.hpp>
-#include <neos/i_concept_library.hpp>
+#include <neos/concept_library.hpp>
 
 namespace neos
 {
-    class concept_library : public neolib::reference_counted<i_concept_library>
+    class concept_library_plugin : public neolib::reference_counted<neolib::i_plugin>
     {
     public:
-        concept_library(
+        concept_library_plugin(
             const neolib::uuid& aId, 
             const std::string& aName, 
             const std::string& aDescription = {}, 
@@ -41,15 +41,18 @@ namespace neos
             iName{ aName },
             iDescription{ aDescription },
             iVersion{ aVersion },
-            iCopyright{ aCopyright }
-        {
-        }
-        ~concept_library()
+            iCopyright{ aCopyright },
+            iLoaded{ false }
         {
         }
     public:
         bool discover(const neolib::uuid& aId, void*& aObject) override
         {
+            if (aId == i_concept_library::iid())
+            {
+                aObject = new concept_library{ id(), name().to_std_string(), description().to_std_string(), version(), copyright().to_std_string() };
+                return true;
+            }
             return false;
         }
     public:
@@ -73,11 +76,30 @@ namespace neos
         {
             return iCopyright;
         }
+        bool load() override
+        {
+            iLoaded = true;
+            return true;
+        }
+        bool unload() override
+        {
+            iLoaded = false;
+            return true;
+        }
+        bool loaded() const override
+        {
+            return iLoaded;
+        }
+        bool open_uri(const neolib::i_string& aUri) override
+        {
+            return false;
+        }
     private:
         neolib::uuid iId;
         neolib::string iName;
         neolib::string iDescription;
         neolib::version iVersion;
         neolib::string iCopyright;
+        bool iLoaded;
     };
 }

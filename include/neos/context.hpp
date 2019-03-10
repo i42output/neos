@@ -28,6 +28,7 @@
 #include <neolib/i_application.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
+#include <neos/i_concept_library.hpp>
 
 namespace neos
 {
@@ -42,6 +43,7 @@ namespace neos
     class context
     {
     public:
+        typedef std::vector<neolib::auto_ref<i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
@@ -52,6 +54,7 @@ namespace neos
         context(neolib::i_application& aApplication);
         ~context();
     public:
+        const concept_libraries_t& concept_libraries() const;
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
         const language::schema& schema() const;
@@ -72,6 +75,7 @@ namespace neos
     private:
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;
+        concept_libraries_t iConceptLibraries;
         std::optional<neolib::rjson> iSchemaSource;
         std::optional<language::schema> iSchema;
         program_t iProgram;
