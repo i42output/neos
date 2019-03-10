@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neolib/i_reference_counted.hpp>
+#include <neolib/i_string.hpp>
 
 namespace neos
 {
