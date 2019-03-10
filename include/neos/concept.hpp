@@ -20,12 +20,13 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/reference_counted.hpp>
 #include <neolib/string.hpp>
 #include <neos/i_concept.hpp>
 
 namespace neos
 {
-    class neos_concept : public i_concept
+    class neos_concept : public neolib::reference_counted<i_concept>
     {
     public:
         neos_concept(const std::string& aName) :
