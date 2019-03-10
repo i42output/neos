@@ -33,11 +33,13 @@ namespace neos
     public:
         concept_library(
             const neolib::uuid& aId, 
+            const std::string& aUri,
             const std::string& aName, 
             const std::string& aDescription = {}, 
             const neolib::version aVersion = {}, 
             const std::string& aCopyright = {}) : 
             iId{ aId },
+            iUri{ aUri },
             iName{ aName },
             iDescription{ aDescription },
             iVersion{ aVersion },
@@ -57,6 +59,10 @@ namespace neos
         {
             return iId;
         }
+        const neolib::i_string& uri() const override
+        {
+            return iUri;
+        }
         const neolib::i_string& name() const override
         {
             return iName;
@@ -75,6 +81,7 @@ namespace neos
         }
     private:
         neolib::uuid iId;
+        neolib::string iUri;
         neolib::string iName;
         neolib::string iDescription;
         neolib::version iVersion;

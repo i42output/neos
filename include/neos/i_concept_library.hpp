@@ -30,6 +30,7 @@ namespace neos
     {
     public:
         virtual const neolib::uuid& id() const = 0;
+        virtual const neolib::i_string& uri() const = 0;
         virtual const neolib::i_string& name() const = 0;
         virtual const neolib::i_string& description() const = 0;
         virtual const neolib::i_version& version() const = 0;

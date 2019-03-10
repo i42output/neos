@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <boost/dll.hpp>
 #include <neolib/string.hpp>
 #include <neolib/version.hpp>
 #include <neolib/reference_counted.hpp>
@@ -50,7 +51,7 @@ namespace neos
         {
             if (aId == i_concept_library::iid())
             {
-                aObject = new concept_library{ id(), name().to_std_string(), description().to_std_string(), version(), copyright().to_std_string() };
+                aObject = new concept_library{ id(), "file:///" + boost::dll::this_line_location().string(), name().to_std_string(), description().to_std_string(), version(), copyright().to_std_string() };
                 return true;
             }
             return false;
