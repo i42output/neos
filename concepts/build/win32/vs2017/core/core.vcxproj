@@ -171,8 +171,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="core.cpp" />
-    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="..\..\..\..\src\common\dllmain.cpp" />
+    <ClCompile Include="..\..\..\..\src\core\core.cpp" />
+    <ClCompile Include="..\..\..\..\src\core\plugin.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\..\src\core\core.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

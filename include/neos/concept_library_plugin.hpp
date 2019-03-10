@@ -25,16 +25,18 @@
 #include <neolib/version.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neolib/i_application.hpp>
-#include <neos/concept_library.hpp>
 
 namespace neos
 {
+    template <typename ConceptLibrary>
     class concept_library_plugin : public neolib::reference_counted<neolib::i_plugin>
     {
     public:
+        typedef ConceptLibrary concept_library_type;
+    public:
         concept_library_plugin(
-            const neolib::uuid& aId, 
-            const std::string& aName, 
+            const neolib::uuid& aId = concept_library_type::library_id(),
+            const std::string& aName = concept_library_type::library_name(),
             const std::string& aDescription = {}, 
             const neolib::version aVersion = {}, 
             const std::string& aCopyright = {}) : 
@@ -51,7 +53,7 @@ namespace neos
         {
             if (aId == i_concept_library::iid())
             {
-                aObject = new concept_library{ id(), "file:///" + boost::dll::this_line_location().string(), name().to_std_string(), description().to_std_string(), version(), copyright().to_std_string() };
+                aObject = new concept_library_type{ "file:///" + boost::dll::this_line_location().string() };
                 return true;
             }
             return false;
