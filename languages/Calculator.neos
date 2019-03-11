@@ -1,0 +1,150 @@
+{
+    meta: {
+        language: "Calculator"
+        description: "A simple expression evaluator (for neos testing purposes)"
+        language.file.extension: [ "calc" ]
+        copyright: "Copyright (C) 2019 Leigh Johnston"
+        version: "1.0.0"
+    }
+
+    libraries: [
+        neos.math
+        neos.math.universal
+    ]
+
+    expect: expression
+
+    unmatched: {
+        is: parser.token.unmatched
+        tokens: {
+            ' ': whitespace
+            character.LF: whitespace
+            character.CR: whitespace
+            character.TAB: whitespace
+            character.EOF: whitespace
+            '-': {
+                '-': {
+                    transform: comment
+                }
+            }
+        }
+    }
+
+    whitespace: {
+        is: language.whitespace
+        tokens: {
+            ' ': whitespace
+            character.LF: whitespace
+            character.CR: whitespace
+            character.TAB: whitespace
+            character.EOF: whitespace
+        }
+    }
+
+    statement.end: {
+        tokens: {
+            whitespace: whitespace
+            ';': done
+        }
+    }
+
+    operand: {
+        tokens: {
+            character.digit: universal_number
+        }
+    }
+
+    expression: {
+        math.operator.precedence: math.operator.precedence.standard
+        tokens: {
+            operand: operand
+            '-': math.operator.negate
+            '(': subexpression
+        }
+        object: {
+            tokens: {
+                '+': math.operator.addition
+                '-': math.operator.subtraction
+                '*': math.operator.multiplication
+                '**': math.operator.power
+                '/': math.operator.division
+            }
+            statement.end: done
+        }
+    }
+
+    subexpression: {
+        is: expression
+        tokens: {
+            ')': done
+        }
+    }
+
+    object: {
+        is: language.object
+    }
+
+    universal_number: {
+        is: math.universal.number
+        tokens: {
+            character.digit: universal_number.digit
+            '#': {
+                transform.previous: universal_number.base
+                character.hexdigit: universal_number.hexdigit
+                '.': universal_number.point
+                universal_number.point: {
+                    character.hexdigit: universal_number.hexdigit
+                    '#': {
+                        'e': exponent
+                        'E': exponent
+                        whitespace: done
+                        character: done.next
+                    }
+                    whitespace: done
+                    character: done.next
+                    done: {
+                        transform: math.universal.float
+                    }
+                }
+                '#': {
+                    'e': exponent
+                    'E': exponent
+                    whitespace: done
+                    character: done.next
+                }
+            }
+            exponent: {
+                '+': universal_number.exponent.positive
+                universal_number.exponent.positive: {
+                    character.digit: universal_number.exponent.digit
+                    universal_number.exponent.digit: {
+                        character.digit: universal_number.exponent.digit
+                        whitespace: done
+                        character: done.next
+                    }
+                }
+                '-': universal_number.exponent.negative
+                universal_number.exponent.negative: {
+                    character.digit: universal_number.exponent.digit
+                    universal_number.exponent.digit: {
+                        character.digit: universal_number.exponent.digit
+                        whitespace: done
+                        character: done.next
+                    }
+                }
+                done: {
+                    transform: math.universal.float
+                }
+            }
+            whitespace: done
+            character: done.next
+        }
+        done: {
+            tranform: math.universal.integer
+        }
+    }
+
+    character: {
+        is: language.character
+    }
+}

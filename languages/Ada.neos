@@ -251,7 +251,7 @@
     }
 
     pragma: {
-        is: statement
+        is: language.pragma
         language.identifier: {
             "Import": Import
             "Export": Export
@@ -299,6 +299,7 @@
     }
 
     expression: {
+        is: statement
         tokens: {
             operand: operand
             '-': math.operator.negate
@@ -307,7 +308,7 @@
         object: {
             tokens: {
                 '=': object.operator.equality
-                ':=':object.operator.assignment
+                ':=': object.operator.assignment
                 '+': math.operator.addition
                 '-': math.operator.subtraction
                 '*': math.operator.multiplication
@@ -322,6 +323,10 @@
         tokens: {
             ')': done
         }
+    }
+
+    object: {
+        is: language.object
     }
 
     identifier: {

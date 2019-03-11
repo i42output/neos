@@ -35,6 +35,7 @@ namespace neos
         class concept_library : public neolib::reference_counted<i_concept_library>
         {
         public:
+            typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>, neolib::string, neolib::ref_ptr<i_concept_library>> sublibraries_t;
             typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept>, neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
         public:
             concept_library(
@@ -61,6 +62,14 @@ namespace neos
                 return false;
             }
         public:
+            const sublibraries_t& sublibraries() const override
+            {
+                return iSublibraries;
+            }
+            sublibraries_t& sublibraries() override
+            {
+                return iSublibraries;
+            }
             const concepts_t& concepts() const override
             {
                 return iConcepts;
@@ -95,6 +104,7 @@ namespace neos
                 return iCopyright;
             }
         private:
+            sublibraries_t iSublibraries;
             concepts_t iConcepts;
             neolib::uuid iId;
             neolib::string iUri;

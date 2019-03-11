@@ -24,9 +24,15 @@
     <ClCompile Include="..\..\..\..\src\common\dllmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\..\src\core\math.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\src\core\core.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\src\core\math.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

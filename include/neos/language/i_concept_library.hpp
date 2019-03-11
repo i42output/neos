@@ -33,7 +33,11 @@ namespace neos
         class i_concept_library : public neolib::i_discoverable
         {
         public:
+            typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>> sublibraries_t;
             typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
+        public:
+            virtual const sublibraries_t& sublibraries() const = 0;
+            virtual sublibraries_t& sublibraries() = 0;
         public:
             virtual const concepts_t& concepts() const = 0;
             virtual concepts_t& concepts() = 0;
