@@ -27,6 +27,10 @@
     <ClCompile Include="..\..\..\src\neos.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\..\include\neos\bytecode\bytecode.hpp" />
+    <ClInclude Include="..\..\..\include\neos\bytecode\opcodes.hpp" />
+    <ClInclude Include="..\..\..\include\neos\bytecode\registers.hpp" />
+    <ClInclude Include="..\..\..\include\neos\bytecode\vm\vm.hpp" />
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\ast.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\compiler.hpp" />
@@ -38,11 +42,6 @@
     <ClInclude Include="..\..\..\include\neos\language\schema.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\symbols.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
-    <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp" />
-    <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp" />
-    <ClInclude Include="..\..\..\src\bytecode\registers.hpp" />
-    <ClInclude Include="..\..\..\src\bytecode\text.hpp" />
-    <ClInclude Include="..\..\..\src\bytecode\vm.hpp" />
     <ClInclude Include="..\..\..\src\compiler.hpp" />
   </ItemGroup>
   <ItemGroup>

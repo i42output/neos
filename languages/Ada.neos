@@ -2,9 +2,9 @@
     meta: {
         language: "Ada"
         description: "Ada (initially a subset of standard Ada, standard/scope TBD)"
-        language.file.extension: [ "ads", "adb", "ada" ]
-        module.package.specification.file.extension: "ads"
-        module.package.implementation.file.extension: [ "adb", "ada" ]
+        language.file.extension: [ ".ads", ".adb", ".ada" ]
+        module.package.specification.file.extension: ".ads"
+        module.package.implementation.file.extension: [ ".adb", ".ada" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -320,6 +320,7 @@
 
     subexpression: {
         is: expression
+        discard: ')'
         tokens: {
             ')': done
         }

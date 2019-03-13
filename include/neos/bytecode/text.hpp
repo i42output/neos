@@ -20,9 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include "registers.hpp"
-#include "opcodes.hpp"
-#include "vm.hpp"
+#include <neos/bytecode/registers.hpp>
+#include <neos/bytecode/opcodes.hpp>
 
 namespace neos
 {
@@ -67,7 +66,7 @@ namespace neos
         }
 
         template <typename DataType>
-        inline uint64_t emit(text_t& aText, opcode aOpcode, reg aRegister, DataType aImmediate)
+        inline uint64_t emit(text_t& aText, opcode aOpcode, bytecode::registers aRegister, DataType aImmediate)
         {
             auto pos = aText.size();
             if constexpr (sizeof(DataType) > 1)

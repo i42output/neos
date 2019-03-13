@@ -2,7 +2,7 @@
     meta: {
         language: "Calculator"
         description: "A simple expression evaluator (for neos testing purposes)"
-        language.file.extension: [ "calc" ]
+        language.file.extension: [ ".calc" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -48,44 +48,54 @@
         }
     }
 
-    operand: {
-        tokens: {
-            character.digit: universal_number
-        }
-    }
-
     expression: {
-        math.operator.precedence: math.operator.precedence.standard
-        tokens: {
-            operand: operand
-            '-': math.operator.negate
-            '(': subexpression
-        }
-        object: {
+        is: language.expression
+        expression: {
             tokens: {
                 '+': math.operator.addition
                 '-': math.operator.subtraction
+            }
+            math.operator: {
+                expect: term
+            }
+        }
+        subexpression: {
+            discard: '('
+            expression: {
+                tokens: {
+                    ')': done
+                }
+            }
+        }
+        term: {
+            tokens: {
                 '*': math.operator.multiplication
-                '**': math.operator.power
                 '/': math.operator.division
             }
-            statement.end: done
+            math.operator: {
+                expect: primary
+            }
+            primary: done
         }
-    }
-
-    subexpression: {
-        is: expression
-        tokens: {
-            ')': done
+        primary: {
+            tokens: {
+                character.digit: universal_number
+                '-': math.operator.negate
+                '(': subexpression
+            }
+            math.operator.negate: {
+                expect: primary
+            }
         }
-    }
-
-    object: {
-        is: language.object
+        expect: expression
+        expect: term
+        expect: statement.end
+        statement.end: done
     }
 
     universal_number: {
         is: math.universal.number
+        is: expression.operand
         tokens: {
             character.digit: universal_number.digit
             '#': {

@@ -28,6 +28,12 @@
     <Filter Include="Header Files\language">
       <UniqueIdentifier>{d05db517-d67a-42d7-b5a0-18182a987e2d}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\bytecode">
+      <UniqueIdentifier>{e1d94329-b6d7-4b9d-82af-8f84b633a900}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\bytecode\vm">
+      <UniqueIdentifier>{68c1f8f1-2fae-45ce-b087-e7f4a33dc9a2}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\src\neos.cpp">
@@ -55,21 +61,6 @@
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\context.hpp">
       <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\src\bytecode\registers.hpp">
-      <Filter>Source Files\bytecode</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\src\bytecode\vm.hpp">
-      <Filter>Source Files\bytecode</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\src\bytecode\opcodes.hpp">
-      <Filter>Source Files\bytecode</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\src\bytecode\text.hpp">
-      <Filter>Source Files\bytecode</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\src\bytecode\bytecode.hpp">
-      <Filter>Source Files\bytecode</Filter>
     </ClInclude>
     <ClInclude Include="..\..\..\src\compiler.hpp">
       <Filter>Source Files</Filter>
@@ -100,6 +91,18 @@
     </ClInclude>
     <ClInclude Include="..\..\..\include\neos\language\i_concept_library.hpp">
       <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\bytecode\bytecode.hpp">
+      <Filter>Header Files\bytecode</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\bytecode\opcodes.hpp">
+      <Filter>Header Files\bytecode</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\bytecode\registers.hpp">
+      <Filter>Header Files\bytecode</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\bytecode\vm\vm.hpp">
+      <Filter>Header Files\bytecode\vm</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

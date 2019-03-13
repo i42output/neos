@@ -21,8 +21,8 @@
 #include <iostream>
 #include <neolib/string_utf.hpp>
 #include <neos/language/compiler.hpp>
-#include "bytecode/opcodes.hpp"
-#include "bytecode/text.hpp"
+#include <neos/bytecode/opcodes.hpp>
+#include <neos/bytecode/text.hpp>
 
 namespace neos
 {
@@ -35,8 +35,8 @@ namespace neos
         void compiler::compile(program& aProgram)
         {
             // todo
-            auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::u64{ 10 });
-            emit(aProgram.text, bytecode::opcode::ADD, bytecode::reg::R1, bytecode::i8{ -1 });
+            auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::u64{ 10 });
+            emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::i8{ -1 });
             emit(aProgram.text, bytecode::opcode::B, loop);
         }
     }

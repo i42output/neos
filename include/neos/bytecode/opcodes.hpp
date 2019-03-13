@@ -135,12 +135,12 @@ namespace neos
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
         }
 
-        inline constexpr opcode operator|(opcode lhs, reg rhs)
+        inline constexpr opcode operator|(opcode lhs, registers rhs)
         {
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | (static_cast<opcode_base_t>(rhs) << REG1_SHIFT));
         }
 
-        inline constexpr opcode operator|(opcode lhs, const std::pair<reg, reg>& rhs)
+        inline constexpr opcode operator|(opcode lhs, const std::pair<registers, registers>& rhs)
         {
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | (static_cast<opcode_base_t>(rhs.first) << REG1_SHIFT) | static_cast<opcode_base_t>(rhs.second));
         }
@@ -160,14 +160,14 @@ namespace neos
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
         }
 
-        inline reg r1(opcode aOpcode)
+        inline registers r1(opcode aOpcode)
         {
-            return static_cast<reg>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG1_MASK) >> REG1_SHIFT);
+            return static_cast<registers>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG1_MASK) >> REG1_SHIFT);
         }
 
-        inline reg r2(opcode aOpcode)
+        inline registers r2(opcode aOpcode)
         {
-            return static_cast<reg>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG2_MASK));
+            return static_cast<registers>(static_cast<opcode_base_t>(aOpcode & opcode_type::REG2_MASK));
         }
     }
 }

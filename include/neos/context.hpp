@@ -29,17 +29,11 @@
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/language/i_concept_library.hpp>
+#include <neos/bytecode/registers.hpp>
+#include <neos/bytecode/vm/vm.hpp>
 
 namespace neos
 {
-    namespace bytecode
-    {
-        namespace vm
-        {
-            class thread;
-        }
-    }
-
     class context
     {
     public:
@@ -67,6 +61,7 @@ namespace neos
     public:
         bool running() const;
         void run();
+        bytecode::reg_64 evaluate(const std::string& aExpression);
         std::string metrics() const;
     private:
         void init();

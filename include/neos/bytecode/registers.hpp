@@ -20,13 +20,48 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neos/bytecode/bytecode.hpp>
 
 namespace neos
 {
     namespace bytecode
     {
-        /// @brief Registers
-        enum class reg : uint8_t
+        union reg_data_64
+        {
+            u8 u8;
+            u16 u16;
+            u32 u32;
+            u64 u64;
+            i8 i8;
+            i16 i16;
+            i32 i32;
+            i64 i64;
+            f32 f32;
+            f64 f64;
+        };
+        
+        typedef reg_data_64 reg_64;
+        
+        union reg_simd_128
+        {
+            std::array<reg_data_64, 2> d;
+            // todo: add SIMD data types
+        };
+        
+        union reg_simd_256
+        {
+            std::array<reg_data_64, 4> d;
+            // todo: add SIMD data types
+        };
+        
+        union reg_simd_512
+        {
+            std::array<reg_data_64, 8> d;
+            // todo: add SIMD data types
+        };
+
+        /// @brief registers
+        enum class registers : uint8_t
         {
             // R0 to R15 are 64-bit registers
             R0  = 0x00,
@@ -118,7 +153,7 @@ namespace neos
             P3 = 0x1100000000000000ull, // Ring-3 privilege
         };
 
-        inline uint8_t operator-(reg lhs, reg rhs)
+        inline uint8_t operator-(registers lhs, registers rhs)
         {
             return static_cast<uint8_t>(lhs) - static_cast<uint8_t>(rhs);
         }

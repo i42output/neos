@@ -19,7 +19,7 @@
 
 #include <neos/neos.hpp>
 #include <neolib/vecarray.hpp>
-#include "text.hpp"
+#include <neos/bytecode/text.hpp>
 
 namespace neos
 {

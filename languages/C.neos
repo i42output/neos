@@ -2,9 +2,9 @@
     meta: {
         language: "C"
         description: "The C Programming Language"
-        sourcecode.file.extension: [ "c", "h" ]
-        sourcecode.module.package.specification.file.extension: "h"
-        sourcecode.module.package.implementation.file.extension: "c"
+        sourcecode.file.extension: [ ".c", ".h" ]
+        sourcecode.module.package.specification.file.extension: ".h"
+        sourcecode.module.package.implementation.file.extension: ".c"
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }

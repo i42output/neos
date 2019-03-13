@@ -22,7 +22,6 @@
 #include <neolib/application.hpp>
 #include <neolib/string_utf.hpp>
 #include <neos/context.hpp>
-#include "../bytecode/vm.hpp"
 
 namespace neos
 {
@@ -116,6 +115,18 @@ namespace neos
         if (text().empty())
             throw no_program_loaded();
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
+    }
+
+    bytecode::reg_64 context::evaluate(const std::string& aExpression)
+    {
+        std::istringstream stream{ aExpression };
+        load_program(stream);
+        compile_program();
+        run();
+        iThreads.back()->join();
+        auto result = iThreads.back()->result();
+        iThreads.pop_back();
+        return result;
     }
 
     std::string context::metrics() const

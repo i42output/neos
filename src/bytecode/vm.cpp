@@ -17,8 +17,9 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "vm.hpp"
+#include <neos/neos.hpp>
 #include <sstream>
+#include <neos/bytecode/vm/vm.hpp>
 
 namespace neos
 {
@@ -26,12 +27,15 @@ namespace neos
     {
         namespace vm
         {
-            namespace registers
+            namespace cpu
             {
-                thread_local data r[16];
-                thread_local simd_128 x[16];
-                thread_local simd_256 y[16];
-                thread_local simd_512 z[16];
+                namespace registers
+                {
+                    thread_local neos::bytecode::reg_64 r[16];
+                    thread_local neos::bytecode::reg_simd_128 x[16];
+                    thread_local neos::bytecode::reg_simd_256 y[16];
+                    thread_local neos::bytecode::reg_simd_512 z[16];
+                }
             }
 
             namespace
@@ -83,28 +87,28 @@ namespace neos
                         switch (static_cast<opcode_type>(aOpcode & opcode_type::DATA_MASK))
                         {
                         case opcode_type::D8:
-                            r<u64, reg::PC>() += immediate<u8>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<u8>(aOpcode, aText);
                             break;
                         case opcode_type::D16:
-                            r<u64, reg::PC>() += immediate<u16>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<u16>(aOpcode, aText);
                             break;
                         case opcode_type::D32:
-                            r<u64, reg::PC>() += immediate<u32>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<u32>(aOpcode, aText);
                             break;
                         case opcode_type::D64:
-                            r<u64, reg::PC>() = immediate<u64>(aOpcode, aText);
+                            r<u64, registers::PC>() = immediate<u64>(aOpcode, aText);
                             break;
                         case opcode_type::D8 | opcode_type::Signed:
-                            r<u64, reg::PC>() += immediate<i8>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<i8>(aOpcode, aText);
                             break;
                         case opcode_type::D16 | opcode_type::Signed:
-                            r<u64, reg::PC>() += immediate<i16>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<i16>(aOpcode, aText);
                             break;
                         case opcode_type::D32 | opcode_type::Signed:
-                            r<u64, reg::PC>() += immediate<i32>(aOpcode, aText);
+                            r<u64, registers::PC>() += immediate<i32>(aOpcode, aText);
                             break;
                         case opcode_type::D64 | opcode_type::Signed:
-                            r<u64, reg::PC>() = immediate<i64>(aOpcode, aText);
+                            r<u64, registers::PC>() = immediate<i64>(aOpcode, aText);
                             break;
                         }
                     }
@@ -209,19 +213,19 @@ namespace neos
                 return oss.str();
             }
 
-            i64 thread::result() const
+            reg_64 thread::result() const
             {
                 return iResult;
             }
 
-            i64 thread::execute()
+            reg_64 thread::execute()
             {
                 iStartTime = std::chrono::steady_clock::now();
                 if (iText.empty())
                     throw exceptions::no_text();
                 for(;;)
                 {
-                    auto& pc = r<u64, reg::PC>();
+                    auto& pc = r<u64, registers::PC>();
                     bytecode::opcode const opcode = *reinterpret_cast<const bytecode::opcode*>(&iText[pc]);
                     pc += 4u;
                     bytecode::opcode const opcodeInstruction = (opcode & opcode_type::OPCODE_MASK);
@@ -241,7 +245,7 @@ namespace neos
                         iCountSample = iCount;
                     }
                 }
-                return r<i64, reg::R1>();
+                return cpu::registers::r[registers::R1 - registers::R0];
             }
         }
    }
