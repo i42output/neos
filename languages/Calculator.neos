@@ -74,6 +74,7 @@
             }
         }
         primary: {
+            is: language.expression.operand
             tokens: {
                 character.digit: universal_number
                 '-': math.operator.negate
