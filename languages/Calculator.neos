@@ -14,8 +14,7 @@
 
     expect: expression
 
-    unmatched: {
-        is: parser.token.unmatched
+    default: {
         tokens: {
             ' ': whitespace
             character.LF: whitespace
@@ -50,87 +49,93 @@
 
     expression: {
         is: language.expression
-        expression: {
-            tokens: {
+        expect: term
+        tokens: {
+            term: {
                 '+': math.operator.addition
                 '-': math.operator.subtraction
-            }
-            math.operator: {
-                expect: term
-            }
-        }
-        subexpression: {
-            discard: '('
-            expression: {
-                tokens: {
-                    ')': done
+                math.operator: {
+                    expect: term
                 }
+                statement.end: done
             }
         }
         term: {
+            expect: primary
             tokens: {
-                '*': math.operator.multiplication
-                '/': math.operator.division
+                primary: {
+                    '*': math.operator.multiplication
+                    '/': math.operator.division
+                    math.operator: {
+                        expect: primary
+                    }
+                    default: done
+                }
             }
-            math.operator: {
-                expect: primary
-            }
-            primary: done
         }
         primary: {
             tokens: {
                 character.digit: universal_number
                 '-': math.operator.negate
-                '(': subexpression
-            }
-            math.operator.negate: {
-                expect: primary
+                math.operator.negate: {
+                    expect: primary
+                }
+                '(': {
+                    expect: expression
+                    expression: {
+                        expect: ')'
+                        ')': done
+                    }
+                }
             }
         }
-        expect: expression
-        expect: term
-        expect: statement.end
-        statement.end: done
     }
 
     universal_number: {
         is: math.universal.number
-        is: expression.operand
         tokens: {
             character.digit: universal_number.digit
-            '#': {
-                transform.previous: universal_number.base
+            '.': universal_number.point
+            universal_number.point: {
+                character.digit: universal_number.digit
+                'e': universal_number.exponent
+                'E': universal_number.exponent
+                whitespace: done
+                character: next
+            }
+            '#': universal_number.base
+            universal_number.base: {
                 character.hexdigit: universal_number.hexdigit
                 '.': universal_number.point
                 universal_number.point: {
                     character.hexdigit: universal_number.hexdigit
                     '#': {
-                        'e': exponent
-                        'E': exponent
+                        'e': universal_number.exponent
+                        'E': universal_number.exponent
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
                     whitespace: done
-                    character: done.next
+                    character: next
                     done: {
                         transform: math.universal.float
                     }
                 }
                 '#': {
-                    'e': exponent
-                    'E': exponent
+                    'e': universal_number.exponent
+                    'E': universal_number.exponent
                     whitespace: done
-                    character: done.next
+                    character: next
                 }
             }
-            exponent: {
+            universal_number.exponent: {
                 '+': universal_number.exponent.positive
                 universal_number.exponent.positive: {
                     character.digit: universal_number.exponent.digit
                     universal_number.exponent.digit: {
                         character.digit: universal_number.exponent.digit
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
                 }
                 '-': universal_number.exponent.negative
@@ -139,22 +144,12 @@
                     universal_number.exponent.digit: {
                         character.digit: universal_number.exponent.digit
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
-                }
-                done: {
-                    transform: math.universal.float
                 }
             }
             whitespace: done
-            character: done.next
+            character: next
         }
-        done: {
-            tranform: math.universal.integer
-        }
-    }
-
-    character: {
-        is: language.character
     }
 }
