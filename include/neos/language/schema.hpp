@@ -20,6 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/i_map.hpp>
+#include <neolib/i_string.hpp>
 #include <neolib/json.hpp>
 #include <neos/language/i_concept_library.hpp>
 
@@ -41,11 +43,12 @@ namespace neos
         class schema
         {
         public:
-            schema(neolib::rjson const& aSchema);
+            schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
         public:
             language::meta const& meta() const;
         private:
             language::meta iMeta;
+            const concept_libraries_t& iConceptLibraries;
         };
     }
 }

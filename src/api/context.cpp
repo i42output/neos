@@ -44,7 +44,7 @@ namespace neos
     {
     }
 
-    const context::concept_libraries_t& context::concept_libraries() const
+    const language::concept_libraries_t& context::concept_libraries() const
     {
         return iConceptLibraries;
     }
@@ -60,7 +60,7 @@ namespace neos
         iSchemaSource.reset();
         iSchema.reset();
         iSchemaSource.emplace(aSchemaPath);
-        iSchema.emplace(*iSchemaSource);
+        iSchema.emplace(*iSchemaSource, concept_libraries());
     }
 
     const language::schema& context::schema() const
@@ -141,7 +141,19 @@ namespace neos
     {
         iApplication.plugin_manager().load_plugins();
         for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
-            iConceptLibraries.push_back(neolib::ref_ptr<language::i_concept_library>(*plugin));
+        {
+            neolib::ref_ptr<language::i_concept_library> library(*plugin);
+            iConceptLibraries[library->name()] = library;
+            auto add_sublibraries = [this](auto& self, auto& aParentLibrary) -> void
+            {
+                for (auto& sublibrary : aParentLibrary.sublibraries())
+                {
+                    iConceptLibraries[sublibrary.first()] = sublibrary.second();
+                    self(self, *sublibrary.second());
+                }
+            };
+            add_sublibraries(add_sublibraries, *library);
+        }
     }
 
     context::translation_unit_t& context::load_unit(const std::string& aPath)

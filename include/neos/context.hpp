@@ -24,6 +24,8 @@
 #include <optional>
 #include <vector>
 #include <memory>
+#include <neolib/map.hpp>
+#include <neolib/string.hpp>
 #include <neolib/json.hpp>
 #include <neolib/i_application.hpp>
 #include <neos/language/schema.hpp>
@@ -37,7 +39,7 @@ namespace neos
     class context
     {
     public:
-        typedef std::vector<neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
+        typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<language::i_concept_library>, neolib::string, neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
@@ -48,7 +50,7 @@ namespace neos
         context(neolib::i_application& aApplication);
         ~context();
     public:
-        const concept_libraries_t& concept_libraries() const;
+        const language::concept_libraries_t& concept_libraries() const;
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
         const language::schema& schema() const;

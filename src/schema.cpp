@@ -24,8 +24,9 @@ namespace neos
 {
     namespace language
     {
-        schema::schema(neolib::rjson const& aSchema) :
-            iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() }
+        schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
+            iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
+            iConceptLibraries{ aConceptLibraries }
         {
             for (auto const& e : aSchema.root())
             {
@@ -64,6 +65,12 @@ namespace neos
                                     iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(ext.as<neolib::rjson_string>());
                         }
                     }
+                }
+                else if (e.name() == "libraries")
+                {
+                    for (auto const& library : e)
+                        if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
+                            throw std::runtime_error("Concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
                 }
             }
         }

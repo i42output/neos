@@ -45,6 +45,24 @@ namespace neos
                 const std::string& aDescription = {},
                 const neolib::version aVersion = {},
                 const std::string& aCopyright = {}) :
+                iParent{ nullptr },
+                iId{ aId },
+                iUri{ aUri },
+                iName{ aName },
+                iDescription{ aDescription },
+                iVersion{ aVersion },
+                iCopyright{ aCopyright }
+            {
+            }
+            concept_library(
+                i_concept_library& aParent,
+                const neolib::uuid& aId,
+                const std::string& aUri,
+                const std::string& aName,
+                const std::string& aDescription = {},
+                const neolib::version aVersion = {},
+                const std::string& aCopyright = {}) :
+                iParent{ &aParent },
                 iId{ aId },
                 iUri{ aUri },
                 iName{ aName },
@@ -62,6 +80,22 @@ namespace neos
                 return false;
             }
         public:
+            bool has_parent() const override
+            {
+                return iParent != nullptr;
+            }
+            const i_concept_library& parent() const override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
+            i_concept_library& parent() override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
             const sublibraries_t& sublibraries() const override
             {
                 return iSublibraries;
@@ -104,6 +138,7 @@ namespace neos
                 return iCopyright;
             }
         private:
+            i_concept_library* iParent;
             sublibraries_t iSublibraries;
             concepts_t iConcepts;
             neolib::uuid iId;

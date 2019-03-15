@@ -8,6 +8,7 @@
     }
 
     libraries: [
+        neos.core
         neos.math
         neos.math.universal
     ]
@@ -21,11 +22,6 @@
             character.CR: whitespace
             character.TAB: whitespace
             character.EOF: whitespace
-            '-': {
-                '-': {
-                    transform: comment
-                }
-            }
         }
     }
 

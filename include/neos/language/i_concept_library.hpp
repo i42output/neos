@@ -30,17 +30,30 @@ namespace neos
 {
     namespace language
     {
+        class i_concept_library;
+        typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>> concept_libraries_t;
+
         class i_concept_library : public neolib::i_discoverable
         {
+            // exceptions
         public:
-            typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>> sublibraries_t;
+            struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_concept_library::no_parent") {} };
+            // types
+        public:
+            typedef concept_libraries_t sublibraries_t;
             typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
+            // sublibrary
         public:
+            virtual bool has_parent() const = 0;
+            virtual const i_concept_library& parent() const = 0;
+            virtual i_concept_library& parent() = 0;
             virtual const sublibraries_t& sublibraries() const = 0;
             virtual sublibraries_t& sublibraries() = 0;
+            // concepts
         public:
             virtual const concepts_t& concepts() const = 0;
             virtual concepts_t& concepts() = 0;
+            // meta
         public:
             virtual const neolib::uuid& id() const = 0;
             virtual const neolib::i_string& uri() const = 0;
@@ -48,6 +61,20 @@ namespace neos
             virtual const neolib::i_string& description() const = 0;
             virtual const neolib::i_version& version() const = 0;
             virtual const neolib::i_string& copyright() const = 0;
+            // helpers
+        public:
+            uint32_t depth() const
+            {
+                uint32_t result = 0;
+                i_concept_library const* l = this;
+                while (l->has_parent())
+                {
+                    ++result;
+                    l = &l->parent();
+                }
+                return result;
+            }
+            // interface
         public:
             static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("DF0D818D-7C3F-4958-8FCF-9FE6A9B2A501"); return sId; }
         };
