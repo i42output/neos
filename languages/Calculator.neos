@@ -15,6 +15,10 @@
 
     expect: expression
 
+    character: {
+        is: language.character.utf8
+    }
+
     default: {
         tokens: {
             ' ': whitespace
@@ -44,7 +48,7 @@
     }
 
     expression: {
-        is: language.expression
+        is: math.expression
         expect: term
         tokens: {
             term: {
@@ -70,9 +74,9 @@
             }
         }
         primary: {
-            is: language.expression.operand
+            is: math.expression.operand
             tokens: {
-                character.digit: universal_number
+                character.digit: universal_number.digit
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary
@@ -114,9 +118,6 @@
                     }
                     whitespace: done
                     character: next
-                    done: {
-                        transform: math.universal.float
-                    }
                 }
                 '#': {
                     'e': universal_number.exponent
