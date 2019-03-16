@@ -40,48 +40,57 @@ namespace neos
         {
             for (auto const& e : aNode)
             {
-                if (aNode.is_root() && e.name() == "meta")
+                if (aNode.is_root() && (e.name() == "meta" || e.name() == "libraries"))
                 {
-                    for (auto const& meta : e)
+                    parse_meta(e);
+                    continue;
+                }
+            }
+        }
+
+        void schema::parse_meta(neolib::rjson_value const& aNode)
+        {
+            if (aNode.name() == "meta")
+            {
+                for (auto const& meta : aNode)
+                {
+                    if (meta.name() == "description")
+                        iMeta.description = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "copyright")
+                        iMeta.copyright = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "version")
+                        iMeta.version = meta.as<neolib::rjson_string>();
+                    else if (meta.name() == "sourcecode.file.extension")
                     {
-                        if (meta.name() == "description")
-                            iMeta.description = meta.as<neolib::rjson_string>();
-                        else if (meta.name() == "copyright")
-                            iMeta.copyright = meta.as<neolib::rjson_string>();
-                        else if (meta.name() == "version")
-                            iMeta.version = meta.as<neolib::rjson_string>();
-                        else if (meta.name() == "sourcecode.file.extension")
-                        {
-                            if (meta.type() == neolib::json_type::String)
-                                iMeta.sourcecodeFileExtension.push_back(meta.as<neolib::rjson_string>());
-                            else
-                                for (auto const& ext : meta)
-                                    iMeta.sourcecodeFileExtension.push_back(ext.as<neolib::rjson_string>());
-                        }
-                        else if (meta.name() == "sourcecode.module.package.specification.file.extension")
-                        {
-                            if (meta.type() == neolib::json_type::String)
-                                iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(meta.as<neolib::rjson_string>());
-                            else
-                                for (auto const& ext : meta)
-                                    iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(ext.as<neolib::rjson_string>());
-                        }
-                        else if (meta.name() == "sourcecode.module.package.implementation.file.extension")
-                        {
-                            if (meta.type() == neolib::json_type::String)
-                                iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(meta.as<neolib::rjson_string>());
-                            else
-                                for (auto const& ext : meta)
-                                    iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(ext.as<neolib::rjson_string>());
-                        }
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeFileExtension.push_back(ext.as<neolib::rjson_string>());
+                    }
+                    else if (meta.name() == "sourcecode.module.package.specification.file.extension")
+                    {
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(ext.as<neolib::rjson_string>());
+                    }
+                    else if (meta.name() == "sourcecode.module.package.implementation.file.extension")
+                    {
+                        if (meta.type() == neolib::json_type::String)
+                            iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(meta.as<neolib::rjson_string>());
+                        else
+                            for (auto const& ext : meta)
+                                iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(ext.as<neolib::rjson_string>());
                     }
                 }
-                else if (aNode.is_root() && e.name() == "libraries")
-                {
-                    for (auto const& library : e)
-                        if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
-                            throw std::runtime_error("Concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
-                }
+            }
+            else if (aNode.name() == "libraries")
+            {
+                for (auto const& library : aNode)
+                    if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
+                        throw std::runtime_error("Concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
             }
         }
     }

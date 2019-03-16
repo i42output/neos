@@ -51,6 +51,7 @@ namespace neos
             language::meta const& meta() const;
         private:
             void parse(neolib::rjson_value const& aNode, atom_ptr aAtom);
+            void parse_meta(neolib::rjson_value const& aNode);
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
