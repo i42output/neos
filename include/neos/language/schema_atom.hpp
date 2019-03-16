@@ -1,0 +1,96 @@
+/*
+  schema_concept.hpp
+
+  Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
+
+  This program is free software: you can redistribute it and / or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#pragma once
+
+#include <neos/neos.hpp>
+#include <neolib/vector.hpp>
+#include <neolib/map.hpp>
+#include <neolib/reference_counted.hpp>
+#include <neos/language/i_schema_atom.hpp>
+
+namespace neos
+{
+    namespace language
+    {
+        class schema_atom : public neolib::reference_counted<i_schema_atom>
+        {
+        public:
+            typedef neolib::string symbol_t;
+            typedef neolib::vector<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
+            typedef concept_list_t is_concepts_t;
+            typedef neolib::vector<neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_list_t;
+            typedef atom_list_t expects_t;
+            typedef neolib::map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_t;
+            typedef atom_map_t tokens_t;
+            typedef atom_map_t children_t;
+        public:
+            schema_atom(const std::string& aSymbol) :
+                iSymbol{ aSymbol }
+            {
+            }
+            schema_atom()
+            {
+            }
+        public:
+            const symbol_t& symbol() const override
+            {
+                return iSymbol;
+            }
+            const is_concepts_t& is_concepts() const override
+            {
+                return iIsConcepts;
+            }
+            is_concepts_t& is_concepts() override
+            {
+                return iIsConcepts;
+            }
+            const expects_t& expects() const override
+            {
+                return iExpects;
+            }
+            expects_t& expects() override
+            {
+                return iExpects;
+            }
+            const tokens_t& tokens() const override
+            {
+                return iTokens;
+            }
+            tokens_t& tokens() override
+            {
+                return iTokens;
+            }
+            const children_t& children() const override
+            {
+                return iChildren;
+            }
+            children_t& children() override
+            {
+                return iChildren;
+            }
+        private:
+            symbol_t iSymbol;
+            is_concepts_t iIsConcepts;
+            expects_t iExpects;
+            tokens_t iTokens;
+            children_t iChildren;
+        };
+    }
+}

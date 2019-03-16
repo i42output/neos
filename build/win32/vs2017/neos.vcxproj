@@ -39,7 +39,9 @@
     <ClInclude Include="..\..\..\include\neos\language\concept_library_plugin.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept_library.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_schema_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\schema.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\schema_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\symbols.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\compiler.hpp" />

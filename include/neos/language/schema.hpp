@@ -24,6 +24,7 @@
 #include <neolib/i_string.hpp>
 #include <neolib/json.hpp>
 #include <neos/language/i_concept_library.hpp>
+#include <neos/language/schema_atom.hpp>
 
 namespace neos
 {
@@ -49,6 +50,7 @@ namespace neos
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
+            schema_atom iRoot;
         };
     }
 }
