@@ -13,7 +13,7 @@
         neos.math.universal
     ]
 
-    expect: expression
+    expect: statement
 
     character: {
         is: language.character.utf8
@@ -40,10 +40,18 @@
         }
     }
 
-    statement.end: {
+    statement: {
+        is: language.statement
+        expect: expression
         tokens: {
-            whitespace: whitespace
-            ';': done
+            expression: {
+                expect: end
+            }
+        }
+        end: {
+            tokens: {
+                ';': done
+            }
         }
     }
 

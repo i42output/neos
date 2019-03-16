@@ -44,13 +44,17 @@ namespace neos
         class schema
         {
         public:
+            typedef neolib::ref_ptr<i_schema_atom> atom_ptr;
+        public:
             schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
         public:
             language::meta const& meta() const;
         private:
+            void parse(neolib::rjson_value const& aNode, atom_ptr aAtom);
+        private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
-            schema_atom iRoot;
+            atom_ptr iRoot;
         };
     }
 }

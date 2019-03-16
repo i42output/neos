@@ -28,9 +28,19 @@ namespace neos
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries }
         {
-            for (auto const& e : aSchema.root())
+            parse(aSchema.root(), neolib::make_ref<schema_atom>());
+        }
+
+        meta const& schema::meta() const
+        {
+            return iMeta;
+        }
+
+        void schema::parse(neolib::rjson_value const& aNode, atom_ptr aAtom)
+        {
+            for (auto const& e : aNode)
             {
-                if (e.name() == "meta")
+                if (aNode.is_root() && e.name() == "meta")
                 {
                     for (auto const& meta : e)
                     {
@@ -66,18 +76,13 @@ namespace neos
                         }
                     }
                 }
-                else if (e.name() == "libraries")
+                else if (aNode.is_root() && e.name() == "libraries")
                 {
                     for (auto const& library : e)
                         if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
                             throw std::runtime_error("Concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
                 }
             }
-        }
-
-        meta const& schema::meta() const
-        {
-            return iMeta;
         }
     }
 }
