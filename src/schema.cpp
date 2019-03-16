@@ -29,6 +29,13 @@ namespace neos
             iConceptLibraries{ aConceptLibraries }
         {
             parse(aSchema.root(), neolib::make_ref<schema_atom>());
+            if (!iAtomReferences.empty())
+            {
+                std::vector<std::string> references;
+                for (auto const& r : iAtomReferences)
+                    references.push_back(r.first);
+                throw unresolved_references(std::move(references));
+            }
         }
 
         meta const& schema::meta() const
@@ -38,13 +45,42 @@ namespace neos
 
         void schema::parse(neolib::rjson_value const& aNode, atom_ptr aAtom)
         {
-            for (auto const& e : aNode)
+            for (auto const& childNode : aNode)
             {
-                if (aNode.is_root() && (e.name() == "meta" || e.name() == "libraries"))
+                auto default_method = [this](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom)
                 {
-                    parse_meta(e);
-                    continue;
-                }
+                    parse(aChildNode, neolib::make_ref<schema_atom>(*aParentAtom, aChildNode.name()));
+                };
+                static std::map<neolib::json_string, std::function<void(neolib::rjson_value const&, atom_ptr)>> const sMethods = 
+                {
+                    { "meta", [this, &default_method](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom) 
+                        { 
+                            if (aChildNode.parent().is_root()) 
+                                parse_meta(aChildNode); 
+                            else 
+                                default_method(aChildNode, aParentAtom); 
+                        } },
+                    { "libraries", [this, &default_method](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom) 
+                        { 
+                            if (aChildNode.parent().is_root()) 
+                                parse_meta(aChildNode); 
+                            else default_method(aChildNode, aParentAtom); 
+                        } },
+                    { "expect" , [this](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom) 
+                        { 
+                            aParentAtom->expects().push_back(atom_ptr{}); 
+                            add_rhs_atom_reference(aChildNode, aParentAtom, aParentAtom->expects().back());
+                        } },
+                    { "tokens" , [this](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom) 
+                        { 
+                            /* todo */ 
+                        } }
+                };
+                auto method = (childNode.name_is_keyword() ? sMethods.find(childNode.name()) : sMethods.end());
+                if (method != sMethods.end())
+                    method->second(childNode, aAtom);
+                else
+                    default_method(childNode, aAtom);
             }
         }
 
@@ -92,6 +128,48 @@ namespace neos
                     if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
                         throw std::runtime_error("Concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
             }
+        }
+
+        std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs) const
+        {
+            if (aNode.is_root())
+                return aRhs;
+            neolib::rjson_value const* n = &aNode;
+            std::string fullyQualifiedName = n->name();
+            while (n->has_parent() && !n->parent().is_root())
+            {
+                fullyQualifiedName = n->parent().name().as_string() + "." + fullyQualifiedName;
+                n = &n->parent();
+            }
+            if (!aRhs.empty())
+                return fullyQualifiedName + "." + aRhs;
+            else
+                return fullyQualifiedName;
+        }
+
+        const schema::atom_references_t& schema::atom_references() const
+        {
+            return iAtomReferences;
+        }
+
+        void schema::add_lhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom)
+        {
+            if (aNode.name_is_keyword())
+                iAtomReferences[fully_qualified_name(aNode)].push_back(&aAtom);
+            else
+                aAtom = neolib::make_ref<schema_atom>(*aParentAtom, aNode.name());
+        }
+
+        void schema::add_rhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom)
+        {
+            aNode.visit([this, &aNode, &aAtom](auto&& aNodeValue)
+            {
+                typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
+                if constexpr (std::is_same_v<type_t, neolib::rjson_keyword>)
+                    iAtomReferences[fully_qualified_name(aNode.parent(), aNodeValue.text.as_string())].push_back(&aAtom);
+                else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
+                    iAtomReferences[fully_qualified_name(aNode.parent(), aNodeValue.as_string())].push_back(&aAtom);
+            }, false);
         }
     }
 }

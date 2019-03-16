@@ -20,7 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/vector.hpp>
+#include <neolib/list.hpp>
 #include <neolib/map.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neos/language/i_schema_atom.hpp>
@@ -33,9 +33,9 @@ namespace neos
         {
         public:
             typedef neolib::string symbol_t;
-            typedef neolib::vector<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
+            typedef neolib::list<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
             typedef concept_list_t is_concepts_t;
-            typedef neolib::vector<neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_list_t;
+            typedef neolib::list<neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_list_t;
             typedef atom_list_t expects_t;
             typedef neolib::map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_t;
             typedef atom_map_t tokens_t;

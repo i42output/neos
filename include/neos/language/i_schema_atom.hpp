@@ -20,7 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_vector.hpp>
+#include <neolib/i_list.hpp>
 #include <neolib/i_map.hpp>
 #include <neolib/i_reference_counted.hpp>
 #include <neolib/i_string.hpp>
@@ -36,9 +36,9 @@ namespace neos
             struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_schema_atom::no_parent") {} };
         public:
             typedef neolib::i_string symbol_t;
-            typedef neolib::i_vector<neolib::i_ref_ptr<i_concept>> concept_list_t;
+            typedef neolib::i_list<neolib::i_ref_ptr<i_concept>> concept_list_t;
             typedef concept_list_t is_concepts_t;
-            typedef neolib::i_vector<neolib::i_ref_ptr<i_schema_atom>> atom_list_t;
+            typedef neolib::i_list<neolib::i_ref_ptr<i_schema_atom>> atom_list_t;
             typedef atom_list_t expects_t;
             typedef neolib::i_map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>> atom_map_t;
             typedef atom_map_t tokens_t;

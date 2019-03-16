@@ -44,7 +44,18 @@ namespace neos
         class schema
         {
         public:
+            struct unresolved_references : std::runtime_error 
+            { 
+                std::vector<std::string> references;
+                unresolved_references(std::vector<std::string>&& aReferences) :
+                    std::runtime_error("neos::language::schema::unresolved_references"),
+                    references{ std::move(aReferences) }
+                {} 
+            };
+        public:
             typedef neolib::ref_ptr<i_schema_atom> atom_ptr;
+            typedef neolib::i_ref_ptr<i_schema_atom>* atom_reference_t;
+            typedef std::unordered_map<std::string, std::vector<atom_reference_t>> atom_references_t;
         public:
             schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
         public:
@@ -52,10 +63,15 @@ namespace neos
         private:
             void parse(neolib::rjson_value const& aNode, atom_ptr aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
+            std::string fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs = std::string{}) const;
+            const atom_references_t& atom_references() const;
+            void add_lhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
+            void add_rhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
             atom_ptr iRoot;
+            atom_references_t iAtomReferences;
         };
     }
 }
