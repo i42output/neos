@@ -41,14 +41,31 @@ namespace neos
             typedef atom_map_t tokens_t;
             typedef atom_map_t children_t;
         public:
-            schema_atom(const std::string& aSymbol) :
-                iSymbol{ aSymbol }
+            schema_atom(i_schema_atom& aParent, const std::string& aSymbol) :
+                iParent{ &aParent }, iSymbol { aSymbol }
             {
             }
-            schema_atom()
+            schema_atom() :
+                iParent{ nullptr }
             {
             }
         public:
+            bool has_parent() const override
+            {
+                return iParent != nullptr;
+            }
+            const i_schema_atom& parent() const override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
+            i_schema_atom& parent() override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
             const symbol_t& symbol() const override
             {
                 return iSymbol;
@@ -86,6 +103,7 @@ namespace neos
                 return iChildren;
             }
         private:
+            i_schema_atom* iParent;
             symbol_t iSymbol;
             is_concepts_t iIsConcepts;
             expects_t iExpects;
