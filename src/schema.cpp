@@ -32,7 +32,7 @@ namespace neos
             resolve_references();
             if (!iAtomReferences.empty())
             {
-                std::vector<std::string> references;
+                std::vector<atom_reference_key_t> references;
                 for (auto const& r : iAtomReferences)
                     references.push_back(r.first);
                 throw unresolved_references(std::move(references));
@@ -141,8 +141,8 @@ namespace neos
             else if (keyword(aNode.name()) == schema_keyword::Libraries)
             {
                 for (auto const& library : aNode)
-                    if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text.as_string() }) == iConceptLibraries.end())
-                        throw std::runtime_error("concept library '" + library.as<neolib::rjson_keyword>().text.as_string() + "' not found");
+                    if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text }) == iConceptLibraries.end())
+                        throw std::runtime_error("concept library '" + library.as<neolib::rjson_keyword>().text + "' not found");
             }
         }
 
@@ -169,7 +169,7 @@ namespace neos
                     }, false);
                     break;
                 default:
-                    throw std::runtime_error("unexpected keyword '" + token.name().as_string() + "' in token specification");
+                    throw std::runtime_error("unexpected keyword '" + token.name() + "' in token specification");
                     break;
                 }
             }
@@ -183,7 +183,7 @@ namespace neos
             std::string fullyQualifiedName = n->name();
             while (n->has_parent() && !n->parent().is_root())
             {
-                fullyQualifiedName = n->parent().name().as_string() + "." + fullyQualifiedName;
+                fullyQualifiedName = n->parent().name() + "." + fullyQualifiedName;
                 n = &n->parent();
             }
             if (!aRhs.empty())
@@ -202,9 +202,9 @@ namespace neos
             if (aNode.name_is_keyword())
             {
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
-                    iAtomReferences[fully_qualified_name(aNode)].push_back(&aAtom);
+                    iAtomReferences[atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) }].push_back(&aAtom);
                 else
-                    throw std::runtime_error("unexpected keyword '" + aNode.name().as_string() + "'");
+                    throw std::runtime_error("unexpected keyword '" + aNode.name() + "'");
             }
             else
                 aAtom = neolib::make_ref<schema_atom>(*aParentAtom, aNode.name());
@@ -218,9 +218,9 @@ namespace neos
                 if constexpr (std::is_same_v<type_t, neolib::rjson_keyword>)
                 {
                     if (keyword(aNodeValue.text) == schema_keyword::Invalid)
-                        iAtomReferences[fully_qualified_name(aNode.parent(), aNodeValue.text.as_string())].push_back(&aAtom);
+                        iAtomReferences[atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) }].push_back(&aAtom);
                     else
-                        throw std::runtime_error("unexpected keyword '" + aNodeValue.text.as_string() + "'");
+                        throw std::runtime_error("unexpected keyword '" + aNodeValue.text + "'");
                 }
                 else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
                     aAtom = neolib::make_ref<schema_atom>(*aParentAtom, aNode.name());

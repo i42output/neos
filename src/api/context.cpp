@@ -63,10 +63,17 @@ namespace neos
         iSchema.emplace(*iSchemaSource, concept_libraries());
     }
 
+    const neolib::rjson& context::schema_source() const
+    {
+        if (iSchemaSource == std::nullopt)
+            throw no_schema_source();
+        return *iSchemaSource;
+    }
+
     const language::schema& context::schema() const
     {
         if (!schema_loaded())
-            throw compiler_error("no schema loaded");
+            throw no_schema_loaded();
         return *iSchema;
     }
 

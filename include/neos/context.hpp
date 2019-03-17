@@ -43,6 +43,8 @@ namespace neos
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
+        struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::context::no_schema_source") {} };
+        struct no_schema_loaded : std::runtime_error { no_schema_loaded() : std::runtime_error("no schema loaded") {} };
         struct no_program_loaded : std::runtime_error { no_program_loaded() : std::runtime_error("no program loaded") {} };
         struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
     public:
@@ -53,6 +55,7 @@ namespace neos
         const language::concept_libraries_t& concept_libraries() const;
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
+        const neolib::rjson& schema_source() const;
         const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);

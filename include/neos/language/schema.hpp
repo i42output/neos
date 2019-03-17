@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <boost/functional/hash.hpp>
 #include <neolib/i_map.hpp>
 #include <neolib/i_string.hpp>
 #include <neolib/json.hpp>
@@ -55,8 +56,8 @@ namespace neos
         public:
             struct unresolved_references : std::runtime_error 
             { 
-                std::vector<std::string> references;
-                unresolved_references(std::vector<std::string>&& aReferences) :
+                std::vector<std::pair<neolib::rjson_string, neolib::rjson_string>> references;
+                unresolved_references(std::vector<std::pair<neolib::rjson_string, neolib::rjson_string>>&& aReferences) :
                     std::runtime_error("neos::language::schema::unresolved_references"),
                     references{ std::move(aReferences) }
                 {} 
@@ -64,7 +65,8 @@ namespace neos
         public:
             typedef neolib::ref_ptr<i_schema_atom> atom_ptr;
             typedef neolib::i_ref_ptr<i_schema_atom>* atom_reference_t;
-            typedef std::unordered_map<std::string, std::vector<atom_reference_t>> atom_references_t;
+            typedef std::pair<neolib::rjson_string, neolib::rjson_string> atom_reference_key_t;
+            typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
         public:
             schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
         public:
