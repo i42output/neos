@@ -40,8 +40,11 @@ namespace neos
             typedef concept_list_t is_concepts_t;
             typedef neolib::i_list<neolib::i_ref_ptr<i_schema_atom>> atom_list_t;
             typedef atom_list_t expects_t;
+            typedef neolib::i_pair<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>> atom_map_list_entry_t;
+            typedef neolib::i_list<atom_map_list_entry_t> atom_map_list_t;
+            typedef atom_map_list_t tokens_t;
             typedef neolib::i_map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>> atom_map_t;
-            typedef atom_map_t tokens_t;
+            typedef atom_map_t token_map_t;
             typedef atom_map_t children_t;
         public:
             virtual bool has_parent() const = 0;

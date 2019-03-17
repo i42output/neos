@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neolib/list.hpp>
+#include <neolib/pair.hpp>
 #include <neolib/map.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neos/language/i_schema_atom.hpp>
@@ -37,8 +38,11 @@ namespace neos
             typedef concept_list_t is_concepts_t;
             typedef neolib::list<neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_list_t;
             typedef atom_list_t expects_t;
+            typedef neolib::pair<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_list_entry_t;
+            typedef neolib::list<i_schema_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
+            typedef atom_map_list_t tokens_t;
             typedef neolib::map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_t;
-            typedef atom_map_t tokens_t;
+            typedef atom_map_t token_map_t;
             typedef atom_map_t children_t;
         public:
             schema_atom(i_schema_atom& aParent, const std::string& aSymbol) :

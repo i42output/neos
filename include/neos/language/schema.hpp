@@ -41,6 +41,15 @@ namespace neos
             std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
         };
 
+        enum class schema_keyword
+        {
+            Invalid,
+            Meta,
+            Libraries,
+            Expect,
+            Tokens
+        };
+
         class schema
         {
         public:
@@ -61,12 +70,15 @@ namespace neos
         public:
             language::meta const& meta() const;
         private:
+            static schema_keyword keyword(const neolib::rjson_string& aSymbol);
             void parse(neolib::rjson_value const& aNode, atom_ptr aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
+            void parse_tokens(neolib::rjson_value const& aNode, atom_ptr aAtom);
             std::string fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs = std::string{}) const;
             const atom_references_t& atom_references() const;
             void add_lhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
             void add_rhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
+            void resolve_references();
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
