@@ -36,12 +36,12 @@ namespace neos
             typedef neolib::string symbol_t;
             typedef neolib::list<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
             typedef concept_list_t is_concepts_t;
-            typedef neolib::list<neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_list_t;
+            typedef neolib::list<neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_list_t;
             typedef atom_list_t expects_t;
-            typedef neolib::pair<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_list_entry_t;
+            typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
             typedef neolib::list<i_schema_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
             typedef atom_map_list_t tokens_t;
-            typedef neolib::map<neolib::i_ref_ptr<i_schema_atom>, neolib::i_ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>, neolib::ref_ptr<i_schema_atom>> atom_map_t;
+            typedef neolib::map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
             typedef atom_map_t token_map_t;
             typedef atom_map_t children_t;
         public:
@@ -54,6 +54,10 @@ namespace neos
             {
             }
         public:
+            const symbol_t& symbol() const override
+            {
+                return iSymbol;
+            }
             bool has_parent() const override
             {
                 return iParent != nullptr;
@@ -69,10 +73,6 @@ namespace neos
                 if (has_parent())
                     return *iParent;
                 throw no_parent();
-            }
-            const symbol_t& symbol() const override
-            {
-                return iSymbol;
             }
             const is_concepts_t& is_concepts() const override
             {
@@ -107,8 +107,8 @@ namespace neos
                 return iChildren;
             }
         private:
-            i_schema_atom* iParent;
             symbol_t iSymbol;
+            i_schema_atom* iParent;
             is_concepts_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;

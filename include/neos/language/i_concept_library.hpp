@@ -53,6 +53,7 @@ namespace neos
         public:
             virtual const concepts_t& concepts() const = 0;
             virtual concepts_t& concepts() = 0;
+            virtual bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const = 0;
             // meta
         public:
             virtual const neolib::uuid& id() const = 0;

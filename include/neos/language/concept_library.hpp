@@ -112,6 +112,19 @@ namespace neos
             {
                 return iConcepts;
             }
+            bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const override
+            {
+                auto concept = concepts().find(aSymbol);
+                if (concept != concepts().end())
+                {
+                    aConcept = concept->second();
+                    return true;
+                }
+                for (auto const& cl : sublibraries())
+                    if (cl.second()->find_concept(aSymbol, aConcept))
+                        return true;
+                return false;
+            }
         public:
             const neolib::uuid& id() const override
             {

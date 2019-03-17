@@ -26,6 +26,7 @@
 #include <neolib/json.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/schema_atom.hpp>
+#include <neos/language/concept_atom.hpp>
 
 namespace neos
 {
@@ -63,8 +64,8 @@ namespace neos
                 {} 
             };
         public:
-            typedef neolib::ref_ptr<i_schema_atom> atom_ptr;
-            typedef neolib::i_ref_ptr<i_schema_atom>* atom_reference_t;
+            typedef neolib::ref_ptr<i_atom> atom_ptr;
+            typedef neolib::i_ref_ptr<i_atom>* atom_reference_t;
             typedef std::pair<neolib::rjson_string, neolib::rjson_string> atom_reference_key_t;
             typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
         public:
@@ -81,6 +82,7 @@ namespace neos
             void add_lhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
             void add_rhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom);
             void resolve_references();
+            neolib::ref_ptr<i_concept> find_concept(const neolib::rjson_string& aSymbol) const;
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;

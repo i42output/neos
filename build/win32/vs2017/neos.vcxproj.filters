@@ -110,6 +110,15 @@
     <ClInclude Include="..\..\..\include\neos\language\i_schema_atom.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_atom.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_concept_atom.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\concept_atom.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\examples\ada\ExitCode.ada">
