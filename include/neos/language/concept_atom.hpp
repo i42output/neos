@@ -36,10 +36,30 @@ namespace neos
             typedef neolib::string symbol_t;
         public:
             concept_atom(const neolib::i_ref_ptr<i_concept>& aConcept) : 
-                iConcept{ aConcept } 
+                iParent{ nullptr }, iConcept { aConcept }
+            {
+            }
+            concept_atom(i_concept_atom& aParent, const neolib::i_ref_ptr<i_concept>& aConcept) :
+                iParent{ &aParent }, iConcept{ aConcept }
             {
             }
         public:
+            bool has_parent() const override
+            {
+                return iParent != nullptr;
+            }
+            const i_concept_atom& parent() const override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
+            i_concept_atom& parent() override
+            {
+                if (has_parent())
+                    return *iParent;
+                throw no_parent();
+            }
             const symbol_t& symbol() const override
             {
                 if (iSymbol == std::nullopt)
@@ -63,6 +83,7 @@ namespace neos
                 return *iConcept;
             }
         private:
+            i_concept_atom* iParent;
             neolib::ref_ptr<i_concept> iConcept;
             mutable std::optional<symbol_t> iSymbol;
         };

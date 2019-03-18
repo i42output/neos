@@ -252,6 +252,14 @@ namespace neos
             }
         }
 
+        std::string schema::fully_qualified_name(const i_atom& aAtom) const
+        {
+            if (aAtom.has_parent())
+                return fully_qualified_name(aAtom.parent()) + aAtom.symbol();
+            else
+                return aAtom.symbol();
+        }
+
         neolib::ref_ptr<i_concept> schema::find_concept(const neolib::rjson_string& aSymbol) const
         {
             neolib::ref_ptr<i_concept> concept;

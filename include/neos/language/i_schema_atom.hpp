@@ -34,8 +34,6 @@ namespace neos
         class i_schema_atom : public i_atom
         {
         public:
-            struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_schema_atom::no_parent") {} };
-        public:
             typedef i_atom::symbol_t symbol_t;
             typedef neolib::i_list<neolib::i_ref_ptr<i_concept>> concept_list_t;
             typedef concept_list_t is_concepts_t;

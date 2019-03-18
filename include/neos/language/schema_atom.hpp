@@ -54,10 +54,6 @@ namespace neos
             {
             }
         public:
-            const symbol_t& symbol() const override
-            {
-                return iSymbol;
-            }
             bool has_parent() const override
             {
                 return iParent != nullptr;
@@ -74,6 +70,11 @@ namespace neos
                     return *iParent;
                 throw no_parent();
             }
+            const symbol_t& symbol() const override
+            {
+                return iSymbol;
+            }
+        public:
             const is_concepts_t& is_concepts() const override
             {
                 return iIsConcepts;

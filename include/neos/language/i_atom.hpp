@@ -33,11 +33,16 @@ namespace neos
         class i_atom : public neolib::i_reference_counted
         {
         public:
+            struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_atom::no_parent") {} };
             struct wrong_type : std::logic_error { wrong_type() : std::logic_error("neos::language::i_atom::wrong_type") {} };
         public:
             typedef neolib::i_string symbol_t;
         public:
+            virtual bool has_parent() const = 0;
+            virtual const i_atom& parent() const = 0;
+            virtual i_atom& parent() = 0;
             virtual const symbol_t& symbol() const = 0;
+        public:
             virtual bool is_schema_atom() const = 0;
             virtual const i_schema_atom& as_schema_atom() const = 0;
             virtual i_schema_atom& as_schema_atom() = 0;
