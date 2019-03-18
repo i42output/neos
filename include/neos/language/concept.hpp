@@ -43,5 +43,14 @@ namespace neos
         private:
             neolib::string iName;
         };
+
+        class unimplemented_concept : public neos_concept
+        {
+        public:
+            unimplemented_concept(const std::string& aName) :
+                neos_concept{ aName }
+            {
+            }
+        };
     }
 }

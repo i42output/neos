@@ -130,5 +130,11 @@
     <None Include="..\..\..\languages\C.neos">
       <Filter>Languages</Filter>
     </None>
+    <None Include="..\..\..\languages\Calculator.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\neoscript.neos">
+      <Filter>Languages</Filter>
+    </None>
   </ItemGroup>
 </Project>

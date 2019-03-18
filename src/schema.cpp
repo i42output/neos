@@ -26,14 +26,15 @@ namespace neos
     {
         schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
-            iConceptLibraries{ aConceptLibraries }
+            iConceptLibraries{ aConceptLibraries },
+            iRoot{ neolib::make_ref<schema_atom>() }
         {
-            parse(aSchema.root(), neolib::make_ref<schema_atom>());
+            parse(aSchema.root(), iRoot);
             resolve_references();
-            if (!iAtomReferences.empty())
+            if (!atom_references().empty())
             {
                 std::vector<atom_reference_key_t> references;
-                for (auto const& r : iAtomReferences)
+                for (auto const& r : atom_references())
                     references.push_back(r.first);
                 throw unresolved_references(std::move(references));
             }
@@ -65,7 +66,9 @@ namespace neos
             {
                 auto default_method = [this](neolib::rjson_value const& aChildNode, atom_ptr aParentAtom)
                 {
-                    parse(aChildNode, neolib::make_ref<schema_atom>(aParentAtom->as_schema_atom(), aChildNode.name()));
+                    auto newChild = aParentAtom->as_schema_atom().children().insert(
+                        atom_ptr{ neolib::make_ref<schema_atom>(aParentAtom->as_schema_atom(), aChildNode.name()) }, atom_ptr{});
+                    parse(aChildNode, newChild->first());
                 };
                 static std::map<schema_keyword, std::function<void(neolib::rjson_value const&, atom_ptr)>> const sMethods =
                 {
@@ -197,12 +200,17 @@ namespace neos
             return iAtomReferences;
         }
 
+        schema::atom_references_t& schema::atom_references()
+        {
+            return iAtomReferences;
+        }
+
         void schema::add_lhs_atom_reference(neolib::rjson_value const& aNode, atom_ptr aParentAtom, std::remove_pointer<atom_reference_t>::type& aAtom)
         {
             if (aNode.name_is_keyword())
             {
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
-                    iAtomReferences[atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) }].push_back(&aAtom);
+                    atom_references()[atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) }].push_back(&aAtom);
                 else
                     throw std::runtime_error("unexpected keyword '" + aNode.name() + "'");
             }
@@ -218,7 +226,7 @@ namespace neos
                 if constexpr (std::is_same_v<type_t, neolib::rjson_keyword>)
                 {
                     if (keyword(aNodeValue.text) == schema_keyword::Invalid)
-                        iAtomReferences[atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) }].push_back(&aAtom);
+                        atom_references()[atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) }].push_back(&aAtom);
                     else
                         throw std::runtime_error("unexpected keyword '" + aNodeValue.text + "'");
                 }
@@ -229,13 +237,18 @@ namespace neos
 
         void schema::resolve_references()
         {
-            for (auto const& r : atom_references())
+            for (auto entry = atom_references().begin(); entry != atom_references().end();)
             {
-                auto result = find_concept(r.first.first);
+                auto result = find_concept(entry->first.first);
                 if (result != nullptr)
                 {
-                    /* todo */
+                    auto conceptAtom = neolib::make_ref<concept_atom>(result);
+                    for (auto& r : entry->second)
+                        *r = conceptAtom;
+                    entry = atom_references().erase(entry);
                 }
+                else
+                    ++entry;
             }
         }
 

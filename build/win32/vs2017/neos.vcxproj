@@ -52,7 +52,9 @@
   <ItemGroup>
     <None Include="..\..\..\languages\Ada.neos" />
     <None Include="..\..\..\languages\C.neos" />
+    <None Include="..\..\..\languages\Calculator.neos" />
     <None Include="..\..\..\languages\examples\ada\ExitCode.ada" />
+    <None Include="..\..\..\languages\neoscript.neos" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>
