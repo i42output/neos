@@ -48,6 +48,10 @@ namespace neos
             Invalid,
             Meta,
             Libraries,
+            Is,
+            Done,
+            Next,
+            Default,
             Expect,
             Tokens
         };
