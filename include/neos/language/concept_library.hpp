@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/recursion.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neolib/map.hpp>
 #include <neolib/string.hpp>
@@ -114,6 +115,7 @@ namespace neos
             }
             bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const override
             {
+                neolib::limit_recursion<concept_library, 16> _{ this };
                 auto concept = concepts().find(aSymbol);
                 if (concept != concepts().end())
                 {

@@ -61,8 +61,8 @@ namespace neos
         public:
             struct unresolved_references : std::runtime_error 
             { 
-                std::vector<std::pair<neolib::rjson_string, neolib::rjson_string>> references;
-                unresolved_references(std::vector<std::pair<neolib::rjson_string, neolib::rjson_string>>&& aReferences) :
+                std::vector<std::pair<neolib::rjson_string, std::string>> references;
+                unresolved_references(std::vector<std::pair<neolib::rjson_string, std::string>>&& aReferences) :
                     std::runtime_error("neos::language::schema::unresolved_references"),
                     references{ std::move(aReferences) }
                 {} 
@@ -71,7 +71,7 @@ namespace neos
             typedef neolib::i_ref_ptr<i_atom> abstract_atom_ptr;
             typedef neolib::ref_ptr<i_atom> atom_ptr;
             typedef abstract_atom_ptr* atom_reference_t;
-            typedef std::pair<neolib::rjson_string, neolib::rjson_string> atom_reference_key_t;
+            typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
             typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
         public:
             schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
@@ -89,6 +89,8 @@ namespace neos
             void add_rhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom);
             void resolve_references();
             std::string fully_qualified_name(const i_atom& aAtom) const;
+            atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName) const;
+            atom_ptr leaf(const i_atom& aParent, const std::string& aStem, const neolib::rjson_string& aLeafName) const;
             neolib::ref_ptr<i_concept> find_concept(const neolib::rjson_string& aSymbol) const;
         private:
             language::meta iMeta;

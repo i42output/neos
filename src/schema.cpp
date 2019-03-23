@@ -18,12 +18,15 @@
 */
 
 #include <neos/neos.hpp>
+#include <neolib/recursion.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos
 {
     namespace language
     {
+        static constexpr std::size_t RECURSION_LIMIT = 64;
+
         schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
@@ -66,6 +69,7 @@ namespace neos
 
         void schema::parse(neolib::rjson_value const& aNode, i_atom& aAtom)
         {
+            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
             for (auto const& childNode : aNode)
             {
                 auto default_method = [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
@@ -171,6 +175,7 @@ namespace neos
 
         void schema::parse_tokens(neolib::rjson_value const& aNode, i_atom& aAtom)
         {
+            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
             for (auto const& token : aNode)
             {
                 switch (keyword(token.name()))
@@ -202,6 +207,7 @@ namespace neos
 
         std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs) const
         {
+            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
             for (auto n = &aNode; n->has_parent(); n = &n->parent())
                 if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
                     return fully_qualified_name(n->parent(), aRhs);
@@ -226,7 +232,10 @@ namespace neos
             if (aNode.name_is_keyword())
             {
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
-                    atom_references()[atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) }].push_back(&aAtom);
+                {
+                    auto const key = atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) };
+                    atom_references()[key].push_back(&aAtom);
+                }
                 else
                     throw std::runtime_error("unexpected keyword '" + aNode.name() + "'");
             }
@@ -244,7 +253,10 @@ namespace neos
                     switch (keyword(aNodeValue.text))
                     {
                     case schema_keyword::Invalid:
-                        atom_references()[atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) }].push_back(&aAtom);
+                        {
+                            auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) };
+                            atom_references()[key].push_back(&aAtom);
+                        }
                         break;
                     case schema_keyword::Done:
                         /* todo */
@@ -269,10 +281,18 @@ namespace neos
                 foundSome = false;
                 for (auto entry = atom_references().begin(); entry != atom_references().end();)
                 {
-                    auto result = find_concept(entry->first.first);
-                    if (result != nullptr)
+                    auto atom = leaf(entry->first.second, entry->first.first);
+                    if (atom != nullptr)
                     {
-                        auto conceptAtom = neolib::make_ref<concept_atom>(result);
+                        for (auto& r : entry->second)
+                            *r = atom;
+                        foundSome = true;
+                        continue;
+                    }
+                    auto concept = find_concept(entry->first.first);
+                    if (concept != nullptr)
+                    {
+                        auto conceptAtom = neolib::make_ref<concept_atom>(concept);
                         for (auto& r : entry->second)
                             *r = conceptAtom;
                         entry = atom_references().erase(entry);
@@ -289,6 +309,18 @@ namespace neos
             if (!aAtom.has_parent())
                 return aAtom.symbol();
             return fully_qualified_name(aAtom.parent()) + aAtom.symbol();
+        }
+        
+        schema::atom_ptr schema::leaf(const std::string& aStem, const neolib::rjson_string& aLeafName) const
+        {
+            return leaf(*iRoot, aStem, aLeafName);
+        }
+
+        schema::atom_ptr schema::leaf(const i_atom& aParent, const std::string& aStem, const neolib::rjson_string& aLeafName) const
+        {
+            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
+            // todo
+            return atom_ptr{};
         }
 
         neolib::ref_ptr<i_concept> schema::find_concept(const neolib::rjson_string& aSymbol) const
