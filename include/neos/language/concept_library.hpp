@@ -39,6 +39,8 @@ namespace neos
             typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>, neolib::string, neolib::ref_ptr<i_concept_library>> sublibraries_t;
             typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept>, neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
         public:
+            static constexpr std::size_t RecursionLimit = 16u;
+        public:
             concept_library(
                 const neolib::uuid& aId,
                 const std::string& aUri,
@@ -115,7 +117,7 @@ namespace neos
             }
             bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const override
             {
-                neolib::limit_recursion<concept_library, 16> _{ this };
+                _limit_recursion_(concept_library);
                 auto concept = concepts().find(aSymbol);
                 if (concept != concepts().end())
                 {

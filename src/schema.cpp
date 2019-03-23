@@ -25,8 +25,6 @@ namespace neos
 {
     namespace language
     {
-        static constexpr std::size_t RECURSION_LIMIT = 64;
-
         schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
@@ -69,7 +67,7 @@ namespace neos
 
         void schema::parse(neolib::rjson_value const& aNode, i_atom& aAtom)
         {
-            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
+            _limit_recursion_(schema);
             for (auto const& childNode : aNode)
             {
                 auto default_method = [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
@@ -175,7 +173,7 @@ namespace neos
 
         void schema::parse_tokens(neolib::rjson_value const& aNode, i_atom& aAtom)
         {
-            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
+            _limit_recursion_(schema);
             for (auto const& token : aNode)
             {
                 switch (keyword(token.name()))
@@ -207,7 +205,7 @@ namespace neos
 
         std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs) const
         {
-            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
+            _limit_recursion_(schema);
             for (auto n = &aNode; n->has_parent(); n = &n->parent())
                 if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
                     return fully_qualified_name(n->parent(), aRhs);
@@ -318,7 +316,7 @@ namespace neos
 
         schema::atom_ptr schema::leaf(const i_atom& aParent, const std::string& aStem, const neolib::rjson_string& aLeafName) const
         {
-            neolib::limit_recursion<schema, RECURSION_LIMIT> _{ this };
+            _limit_recursion_(schema);
             // todo
             return atom_ptr{};
         }

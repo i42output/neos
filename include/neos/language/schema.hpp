@@ -74,6 +74,8 @@ namespace neos
             typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
             typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
         public:
+            static constexpr std::size_t RecursionLimit = 64u;
+        public:
             schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
         public:
             language::meta const& meta() const;
