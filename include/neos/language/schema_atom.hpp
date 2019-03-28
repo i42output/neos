@@ -35,7 +35,7 @@ namespace neos
         public:
             typedef neolib::string symbol_t;
             typedef neolib::list<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
-            typedef concept_list_t is_concepts_t;
+            typedef concept_list_t is_a_t;
             typedef neolib::list<neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_list_t;
             typedef atom_list_t expects_t;
             typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
@@ -75,11 +75,11 @@ namespace neos
                 return iSymbol;
             }
         public:
-            const is_concepts_t& is_concepts() const override
+            const is_a_t& is_a() const override
             {
                 return iIsConcepts;
             }
-            is_concepts_t& is_concepts() override
+            is_a_t& is_a() override
             {
                 return iIsConcepts;
             }
@@ -110,7 +110,7 @@ namespace neos
         private:
             symbol_t iSymbol;
             i_schema_atom* iParent;
-            is_concepts_t iIsConcepts;
+            is_a_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;
             children_t iChildren;

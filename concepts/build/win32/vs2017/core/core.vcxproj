@@ -173,11 +173,13 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\..\src\common\dllmain.cpp" />
     <ClCompile Include="..\..\..\..\src\core\core.cpp" />
+    <ClCompile Include="..\..\..\..\src\core\language.cpp" />
     <ClCompile Include="..\..\..\..\src\core\math.cpp" />
     <ClCompile Include="..\..\..\..\src\core\plugin.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\..\src\core\core.hpp" />
+    <ClInclude Include="..\..\..\..\src\core\language.hpp" />
     <ClInclude Include="..\..\..\..\src\core\math.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

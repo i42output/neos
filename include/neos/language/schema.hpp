@@ -91,9 +91,9 @@ namespace neos
             void add_rhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom);
             void resolve_references();
             std::string fully_qualified_name(const i_atom& aAtom) const;
-            atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName) const;
-            atom_ptr leaf(const i_atom& aParent, const std::string& aStem, const neolib::rjson_string& aLeafName) const;
-            neolib::ref_ptr<i_concept> find_concept(const neolib::rjson_string& aSymbol) const;
+            atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
+            atom_ptr leaf(i_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
+            neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
         private:
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;

@@ -93,7 +93,12 @@ namespace neos
                         } },
                     { schema_keyword::Is, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
                         {
-                            /* todo */
+                            auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
+                            auto concept = find_concept(conceptName);
+                            if (concept != nullptr)
+                                aParentAtom.as_schema_atom().is_a().push_back(concept);
+                            else
+                                throw std::runtime_error("concept '" + conceptName + "' not found");
                         } },
                     { schema_keyword::Done, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
                         {
@@ -284,6 +289,7 @@ namespace neos
                     {
                         for (auto& r : entry->second)
                             *r = atom;
+                        entry = atom_references().erase(entry);
                         foundSome = true;
                         continue;
                     }
@@ -309,19 +315,35 @@ namespace neos
             return fully_qualified_name(aAtom.parent()) + aAtom.symbol();
         }
         
-        schema::atom_ptr schema::leaf(const std::string& aStem, const neolib::rjson_string& aLeafName) const
+        schema::atom_ptr schema::leaf(const std::string& aStem, const neolib::rjson_string& aLeafName)
         {
             return leaf(*iRoot, aStem, aLeafName);
         }
 
-        schema::atom_ptr schema::leaf(const i_atom& aParent, const std::string& aStem, const neolib::rjson_string& aLeafName) const
+        schema::atom_ptr schema::leaf(i_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName)
         {
             _limit_recursion_(schema);
-            // todo
+            if (aStem == aNode.as_schema_atom().symbol())
+            {
+                if (aLeafName == aStem)
+                    return &aNode;
+            }
+            for (auto& concept : aNode.as_schema_atom().is_a())
+            {
+                if (concept->name() == neolib::string{ aLeafName })
+                    return neolib::make_ref<concept_atom>(concept);
+                auto matchingConcept = find_concept(concept->name() + "." + aLeafName);
+                if (matchingConcept != nullptr)
+                    return neolib::make_ref<concept_atom>(matchingConcept);
+            }
+            schema_atom key{ aNode.as_schema_atom(), aStem };
+            auto child = aNode.as_schema_atom().children().find(neolib::ref_ptr<i_atom>{ key });
+            if (child != aNode.as_schema_atom().children().end())
+                return leaf(*child->first(), aStem, aLeafName);
             return atom_ptr{};
         }
 
-        neolib::ref_ptr<i_concept> schema::find_concept(const neolib::rjson_string& aSymbol) const
+        neolib::ref_ptr<i_concept> schema::find_concept(const std::string& aSymbol) const
         {
             neolib::ref_ptr<i_concept> concept;
             for (auto const& cl : iConceptLibraries)
