@@ -77,11 +77,12 @@ namespace neos
         public:
             static constexpr std::size_t RecursionLimit = 64u;
         public:
-            schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries);
+            schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries);
         public:
             language::meta const& meta() const;
         private:
             static schema_keyword keyword(const neolib::rjson_string& aSymbol);
+
             void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
             void parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
@@ -96,7 +97,9 @@ namespace neos
             atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
             atom_ptr leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
             neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
+            void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText);
         private:
+            neolib::rjson const& iSource;
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
             atom_ptr iRoot;

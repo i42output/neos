@@ -343,60 +343,59 @@
     universal_number: {
         is: math.universal.number
         tokens: {
-            character.digit: universal_number.digit
-            '#': {
-                transform.previous: universal_number.base
-                character.hexdigit: universal_number.hexdigit
-                '.': universal_number.point
-                universal_number.point: {
-                    character.hexdigit: universal_number.hexdigit
+            character.digit: digit
+            '.': point
+            point: {
+                character.digit: digit
+                'e': exponent
+                'E': exponent
+                whitespace: done
+                character: next
+            }
+            '#': base
+            base: {
+                character.hexdigit: hexdigit
+                '.': point
+                point: {
+                    character.hexdigit: hexdigit
                     '#': {
                         'e': exponent
                         'E': exponent
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
                     whitespace: done
-                    character: done.next
-                    done: {
-                        transform: math.universal.float
-                    }
+                    character: next
                 }
                 '#': {
                     'e': exponent
                     'E': exponent
                     whitespace: done
-                    character: done.next
+                    character: next
                 }
             }
             exponent: {
-                '+': universal_number.exponent.positive
-                universal_number.exponent.positive: {
-                    character.digit: universal_number.exponent.digit
-                    universal_number.exponent.digit: {
-                        character.digit: universal_number.exponent.digit
+                '+': exponent.positive
+                exponent.positive: {
+                    character.digit: exponent.digit
+                    exponent.digit: {
+                        character.digit: exponent.digit
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
                 }
-                '-': universal_number.exponent.negative
-                universal_number.exponent.negative: {
-                    character.digit: universal_number.exponent.digit
-                    universal_number.exponent.digit: {
-                        character.digit: universal_number.exponent.digit
+                '-': exponent.negative
+                exponent.negative: {
+                    character.digit: exponent.digit
+                    exponent.digit: {
+                        character.digit: exponent.digit
                         whitespace: done
-                        character: done.next
+                        character: next
                     }
-                }
-                done: {
-                    transform: math.universal.float
                 }
             }
             whitespace: done
-            character: done.next
-        }
-        done: {
-            tranform: math.universal.integer
+            character: next
         }
     }
 
@@ -416,7 +415,7 @@
                     character.alpha: package.name
                 }
                 whitespace: done
-                character: done.next
+                character: next
             }
         }
     }
@@ -447,7 +446,7 @@
             '\"': {
                 '\"': character.quote
                 whitespace: done
-                character: done.next
+                character: next
             }
             character: string.literal
         }

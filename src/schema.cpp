@@ -25,12 +25,13 @@ namespace neos
 {
     namespace language
     {
-        schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
-            iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
+        schema::schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries) :
+            iSource{ aSource },
+            iMeta{ aSource.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
             iRoot{ neolib::make_ref<schema_node_atom>() }
         {
-            parse(aSchema.root(), iRoot->as_schema_atom().as_schema_node_atom());
+            parse(aSource.root(), iRoot->as_schema_atom().as_schema_node_atom());
             resolve_references();
             if (!atom_references().empty())
             {
@@ -72,6 +73,8 @@ namespace neos
             {
                 auto default_method = [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                 {
+                    if (aChildNode.name_is_keyword() && keyword(aChildNode.name()) != schema_keyword::Invalid)
+                        throw_error(aChildNode, "unexpected keyword '" + aChildNode.name() + "'");
                     auto newChild = aParentAtom.children().insert(
                         atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) }, atom_ptr{});
                     parse(aChildNode, newChild->first()->as_schema_atom().as_schema_node_atom());
@@ -98,15 +101,7 @@ namespace neos
                             if (concept != nullptr)
                                 aParentAtom.is_a().push_back(concept);
                             else
-                                throw std::runtime_error("concept '" + conceptName + "' not found");
-                        } },
-                    { schema_keyword::Done, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
-                        {
-                            /* todo */
-                        } },
-                    { schema_keyword::Next, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
-                        {
-                            /* todo */
+                                throw_error(aChildNode, "concept '" + conceptName + "' not found");
                         } },
                     { schema_keyword::Default, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
@@ -172,7 +167,7 @@ namespace neos
             {
                 for (auto const& library : aNode)
                     if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text }) == iConceptLibraries.end())
-                        throw std::runtime_error("concept library '" + library.as<neolib::rjson_keyword>().text + "' not found");
+                        throw_error(aNode, "concept library '" + library.as<neolib::rjson_keyword>().text + "' not found");
             }
         }
 
@@ -206,7 +201,7 @@ namespace neos
                     }, false);
                     break;
                 default:
-                    throw std::runtime_error("unexpected keyword '" + token.name() + "' in token specification");
+                    throw_error(aNode, "unexpected keyword '" + token.name() + "' in token specification");
                     break;
                 }
             }
@@ -255,7 +250,7 @@ namespace neos
                     atom_references()[key].push_back(&aAtom);
                 }
                 else
-                    throw std::runtime_error("unexpected keyword '" + aNode.name() + "'");
+                    throw_error(aNode, "unexpected keyword '" + aNode.name() + "'");
             }
             else
                 aAtom = neolib::make_ref<schema_node_atom>(aParentAtom, aNode.name());
@@ -277,13 +272,13 @@ namespace neos
                         }
                         break;
                     case schema_keyword::Done:
-                        /* todo */
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Done);
                         break;
                     case schema_keyword::Next:
-                        /* todo */
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Next);
                         break;
                     default:
-                        throw std::runtime_error("unexpected keyword '" + aNodeValue.text + "'");
+                        throw_error(aNode, "unexpected keyword '" + aNodeValue.text + "'");
                     }
                 }
                 else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
@@ -382,5 +377,12 @@ namespace neos
             }
             return nullptr;
         }
-    }
+
+        void schema::throw_error(neolib::rjson_value const& aNode, const std::string aErrorText)
+        {
+            if (aNode.has_name())
+                iSource.create_parse_error(&aNode.name()[0], aErrorText);
+            throw std::runtime_error(iSource.error_text());
+        }
+   }
 }
