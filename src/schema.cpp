@@ -336,10 +336,18 @@ namespace neos
                 if (matchingConcept != nullptr)
                     return neolib::make_ref<concept_atom>(matchingConcept);
             }
-            schema_atom key{ aNode.as_schema_atom(), aStem };
+            auto delim = std::find(aStem.begin(), aStem.end(), '.');
+            schema_atom key{ aNode.as_schema_atom(), std::string{ aStem.begin(), delim } };
             auto child = aNode.as_schema_atom().children().find(neolib::ref_ptr<i_atom>{ key });
             if (child != aNode.as_schema_atom().children().end())
-                return leaf(*child->first(), aStem, aLeafName);
+            {
+                if (delim != aStem.end())
+                    return leaf(*child->first(), std::string{ std::next(delim), aStem.end() }, aLeafName);
+                else
+                    return child->first();
+            }
+            if (aNode.has_parent())
+                return leaf(aNode.parent(), aStem, aLeafName);
             return atom_ptr{};
         }
 
