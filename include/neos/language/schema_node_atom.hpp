@@ -99,6 +99,14 @@ namespace neos
             {
                 return iTokens;
             }
+            const tokens_t& default_tokens() const override
+            {
+                return iDefaultTokens;
+            }
+            tokens_t& default_tokens() override
+            {
+                return iDefaultTokens;
+            }
             const children_t& children() const override
             {
                 return iChildren;
@@ -113,6 +121,7 @@ namespace neos
             is_a_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;
+            tokens_t iDefaultTokens;
             children_t iChildren;
         };
     }

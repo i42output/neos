@@ -20,13 +20,11 @@
     }
 
     default: {
-        tokens: {
-            ' ': whitespace
-            character.LF: whitespace
-            character.CR: whitespace
-            character.TAB: whitespace
-            character.EOF: whitespace
-        }
+        ' ': whitespace
+        character.LF: whitespace
+        character.CR: whitespace
+        character.TAB: whitespace
+        character.EOF: whitespace
     }
 
     whitespace: {

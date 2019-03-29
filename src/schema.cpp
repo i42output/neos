@@ -105,7 +105,7 @@ namespace neos
                         } },
                     { schema_keyword::Default, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
-                            /* todo */
+                            parse_default_tokens(aChildNode, aParentAtom);
                         } },
                     { schema_keyword::Expect, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
@@ -173,6 +173,16 @@ namespace neos
 
         void schema::parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
+            do_parse_tokens(aNode, aAtom, aAtom.tokens());
+        }
+
+        void schema::parse_default_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
+        {
+            do_parse_tokens(aNode, aAtom, aAtom.default_tokens());
+        }
+
+        void schema::do_parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom, i_schema_node_atom::tokens_t& aResult)
+        {
             _limit_recursion_(schema);
             for (auto const& token : aNode)
             {
@@ -183,19 +193,20 @@ namespace neos
                     add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
                     break;
                 case schema_keyword::Default:
+                    parse_default_tokens(token, aAtom);
                     break;
                 case schema_keyword::Invalid:
-                    aAtom.tokens().push_back(schema_node_atom::tokens_t::concrete_value_type{});
-                    add_lhs_atom_reference(token, aAtom, aAtom.tokens().back().first());
-                    token.visit([this, &token, &aAtom](auto&& aNodeValue)
+                    aResult.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    add_lhs_atom_reference(token, aAtom, aResult.back().first());
+                    token.visit([this, &token, &aAtom, &aResult](auto&& aNodeValue)
                     {
                         typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
                         if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
-                            add_rhs_atom_reference(token, aAtom, aAtom.tokens().back().second());
+                            add_rhs_atom_reference(token, aAtom, aResult.back().second());
                         else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                         {
                             auto newNode = neolib::make_ref<schema_node_atom>(aAtom, token.name());
-                            aAtom.tokens().back().second() = newNode;
+                            aResult.back().second() = newNode;
                             parse_tokens(token, *newNode);
                         }
                     }, false);
@@ -210,24 +221,24 @@ namespace neos
         std::string schema::fully_qualified_name(neolib::rjson_value const& aNode) const
         {
             _limit_recursion_(schema);
-            if (aNode.is_root())
-                return std::string{};
             auto next_node = [&aNode]() -> neolib::rjson_value const&
             {
                 for (auto n = &aNode; n->has_parent(); n = &n->parent())
-                    if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
+                    if (n->name_is_keyword() && (keyword(n->name()) == schema_keyword::Tokens || keyword(n->name()) == schema_keyword::Default))
                         return n->parent();
                 return aNode;
             };
             auto const& nextNode = next_node();
+            if (nextNode.is_root())
+                return std::string{};
             auto lhs = fully_qualified_name(nextNode.parent());
-            return lhs + (!lhs.empty() ? "." : "") + nextNode.name();
+            return lhs + (!lhs.empty() ? "." : std::string{}) + nextNode.name();
         }
 
         std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const neolib::rjson_string& aLeafName) const
         {
             auto lhs = fully_qualified_name(aNode);
-            return lhs + (!lhs.empty() ? "." : "") + aLeafName;
+            return lhs + (!lhs.empty() ? "." : std::string{}) + aLeafName;
         }
 
         const schema::atom_references_t& schema::atom_references() const
