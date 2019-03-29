@@ -211,12 +211,17 @@ namespace neos
         std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs) const
         {
             _limit_recursion_(schema);
-            for (auto n = &aNode; n->has_parent(); n = &n->parent())
-                if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
-                    return fully_qualified_name(n->parent(), aRhs);
             if (aNode.is_root())
                 return aRhs;
-            return fully_qualified_name(aNode.parent(), aNode.name()) + (!aRhs.empty() && keyword(aRhs) == schema_keyword::Invalid ? "." + aRhs : std::string{});
+            auto controlling_parent = [&aNode]() -> neolib::rjson_value const&
+            {
+                for (auto n = &aNode; n->has_parent(); n = &n->parent())
+                    if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
+                        return n->parent();
+                return aNode.parent();
+            };
+            return fully_qualified_name(controlling_parent(), aNode.name()) + 
+                (!aRhs.empty() && keyword(aRhs) == schema_keyword::Invalid ? "." + aRhs : std::string{});
         }
 
         const schema::atom_references_t& schema::atom_references() const
