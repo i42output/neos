@@ -42,6 +42,11 @@ namespace neos
             }
         }
 
+        i_schema_node_atom& schema::root() const
+        {
+            return iRoot->as_schema_atom().as_schema_node_atom();
+        }
+
         meta const& schema::meta() const
         {
             return iMeta;

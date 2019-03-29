@@ -42,6 +42,7 @@ namespace neos
             std::vector<std::string> sourcecodeFileExtension;
             std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
             std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
+            std::size_t parserRecursionLimit = 256u;
         };
 
         enum class schema_keyword
@@ -79,10 +80,10 @@ namespace neos
         public:
             schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries);
         public:
+            i_schema_node_atom& root() const;
             language::meta const& meta() const;
         private:
             static schema_keyword keyword(const neolib::rjson_string& aSymbol);
-
             void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
             void parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);

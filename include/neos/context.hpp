@@ -77,7 +77,7 @@ namespace neos
         neolib::i_application& iApplication;
         concept_libraries_t iConceptLibraries;
         std::optional<neolib::rjson> iSchemaSource;
-        std::optional<language::schema> iSchema;
+        std::shared_ptr<language::schema> iSchema;
         program_t iProgram;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
     };

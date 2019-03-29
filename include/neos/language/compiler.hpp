@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <string>
+#include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
 
@@ -30,6 +31,7 @@ namespace neos
     {
         struct translation_unit
         {
+            std::shared_ptr<language::schema> schema;
             typedef std::string source_t;
             source_t source;
             language::ast ast;
@@ -48,6 +50,8 @@ namespace neos
             compiler();
         public:
             void compile(program& aProgram);
+        private:
+            void parse(program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aSchemaAtom, translation_unit::source_t::const_iterator aSource);
         };
     }
 }

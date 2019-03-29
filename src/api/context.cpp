@@ -51,7 +51,7 @@ namespace neos
 
     bool context::schema_loaded() const
     {
-        return iSchemaSource != std::nullopt && iSchema != std::nullopt;
+        return iSchemaSource != std::nullopt && iSchema != nullptr;
     }
 
     void context::load_schema(const std::string& aSchemaPath)
@@ -60,7 +60,7 @@ namespace neos
         iSchemaSource.reset();
         iSchema.reset();
         iSchemaSource.emplace(aSchemaPath);
-        iSchema.emplace(*iSchemaSource, concept_libraries());
+        iSchema = std::make_shared<language::schema>(*iSchemaSource, concept_libraries());
     }
 
     const neolib::rjson& context::schema_source() const
@@ -196,7 +196,8 @@ namespace neos
         else
             aStream.clear();
 
-        auto& unit = *program().translationUnits.insert(program().translationUnits.end(), translation_unit_t{ translation_unit_t::source_t{}, language::ast{ program().symbolTable } });
+        auto& unit = *program().translationUnits.insert(program().translationUnits.end(), 
+            translation_unit_t{ iSchema, translation_unit_t::source_t{}, language::ast{ program().symbolTable } });
 
         if (count != std::istream::pos_type(0))
         {

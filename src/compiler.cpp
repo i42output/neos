@@ -19,6 +19,7 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
+#include <neolib/recursion.hpp>
 #include <neolib/string_utf.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/bytecode/opcodes.hpp>
@@ -34,10 +35,16 @@ namespace neos
 
         void compiler::compile(program& aProgram)
         {
-            // todo
-            auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::u64{ 10 });
-            emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::i8{ -1 });
-            emit(aProgram.text, bytecode::opcode::B, loop);
+            for (auto const& unit : aProgram.translationUnits)
+                parse(aProgram, unit, unit.schema->root(), unit.source.begin());
+        }
+
+        void compiler::parse(program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aSchemaAtom, translation_unit::source_t::const_iterator aSource)
+        {
+            _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
+            //auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::u64{ 10 });
+            //emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::i8{ -1 });
+            //emit(aProgram.text, bytecode::opcode::B, loop);
         }
     }
 }
