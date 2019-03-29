@@ -28,9 +28,9 @@ namespace neos
         schema::schema(neolib::rjson const& aSchema, const concept_libraries_t& aConceptLibraries) :
             iMeta{ aSchema.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
-            iRoot{ neolib::make_ref<schema_atom>() }
+            iRoot{ neolib::make_ref<schema_node_atom>() }
         {
-            parse(aSchema.root(), *iRoot);
+            parse(aSchema.root(), iRoot->as_schema_atom().as_schema_node_atom());
             resolve_references();
             if (!atom_references().empty())
             {
@@ -65,59 +65,59 @@ namespace neos
             return schema_keyword::Invalid;
         }
 
-        void schema::parse(neolib::rjson_value const& aNode, i_atom& aAtom)
+        void schema::parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
             _limit_recursion_(schema);
             for (auto const& childNode : aNode)
             {
-                auto default_method = [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                auto default_method = [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                 {
-                    auto newChild = aParentAtom.as_schema_atom().children().insert(
-                        atom_ptr{ neolib::make_ref<schema_atom>(aParentAtom.as_schema_atom(), aChildNode.name()) }, atom_ptr{});
-                    parse(aChildNode, *newChild->first());
+                    auto newChild = aParentAtom.children().insert(
+                        atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) }, atom_ptr{});
+                    parse(aChildNode, newChild->first()->as_schema_atom().as_schema_node_atom());
                 };
-                static std::map<schema_keyword, std::function<void(neolib::rjson_value const&, i_atom&)>> const sMethods =
+                static std::map<schema_keyword, std::function<void(neolib::rjson_value const&, i_schema_node_atom&)>> const sMethods =
                 {
-                    { schema_keyword::Meta, [this, &default_method](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Meta, [this, &default_method](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
                             if (aChildNode.parent().is_root()) 
                                 parse_meta(aChildNode); 
                             else 
                                 default_method(aChildNode, aParentAtom); 
                         } },
-                    { schema_keyword::Libraries, [this, &default_method](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Libraries, [this, &default_method](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
                             if (aChildNode.parent().is_root()) 
                                 parse_meta(aChildNode); 
                             else default_method(aChildNode, aParentAtom); 
                         } },
-                    { schema_keyword::Is, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Is, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
                             auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
                             auto concept = find_concept(conceptName);
                             if (concept != nullptr)
-                                aParentAtom.as_schema_atom().is_a().push_back(concept);
+                                aParentAtom.is_a().push_back(concept);
                             else
                                 throw std::runtime_error("concept '" + conceptName + "' not found");
                         } },
-                    { schema_keyword::Done, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Done, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
                             /* todo */
                         } },
-                    { schema_keyword::Next, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Next, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
                             /* todo */
                         } },
-                    { schema_keyword::Default, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Default, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
                             /* todo */
                         } },
-                    { schema_keyword::Expect, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Expect, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
-                            aParentAtom.as_schema_atom().expects().push_back(atom_ptr{});
-                            add_rhs_atom_reference(aChildNode, aParentAtom, aParentAtom.as_schema_atom().expects().back());
+                            aParentAtom.expects().push_back(atom_ptr{});
+                            add_rhs_atom_reference(aChildNode, aParentAtom, aParentAtom.expects().back());
                         } },
-                    { schema_keyword::Tokens, [this](neolib::rjson_value const& aChildNode, i_atom& aParentAtom)
+                    { schema_keyword::Tokens, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
                             parse_tokens(aChildNode, aParentAtom);
                         } }
@@ -176,7 +176,7 @@ namespace neos
             }
         }
 
-        void schema::parse_tokens(neolib::rjson_value const& aNode, i_atom& aAtom)
+        void schema::parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
             _limit_recursion_(schema);
             for (auto const& token : aNode)
@@ -184,21 +184,25 @@ namespace neos
                 switch (keyword(token.name()))
                 {
                 case schema_keyword::Expect:
-                    aAtom.as_schema_atom().expects().push_back(atom_ptr{});
-                    add_rhs_atom_reference(token, aAtom, aAtom.as_schema_atom().expects().back());
+                    aAtom.expects().push_back(atom_ptr{});
+                    add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
                     break;
                 case schema_keyword::Default:
                     break;
                 case schema_keyword::Invalid:
-                    aAtom.as_schema_atom().tokens().push_back(schema_atom::tokens_t::concrete_value_type{});
-                    add_lhs_atom_reference(token, aAtom, aAtom.as_schema_atom().tokens().back().first());
+                    aAtom.tokens().push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    add_lhs_atom_reference(token, aAtom, aAtom.tokens().back().first());
                     token.visit([this, &token, &aAtom](auto&& aNodeValue)
                     {
                         typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
                         if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
-                            add_rhs_atom_reference(token, aAtom, aAtom.as_schema_atom().tokens().back().second());
+                            add_rhs_atom_reference(token, aAtom, aAtom.tokens().back().second());
                         else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
-                            parse_tokens(token, *(aAtom.as_schema_atom().tokens().back().second() = neolib::make_ref<schema_atom>(aAtom.as_schema_atom(), token.name())));
+                        {
+                            auto newNode = neolib::make_ref<schema_node_atom>(aAtom, token.name());
+                            aAtom.tokens().back().second() = newNode;
+                            parse_tokens(token, *newNode);
+                        }
                     }, false);
                     break;
                 default:
@@ -241,7 +245,7 @@ namespace neos
             return iAtomReferences;
         }
 
-        void schema::add_lhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom)
+        void schema::add_lhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom)
         {
             if (aNode.name_is_keyword())
             {
@@ -254,10 +258,10 @@ namespace neos
                     throw std::runtime_error("unexpected keyword '" + aNode.name() + "'");
             }
             else
-                aAtom = neolib::make_ref<schema_atom>(aParentAtom.as_schema_atom(), aNode.name());
+                aAtom = neolib::make_ref<schema_node_atom>(aParentAtom, aNode.name());
         }
 
-        void schema::add_rhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom)
+        void schema::add_rhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom)
         {
             aNode.visit([this, &aNode, &aParentAtom, &aAtom](auto&& aNodeValue)
             {
@@ -283,7 +287,7 @@ namespace neos
                     }
                 }
                 else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
-                    aAtom = neolib::make_ref<schema_atom>(aParentAtom.as_schema_atom(), aNode.name());
+                    aAtom = neolib::make_ref<schema_node_atom>(aParentAtom, aNode.name());
             }, false);
         }
 
@@ -328,18 +332,18 @@ namespace neos
         
         schema::atom_ptr schema::leaf(const std::string& aStem, const neolib::rjson_string& aLeafName)
         {
-            return leaf(*iRoot, aStem, aLeafName);
+            return leaf(iRoot->as_schema_atom().as_schema_node_atom(), aStem, aLeafName);
         }
 
-        schema::atom_ptr schema::leaf(i_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName)
+        schema::atom_ptr schema::leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName)
         {
             _limit_recursion_(schema);
-            if (aStem == aNode.as_schema_atom().symbol())
+            if (aStem == aNode.symbol())
             {
                 if (aLeafName == aStem)
                     return &aNode;
             }
-            for (auto& concept : aNode.as_schema_atom().is_a())
+            for (auto& concept : aNode.is_a())
             {
                 if (concept->name() == neolib::string{ aLeafName })
                     return neolib::make_ref<concept_atom>(concept);
@@ -351,20 +355,20 @@ namespace neos
                     return neolib::make_ref<concept_atom>(matchingConcept);
             }
             auto delim = std::find(aStem.begin(), aStem.end(), '.');
-            schema_atom key{ aNode.as_schema_atom(), std::string{ aStem.begin(), delim } };
-            auto child = aNode.as_schema_atom().children().find(neolib::ref_ptr<i_atom>{ key });
-            if (child != aNode.as_schema_atom().children().end())
+            schema_node_atom key{ aNode, std::string{ aStem.begin(), delim } };
+            auto child = aNode.children().find(neolib::ref_ptr<i_atom>{ key });
+            if (child != aNode.children().end())
             {
                 if (delim != aStem.end())
                 {
                     auto newStem = std::string{ std::next(delim), aStem.end() };
-                    return leaf(*child->first(), newStem, aLeafName != aStem ? aLeafName : neolib::rjson_string{ newStem });
+                    return leaf(child->first()->as_schema_atom().as_schema_node_atom(), newStem, aLeafName != aStem ? aLeafName : neolib::rjson_string{ newStem });
                 }
                 else
                     return child->first();
             }
             if (aNode.has_parent())
-                return leaf(aNode.parent(), aStem, aLeafName);
+                return leaf(aNode.parent().as_schema_atom().as_schema_node_atom(), aStem, aLeafName);
             return atom_ptr{};
         }
 

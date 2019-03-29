@@ -43,8 +43,11 @@
     <ClInclude Include="..\..\..\include\neos\language\i_concept_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_schema_atom.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_schema_node_atom.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_schema_terminal_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\schema.hpp" />
-    <ClInclude Include="..\..\..\include\neos\language\schema_atom.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\schema_node_atom.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\schema_terminal_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\symbols.hpp" />
     <ClInclude Include="..\..\..\include\neos\neos.hpp" />
     <ClInclude Include="..\..\..\src\compiler.hpp" />

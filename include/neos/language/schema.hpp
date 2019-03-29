@@ -25,7 +25,8 @@
 #include <neolib/i_string.hpp>
 #include <neolib/json.hpp>
 #include <neos/language/i_concept_library.hpp>
-#include <neos/language/schema_atom.hpp>
+#include <neos/language/schema_node_atom.hpp>
+#include <neos/language/schema_terminal_atom.hpp>
 #include <neos/language/concept_atom.hpp>
 
 namespace neos
@@ -81,19 +82,19 @@ namespace neos
             language::meta const& meta() const;
         private:
             static schema_keyword keyword(const neolib::rjson_string& aSymbol);
-            void parse(neolib::rjson_value const& aNode, i_atom& aAtom);
+            void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
-            void parse_tokens(neolib::rjson_value const& aNode, i_atom& aAtom);
+            void parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             std::string fully_qualified_name(neolib::rjson_value const& aNode) const;
             std::string fully_qualified_name(neolib::rjson_value const& aNode, const neolib::rjson_string& aLeafName) const;
             const atom_references_t& atom_references() const;
             atom_references_t& atom_references();
-            void add_lhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom);
-            void add_rhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom);
+            void add_lhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom);
+            void add_rhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom);
             void resolve_references();
             std::string fully_qualified_name(const i_atom& aAtom) const;
             atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
-            atom_ptr leaf(i_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
+            atom_ptr leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
             neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
         private:
             language::meta iMeta;

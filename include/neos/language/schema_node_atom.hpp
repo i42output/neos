@@ -1,5 +1,5 @@
 /*
-  schema_concept.hpp
+  schema_node_atom.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -24,13 +24,13 @@
 #include <neolib/pair.hpp>
 #include <neolib/map.hpp>
 #include <neolib/reference_counted.hpp>
-#include <neos/language/i_schema_atom.hpp>
+#include <neos/language/i_schema_node_atom.hpp>
 
 namespace neos
 {
     namespace language
     {
-        class schema_atom : public neolib::reference_counted<i_schema_atom>
+        class schema_node_atom : public neolib::reference_counted<i_schema_node_atom>
         {
         public:
             typedef neolib::string symbol_t;
@@ -39,17 +39,17 @@ namespace neos
             typedef neolib::list<neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_list_t;
             typedef atom_list_t expects_t;
             typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
-            typedef neolib::list<i_schema_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
+            typedef neolib::list<i_schema_node_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
             typedef atom_map_list_t tokens_t;
             typedef neolib::map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
             typedef atom_map_t token_map_t;
             typedef atom_map_t children_t;
         public:
-            schema_atom(i_schema_atom& aParent, const std::string& aSymbol) :
+            schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol) :
                 iParent{ &aParent }, iSymbol { aSymbol }
             {
             }
-            schema_atom() :
+            schema_node_atom() :
                 iParent{ nullptr }
             {
             }
@@ -108,8 +108,8 @@ namespace neos
                 return iChildren;
             }
         private:
-            symbol_t iSymbol;
             i_schema_atom* iParent;
+            symbol_t iSymbol;
             is_a_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;
