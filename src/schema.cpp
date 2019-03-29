@@ -381,8 +381,8 @@ namespace neos
         void schema::throw_error(neolib::rjson_value const& aNode, const std::string aErrorText)
         {
             if (aNode.has_name())
-                iSource.create_parse_error(&aNode.name()[0], aErrorText);
-            throw std::runtime_error(iSource.error_text());
+                throw std::runtime_error(iSource.to_error_text(&aNode.name()[0], aErrorText));
+            throw std::runtime_error(aErrorText);
         }
    }
 }
