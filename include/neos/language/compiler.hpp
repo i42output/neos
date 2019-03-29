@@ -25,33 +25,30 @@
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
 
-namespace neos
+namespace neos::language
 {
-    namespace language
+    struct translation_unit
     {
-        struct translation_unit
-        {
-            std::shared_ptr<language::schema> schema;
-            typedef std::string source_t;
-            source_t source;
-            language::ast ast;
-        };
+        std::shared_ptr<language::schema> schema;
+        typedef std::string source_t;
+        source_t source;
+        language::ast ast;
+    };
 
-        struct program
-        {
-            symbol_table_t symbolTable;
-            std::vector<translation_unit> translationUnits;
-            text_t text;
-        };
+    struct program
+    {
+        symbol_table_t symbolTable;
+        std::vector<translation_unit> translationUnits;
+        text_t text;
+    };
 
-        class compiler
-        {
-        public:
-            compiler();
-        public:
-            void compile(program& aProgram);
-        private:
-            void parse(program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aSchemaAtom, translation_unit::source_t::const_iterator aSource);
-        };
-    }
+    class compiler
+    {
+    public:
+        compiler();
+    public:
+        void compile(program& aProgram);
+    private:
+        void parse(program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aSchemaAtom, translation_unit::source_t::const_iterator aSource);
+    };
 }
