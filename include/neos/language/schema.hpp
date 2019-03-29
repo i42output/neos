@@ -85,6 +85,7 @@ namespace neos
             void parse_meta(neolib::rjson_value const& aNode);
             void parse_tokens(neolib::rjson_value const& aNode, i_atom& aAtom);
             std::string fully_qualified_name(neolib::rjson_value const& aNode) const;
+            std::string fully_qualified_name(neolib::rjson_value const& aNode, const neolib::rjson_string& aLeafName) const;
             const atom_references_t& atom_references() const;
             atom_references_t& atom_references();
             void add_lhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom);

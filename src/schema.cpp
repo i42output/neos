@@ -213,15 +213,22 @@ namespace neos
             _limit_recursion_(schema);
             if (aNode.is_root())
                 return std::string{};
-            auto controlling_parent = [&aNode]() -> neolib::rjson_value const&
+            auto next_node = [&aNode]() -> neolib::rjson_value const&
             {
                 for (auto n = &aNode; n->has_parent(); n = &n->parent())
                     if (n->name_is_keyword() && keyword(n->name()) == schema_keyword::Tokens)
                         return n->parent();
-                return aNode.parent();
+                return aNode;
             };
-            auto lhs = fully_qualified_name(controlling_parent());
-            return lhs + (!lhs.empty() ? "." : "") + aNode.name();
+            auto const& nextNode = next_node();
+            auto lhs = fully_qualified_name(nextNode.parent());
+            return lhs + (!lhs.empty() ? "." : "") + nextNode.name();
+        }
+
+        std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const neolib::rjson_string& aLeafName) const
+        {
+            auto lhs = fully_qualified_name(aNode);
+            return lhs + (!lhs.empty() ? "." : "") + aLeafName;
         }
 
         const schema::atom_references_t& schema::atom_references() const
@@ -236,12 +243,11 @@ namespace neos
 
         void schema::add_lhs_atom_reference(neolib::rjson_value const& aNode, i_atom& aParentAtom, abstract_atom_ptr& aAtom)
         {
-            
             if (aNode.name_is_keyword())
             {
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
                 {
-                    auto const key = atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode) };
+                    auto const key = atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode.parent(), aNode.name()) };
                     atom_references()[key].push_back(&aAtom);
                 }
                 else
@@ -262,7 +268,7 @@ namespace neos
                     {
                     case schema_keyword::Invalid:
                         {
-                            auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode) };
+                            auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) };
                             atom_references()[key].push_back(&aAtom);
                         }
                         break;
