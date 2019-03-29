@@ -208,11 +208,11 @@ namespace neos
             }
         }
 
-        std::string schema::fully_qualified_name(neolib::rjson_value const& aNode, const std::string& aRhs) const
+        std::string schema::fully_qualified_name(neolib::rjson_value const& aNode) const
         {
             _limit_recursion_(schema);
             if (aNode.is_root())
-                return aRhs;
+                return std::string{};
             auto controlling_parent = [&aNode]() -> neolib::rjson_value const&
             {
                 for (auto n = &aNode; n->has_parent(); n = &n->parent())
@@ -220,8 +220,8 @@ namespace neos
                         return n->parent();
                 return aNode.parent();
             };
-            return fully_qualified_name(controlling_parent(), aNode.name()) + 
-                (!aRhs.empty() && keyword(aRhs) == schema_keyword::Invalid ? "." + aRhs : std::string{});
+            auto lhs = fully_qualified_name(controlling_parent());
+            return lhs + (!lhs.empty() ? "." : "") + aNode.name();
         }
 
         const schema::atom_references_t& schema::atom_references() const
@@ -262,7 +262,7 @@ namespace neos
                     {
                     case schema_keyword::Invalid:
                         {
-                            auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) };
+                            auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode) };
                             atom_references()[key].push_back(&aAtom);
                         }
                         break;
@@ -337,7 +337,10 @@ namespace neos
             {
                 if (concept->name() == neolib::string{ aLeafName })
                     return neolib::make_ref<concept_atom>(concept);
-                auto matchingConcept = find_concept(concept->name() + "." + aLeafName);
+                auto const base = concept->name() + ".";
+                auto matchingConcept = find_concept(base + aLeafName);
+                if (matchingConcept == nullptr && aLeafName.find(base.to_std_string()) == 0)
+                    matchingConcept = find_concept(aLeafName);
                 if (matchingConcept != nullptr)
                     return neolib::make_ref<concept_atom>(matchingConcept);
             }
@@ -347,7 +350,10 @@ namespace neos
             if (child != aNode.as_schema_atom().children().end())
             {
                 if (delim != aStem.end())
-                    return leaf(*child->first(), std::string{ std::next(delim), aStem.end() }, aLeafName);
+                {
+                    auto newStem = std::string{ std::next(delim), aStem.end() };
+                    return leaf(*child->first(), newStem, aLeafName != aStem ? aLeafName : neolib::rjson_string{ newStem });
+                }
                 else
                     return child->first();
             }
