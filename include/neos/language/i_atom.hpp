@@ -50,7 +50,8 @@ namespace neos::language
     public:
         bool operator==(const i_atom& rhs) const
         {
-            return symbol() == rhs.symbol();
+            // atoms have unique object identity so just compare 'this' pointers.
+            return this == &rhs;
         }
         bool operator<(const i_atom& rhs) const
         {
