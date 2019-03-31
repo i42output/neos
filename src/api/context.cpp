@@ -131,6 +131,7 @@ namespace neos
 
     bytecode::reg_64 context::evaluate(const std::string& aExpression)
     {
+        program().translationUnits.clear();
         std::istringstream stream{ aExpression };
         load_program(stream);
         compile_program();
