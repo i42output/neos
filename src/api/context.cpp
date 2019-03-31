@@ -89,9 +89,14 @@ namespace neos
         compile_program();
     }
 
+    language::compiler& context::compiler()
+    {
+        return iCompiler;
+    }
+
     void context::compile_program()
     {
-        language::compiler{}.compile(program());
+        compiler().compile(program());
     }
 
     const context::program_t& context::program() const

@@ -24,33 +24,35 @@
 #include <neolib/string.hpp>
 #include <neos/language/i_concept.hpp>
 
-namespace neos
+namespace neos::language
 {
-    namespace language
+    class neos_concept : public neolib::reference_counted<i_concept>
     {
-        class neos_concept : public neolib::reference_counted<i_concept>
+    public:
+        neos_concept(const std::string& aName) :
+            iName{ aName }
         {
-        public:
-            neos_concept(const std::string& aName) :
-                iName{ aName }
-            {
-            }
-        public:
-            const neolib::i_string& name() const override
-            {
-                return iName;
-            }
-        private:
-            neolib::string iName;
-        };
+        }
+    public:
+        const neolib::i_string& name() const override
+        {
+            return iName;
+        }
+    public:
+        source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const override
+        {
+            return aSource;
+        }
+    private:
+        neolib::string iName;
+    };
 
-        class unimplemented_concept : public neos_concept
+    class unimplemented_concept : public neos_concept
+    {
+    public:
+        unimplemented_concept(const std::string& aName) :
+            neos_concept{ aName }
         {
-        public:
-            unimplemented_concept(const std::string& aName) :
-                neos_concept{ aName }
-            {
-            }
-        };
-    }
+        }
+    };
 }

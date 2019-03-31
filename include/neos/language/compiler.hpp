@@ -24,6 +24,7 @@
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
+#include <neos/language/i_concept.hpp>
 
 namespace neos::language
 {
@@ -45,10 +46,21 @@ namespace neos::language
     class compiler
     {
     public:
+        typedef translation_unit::source_t::const_iterator source_iterator;
+    public:
         compiler();
     public:
         void compile(program& aProgram);
+        bool trace() const;
+        void set_trace(bool aTrace);
     private:
-        void parse(program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aSchemaAtom, translation_unit::source_t::const_iterator aSource);
+        source_iterator parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
+        source_iterator parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, source_iterator aSource);
+        source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
+        source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchedTokenValue, source_iterator aSource);
+        source_iterator parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, source_iterator aSource);
+        void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
+    private:
+        bool iTrace;
     };
 }

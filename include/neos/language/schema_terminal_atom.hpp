@@ -30,8 +30,10 @@ namespace neos
         class schema_terminal_atom : public neolib::reference_counted<i_schema_terminal_atom>
         {
         public:
-            schema_terminal_atom(i_schema_atom& aParent, schema_terminal aType) :
-                iParent{ &aParent }, iType{ aType }
+            typedef neolib::string symbol_t;
+        public:
+            schema_terminal_atom(i_schema_atom& aParent, schema_terminal aType, const std::string& aSymbol = std::string{}) :
+                iParent{ &aParent }, iType{ aType }, iSymbol{ aSymbol }
             {
             }
             schema_terminal_atom() :
@@ -57,7 +59,7 @@ namespace neos
             }
             const symbol_t& symbol() const override
             {
-                throw wrong_type();
+                return iSymbol;
             }
         public:
             schema_terminal type() const override
@@ -67,6 +69,7 @@ namespace neos
         private:
             i_schema_atom* iParent;
             schema_terminal iType;
+            symbol_t iSymbol;
         };
     }
 }

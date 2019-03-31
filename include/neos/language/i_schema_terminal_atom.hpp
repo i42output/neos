@@ -28,6 +28,7 @@ namespace neos
     {
         enum class schema_terminal
         {
+            String,
             Done,
             Next
         };

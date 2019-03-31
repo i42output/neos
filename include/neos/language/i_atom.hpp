@@ -50,6 +50,10 @@ namespace neos
             virtual const i_concept_atom& as_concept_atom() const = 0;
             virtual i_concept_atom& as_concept_atom() = 0;
         public:
+            bool operator==(const i_atom& rhs) const
+            {
+                return symbol() == rhs.symbol();
+            }
             bool operator<(const i_atom& rhs) const
             {
                 return symbol() < rhs.symbol();

@@ -24,7 +24,6 @@
         character.LF: whitespace
         character.CR: whitespace
         character.TAB: whitespace
-        character.EOF: whitespace
     }
 
     whitespace: {
@@ -34,7 +33,6 @@
             character.LF: whitespace
             character.CR: whitespace
             character.TAB: whitespace
-            character.EOF: whitespace
         }
     }
 
@@ -83,6 +81,7 @@
             is: math.expression.operand
             tokens: {
                 character.digit: universal_number
+                universal_number: done
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary

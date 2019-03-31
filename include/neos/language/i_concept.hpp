@@ -23,14 +23,28 @@
 #include <neolib/i_reference_counted.hpp>
 #include <neolib/i_string.hpp>
 
-namespace neos
+namespace neos::language
 {
-    namespace language
+    enum class compiler_pass
     {
-        class i_concept : public neolib::i_reference_counted
+        Probe,
+        Emit
+    };
+
+    class i_concept : public neolib::i_reference_counted
+    {
+    public:
+        typedef const char* source_iterator;
+    public:
+        virtual const neolib::i_string& name() const = 0;
+    public:
+        virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const = 0;
+    public:
+        template <typename SourceIterator>
+        SourceIterator consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
         {
-        public:
-            virtual const neolib::i_string& name() const = 0;
-        };
-    }
+            auto result = consume_token(aPass, &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
+            return std::next(aSource, std::distance(&*aSource, result));
+        }
+    };
 }

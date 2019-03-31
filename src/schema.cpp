@@ -210,7 +210,7 @@ namespace neos
                             add_rhs_atom_reference(token, aAtom, aResult.back().second());
                         else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                         {
-                            auto newNode = neolib::make_ref<schema_node_atom>(aAtom, token.name());
+                            auto newNode = neolib::make_ref<schema_node_atom>(aAtom, token.name() + ".*");
                             aResult.back().second() = newNode;
                             parse_tokens(token, *newNode);
                         }
@@ -269,7 +269,7 @@ namespace neos
                     throw_error(aNode, "unexpected keyword '" + aNode.name() + "'");
             }
             else
-                aAtom = neolib::make_ref<schema_node_atom>(aParentAtom, aNode.name());
+                aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::String, aNode.name());
         }
 
         void schema::add_rhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom)
@@ -298,7 +298,7 @@ namespace neos
                     }
                 }
                 else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
-                    aAtom = neolib::make_ref<schema_node_atom>(aParentAtom, aNode.name());
+                    aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::String, aNode.name());
             }, false);
         }
 
