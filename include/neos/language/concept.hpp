@@ -30,10 +30,30 @@ namespace neos::language
     {
     public:
         neos_concept(const std::string& aName) :
-            iName{ aName }
+            iParent{ nullptr }, iName { aName}
+        {
+        }
+        neos_concept(i_concept& aParent, const std::string& aName) :
+            iParent{ &aParent }, iName{ aName }
         {
         }
     public:
+        bool has_parent() const override
+        {
+            return iParent != nullptr;
+        }
+        const i_concept& parent() const override
+        {
+            if (has_parent())
+                return *iParent;
+            throw no_parent();
+        }
+        i_concept& parent() override
+        {
+            if (has_parent())
+                return *iParent;
+            throw no_parent();
+        }
         const neolib::i_string& name() const override
         {
             return iName;
@@ -43,16 +63,18 @@ namespace neos::language
         {
             return aSource;
         }
+        source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd) const override
+        {
+            return aSource;
+        }
     private:
+        i_concept* iParent;
         neolib::string iName;
     };
 
     class unimplemented_concept : public neos_concept
     {
     public:
-        unimplemented_concept(const std::string& aName) :
-            neos_concept{ aName }
-        {
-        }
+        using neos_concept::neos_concept;
     };
 }

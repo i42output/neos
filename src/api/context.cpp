@@ -59,7 +59,14 @@ namespace neos
         std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
-        iSchemaSource.emplace(aSchemaPath);
+        try
+        {
+            iSchemaSource.emplace(aSchemaPath);
+        }
+        catch (...)
+        {
+            iSchemaSource.emplace(aSchemaPath + ".neos");
+        }
         iSchema = std::make_shared<language::schema>(*iSchemaSource, concept_libraries());
     }
 

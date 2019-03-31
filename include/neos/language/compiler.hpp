@@ -55,7 +55,7 @@ namespace neos::language
         void set_trace(bool aTrace);
     private:
         source_iterator parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
-        source_iterator parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, source_iterator aSource);
+        source_iterator parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aExpectedToken, source_iterator aSource);
         source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
         source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchedTokenValue, source_iterator aSource);
         source_iterator parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, source_iterator aSource);

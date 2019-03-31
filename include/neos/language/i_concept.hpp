@@ -31,19 +31,44 @@ namespace neos::language
         Emit
     };
 
+    class i_atom;
+
     class i_concept : public neolib::i_reference_counted
     {
     public:
+        struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_concept::no_parent") {} };
+    public:
         typedef const char* source_iterator;
     public:
+        virtual bool has_parent() const = 0;
+        virtual const i_concept& parent() const = 0;
+        virtual i_concept& parent() = 0;
         virtual const neolib::i_string& name() const = 0;
     public:
         virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const = 0;
+        virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd) const = 0;
     public:
+        bool is_ancestor_of(const i_concept& child) const
+        {
+            auto a = &child;
+            while (a->has_parent())
+            {
+                a = &a->parent();
+                if (a == this)
+                    return true;
+            }
+            return false;
+        }
         template <typename SourceIterator>
         SourceIterator consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
         {
             auto result = consume_token(aPass, &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
+            return std::next(aSource, std::distance(&*aSource, result));
+        }
+        template <typename SourceIterator>
+        SourceIterator consume_atom(compiler_pass aPass, const i_atom& aAtom, SourceIterator aSource, SourceIterator aSourceEnd) const
+        {
+            auto result = consume_atom(aPass, aAtom, &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
             return std::next(aSource, std::distance(&*aSource, result));
         }
     };
