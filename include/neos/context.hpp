@@ -43,10 +43,12 @@ namespace neos
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
+        struct warning : std::runtime_error { using runtime_error::runtime_error; };
+        struct error : std::runtime_error { using runtime_error::runtime_error; };
         struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::context::no_schema_source") {} };
-        struct no_schema_loaded : std::runtime_error { no_schema_loaded() : std::runtime_error("no schema loaded") {} };
-        struct no_text : std::runtime_error { no_text() : std::runtime_error("no text") {} };
-        struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
+        struct no_schema_loaded : error { no_schema_loaded() : error("no schema loaded") {} };
+        struct no_text : warning { no_text() : warning("no text") {} };
+        struct compiler_error : error { compiler_error(const std::string& aReason) : error(aReason) {} };
     public:
         context();
         context(neolib::i_application& aApplication);
