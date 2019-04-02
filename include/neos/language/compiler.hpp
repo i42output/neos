@@ -47,6 +47,11 @@ namespace neos::language
     {
     public:
         typedef translation_unit::source_t::const_iterator source_iterator;
+        typedef std::optional<source_iterator> optional_source_iterator;
+        struct parse_result
+        {
+            optional_source_iterator sourceParsed;
+        };
     public:
         compiler();
     public:
@@ -54,13 +59,14 @@ namespace neos::language
         bool trace() const;
         void set_trace(bool aTrace);
     private:
-        source_iterator parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
-        source_iterator parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aExpectedToken, source_iterator aSource);
-        source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
-        source_iterator parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchedTokenValue, source_iterator aSource);
-        source_iterator parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, source_iterator aSource);
+        parse_result parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
+        parse_result parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aExpectedToken, source_iterator aSource);
+        parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
+        parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchedTokenValue, source_iterator aSource, bool aSelf = true);
+        parse_result parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aToken, source_iterator aSource);
         void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         bool iTrace;
+        optional_source_iterator iDeepestProbe;
     };
 }

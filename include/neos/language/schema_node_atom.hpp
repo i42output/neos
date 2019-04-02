@@ -40,6 +40,7 @@ namespace neos
             typedef atom_list_t expects_t;
             typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
             typedef neolib::list<i_schema_node_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
+            typedef i_schema_node_atom::tokens_t abstract_tokens_t;
             typedef atom_map_list_t tokens_t;
             typedef neolib::map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
             typedef atom_map_t token_map_t;
@@ -99,13 +100,15 @@ namespace neos
             {
                 return iTokens;
             }
-            const tokens_t& default_tokens() const override
+            const abstract_tokens_t& default_tokens() const override
             {
-                return iDefaultTokens;
+                if (!iDefaultTokens.empty() || !has_parent())
+                    return iDefaultTokens;
+                return parent().as_schema_node_atom().default_tokens();
             }
-            tokens_t& default_tokens() override
+            abstract_tokens_t& default_tokens() override
             {
-                return iDefaultTokens;
+                return const_cast<abstract_tokens_t&>(const_cast<const schema_node_atom*>(this)->default_tokens());
             }
             const children_t& children() const override
             {

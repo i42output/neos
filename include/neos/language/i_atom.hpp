@@ -53,9 +53,17 @@ namespace neos::language
             // atoms have unique object identity so just compare 'this' pointers.
             return this == &rhs;
         }
+        bool operator!=(const i_atom& rhs) const
+        {
+            return !(*this == rhs);
+        }
         bool operator<(const i_atom& rhs) const
         {
             return symbol() < rhs.symbol();
+        }
+        bool is_parent_of(const i_atom& child) const
+        {
+            return child.has_parent() && child.parent() == *this;
         }
         bool is_ancestor_of(const i_atom& child) const
         {

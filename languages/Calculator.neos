@@ -61,7 +61,7 @@
                 math.operator: {
                     expect: term
                 }
-                statement.end: done
+                default: done
             }
         }
         term: {
@@ -107,7 +107,6 @@
                 'e': exponent
                 'E': exponent
                 whitespace: done
-                character: next
             }
             '#': base
             base: {
@@ -122,13 +121,11 @@
                         character: next
                     }
                     whitespace: done
-                    character: next
                 }
                 '#': {
                     'e': exponent
                     'E': exponent
                     whitespace: done
-                    character: next
                 }
             }
             exponent: {
@@ -138,7 +135,6 @@
                     exponent.digit: {
                         character.digit: exponent.digit
                         whitespace: done
-                        character: next
                     }
                 }
                 '-': exponent.negative
@@ -147,12 +143,10 @@
                     exponent.digit: {
                         character.digit: exponent.digit
                         whitespace: done
-                        character: next
                     }
                 }
             }
             whitespace: done
-            character: next
         }
     }
 }

@@ -132,7 +132,7 @@ namespace neos
     void context::run()
     {
         if (text().empty())
-            throw no_program_loaded();
+            throw no_text();
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
     }
 

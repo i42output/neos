@@ -30,7 +30,8 @@ namespace neos
         {
             String,
             Done,
-            Next
+            Next,
+            Default
         };
 
         class i_schema_terminal_atom : public i_schema_atom

@@ -183,14 +183,37 @@ namespace neos
 
         void schema::parse_default_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
+            _limit_recursion_(schema);
             do_parse_tokens(aNode, aAtom, aAtom.default_tokens());
         }
 
         void schema::do_parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom, i_schema_node_atom::tokens_t& aResult)
         {
             _limit_recursion_(schema);
-            for (auto const& token : aNode)
+            auto parse_token_value = [&aAtom, &aResult](schema& aSchema, auto&& aToken)
             {
+                aToken.visit([&aSchema, &aToken, &aAtom, &aResult](auto&& aNodeValue)
+                {
+                    typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
+                    if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
+                        aSchema.add_rhs_atom_reference(aToken, aAtom, aResult.back().second());
+                    else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
+                    {
+                        auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*");
+                        aResult.back().second() = newNode;
+                        aSchema.parse_tokens(aToken, *newNode);
+                    }
+                }, false);
+            };
+            std::map<const char*, neolib::rjson_value::const_iterator> tokensInDocumentOrder;
+            for (auto iterToken = aNode.cbegin(); iterToken != aNode.cend(); ++iterToken)
+            {
+                auto const& token = *iterToken;
+                tokensInDocumentOrder[&token.name()[0]] = iterToken;
+            }
+            for (auto iterToken = tokensInDocumentOrder.cbegin(); iterToken != tokensInDocumentOrder.cend(); ++iterToken)
+            {
+                auto const& token = *iterToken->second;
                 switch (keyword(token.name()))
                 {
                 case schema_keyword::Expect:
@@ -198,23 +221,21 @@ namespace neos
                     add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
                     break;
                 case schema_keyword::Default:
-                    parse_default_tokens(token, aAtom);
+                    if (iterToken != std::prev(tokensInDocumentOrder.cend()))
+                        throw_error(token, "default specifier must appear last in token specification block");
+                    if (token.has_children())
+                        parse_default_tokens(token, aAtom);
+                    else
+                    {
+                        aResult.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                        aResult.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
+                        parse_token_value(*this, token);
+                    }
                     break;
                 case schema_keyword::Invalid:
                     aResult.push_back(schema_node_atom::tokens_t::concrete_value_type{});
                     add_lhs_atom_reference(token, aAtom, aResult.back().first());
-                    token.visit([this, &token, &aAtom, &aResult](auto&& aNodeValue)
-                    {
-                        typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
-                        if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
-                            add_rhs_atom_reference(token, aAtom, aResult.back().second());
-                        else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
-                        {
-                            auto newNode = neolib::make_ref<schema_node_atom>(aAtom, token.name() + ".*");
-                            aResult.back().second() = newNode;
-                            parse_tokens(token, *newNode);
-                        }
-                    }, false);
+                    parse_token_value(*this, token);
                     break;
                 default:
                     throw_error(aNode, "unexpected keyword '" + token.name() + "' in token specification");
@@ -298,7 +319,7 @@ namespace neos
                     }
                 }
                 else if constexpr (std::is_same_v<type_t, neolib::rjson_string>)
-                    aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::String, aNode.name());
+                    aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::String, aNodeValue);
             }, false);
         }
 

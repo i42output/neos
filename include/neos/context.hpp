@@ -45,7 +45,7 @@ namespace neos
     public:
         struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::context::no_schema_source") {} };
         struct no_schema_loaded : std::runtime_error { no_schema_loaded() : std::runtime_error("no schema loaded") {} };
-        struct no_program_loaded : std::runtime_error { no_program_loaded() : std::runtime_error("no program loaded") {} };
+        struct no_text : std::runtime_error { no_text() : std::runtime_error("no text") {} };
         struct compiler_error : std::runtime_error { compiler_error(const std::string& aReason) : std::runtime_error(aReason) {} };
     public:
         context();
