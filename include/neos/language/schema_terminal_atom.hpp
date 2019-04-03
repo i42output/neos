@@ -62,6 +62,11 @@ namespace neos
                 return iSymbol;
             }
         public:
+            bool is_concept(const i_concept&) const override
+            {
+                return false;
+            }
+        public:
             schema_terminal type() const override
             {
                 return iType;

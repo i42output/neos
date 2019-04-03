@@ -53,6 +53,8 @@ namespace neos
             Is,
             Done,
             Next,
+            Ignore,
+            Error,
             Default,
             Expect,
             Tokens
@@ -82,6 +84,7 @@ namespace neos
         public:
             i_schema_node_atom& root() const;
             language::meta const& meta() const;
+            neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
         private:
             static schema_keyword keyword(const neolib::rjson_string& aSymbol);
             void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
@@ -99,7 +102,6 @@ namespace neos
             std::string fully_qualified_name(const i_atom& aAtom) const;
             atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
             atom_ptr leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
-            neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
             void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText);
         private:
             neolib::rjson const& iSource;

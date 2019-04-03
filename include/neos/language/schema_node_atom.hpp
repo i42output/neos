@@ -76,6 +76,14 @@ namespace neos
                 return iSymbol;
             }
         public:
+            bool is_concept(const i_concept& aConcept) const override 
+            { 
+                for (auto const& concept : is_a())
+                    if (&*concept == &aConcept || aConcept.is_ancestor_of(*concept))
+                        return true;
+                return false;
+            }
+        public:
             const is_a_t& is_a() const override
             {
                 return iIsConcepts;

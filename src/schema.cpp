@@ -61,6 +61,8 @@ namespace neos
                 { "is", schema_keyword::Is},
                 { "done", schema_keyword::Done},
                 { "next", schema_keyword::Next},
+                { "ignore", schema_keyword::Ignore},
+                { "error", schema_keyword::Error},
                 { "default", schema_keyword::Default},
                 { "expect", schema_keyword::Expect},
                 { "tokens", schema_keyword::Tokens},
@@ -313,6 +315,12 @@ namespace neos
                         break;
                     case schema_keyword::Next:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Next);
+                        break;
+                    case schema_keyword::Ignore:
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Ignore);
+                        break;
+                    case schema_keyword::Error:
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Error);
                         break;
                     default:
                         throw_error(aNode, "unexpected keyword '" + aNodeValue.text + "'");

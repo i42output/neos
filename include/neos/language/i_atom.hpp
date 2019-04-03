@@ -27,6 +27,7 @@ namespace neos::language
 {
     class i_schema_atom;
     class i_concept_atom;
+    class i_concept;
 
     class i_atom : public neolib::i_reference_counted
     {
@@ -47,6 +48,7 @@ namespace neos::language
         virtual bool is_concept_atom() const = 0;
         virtual const i_concept_atom& as_concept_atom() const = 0;
         virtual i_concept_atom& as_concept_atom() = 0;
+        virtual bool is_concept(const i_concept& aConcept) const = 0;
     public:
         bool operator==(const i_atom& rhs) const
         {

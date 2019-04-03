@@ -1,7 +1,7 @@
 {
     meta: {
         language: "Calculator"
-        description: "A simple expression evaluator (for neos testing purposes)"
+        description: "A simple expression evaluator language (for neos testing purposes)"
         language.file.extension: [ ".calc" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
@@ -43,10 +43,12 @@
             expression: {
                 expect: end
             }
+            whitespace: ignore
         }
         end: {
             tokens: {
                 ';': done
+                whitespace: ignore
             }
         }
     }
@@ -60,8 +62,9 @@
                 '-': math.operator.subtraction
                 math.operator: {
                     expect: term
+                    whitespace: ignore
                 }
-                default: done
+                whitespace: ignore
             }
         }
         term: {
@@ -72,8 +75,9 @@
                     '/': math.operator.division
                     math.operator: {
                         expect: primary
+                        whitespace: ignore
                     }
-                    default: done
+                    whitespace: ignore
                 }
             }
         }
@@ -85,14 +89,18 @@
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary
+                    whitespace: ignore
                 }
                 '(': {
                     expect: expression
                     expression: {
                         expect: ')'
                         ')': done
+                        whitespace: ignore
                     }
+                    whitespace: ignore
                 }
+                whitespace: ignore
             }
         }
     }
@@ -101,11 +109,15 @@
         is: math.universal.number
         tokens: {
             character.digit: digit
-            '.': point
-            point: {
+            digit: {
                 character.digit: digit
-                'e': exponent
-                'E': exponent
+                '.': point
+                point: {
+                    character.digit: digit
+                    'e': exponent
+                    'E': exponent
+                    whitespace: done
+                }
                 whitespace: done
             }
             '#': base
@@ -146,7 +158,6 @@
                     }
                 }
             }
-            whitespace: done
         }
     }
 }

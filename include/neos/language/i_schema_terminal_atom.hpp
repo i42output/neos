@@ -31,6 +31,8 @@ namespace neos
             String,
             Done,
             Next,
+            Ignore,
+            Error,
             Default
         };
 

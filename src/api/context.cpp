@@ -141,7 +141,6 @@ namespace neos
         program().translationUnits.clear();
         std::istringstream stream{ aExpression };
         load_program(stream);
-        compile_program();
         run();
         iThreads.back()->join();
         auto result = iThreads.back()->result();
