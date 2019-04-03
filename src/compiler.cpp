@@ -213,20 +213,12 @@ namespace neos::language
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ":" << aMatchedTokenValue.symbol() << ")" << std::endl;
         auto currentSource = aSource;
-        auto iterToken = std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [&](auto&& aTokenMapEntry)
+        auto matchedToken = aAtom.find_token(aMatchedTokenValue);
+        if (matchedToken != nullptr)
         {
-            auto const& token = *aTokenMapEntry.first();
-            auto const& newTokenValue = *aTokenMapEntry.second();
-            return (token == aMatchedTokenValue ||
-                (token.is_concept_atom() && aMatchedTokenValue.is_concept_atom() &&
-                    token.as_concept_atom().concept().is_ancestor_of(aMatchedTokenValue.as_concept_atom().concept())));
-        });
-        if (iterToken != aAtom.tokens().end())
-        {
-            auto const& newTokenValue = *iterToken->second();
-            auto result = parse_token(aPass, aProgram, aUnit, aAtom, newTokenValue, currentSource);
+            auto result = parse_token(aPass, aProgram, aUnit, aAtom, *matchedToken, currentSource);
             if (result.sourceParsed)
-                return parse_tokens(aPass, aProgram, aUnit, aAtom, newTokenValue, *result.sourceParsed);
+                return parse_tokens(aPass, aProgram, aUnit, aAtom, *matchedToken, *result.sourceParsed);
             return result;
         }
         return parse_result{ currentSource };

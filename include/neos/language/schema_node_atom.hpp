@@ -45,6 +45,8 @@ namespace neos
             typedef neolib::map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
             typedef atom_map_t token_map_t;
             typedef atom_map_t children_t;
+        private:
+            typedef std::unordered_map<const i_atom*, const i_atom*> token_cache_t; // for packrat memoization.
         public:
             schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol) :
                 iParent{ &aParent }, iSymbol { aSymbol }
@@ -126,6 +128,23 @@ namespace neos
             {
                 return iChildren;
             }
+            const i_atom* find_token(const i_atom& aToken) const override
+            {
+                auto iterCacheToken = iTokenCache.find(&aToken);
+                if (iterCacheToken == iTokenCache.end())
+                {
+                    auto iterToken = std::find_if(tokens().begin(), tokens().end(), [&](auto&& aTokenMapEntry)
+                    {
+                        auto const& token = *aTokenMapEntry.first();
+                        auto const& newTokenValue = *aTokenMapEntry.second();
+                        return (token == aToken ||
+                            (token.is_concept_atom() && aToken.is_concept_atom() &&
+                                token.as_concept_atom().concept().is_ancestor_of(aToken.as_concept_atom().concept())));
+                    });
+                    iterCacheToken = iTokenCache.emplace(&aToken, iterToken != tokens().end() ? &*iterToken->second() : nullptr).first;
+                }
+                return iterCacheToken->second;
+            }
         private:
             i_schema_atom* iParent;
             symbol_t iSymbol;
@@ -134,6 +153,7 @@ namespace neos
             tokens_t iTokens;
             tokens_t iDefaultTokens;
             children_t iChildren;
+            mutable token_cache_t iTokenCache;
         };
     }
 }

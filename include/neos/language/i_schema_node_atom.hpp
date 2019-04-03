@@ -63,6 +63,8 @@ namespace neos
             virtual tokens_t& default_tokens() = 0;
             virtual const children_t& children() const = 0;
             virtual children_t& children() = 0;
+        public:
+            virtual const i_atom* find_token(const i_atom& aToken) const = 0;
         };
     }
 }
