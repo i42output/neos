@@ -77,6 +77,8 @@ namespace neos
             typedef abstract_atom_ptr* atom_reference_t;
             typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
             typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
+        private:
+            typedef std::unordered_map<const i_concept*, atom_ptr> concept_atoms_t;
         public:
             static constexpr std::size_t RecursionLimit = 64u;
         public:
@@ -90,8 +92,6 @@ namespace neos
             void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
             void parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
-            void parse_default_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
-            void do_parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom, i_schema_node_atom::tokens_t& aResult);
             std::string fully_qualified_name(neolib::rjson_value const& aNode) const;
             std::string fully_qualified_name(neolib::rjson_value const& aNode, const neolib::rjson_string& aLeafName) const;
             const atom_references_t& atom_references() const;
@@ -102,6 +102,7 @@ namespace neos
             std::string fully_qualified_name(const i_atom& aAtom) const;
             atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
             atom_ptr leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
+            atom_ptr create_concept_atom(const neolib::i_ref_ptr<i_concept>& aConcept);
             void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText);
         private:
             neolib::rjson const& iSource;
@@ -109,6 +110,7 @@ namespace neos
             const concept_libraries_t& iConceptLibraries;
             atom_ptr iRoot;
             atom_references_t iAtomReferences;
+            concept_atoms_t iConceptAtoms;
         };
     }
 }

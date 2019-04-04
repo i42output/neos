@@ -110,16 +110,6 @@ namespace neos
             {
                 return iTokens;
             }
-            const abstract_tokens_t& default_tokens() const override
-            {
-                if (!iDefaultTokens.empty() || !has_parent())
-                    return iDefaultTokens;
-                return parent().as_schema_node_atom().default_tokens();
-            }
-            abstract_tokens_t& default_tokens() override
-            {
-                return const_cast<abstract_tokens_t&>(const_cast<const schema_node_atom*>(this)->default_tokens());
-            }
             const children_t& children() const override
             {
                 return iChildren;
@@ -151,7 +141,6 @@ namespace neos
             is_a_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;
-            tokens_t iDefaultTokens;
             children_t iChildren;
             mutable token_cache_t iTokenCache;
         };

@@ -59,12 +59,14 @@ namespace neos::language
             return iName;
         }
     public:
-        source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const override
+        source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
+            aConsumed = false;
             return aSource;
         }
-        source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd) const override
+        source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
+            aConsumed = true;
             return aSource;
         }
     private:

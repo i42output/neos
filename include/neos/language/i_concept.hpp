@@ -45,8 +45,16 @@ namespace neos::language
         virtual i_concept& parent() = 0;
         virtual const neolib::i_string& name() const = 0;
     public:
-        virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const = 0;
-        virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd) const = 0;
+        virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
+        virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
+        // helper
+    public:
+        template<typename SourceIterator>
+        struct consume_result
+        {
+            SourceIterator sourceParsed;
+            bool consumed;
+        };
     public:
         bool is_ancestor_of(const i_concept& child) const
         {
@@ -60,16 +68,38 @@ namespace neos::language
             return false;
         }
         template <typename SourceIterator>
-        SourceIterator consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
+        consume_result<SourceIterator> consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
         {
-            auto result = consume_token(aPass, &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
-            return std::next(aSource, std::distance(&*aSource, result));
+            if (aSource != aSourceEnd)
+            {
+                bool consumed;
+                auto source = &*aSource;
+                auto result = consume_token(aPass, source, std::next(source, std::distance(aSource, aSourceEnd)), consumed);
+                return consume_result<SourceIterator>{ std::next(aSource, std::distance(source, result)), consumed };
+            }
+            else
+            {
+                bool consumed;
+                auto result = consume_token(aPass, nullptr, nullptr, consumed);
+                return consume_result<SourceIterator>{ aSource, consumed };
+            }
         }
         template <typename SourceIterator>
-        SourceIterator consume_atom(compiler_pass aPass, const i_atom& aAtom, SourceIterator aSource, SourceIterator aSourceEnd) const
+        consume_result<SourceIterator> consume_atom(compiler_pass aPass, const i_atom& aAtom, SourceIterator aSource, SourceIterator aSourceEnd) const
         {
-            auto result = consume_atom(aPass, aAtom, &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
-            return std::next(aSource, std::distance(&*aSource, result));
+            if (aSource != aSourceEnd)
+            {
+                bool consumed;
+                auto source = &*aSource;
+                auto result = consume_atom(aPass, aAtom, source, std::next(source, std::distance(aSource, aSourceEnd)), consumed);
+                return consume_result<SourceIterator>{ std::next(aSource, std::distance(source, result)), consumed };
+            }
+            else
+            {
+                bool consumed;
+                auto result = consume_atom(aPass, aAtom, nullptr, nullptr, consumed);
+                return consume_result<SourceIterator>{ aSource, consumed };
+            }
         }
     };
 }

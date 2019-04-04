@@ -19,13 +19,6 @@
         is: language.character.utf8
     }
 
-    default: {
-        ' ': whitespace
-        character.LF: whitespace
-        character.CR: whitespace
-        character.TAB: whitespace
-    }
-
     whitespace: {
         is: language.whitespace
         tokens: {
@@ -68,11 +61,25 @@
             }
         }
         term: {
+            expect: term2
+            tokens: {
+                term2: {
+                    '*': math.operator.multiplication
+                    '/': math.operator.division
+                    math.operator: {
+                        expect: term2
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+            }
+        }
+        term2: {
             expect: primary
             tokens: {
                 primary: {
-                    '*': math.operator.multiplication
-                    '/': math.operator.division
+                    '**': math.operator.power
+                    '^': math.operator.power
                     math.operator: {
                         expect: primary
                         whitespace: ignore
@@ -116,9 +123,9 @@
                     character.digit: digit
                     'e': exponent
                     'E': exponent
-                    whitespace: done
+                    default: next
                 }
-                whitespace: done
+                default: next
             }
             '#': base
             base: {
@@ -129,15 +136,14 @@
                     '#': {
                         'e': exponent
                         'E': exponent
-                        whitespace: done
-                        character: next
+                        default: next
                     }
-                    whitespace: done
+                    default: next
                 }
                 '#': {
                     'e': exponent
                     'E': exponent
-                    whitespace: done
+                    default: next
                 }
             }
             exponent: {
@@ -146,7 +152,7 @@
                     character.digit: exponent.digit
                     exponent.digit: {
                         character.digit: exponent.digit
-                        whitespace: done
+                        default: next
                     }
                 }
                 '-': exponent.negative
@@ -154,10 +160,11 @@
                     character.digit: exponent.digit
                     exponent.digit: {
                         character.digit: exponent.digit
-                        whitespace: done
+                        default: next
                     }
                 }
             }
+            default: next
         }
     }
 }

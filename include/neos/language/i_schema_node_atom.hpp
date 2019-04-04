@@ -59,8 +59,6 @@ namespace neos
             virtual expects_t& expects() = 0;
             virtual const tokens_t& tokens() const = 0;
             virtual tokens_t& tokens() = 0;
-            virtual const tokens_t& default_tokens() const = 0;
-            virtual tokens_t& default_tokens() = 0;
             virtual const children_t& children() const = 0;
             virtual children_t& children() = 0;
         public:

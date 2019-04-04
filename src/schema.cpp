@@ -112,7 +112,7 @@ namespace neos
                         } },
                     { schema_keyword::Default, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         {
-                            parse_default_tokens(aChildNode, aParentAtom);
+                            parse_tokens(aChildNode, aParentAtom);
                         } },
                     { schema_keyword::Expect, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                         { 
@@ -180,29 +180,19 @@ namespace neos
 
         void schema::parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
-            do_parse_tokens(aNode, aAtom, aAtom.tokens());
-        }
-
-        void schema::parse_default_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
-        {
             _limit_recursion_(schema);
-            do_parse_tokens(aNode, aAtom, aAtom.default_tokens());
-        }
-
-        void schema::do_parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom, i_schema_node_atom::tokens_t& aResult)
-        {
-            _limit_recursion_(schema);
-            auto parse_token_value = [&aAtom, &aResult](schema& aSchema, auto&& aToken)
+            auto& result = aAtom.tokens();
+            auto parse_token_value = [&aAtom, &result](schema& aSchema, auto&& aToken)
             {
-                aToken.visit([&aSchema, &aToken, &aAtom, &aResult](auto&& aNodeValue)
+                aToken.visit([&aSchema, &aToken, &aAtom, &result](auto&& aNodeValue)
                 {
                     typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
                     if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
-                        aSchema.add_rhs_atom_reference(aToken, aAtom, aResult.back().second());
+                        aSchema.add_rhs_atom_reference(aToken, aAtom, result.back().second());
                     else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                     {
                         auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*");
-                        aResult.back().second() = newNode;
+                        result.back().second() = newNode;
                         aSchema.parse_tokens(aToken, *newNode);
                     }
                 }, false);
@@ -225,18 +215,13 @@ namespace neos
                 case schema_keyword::Default:
                     if (iterToken != std::prev(tokensInDocumentOrder.cend()))
                         throw_error(token, "default specifier must appear last in token specification block");
-                    if (token.has_children())
-                        parse_default_tokens(token, aAtom);
-                    else
-                    {
-                        aResult.push_back(schema_node_atom::tokens_t::concrete_value_type{});
-                        aResult.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
-                        parse_token_value(*this, token);
-                    }
+                    result.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    result.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
+                    parse_token_value(*this, token);
                     break;
                 case schema_keyword::Invalid:
-                    aResult.push_back(schema_node_atom::tokens_t::concrete_value_type{});
-                    add_lhs_atom_reference(token, aAtom, aResult.back().first());
+                    result.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    add_lhs_atom_reference(token, aAtom, result.back().first());
                     parse_token_value(*this, token);
                     break;
                 default:
@@ -392,7 +377,7 @@ namespace neos
                 if (matchingConcept == nullptr && aLeafName.find(base.to_std_string()) == 0)
                     matchingConcept = find_concept(aLeafName);
                 if (matchingConcept != nullptr)
-                    return neolib::make_ref<concept_atom>(matchingConcept);
+                    return create_concept_atom(matchingConcept);
             }
             auto delim = std::find(aStem.begin(), aStem.end(), '.');
             schema_node_atom key{ aNode, std::string{ aStem.begin(), delim } };
@@ -410,6 +395,14 @@ namespace neos
             if (aNode.has_parent())
                 return leaf(aNode.parent().as_schema_atom().as_schema_node_atom(), aStem, aLeafName);
             return atom_ptr{};
+        }
+
+        schema::atom_ptr schema::create_concept_atom(const neolib::i_ref_ptr<i_concept>& aConcept)
+        {
+            auto iterConceptAtom = iConceptAtoms.find(&*aConcept);
+            if (iterConceptAtom == iConceptAtoms.end())
+                iterConceptAtom = iConceptAtoms.emplace(&*aConcept, neolib::make_ref<concept_atom>(aConcept)).first;
+            return iterConceptAtom->second;
         }
 
         neolib::ref_ptr<i_concept> schema::find_concept(const std::string& aSymbol) const
