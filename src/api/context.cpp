@@ -59,14 +59,10 @@ namespace neos
         std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
-        try
-        {
+        if (boost::filesystem::exists(aSchemaPath))
             iSchemaSource.emplace(aSchemaPath);
-        }
-        catch (...)
-        {
+        else if (boost::filesystem::exists(aSchemaPath + ".neos"))
             iSchemaSource.emplace(aSchemaPath + ".neos");
-        }
         iSchema = std::make_shared<language::schema>(*iSchemaSource, concept_libraries());
     }
 

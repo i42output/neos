@@ -61,6 +61,7 @@ namespace neos
                 { "is", schema_keyword::Is},
                 { "done", schema_keyword::Done},
                 { "next", schema_keyword::Next},
+                { "continue", schema_keyword::Continue},
                 { "ignore", schema_keyword::Ignore},
                 { "error", schema_keyword::Error},
                 { "default", schema_keyword::Default},
@@ -191,7 +192,7 @@ namespace neos
                         aSchema.add_rhs_atom_reference(aToken, aAtom, result.back().second());
                     else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                     {
-                        auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*");
+                        auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*", true);
                         result.back().second() = newNode;
                         aSchema.parse_tokens(aToken, *newNode);
                     }
@@ -300,6 +301,9 @@ namespace neos
                         break;
                     case schema_keyword::Next:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Next);
+                        break;
+                    case schema_keyword::Continue:
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Continue);
                         break;
                     case schema_keyword::Ignore:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Ignore);

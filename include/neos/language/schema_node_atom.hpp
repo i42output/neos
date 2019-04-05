@@ -48,12 +48,12 @@ namespace neos
         private:
             typedef std::unordered_map<const i_atom*, const i_atom*> token_cache_t; // for packrat memoization.
         public:
-            schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol) :
-                iParent{ &aParent }, iSymbol { aSymbol }
+            schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol, bool aIsTokensNode = false) :
+                iParent{ &aParent }, iSymbol{ aSymbol }, iIsTokensNode { aIsTokensNode }
             {
             }
             schema_node_atom() :
-                iParent{ nullptr }
+                iParent{ nullptr }, iIsTokensNode{ false }
             {
             }
         public:
@@ -78,6 +78,10 @@ namespace neos
                 return iSymbol;
             }
         public:
+            bool is_tokens_node() const override
+            {
+                return iIsTokensNode;
+            }
             bool is_concept(const i_concept& aConcept) const override 
             { 
                 for (auto const& concept : is_a())
@@ -138,6 +142,7 @@ namespace neos
         private:
             i_schema_atom* iParent;
             symbol_t iSymbol;
+            bool iIsTokensNode;
             is_a_t iIsConcepts;
             expects_t iExpects;
             tokens_t iTokens;

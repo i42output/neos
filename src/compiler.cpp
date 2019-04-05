@@ -45,7 +45,7 @@ namespace neos::language
     void compiler::emitter::emit(const compiler::emit& aEmit)
     {
         if (iCompiler.trace_emits())
-            std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceStart) << ")" << std::endl;
+            std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
     }
 
     compiler::compiler() :
@@ -162,7 +162,7 @@ namespace neos::language
         {
             auto result = parse(aPass, aProgram, aUnit, aExpectedToken.as_schema_atom().as_schema_node_atom(), aSource);
             if (result.action != parse_result::Error && result.sourceParsed != aSource)
-                return parse_token_match(aPass, aProgram, aUnit, aAtom, aExpectedToken, result.sourceParsed, false);
+                return parse_token_match(aPass, aProgram, aUnit, aAtom, aExpectedToken, result.sourceParsed);
         }
         else if (aExpectedToken.is_schema_atom() && aExpectedToken.as_schema_atom().is_schema_terminal_atom())
             return parse_token(aPass, aProgram, aUnit, aAtom, aExpectedToken, aSource);
@@ -200,9 +200,9 @@ namespace neos::language
                     if (ateSome || (result.action != parse_result::Error && !aAtom.is_parent_of(matchedTokenValue)))
                     {
                         if (matchedTokenValue.is_schema_atom())
-                            result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
+                            result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed);
                         if (result.action != parse_result::Error)
-                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed, false);
+                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
                         if (result.action != parse_result::Error)
                         {
                             currentSource = result.sourceParsed;
@@ -219,7 +219,7 @@ namespace neos::language
                 else if (matchedTokenValue.is_schema_atom() && matchedTokenValue.as_schema_atom().is_schema_terminal_atom())
                 {
                     result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
-                    if (result.action == parse_result::Ignored)
+                    if (result.action == parse_result::Ignored || result.action == parse_result::Continue)
                     {
                         currentSource = result.sourceParsed;
                         iterToken = aAtom.tokens().begin();
@@ -256,13 +256,15 @@ namespace neos::language
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
         {
-            auto probeResult = parse_token_match(compiler_pass::Probe, aProgram, aUnit, aAtom, aMatchResult, aSource);
+            auto probeResult = parse_token_match(compiler_pass::Probe, aProgram, aUnit, aAtom, aMatchResult, aSource, aSelf);
             if (probeResult.action == parse_result::Error)
                 return probeResult;
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
-        emitter e{ *this, aPass };
+        std::optional<emitter> e;
+        if (!aSelf)
+            e.emplace(*this, aPass);
         parse_result result{ aSource };
         if (aMatchResult.is_concept_atom())
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
@@ -274,7 +276,7 @@ namespace neos::language
                 if (!nextMatch->is_concept_atom())
                     result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
                 if (result.action != parse_result::Error)
-                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
+                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed, true);
             }
         }
         return result;
@@ -309,6 +311,13 @@ namespace neos::language
                     return parse_result{ aSource, parse_result::Error };
                 case schema_terminal::Ignore:
                     return parse_result{ aSource, parse_result::Ignored };
+                case schema_terminal::Continue:
+                    {
+                        auto result = consume_token(aPass, aProgram, aUnit, aAtom, aSource);
+                        if (result.action == parse_result::Consumed)
+                            result.action = parse_result::Continue;
+                        return result;
+                    }
                 case schema_terminal::Next:
                     {
                         auto result = consume_token(aPass, aProgram, aUnit, aAtom, aSource);
@@ -341,7 +350,7 @@ namespace neos::language
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         parse_result result{ aSource };
         if (aToken.is_concept_atom())
-            result = consume_concept_token(aPass, aProgram, aUnit, aToken.as_concept_atom().concept(), aSource);
+            result = consume_concept_token(aPass, aProgram, aUnit, aToken.as_concept_atom().concept(), result.sourceParsed);
         else if (aToken.is_schema_atom() && aToken.as_schema_atom().is_schema_node_atom())
         {
             for (auto& concept : aToken.as_schema_atom().as_schema_node_atom().is_a())

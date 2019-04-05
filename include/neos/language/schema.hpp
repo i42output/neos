@@ -53,6 +53,7 @@ namespace neos
             Is,
             Done,
             Next,
+            Continue,
             Ignore,
             Error,
             Default,

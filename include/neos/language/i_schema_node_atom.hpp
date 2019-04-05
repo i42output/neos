@@ -53,6 +53,8 @@ namespace neos
             const i_schema_terminal_atom& as_schema_terminal_atom() const override { throw wrong_type(); }
             i_schema_terminal_atom& as_schema_terminal_atom() override { throw wrong_type(); }
         public:
+            virtual bool is_tokens_node() const = 0;
+        public:
             virtual const is_a_t& is_a() const = 0;
             virtual is_a_t& is_a() = 0;
             virtual const expects_t& expects() const = 0;
