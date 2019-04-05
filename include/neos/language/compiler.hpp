@@ -45,7 +45,7 @@ namespace neos::language
 
     class compiler
     {
-    public:
+    private:
         typedef translation_unit::source_t::const_iterator source_iterator;
         typedef std::optional<source_iterator> optional_source_iterator;
         struct parse_result
@@ -58,6 +58,25 @@ namespace neos::language
                 Ignored,
                 Error
             } action;
+        };
+        struct emit
+        {
+            const i_concept* concept;
+            source_iterator sourceStart;
+            source_iterator sourceEnd;
+        };
+        typedef std::vector<emit> emit_stack_t;
+        class emitter
+        {
+        public:
+            emitter(compiler& aCompiler, compiler_pass aPass);
+            ~emitter();
+        private:
+            void emit(const compiler::emit& aEmit);
+        private:
+            compiler& iCompiler;
+            compiler_pass iPass;
+            emit_stack_t::size_type iEmitFrom;
         };
     public:
         compiler();
@@ -78,12 +97,14 @@ namespace neos::language
         parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, source_iterator aSource);
         parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, source_iterator aSource);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, source_iterator aSource);
+        emit_stack_t& emit_stack();
         void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         neolib::ref_ptr<i_concept> iWhitespaceConcept;
         bool iTrace;
         bool iTraceEmits;
         optional_source_iterator iDeepestProbe;
+        emit_stack_t iEmitStack;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
     };

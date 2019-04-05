@@ -27,6 +27,27 @@
 
 namespace neos::language
 {
+    compiler::emitter::emitter(compiler& aCompiler, compiler_pass aPass) :
+        iCompiler{ aCompiler }, iPass{ aPass }, iEmitFrom{ aCompiler.emit_stack().size() }
+    {
+    }
+
+    compiler::emitter::~emitter()
+    {
+        if (iPass == compiler_pass::Emit)
+        {
+            for (emit_stack_t::size_type stackIndex = iEmitFrom; stackIndex < iCompiler.emit_stack().size(); ++stackIndex)
+                emit(iCompiler.emit_stack()[stackIndex]);
+            iCompiler.emit_stack().erase(iCompiler.emit_stack().begin() + iEmitFrom, iCompiler.emit_stack().end());
+        }
+    }
+
+    void compiler::emitter::emit(const compiler::emit& aEmit)
+    {
+        if (iCompiler.trace_emits())
+            std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceStart) << ")" << std::endl;
+    }
+
     compiler::compiler() :
         iTrace{ false }, iTraceEmits{ false }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
@@ -102,6 +123,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
+        emitter e{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
         if (aSource != aUnit.source.end())
         {
@@ -135,6 +157,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_expect(" << aAtom.symbol() << ")" << std::endl;
+        emitter e{ *this, aPass };
         if (aExpectedToken.is_schema_atom() && aExpectedToken.as_schema_atom().is_schema_node_atom())
         {
             auto result = parse(aPass, aProgram, aUnit, aExpectedToken.as_schema_atom().as_schema_node_atom(), aSource);
@@ -157,6 +180,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
+        emitter e{ *this, aPass };
         auto currentSource = aSource;
         for (auto iterToken = aAtom.tokens().begin(); currentSource != aUnit.source.end() && iterToken != aAtom.tokens().end();)
         {
@@ -238,6 +262,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
+        emitter e{ *this, aPass };
         parse_result result{ aSource };
         if (aMatchResult.is_concept_atom())
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
@@ -266,6 +291,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
+        emitter e{ *this, aPass };
         if (iDeepestProbe == std::nullopt || *iDeepestProbe < aSource)
             iDeepestProbe = aSource;
         if (aToken.is_schema_atom())
@@ -329,8 +355,8 @@ namespace neos::language
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto result = aConcept.consume_token(aPass, aSource, aUnit.source.end());
-        if (trace_emits() && aPass == compiler_pass::Emit && result.consumed)
-            std::cout << "{" << _compiler_recursion_limiter_.depth() << "}: " << aConcept.name() << std::endl;
+        if (result.consumed && aPass == compiler_pass::Emit)
+            emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
     }
 
@@ -338,9 +364,14 @@ namespace neos::language
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto result = aConcept.consume_atom(aPass, aAtom, aSource, aUnit.source.end());
-        if (trace_emits() && aPass == compiler_pass::Emit && result.consumed)
-            std::cout << "{" << _compiler_recursion_limiter_.depth() << "}: " << aConcept.name() << std::endl;
+        if (result.consumed && aPass == compiler_pass::Emit)
+            emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
+    }
+
+    compiler::emit_stack_t& compiler::emit_stack()
+    {
+        return iEmitStack;
     }
 
     void compiler::throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError)
