@@ -50,7 +50,7 @@ namespace neos::language
         typedef std::optional<source_iterator> optional_source_iterator;
         struct parse_result
         {
-            optional_source_iterator sourceParsed;
+            source_iterator sourceParsed;
             enum action_e
             {
                 Consumed,
