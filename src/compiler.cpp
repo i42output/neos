@@ -239,15 +239,18 @@ namespace neos::language
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
         parse_result result{ aSource };
-        if (result.action != parse_result::Error && aMatchResult.is_concept_atom())
+        if (aMatchResult.is_concept_atom())
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
-        auto nextMatch = aAtom.find_token(aMatchResult);
-        if (nextMatch != nullptr)
+        if (result.action != parse_result::Error)
         {
-            if (!nextMatch->is_concept_atom())
-                result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
-            if (result.action != parse_result::Error)
-                result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
+            auto nextMatch = aAtom.find_token(aMatchResult);
+            if (nextMatch != nullptr)
+            {
+                if (!nextMatch->is_concept_atom())
+                    result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
+                if (result.action != parse_result::Error)
+                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
+            }
         }
         return result;
     }
