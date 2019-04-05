@@ -366,8 +366,8 @@ namespace neos::language
         auto result = aConcept.consume_token(aPass, aSource, aUnit.source.end());
         if (result.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace_emits())
-                std::cout << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
+            if (trace())
+                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
             emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
         }
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
@@ -379,8 +379,8 @@ namespace neos::language
         auto result = aConcept.consume_atom(aPass, aAtom, aSource, aUnit.source.end());
         if (result.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace_emits())
-                std::cout << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
+            if (trace())
+                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
             emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
         }
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
