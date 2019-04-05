@@ -55,6 +55,7 @@
                 '-': math.operator.subtraction
                 math.operator: {
                     expect: term
+                    term: done
                     whitespace: ignore
                 }
                 whitespace: ignore
@@ -68,6 +69,7 @@
                     '/': math.operator.division
                     math.operator: {
                         expect: term2
+                        term2: done
                         whitespace: ignore
                     }
                     whitespace: ignore
@@ -82,6 +84,7 @@
                     '^': math.operator.power
                     math.operator: {
                         expect: primary
+                        primary: done
                         whitespace: ignore
                     }
                     whitespace: ignore
@@ -96,6 +99,7 @@
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary
+                    primary: done
                     whitespace: ignore
                 }
                 '(': {
