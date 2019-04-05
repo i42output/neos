@@ -200,7 +200,7 @@ namespace neos::language
                     if (ateSome || (result.action != parse_result::Error && !aAtom.is_parent_of(matchedTokenValue)))
                     {
                         if (matchedTokenValue.is_schema_atom())
-                            result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed);
+                            result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
                         if (result.action != parse_result::Error)
                             result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
                         if (result.action != parse_result::Error)
@@ -251,12 +251,12 @@ namespace neos::language
         return parse_result{ currentSource };
     }
 
-    compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, source_iterator aSource, bool aSelf)
+    compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, source_iterator aSource, bool aConsumeMatchResult, bool aSelf)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
         {
-            auto probeResult = parse_token_match(compiler_pass::Probe, aProgram, aUnit, aAtom, aMatchResult, aSource, aSelf);
+            auto probeResult = parse_token_match(compiler_pass::Probe, aProgram, aUnit, aAtom, aMatchResult, aSource, aConsumeMatchResult, aSelf);
             if (probeResult.action == parse_result::Error)
                 return probeResult;
         }
@@ -266,7 +266,7 @@ namespace neos::language
         if (!aSelf)
             e.emplace(*this, aPass);
         parse_result result{ aSource };
-        if (aMatchResult.is_concept_atom())
+        if (aConsumeMatchResult && aMatchResult.is_concept_atom())
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
         if (result.action != parse_result::Error)
         {
@@ -276,7 +276,7 @@ namespace neos::language
                 if (!nextMatch->is_concept_atom())
                     result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
                 if (result.action != parse_result::Error)
-                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed, true);
+                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed, true, true);
             }
         }
         return result;
@@ -365,7 +365,11 @@ namespace neos::language
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto result = aConcept.consume_token(aPass, aSource, aUnit.source.end());
         if (result.consumed && aPass == compiler_pass::Emit)
+        {
+            if (trace_emits())
+                std::cout << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
             emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
+        }
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
     }
 
@@ -374,7 +378,11 @@ namespace neos::language
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto result = aConcept.consume_atom(aPass, aAtom, aSource, aUnit.source.end());
         if (result.consumed && aPass == compiler_pass::Emit)
+        {
+            if (trace_emits())
+                std::cout << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aSource, result.sourceParsed) << ")" << std::endl;
             emit_stack().push_back(emit{ &aConcept, aSource, result.sourceParsed });
+        }
         return parse_result{ result.sourceParsed, result.consumed ? parse_result::Consumed : parse_result::Error };
     }
 
