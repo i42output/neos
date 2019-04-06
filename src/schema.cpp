@@ -340,7 +340,7 @@ namespace neos
                     auto concept = find_concept(entry->first.first);
                     if (concept != nullptr)
                     {
-                        auto conceptAtom = neolib::make_ref<concept_atom>(concept);
+                        auto conceptAtom = create_concept_atom(concept);
                         for (auto& r : entry->second)
                             *r = conceptAtom;
                         entry = atom_references().erase(entry);
