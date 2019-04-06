@@ -33,6 +33,12 @@ namespace neos::language
 
     class i_atom;
 
+    enum class emit_type
+    {
+        Postfix,
+        Infix
+    };
+
     class i_concept : public neolib::i_reference_counted
     {
     public:
@@ -45,6 +51,7 @@ namespace neos::language
         virtual i_concept& parent() = 0;
         virtual const neolib::i_string& name() const = 0;
     public:
+        virtual emit_type emit_as() const = 0;
         virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
         virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
         // helper

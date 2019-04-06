@@ -29,12 +29,12 @@ namespace neos::language
     class neos_concept : public neolib::reference_counted<i_concept>
     {
     public:
-        neos_concept(const std::string& aName) :
-            iParent{ nullptr }, iName { aName}
+        neos_concept(const std::string& aName, emit_type aEmitAs = emit_type::Postfix) :
+            iParent{ nullptr }, iName { aName}, iEmitAs{ aEmitAs }
         {
         }
-        neos_concept(i_concept& aParent, const std::string& aName) :
-            iParent{ &aParent }, iName{ aName }
+        neos_concept(i_concept& aParent, const std::string& aName, emit_type aEmitAs = emit_type::Postfix) :
+            iParent{ &aParent }, iName{ aName }, iEmitAs{ aEmitAs }
         {
         }
     public:
@@ -59,6 +59,10 @@ namespace neos::language
             return iName;
         }
     public:
+        emit_type emit_as() const override
+        {
+            return iEmitAs;
+        }
         source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
             aConsumed = false;
@@ -72,6 +76,7 @@ namespace neos::language
     private:
         i_concept* iParent;
         neolib::string iName;
+        emit_type iEmitAs;
     };
 
     class unimplemented_concept : public neos_concept

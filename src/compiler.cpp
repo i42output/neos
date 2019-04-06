@@ -34,6 +34,11 @@ namespace neos::language
 
     compiler::emitter::~emitter()
     {
+        emit();
+    }
+
+    void compiler::emitter::emit()
+    {
         if (iPass == compiler_pass::Emit)
         {
             for (emit_stack_t::size_type stackIndex = iEmitFrom; stackIndex < iCompiler.emit_stack().size(); ++stackIndex)
@@ -202,7 +207,15 @@ namespace neos::language
                         if (matchedTokenValue.is_schema_atom())
                             result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
                         if (result.action != parse_result::Error)
-                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
+                        {
+                            if (matchedTokenValue.is_concept_atom() && matchedTokenValue.as_concept_atom().concept().emit_as() == emit_type::Infix)
+                            {
+                                result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), result.sourceParsed);
+                                e.emit();
+                            }
+                            if (result.action != parse_result::Error)
+                                result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
+                        }
                         if (result.action != parse_result::Error)
                         {
                             currentSource = result.sourceParsed;
@@ -266,7 +279,7 @@ namespace neos::language
         if (!aSelf)
             e.emplace(*this, aPass);
         parse_result result{ aSource };
-        if (aConsumeMatchResult && aMatchResult.is_concept_atom())
+        if (aConsumeMatchResult && aMatchResult.is_concept_atom() && aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Postfix)
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
         if (result.action != parse_result::Error)
         {

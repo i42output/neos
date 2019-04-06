@@ -72,6 +72,8 @@ namespace neos::language
         public:
             emitter(compiler& aCompiler, compiler_pass aPass);
             ~emitter();
+        public:
+            void emit();
         private:
             void emit(const compiler::emit& aEmit);
         private:
