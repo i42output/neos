@@ -208,13 +208,15 @@ namespace neos::language
                             result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
                         if (result.action != parse_result::Error)
                         {
-                            if (matchedTokenValue.is_concept_atom() && matchedTokenValue.as_concept_atom().concept().emit_as() == emit_type::Infix)
+                            auto emitAs = matchedTokenValue.is_concept_atom() ? matchedTokenValue.as_concept_atom().concept().emit_as() : emit_type::Postfix;
+                            if (matchedTokenValue.is_concept_atom() && emitAs == emit_type::Infix)
                             {
-                                result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), result.sourceParsed);
+                                result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), 
+                                    result.sourceParsed);
                                 e.emit();
                             }
                             if (result.action != parse_result::Error)
-                                result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
+                                result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed, emitAs == emit_type::Postfix);
                         }
                         if (result.action != parse_result::Error)
                         {
@@ -258,6 +260,8 @@ namespace neos::language
                         else if (result.action == parse_result::Ignored && !ateSome)
                             ++currentSource;
                     }
+                    else
+                        return result;
                 }
             }
         }
@@ -279,7 +283,7 @@ namespace neos::language
         if (!aSelf)
             e.emplace(*this, aPass);
         parse_result result{ aSource };
-        if (aConsumeMatchResult && aMatchResult.is_concept_atom() && aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Postfix)
+        if (aConsumeMatchResult && aMatchResult.is_concept_atom())
             result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result.sourceParsed);
         if (result.action != parse_result::Error)
         {
@@ -341,12 +345,9 @@ namespace neos::language
                 case schema_terminal::Done:
                     return consume_token(aPass, aProgram, aUnit, aAtom, aSource);
                 case schema_terminal::String:
-                    if (std::distance(aSource, aUnit.source.end()) >= terminal.symbol().size() &&
+                    if (std::distance(aSource, aUnit.source.end()) >= terminal.symbol().size() && 
                         std::equal(terminal.symbol().begin(), terminal.symbol().end(), aSource))
-                    {
                         return parse_result{ aSource + terminal.symbol().size() };
-                    }
-                    return parse_result{ aSource };
                 default:
                     // do nothing
                     break;

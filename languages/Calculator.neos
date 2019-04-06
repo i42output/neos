@@ -94,7 +94,7 @@
         primary: {
             is: math.expression.operand
             tokens: {
-                character.digit: universal_number
+                math.universal.number.digit: universal_number
                 universal_number: done
                 '-': math.operator.negate
                 math.operator.negate: {
@@ -119,14 +119,11 @@
     universal_number: {
         is: math.universal.number
         tokens: {
-            character.digit: digit
             digit: {
-                character.digit: digit
                 digit: continue
                 '.': point
                 point: {
                     '.': error
-                    character.digit: digit
                     digit: continue
                     'e': exponent
                     'E': exponent
@@ -136,12 +133,10 @@
             }
             '#': base
             base: {
-                character.hexdigit: hexdigit
                 hexdigit: continue
                 '.': point
                 point: {
                     '.': error
-                    character.hexdigit: hexdigit
                     hexdigit: continue
                     '#': {
                         'e': exponent
@@ -159,18 +154,18 @@
             exponent: {
                 '+': exponent.positive
                 exponent.positive: {
-                    character.digit: exponent.digit
+                    digit: exponent.digit
                     exponent.digit: {
-                        character.digit: exponent.digit
+                        digit: exponent.digit
                         exponent.digit: continue
                         default: next
                     }
                 }
                 '-': exponent.negative
                 exponent.negative: {
-                    character.digit: exponent.digit
+                    digit: exponent.digit
                     exponent.digit: {
-                        character.digit: exponent.digit
+                        digit: exponent.digit
                         exponent.digit: continue
                         default: next
                     }
