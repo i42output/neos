@@ -22,10 +22,11 @@
     whitespace: {
         is: language.whitespace
         tokens: {
-            ' ': whitespace
-            character.LF: whitespace
-            character.CR: whitespace
-            character.TAB: whitespace
+            ' ': done
+            character.LF: done
+            character.CR: done
+            character.TAB: done
+            default: error
         }
     }
 
@@ -121,7 +122,6 @@
     universal_number: {
         is: math.universal.number
         tokens: {
-            whitespace: error
             digit: {
                 digit: continue
                 '.': point

@@ -199,7 +199,13 @@ namespace neos::language
             auto const& tokenValue = *iterToken->second();
             auto result = parse_token(aPass, aProgram, aUnit, aAtom, token, currentSource);
             if (is_finished(result, currentSource))
-                return result;
+            {
+                if (aAtom.is_ancestor_of(token))
+                    return result;
+                currentSource = result.sourceParsed;
+                iterToken = aAtom.tokens().begin();
+                continue;
+            }
             bool const ateSome = (result.action == parse_result::Consumed);
             if (ateSome)
             {
@@ -233,7 +239,7 @@ namespace neos::language
                             currentSource = result.sourceParsed;
                             iterToken = aAtom.tokens().begin();
                         }
-                        else
+                        else if (result.action != parse_result::Ignored && result.action != parse_result::Continue)
                             return result;
                     }
                     else if (result.action == parse_result::Consumed)
@@ -327,10 +333,13 @@ namespace neos::language
             auto nextMatch = aAtom.find_token(aMatchResult);
             if (nextMatch != nullptr)
             {
-                if (!nextMatch->is_concept_atom())
-                    result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
-                if (result.action == parse_result::Consumed)
-                    result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed, true, true);
+                if (*nextMatch != aAtom)
+                {
+                    if (!nextMatch->is_concept_atom())
+                        result = parse_token(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed);
+                    if (result.action == parse_result::Consumed)
+                        result = parse_token_match(aPass, aProgram, aUnit, aAtom, *nextMatch, result.sourceParsed, true, true);
+                }
             }
         }
         if (aConsumeMatchResult)
@@ -411,7 +420,7 @@ namespace neos::language
         else if (aToken.is_schema_atom() && aToken.as_schema_atom().is_schema_node_atom())
         {
             for (auto& concept : aToken.as_schema_atom().as_schema_node_atom().is_a())
-                if (result.action != parse_result::NoMatch)
+                if (result.action != parse_result::NoMatch && result.action != parse_result::Ignored)
                     result = consume_concept_atom(aPass, aProgram, aUnit, aToken, *concept, result.sourceParsed);
         }
         return result;
