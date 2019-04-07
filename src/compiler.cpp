@@ -385,9 +385,12 @@ namespace neos::language
                 case schema_terminal::Next:
                     return parse_result{ aSource, parse_result::ForNext };
                 case schema_terminal::String:
-                    if (std::distance(aSource, aUnit.source.end()) >= terminal.symbol().size() && 
-                        std::equal(terminal.symbol().begin(), terminal.symbol().end(), aSource))
-                        return parse_result{ aSource + terminal.symbol().size() };
+                    {
+                        auto const terminalSymbol = terminal.symbol().to_std_string_view();
+                        if (std::distance(aSource, aUnit.source.end()) >= terminalSymbol.size() &&
+                            std::equal(terminalSymbol.begin(), terminalSymbol.end(), aSource))
+                        return parse_result{ aSource + terminalSymbol.size() };
+                    }
                 default:
                     // do nothing
                     break;
