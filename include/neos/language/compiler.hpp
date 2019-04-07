@@ -54,9 +54,11 @@ namespace neos::language
             enum action_e
             {
                 Consumed,
+                Done,
                 ForNext,
                 Continue,
                 Ignored,
+                NoMatch,
                 Error
             } action;
         };
@@ -101,7 +103,9 @@ namespace neos::language
         parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, source_iterator aSource);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, source_iterator aSource);
         emit_stack_t& emit_stack();
-        void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
+        static bool is_finished(const compiler::parse_result& aResult, source_iterator aSource);
+        static bool finished(compiler::parse_result& aResult, source_iterator aSource, bool aConsumeErrors = false);
+        static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         neolib::ref_ptr<i_concept> iWhitespaceConcept;
         bool iTrace;
