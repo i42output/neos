@@ -20,5 +20,5 @@ def proc main()
     s : string;
 {
     input(s);
-    print(s + ": " + to_string(fib(to_integer(s)));
+    print(s + ": " + to_string(fib(to_integer(s))));
 }
