@@ -107,7 +107,6 @@ namespace neos::language
         static bool finished(compiler::parse_result& aResult, source_iterator aSource, bool aConsumeErrors = false);
         static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
-        neolib::ref_ptr<i_concept> iWhitespaceConcept;
         bool iTrace;
         bool iTraceEmits;
         optional_source_iterator iDeepestProbe;

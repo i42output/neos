@@ -79,6 +79,8 @@ namespace neos
             typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
             typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
         private:
+            typedef std::function<void(neolib::rjson_value const&, i_schema_node_atom&)> atom_handler_t;
+            typedef std::map<schema_keyword, atom_handler_t> atom_handlers_t;
             typedef std::unordered_map<const i_concept*, atom_ptr> concept_atoms_t;
         public:
             static constexpr std::size_t RecursionLimit = 64u;
@@ -90,6 +92,8 @@ namespace neos
             neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
         private:
             static schema_keyword keyword(const neolib::rjson_string& aSymbol);
+            void default_atom_handler(neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom);
+            atom_handlers_t& atom_handlers();
             void parse(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
             void parse_meta(neolib::rjson_value const& aNode);
             void parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom);
@@ -107,6 +111,8 @@ namespace neos
             void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText);
         private:
             neolib::rjson const& iSource;
+            std::optional<atom_handler_t> iDefaultAtomHandler;
+            std::optional<atom_handlers_t> iAtomHandlers;
             language::meta iMeta;
             const concept_libraries_t& iConceptLibraries;
             atom_ptr iRoot;

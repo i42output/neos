@@ -2,142 +2,189 @@
     meta: {
         language: "neoscript"
         description: "Default neoGFX scripting language"
-        sourcecode.file.extension: [ "ns" ]
+        sourcecode.file.extension: [ "neo" ]
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
 
     libraries: [
+        neos.core
         neos.math
-        neos.string
-        neos.io
-        neos.gc
-        i42.magic
+        neos.math.universal
     ]
 
-    tokens: {
-        ' ': whitespace
-        character.LF: whitespace
-        character.CR: whitespace
-        character.TAB: whitespace
-        character.EOF: whitespace
-        '-': {
-            '-': comment
-        }
-        character.alpha: keyword
-        character.underscore: keyword
-        procedure: procedure.main
+    expect: comment
+    expect: statement
+
+    character: {
+        is: language.character.utf8
     }
 
-    keyword: {
+    whitespace: {
+        is: language.whitespace
         tokens: {
-            character.alpha: keyword
-            whitespace: done
-        }
-        "fn": function
-    }
-
-    operand: {
-        tokens: {
-            character.digit: integer
-            '\"': string
-            identifier: identifier
-        }
-    }
-
-    expression: {
-        tokens: {
-            operand: operand
-            '-': object.operator.negate
-            '(': subexpression
-        }
-        object: {
-            tokens: {
-                '=': {
-                    '=': object.operator.assignment
-                    : object.operator.equality
-                }
-                '+': math.operator.addition
-                '-': math.operator.subtraction
-                '*': math.operator.multiplication
-                '/': math.operator.division
-            }
-        }
-    }
-
-    subexpression: {
-        is: expression
-        tokens: {
-            ')': done
-        }
-    }
-
-    identifier: {
-        is: language.identifier
-        tokens: {
-            character.alpha: identifier
-            character.digit: identifier
-            character.underscore: identifier
-            whitespace: done
-        }
-    }
-
-    integer: {
-        is: object.integer64
-        tokens: {
-            character.digit: integer
-            '.': float
-            whitespace: done
-            character: done.next
-        }
-    }
-
-    float: {
-        is: object.float64
-        tokens: {
-            character.digit: float
-            whitespace: done
-            character: done.next
+            ' ': done
+            character.LF: done
+            character.CR: done
+            character.TAB: done
+            default: error
         }
     }
 
     comment: {
-        is: whitespace
+        is: language.comment
+        is: language.whitespace
         tokens: {
-            character.LF: done
-            character: whitespace
+            '-' : {
+                '-': {
+                    character.LF: done
+                    default: ignore
+                }
+            }
         }
     }
 
-    string: {
-        is: object.string
+    statement: {
+        is: language.statement
+        expect: end
+        expect: expression
         tokens: {
-            '\"': done
-            '\\': escape
-            character: string
+            expression: {
+                expect: end
+            }
+            whitespace: ignore
         }
-        escape: {
+        end: {
             tokens: {
-                '\"': character.quote
-                'n': character.LF
-                'r': character.CR
-                't': character.TAB
-                'u': unicode
-                character: string
-                unicode: {
-                    character.hexdigit: unicode1
-                    unicode2: {
-                        character.hexdigit: unicode2
-                        unicode3: {
-                            character.hexdigit: unicode3
-                            unicode4: {
-                                character.hexdigit: unicode4
-                                unicode4: {
-                                    make.character.utf16: [ unicode1, unicode2, unicode3, unicode4 ]
-                                    done: escape
-                                }
-                            }
-                        }
+                ';': done
+                whitespace: ignore
+            }
+        }
+    }
+
+    expression: {
+        is: math.expression
+        expect: term
+        tokens: {
+            term: {
+                '+': math.operator.addition
+                '-': math.operator.subtraction
+                math.operator: {
+                    expect: term
+                    whitespace: ignore
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+        term: {
+            expect: term2
+            tokens: {
+                term2: {
+                    '*': math.operator.multiplication
+                    '/': math.operator.division
+                    math.operator: {
+                        expect: term2
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                    default: next
+                }
+            }
+        }
+        term2: {
+            expect: primary
+            tokens: {
+                primary: {
+                    '**': math.operator.power
+                    '^': math.operator.power
+                    math.operator: {
+                        expect: primary
+                        primary: done
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                    default: next
+                }
+            }
+        }
+        primary: {
+            is: math.expression.operand
+            tokens: {
+                math.universal.number.digit: universal_number
+                universal_number: done
+                '-': math.operator.negate
+                math.operator.negate: {
+                    expect: primary
+                    primary: done
+                    whitespace: ignore
+                }
+                '(': {
+                    expect: expression
+                    expression: {
+                        expect: ')'
+                        ')': done
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+    }
+
+    universal_number: {
+        is: math.universal.number
+        tokens: {
+            digit: {
+                digit: continue
+                '.': point
+                point: {
+                    '.': error
+                    digit: continue
+                    'e': exponent
+                    'E': exponent
+                    default: next
+                }
+                default: next
+            }
+            '#': base
+            base: {
+                hexdigit: continue
+                '.': point
+                point: {
+                    '.': error
+                    hexdigit: continue
+                    '#': {
+                        'e': exponent
+                        'E': exponent
+                        default: next
+                    }
+                    default: next
+                }
+                '#': {
+                    'e': exponent
+                    'E': exponent
+                    default: next
+                }
+            }
+            exponent: {
+                '+': exponent.positive
+                exponent.positive: {
+                    digit: exponent.digit
+                    exponent.digit: {
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
+                    }
+                }
+                '-': exponent.negative
+                exponent.negative: {
+                    digit: exponent.digit
+                    exponent.digit: {
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
                     }
                 }
             }

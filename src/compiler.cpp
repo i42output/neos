@@ -96,7 +96,6 @@ namespace neos::language
         {
             for (auto const& unit : aProgram.translationUnits)
             {
-                iWhitespaceConcept = unit.schema->find_concept("language.whitespace");
                 auto source = unit.source.begin();
                 while (source != unit.source.end())
                 {
@@ -293,6 +292,7 @@ namespace neos::language
                     case parse_result::Ignored:
                         if (!ateSome && currentSource == result.sourceParsed)
                             ++currentSource;
+                        iterToken = aAtom.tokens().begin();
                         break;
                     case parse_result::NoMatch:
                     case parse_result::Error:

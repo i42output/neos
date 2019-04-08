@@ -32,11 +32,11 @@
 
     statement: {
         is: language.statement
+        expect: end
         expect: expression
         tokens: {
             expression: {
                 expect: end
-                end: done
             }
             whitespace: ignore
         }
