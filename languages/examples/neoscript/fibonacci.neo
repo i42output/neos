@@ -8,6 +8,7 @@ import fn to_integer(s : string) -> i32;
 import proc input(s : out string);
 import proc print(s : in string);
 
+-- functions are pure
 def fn fib(x : i32) -> i32 
 {
     if (x = 1) 
@@ -16,6 +17,7 @@ def fn fib(x : i32) -> i32
         return fib(x-1) + fib(x-2);
 }
 
+-- procedures are impure
 def proc main()
     s : string;
 {
