@@ -60,6 +60,7 @@ namespace neos
                 { "libraries", schema_keyword::Libraries},
                 { "is", schema_keyword::Is},
                 { "done", schema_keyword::Done},
+                { "drain", schema_keyword::Drain},
                 { "next", schema_keyword::Next},
                 { "continue", schema_keyword::Continue},
                 { "ignore", schema_keyword::Ignore},
@@ -315,6 +316,9 @@ namespace neos
                         break;
                     case schema_keyword::Done:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Done);
+                        break;
+                    case schema_keyword::Drain:
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Drain);
                         break;
                     case schema_keyword::Next:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Next);

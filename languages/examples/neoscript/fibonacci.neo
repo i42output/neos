@@ -1,7 +1,8 @@
 -- neoscript example: Fibonacci
 
-using neos.string
-using neos.stream
+using a;
+using neos.string;
+using neos.stream;
 
 import fn to_string(x : i32) -> string;
 import fn to_integer(s : string) -> i32;

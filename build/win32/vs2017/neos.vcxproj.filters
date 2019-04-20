@@ -130,9 +130,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\languages\examples\ada\ExitCode.ada">
-      <Filter>Example Scripts</Filter>
-    </None>
     <None Include="..\..\..\languages\Ada.neos">
       <Filter>Languages</Filter>
     </None>
@@ -144,6 +141,18 @@
     </None>
     <None Include="..\..\..\languages\neoscript.neos">
       <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\neoscript\fibonacci.neo">
+      <Filter>Example Scripts</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\Ada\ExitCode.adb">
+      <Filter>Example Scripts</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\Ada\gem_7.ada">
+      <Filter>Example Scripts</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\Ada\HelloWorld.ada">
+      <Filter>Example Scripts</Filter>
     </None>
   </ItemGroup>
 </Project>

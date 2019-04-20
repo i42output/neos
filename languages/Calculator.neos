@@ -9,14 +9,13 @@
 
     libraries: [
         neos.core
-        neos.math
         neos.math.universal
     ]
 
     expect: statement
 
     character: {
-        is: language.character.utf8
+        is: string.utf8.character
     }
 
     whitespace: {

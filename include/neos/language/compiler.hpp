@@ -54,6 +54,7 @@ namespace neos::language
             enum action_e
             {
                 Consumed,
+                Drain,
                 Done,
                 ForNext,
                 Continue,

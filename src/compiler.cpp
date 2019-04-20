@@ -170,7 +170,8 @@ namespace neos::language
             auto result = parse(aPass, aProgram, aUnit, aExpectedToken.as_schema_atom().as_schema_node_atom(), aSource);
             if (result.action == parse_result::NoMatch)
                 return result;
-            result = parse_token_match(aPass, aProgram, aUnit, aAtom, aExpectedToken, result.sourceParsed);
+            if (result.action != parse_result::Drain)
+                result = parse_token_match(aPass, aProgram, aUnit, aAtom, aExpectedToken, result.sourceParsed);
             if (result.action == parse_result::Consumed || is_finished(result, result.sourceParsed))
                 return result;
         }
@@ -197,13 +198,10 @@ namespace neos::language
             auto const& token = *iterToken->first();
             auto const& tokenValue = *iterToken->second();
             auto result = parse_token(aPass, aProgram, aUnit, aAtom, token, currentSource);
-            if (is_finished(result, currentSource))
+            if (finished(result, currentSource))
             {
-                if (aAtom.is_ancestor_of(token))
+                if (token.is_schema_atom() && token.as_schema_atom().is_schema_node_atom() && token.as_schema_atom().as_schema_node_atom().is_tokens_node())
                     return result;
-                currentSource = result.sourceParsed;
-                iterToken = aAtom.tokens().begin();
-                continue;
             }
             bool const ateSome = (result.action == parse_result::Consumed);
             if (ateSome)
@@ -251,6 +249,7 @@ namespace neos::language
                     result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
                     switch(result.action)
                     {
+                    case parse_result::Drain:
                     case parse_result::Done:
                     case parse_result::ForNext:
                         return result;
@@ -283,6 +282,7 @@ namespace neos::language
                     auto result = parse_token(aPass, aProgram, aUnit, aAtom, tokenValue, currentSource);
                     switch (result.action)
                     {
+                    case parse_result::Drain:
                     case parse_result::Done:
                     case parse_result::ForNext:
                         return result;
@@ -295,8 +295,9 @@ namespace neos::language
                         iterToken = aAtom.tokens().begin();
                         break;
                     case parse_result::NoMatch:
-                    case parse_result::Error:
                         return result;
+                    case parse_result::Error:
+                        return parse_result{ result.sourceParsed, parse_result::NoMatch };
                     }
                 }
             }
@@ -391,6 +392,8 @@ namespace neos::language
                             result.action = parse_result::Done;
                         return result;
                     }
+                case schema_terminal::Drain:
+                    return parse_result{ aSource, parse_result::Drain };
                 case schema_terminal::Next:
                     return parse_result{ aSource, parse_result::ForNext };
                 case schema_terminal::String:
@@ -465,6 +468,8 @@ namespace neos::language
             return true;
         case parse_result::Done:
             return true;
+        case parse_result::Drain:
+            return true;
         default:
             return false;
         }
@@ -478,6 +483,9 @@ namespace neos::language
             aResult.action = parse_result::Consumed;
             return true;
         case parse_result::Done:
+            aResult.action = parse_result::Consumed;
+            return true;
+        case parse_result::Drain:
             aResult.action = parse_result::Consumed;
             return true;
         case parse_result::NoMatch:

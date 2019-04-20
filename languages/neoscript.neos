@@ -9,15 +9,29 @@
 
     libraries: [
         neos.core
-        neos.math
         neos.math.universal
     ]
 
+    expect: whitespace
     expect: comment
-    expect: statement
+    expect: keyword
+
+    package: {
+        name: {
+            is: module.package.name
+            tokens: {
+                character.alpha: string
+                string: {
+                    character.alpha: string
+                    '.': string
+                    default: next
+                }
+            }
+        }
+    }
 
     character: {
-        is: language.character.utf8
+        is: string.utf8.character
     }
 
     whitespace: {
@@ -35,13 +49,56 @@
         is: language.comment
         is: language.whitespace
         tokens: {
-            '-' : {
+            '-': {
                 '-': {
                     character.LF: done
                     default: ignore
                 }
             }
         }
+    }
+
+    keyword: {
+        is: language.keyword
+        candidate: {
+            is: string.utf8
+            tokens: {
+                character.alpha: continue
+                default: next
+            }
+        }
+        tokens: {
+            candidate: {
+                "using": using
+                "import": import
+                "def": def
+                "fn": fn
+                "proc": proc
+                "if": if
+                "else": else
+                "return": return
+                language.keyword: done
+            }
+        }
+        using: {
+            is: language.keyword
+            tokens: {
+                package.name: module.package.import
+                module.package.import: module.package.instantiate
+                module.package.instantiate: {
+                    expect: statement.end
+                    statement.end: drain
+                }
+                whitespace: ignore
+            }
+        }
+        import: { is: language.keyword }
+        def: { is: language.keyword }
+        fn: { is: language.keyword }
+        proc: { is: language.keyword }
+        if: { is: language.keyword }
+        else: { is: language.keyword }
+        return: { is: language.keyword }
     }
 
     statement: {

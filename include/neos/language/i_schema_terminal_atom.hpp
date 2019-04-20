@@ -30,6 +30,7 @@ namespace neos
         {
             String,
             Done,
+            Drain,
             Next,
             Continue,
             Ignore,
