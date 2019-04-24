@@ -56,6 +56,7 @@ namespace neos
             Next,
             Continue,
             Ignore,
+            None,
             Error,
             Default,
             Expect,

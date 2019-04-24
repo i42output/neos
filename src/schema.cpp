@@ -64,6 +64,7 @@ namespace neos
                 { "next", schema_keyword::Next},
                 { "continue", schema_keyword::Continue},
                 { "ignore", schema_keyword::Ignore},
+                { "none", schema_keyword::None},
                 { "error", schema_keyword::Error},
                 { "default", schema_keyword::Default},
                 { "expect", schema_keyword::Expect},
@@ -126,8 +127,14 @@ namespace neos
                     } },
                     { schema_keyword::Expect, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                     {
-                        aParentAtom.expects().push_back(atom_ptr{});
-                        add_rhs_atom_reference(aChildNode, aParentAtom, aParentAtom.expects().back());
+                        if (aChildNode.type() != neolib::json_type::Keyword ||
+                            keyword(aChildNode.as<neolib::rjson_keyword>().text) != schema_keyword::None)
+                        {
+                            aParentAtom.expects().push_back(atom_ptr{});
+                            add_rhs_atom_reference(aChildNode, aParentAtom, aParentAtom.expects().back());
+                        }
+                        else
+                            aParentAtom.set_expect_none();
                     } },
                     { schema_keyword::Tokens, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                     {
@@ -210,7 +217,8 @@ namespace neos
                         aSchema.add_rhs_atom_reference(aToken, aAtom, result.back().second());
                     else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                     {
-                        auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*", true);
+                        auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*");
+                        aSchema.add_lhs_atom_reference(aToken, aAtom, newNode->token_ref_ptr());
                         result.back().second() = newNode;
                         aSchema.parse_tokens(aToken, *newNode);
                     }
@@ -228,8 +236,14 @@ namespace neos
                 switch (keyword(token.name()))
                 {
                 case schema_keyword::Expect:
-                    aAtom.expects().push_back(atom_ptr{});
-                    add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
+                    if (token.type() != neolib::json_type::Keyword ||
+                        keyword(token.as<neolib::rjson_keyword>().text) != schema_keyword::None)
+                    {
+                        aAtom.expects().push_back(atom_ptr{});
+                        add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
+                    }
+                    else
+                        aAtom.set_expect_none();
                     break;
                 case schema_keyword::Default:
                     if (iterToken != std::prev(tokensInDocumentOrder.cend()))

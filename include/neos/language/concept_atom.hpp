@@ -75,6 +75,11 @@ namespace neos
             i_concept_atom& as_concept_atom() override { return *this; }
             bool is_concept(const i_concept& aConcept) const override { return &aConcept == &concept() || aConcept.is_ancestor_of(concept()); }
         public:
+            bool operator==(const i_atom& rhs) const override
+            {
+                return this == &rhs;
+            }
+        public:
             const i_concept& concept() const override
             {
                 return *iConcept;

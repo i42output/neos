@@ -43,6 +43,8 @@ namespace neos::language
         typedef neolib::i_map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>> atom_map_t;
         typedef atom_map_t token_map_t;
         typedef atom_map_t children_t;
+	public:
+		struct not_a_token_node : std::logic_error { not_a_token_node() : std::logic_error("neos::language::i_schema_node_atom::not_a_token_node") {} };
     public:
         bool is_schema_node_atom() const override { return true; }
         const i_schema_node_atom& as_schema_node_atom() const override { return *this; }
@@ -51,12 +53,16 @@ namespace neos::language
         const i_schema_terminal_atom& as_schema_terminal_atom() const override { throw wrong_type(); }
         i_schema_terminal_atom& as_schema_terminal_atom() override { throw wrong_type(); }
     public:
-        virtual bool is_tokens_node() const = 0;
+		virtual bool is_token_node() const = 0;
+		virtual const i_atom& token() const = 0; 
+		virtual neolib::i_ref_ptr<i_atom>& token_ref_ptr() = 0;
     public:
         virtual const is_a_t& is_a() const = 0;
         virtual is_a_t& is_a() = 0;
         virtual const expects_t& expects() const = 0;
         virtual expects_t& expects() = 0;
+        virtual bool expect_none() const = 0;
+        virtual void set_expect_none() = 0;
         virtual const tokens_t& tokens() const = 0;
         virtual tokens_t& tokens() = 0;
         virtual const children_t& children() const = 0;

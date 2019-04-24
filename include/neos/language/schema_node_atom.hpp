@@ -46,12 +46,12 @@ namespace neos::language
     private:
         typedef std::unordered_map<const i_atom*, const i_atom*> token_cache_t; // for packrat memoization.
     public:
-        schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol, bool aIsTokensNode = false) :
-            iParent{ &aParent }, iSymbol{ aSymbol }, iIsTokensNode { aIsTokensNode }
+        schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol) :
+			iParent{ &aParent }, iSymbol{ aSymbol }, iExpectNone{ false }
         {
         }
-        schema_node_atom() :
-            iParent{ nullptr }, iIsTokensNode{ false }
+		schema_node_atom() :
+            iParent{ nullptr }, iExpectNone{ false }
         {
         }
     public:
@@ -71,21 +71,36 @@ namespace neos::language
                 return *iParent;
             throw no_parent();
         }
-        const symbol_t& symbol() const override
+		const symbol_t& symbol() const override
         {
             return iSymbol;
         }
     public:
-        bool is_tokens_node() const override
-        {
-            return iIsTokensNode;
-        }
+		bool is_token_node() const override
+		{
+			return iToken != nullptr;
+		}
+		const i_atom& token() const override
+		{
+			if (is_token_node())
+				return *iToken;
+			throw not_a_token_node();
+		}
+		neolib::i_ref_ptr<i_atom>& token_ref_ptr() override
+		{
+			return iToken;
+		}
         bool is_concept(const i_concept& aConcept) const override 
         { 
             for (auto const& concept : is_a())
                 if (&*concept == &aConcept || aConcept.is_ancestor_of(*concept))
                     return true;
             return false;
+        }
+    public:
+        bool operator==(const i_atom& rhs) const override
+        {
+            return this == &rhs;
         }
     public:
         const is_a_t& is_a() const override
@@ -103,6 +118,14 @@ namespace neos::language
         expects_t& expects() override
         {
             return iExpects;
+        }
+        bool expect_none() const override
+        {
+            return iExpectNone;
+        }
+        void set_expect_none() override
+        {
+            iExpectNone = true;
         }
         const tokens_t& tokens() const override
         {
@@ -140,9 +163,10 @@ namespace neos::language
     private:
         i_schema_atom* iParent;
         symbol_t iSymbol;
-        bool iIsTokensNode;
+		neolib::ref_ptr<i_atom> iToken;
         is_a_t iIsConcepts;
         expects_t iExpects;
+        bool iExpectNone;
         tokens_t iTokens;
         children_t iChildren;
         mutable token_cache_t iTokenCache;

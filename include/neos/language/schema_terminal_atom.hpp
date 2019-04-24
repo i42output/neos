@@ -67,6 +67,14 @@ namespace neos
                 return false;
             }
         public:
+            bool operator==(const i_atom& rhs) const override
+            {
+                return this == &rhs ||
+                    (type() == schema_terminal::String &&
+                        rhs.is_schema_atom() && rhs.as_schema_atom().is_schema_terminal_atom() && rhs.as_schema_atom().as_schema_terminal_atom().type() == schema_terminal::String &&
+                        symbol() == rhs.symbol());
+            }
+        public:
             schema_terminal type() const override
             {
                 return iType;

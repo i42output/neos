@@ -50,11 +50,8 @@ namespace neos::language
         virtual i_concept_atom& as_concept_atom() = 0;
         virtual bool is_concept(const i_concept& aConcept) const = 0;
     public:
-        bool operator==(const i_atom& rhs) const
-        {
-            // atoms have unique object identity so just compare 'this' pointers.
-            return this == &rhs;
-        }
+        virtual bool operator==(const i_atom& rhs) const = 0;
+    public:
         bool operator!=(const i_atom& rhs) const
         {
             return !(*this == rhs);

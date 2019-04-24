@@ -133,18 +133,18 @@ namespace neos::language
         {
             if (expectingToken)
             {
-                parse_result result{ aSource, parse_result::NoMatch };
                 for (auto const& expect : aAtom.expects())
                 {
-                    result = parse_expect(aPass, aProgram, aUnit, aAtom, *expect, aSource);
-                    if (result.action == parse_result::Consumed || is_finished(result, result.sourceParsed))
+                    auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, &*expect, aSource);
+                    if (is_finished(result, result.sourceParsed) || result.action == parse_result::Consumed)
                         return result;
                     if (iDeepestProbe == std::nullopt || *iDeepestProbe < result.sourceParsed)
                         iDeepestProbe = result.sourceParsed;
                 }
-                return result;
+                return parse_result{ aSource, parse_result::NoMatch };
             }
-            return parse_tokens(aPass, aProgram, aUnit, aAtom, aSource);
+            else
+                return parse_tokens(aPass, aProgram, aUnit, aAtom, nullptr, aSource);
         }
         else
             return expectingToken ? parse_result{ aSource, parse_result::NoMatch } : parse_result{ aSource };
@@ -153,39 +153,12 @@ namespace neos::language
         //emit(aProgram.text, bytecode::opcode::B, loop);
     }
 
-    compiler::parse_result compiler::parse_expect(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aExpectedToken, source_iterator aSource)
+    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom* aExpected, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
         {
-            auto probeResult = parse_expect(compiler_pass::Probe, aProgram, aUnit, aAtom, aExpectedToken, aSource);
-            if (probeResult.action == parse_result::NoMatch)
-                return probeResult;
-        }
-        if (trace())
-            std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_expect(" << aAtom.symbol() << ")" << std::endl;
-        emitter e{ *this, aPass };
-        if (aExpectedToken.is_schema_atom() && aExpectedToken.as_schema_atom().is_schema_node_atom())
-        {
-            auto result = parse(aPass, aProgram, aUnit, aExpectedToken.as_schema_atom().as_schema_node_atom(), aSource);
-            if (result.action == parse_result::NoMatch)
-                return result;
-            if (result.action != parse_result::Drain)
-                result = parse_token_match(aPass, aProgram, aUnit, aAtom, aExpectedToken, result.sourceParsed);
-            if (result.action == parse_result::Consumed || is_finished(result, result.sourceParsed))
-                return result;
-        }
-        else if (aExpectedToken.is_schema_atom() && aExpectedToken.as_schema_atom().is_schema_terminal_atom())
-            return parse_token(aPass, aProgram, aUnit, aAtom, aExpectedToken, aSource);
-        return parse_result{ aSource, parse_result::NoMatch };
-    }
-
-    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource)
-    {
-        _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        if (aPass == compiler_pass::Emit)
-        {
-            auto probeResult = parse_tokens(compiler_pass::Probe, aProgram, aUnit, aAtom, aSource);
+            auto probeResult = parse_tokens(compiler_pass::Probe, aProgram, aUnit, aAtom, aExpected, aSource);
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
@@ -193,19 +166,28 @@ namespace neos::language
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
         emitter e{ *this, aPass };
         auto currentSource = aSource;
-        for (auto iterToken = aAtom.tokens().begin(); currentSource != aUnit.source.end() && iterToken != aAtom.tokens().end();)
+        bool defaultOk = aAtom.expect_none();
+        auto iterToken = aExpected ? 
+            std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [aExpected](auto&& token) { return *token.first() == *aExpected; }) : 
+            aAtom.tokens().begin();
+        if (iterToken == aAtom.tokens().end())
+            return parse_result{ aSource, parse_result::NoMatch };
+        for (; currentSource != aUnit.source.end() && iterToken != aAtom.tokens().end();)
         {
             auto const& token = *iterToken->first();
             auto const& tokenValue = *iterToken->second();
+            if (aAtom.is_token_node() && aAtom.token() == token)
+                defaultOk = true;
             auto result = parse_token(aPass, aProgram, aUnit, aAtom, token, currentSource);
             if (finished(result, currentSource))
             {
-                if (token.is_schema_atom() && token.as_schema_atom().is_schema_node_atom() && token.as_schema_atom().as_schema_node_atom().is_tokens_node())
-                    return result;
+                if (token.is_schema_atom() && token.as_schema_atom().is_schema_node_atom() && token.as_schema_atom().as_schema_node_atom().is_token_node())
+                    return consume_token(aPass, aProgram, aUnit, aAtom, result.sourceParsed);
             }
             bool const ateSome = (result.action == parse_result::Consumed);
             if (ateSome)
             {
+                defaultOk = true;
                 auto const& matchedTokenValue = tokenValue;
                 if (!matchedTokenValue.is_schema_atom() || matchedTokenValue.as_schema_atom().is_schema_node_atom())
                 {
@@ -213,7 +195,7 @@ namespace neos::language
                     if (aAtom.is_parent_of(matchedTokenValue))
                         result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, trySource);
                     if (is_finished(result, trySource))
-                        return result;
+                        return parse_result{ consume_token(aPass, aProgram, aUnit, aAtom, result.sourceParsed).sourceParsed, result.action };
                     bool const ateSome = (result.action == parse_result::Consumed && result.sourceParsed != trySource);
                     if (ateSome || (result.action == parse_result::Consumed && !aAtom.is_parent_of(matchedTokenValue)))
                     {
@@ -221,15 +203,14 @@ namespace neos::language
                             result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
                         if (is_finished(result, result.sourceParsed))
                         {
-                            consume_token(aPass, aProgram, aUnit, matchedTokenValue, result.sourceParsed);
-                            return result;
+                            result = parse_result{ consume_token(aPass, aProgram, aUnit, matchedTokenValue, result.sourceParsed).sourceParsed, result.action };
+                            return parse_result{ consume_token(aPass, aProgram, aUnit, aAtom, result.sourceParsed).sourceParsed, result.action };
                         }
                         if (result.action == parse_result::Consumed)
                         {
-                            if (result.action == parse_result::Consumed)
-                                result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed, true);
+                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
                             if (is_finished(result, result.sourceParsed))
-                                return result;
+                                return parse_result{ consume_token(aPass, aProgram, aUnit, aAtom, result.sourceParsed).sourceParsed, result.action };
                         }
                         if (result.action == parse_result::Consumed)
                         {
@@ -273,7 +254,12 @@ namespace neos::language
                     return result;
             }
             else
+            {
+                if (aExpected)
+                    return parse_result{ aSource, parse_result::NoMatch };
                 ++iterToken;
+            }
+            aExpected = nullptr;
             if (iterToken == aAtom.tokens().end())
             {
                 if (token.is_schema_atom() && token.as_schema_atom().is_schema_terminal_atom() &&
@@ -285,6 +271,8 @@ namespace neos::language
                     case parse_result::Drain:
                     case parse_result::Done:
                     case parse_result::ForNext:
+                        if (!defaultOk)
+                            result.action = parse_result::NoMatch;
                         return result;
                     case parse_result::Consumed:
                         currentSource = result.sourceParsed;
@@ -302,7 +290,7 @@ namespace neos::language
                 }
             }
         }
-        return parse_result{ currentSource, currentSource != aSource ? parse_result::Consumed : parse_result::NoMatch };
+        return parse_result{ currentSource, parse_result::NoMatch };
     }
 
     compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, source_iterator aSource, bool aConsumeMatchResult, bool aSelf)
@@ -399,9 +387,8 @@ namespace neos::language
                 case schema_terminal::String:
                     {
                         auto const terminalSymbol = terminal.symbol().to_std_string_view();
-                        if (std::distance(aSource, aUnit.source.end()) >= terminalSymbol.size() &&
-                            std::equal(terminalSymbol.begin(), terminalSymbol.end(), aSource))
-                        return parse_result{ aSource + terminalSymbol.size() };
+                        if (static_cast<std::size_t>(std::distance(aSource, aUnit.source.end())) >= terminalSymbol.size() && std::equal(terminalSymbol.begin(), terminalSymbol.end(), aSource))
+                            return parse_result{ aSource + terminalSymbol.size() };
                     }
                 default:
                     // do nothing
@@ -421,11 +408,9 @@ namespace neos::language
         if (aToken.is_concept_atom())
             result = consume_concept_token(aPass, aProgram, aUnit, aToken.as_concept_atom().concept(), result.sourceParsed);
         else if (aToken.is_schema_atom() && aToken.as_schema_atom().is_schema_node_atom())
-        {
             for (auto& concept : aToken.as_schema_atom().as_schema_node_atom().is_a())
                 if (result.action != parse_result::NoMatch && result.action != parse_result::Ignored)
                     result = consume_concept_atom(aPass, aProgram, aUnit, aToken, *concept, result.sourceParsed);
-        }
         return result;
     }
 

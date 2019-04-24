@@ -13,6 +13,12 @@
     ]
 
     expect: statement
+    expect: whitespace
+
+    tokens: {
+        statement: done
+        whitespace: done
+    }
 
     character: {
         is: string.utf8.character
@@ -36,7 +42,9 @@
         tokens: {
             expression: {
                 expect: end
+                end: done
             }
+            end: done
             whitespace: ignore
         }
         end: {
@@ -52,10 +60,12 @@
         expect: term
         tokens: {
             term: {
+                expect: none
                 '+': math.operator.addition
                 '-': math.operator.subtraction
                 math.operator: {
                     expect: term
+                    term: done
                     whitespace: ignore
                 }
                 whitespace: ignore
@@ -66,10 +76,12 @@
             expect: term2
             tokens: {
                 term2: {
+                    expect: none
                     '*': math.operator.multiplication
                     '/': math.operator.division
                     math.operator: {
                         expect: term2
+                        term2: done
                         whitespace: ignore
                     }
                     whitespace: ignore
@@ -81,6 +93,7 @@
             expect: primary
             tokens: {
                 primary: {
+                    expect: none
                     '**': math.operator.power
                     '^': math.operator.power
                     math.operator: {
@@ -156,6 +169,7 @@
             exponent: {
                 '+': exponent.positive
                 exponent.positive: {
+                    expect: digit
                     digit: exponent.digit
                     exponent.digit: {
                         digit: exponent.digit
@@ -165,6 +179,7 @@
                 }
                 '-': exponent.negative
                 exponent.negative: {
+                    expect: digit
                     digit: exponent.digit
                     exponent.digit: {
                         digit: exponent.digit

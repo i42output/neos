@@ -37,12 +37,12 @@
     whitespace: {
         is: language.whitespace
         tokens: {
-            ' ': done
-            character.LF: done
-            character.CR: done
-            character.TAB: done
-            default: error
-        }
+            ' ': continue
+            character.LF: continue
+            character.CR: continue
+            character.TAB: continue
+			default: next
+		}
     }
 
     comment: {
