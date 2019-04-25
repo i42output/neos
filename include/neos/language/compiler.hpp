@@ -99,9 +99,9 @@ namespace neos::language
         parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom* aExpected, source_iterator aSource);
         parse_result parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, source_iterator aSource, bool aConsumeMatchResult = true, bool aSelf = false);
         parse_result parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aToken, source_iterator aSource);
-        parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, source_iterator aSource);
-        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, source_iterator aSource);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, source_iterator aSource);
+        parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, const parse_result& aResult);
+        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, const parse_result& aResult);
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
         emit_stack_t& emit_stack();
         static bool is_finished(const compiler::parse_result& aResult, source_iterator aSource);
         static bool finished(compiler::parse_result& aResult, source_iterator aSource, bool aConsumeErrors = false);
