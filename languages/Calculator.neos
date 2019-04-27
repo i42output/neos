@@ -61,12 +61,10 @@
         tokens: {
             term: {
                 expect: none
-                '+': math.operator.addition
-                '-': math.operator.subtraction
-                math.operator: {
+                '+': math.operator.add
+                '-': math.operator.subtract
+                math.operator.addition: {
                     expect: term
-                    term: done
-                    whitespace: ignore
                 }
                 whitespace: ignore
                 default: next
@@ -77,12 +75,10 @@
             tokens: {
                 term2: {
                     expect: none
-                    '*': math.operator.multiplication
-                    '/': math.operator.division
-                    math.operator: {
+                    '*': math.operator.multiply
+                    '/': math.operator.divide
+                    math.operator.multiplication: {
                         expect: term2
-                        term2: done
-                        whitespace: ignore
                     }
                     whitespace: ignore
                     default: next
@@ -98,8 +94,6 @@
                     '^': math.operator.power
                     math.operator: {
                         expect: primary
-                        primary: done
-                        whitespace: ignore
                     }
                     whitespace: ignore
                     default: next

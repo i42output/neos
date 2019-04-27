@@ -74,6 +74,10 @@ namespace neos::language
             }
             return false;
         }
+        bool is_related_to(const i_concept& other) const
+        {
+            return &other == this || is_ancestor_of(other);
+        }
         template <typename SourceIterator>
         consume_result<SourceIterator> consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
         {

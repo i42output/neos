@@ -28,7 +28,12 @@
 namespace neos::language
 {
     compiler::emitter::emitter(compiler& aCompiler, compiler_pass aPass) :
-        iCompiler{ aCompiler }, iPass{ aPass }, iEmitFrom{ aCompiler.emit_stack().size() }
+        emitter{ aCompiler, aPass, aCompiler.emit_stack() }
+    {
+    }
+
+    compiler::emitter::emitter(compiler& aCompiler, compiler_pass aPass, emit_stack_t& aEmitStack) :
+        iCompiler{ aCompiler }, iPass{ aPass }, iEmitStack{ aEmitStack }, iEmitFrom{ aEmitStack.size() }
     {
     }
 
@@ -41,16 +46,30 @@ namespace neos::language
     {
         if (iPass == compiler_pass::Emit)
         {
-            for (emit_stack_t::size_type stackIndex = iEmitFrom; stackIndex < iCompiler.emit_stack().size(); ++stackIndex)
-                emit(iCompiler.emit_stack()[stackIndex]);
-            iCompiler.emit_stack().erase(iCompiler.emit_stack().begin() + iEmitFrom, iCompiler.emit_stack().end());
+            for (emit_stack_t::size_type stackIndex = iEmitFrom; stackIndex < emit_stack().size(); ++stackIndex)
+                emit(emit_stack()[stackIndex]);
+            emit_stack().erase(emit_stack().begin() + iEmitFrom, emit_stack().end());
         }
+    }
+
+    void compiler::emitter::move_to(emit_stack_t& aOtherStack)
+    {
+        aOtherStack.insert(aOtherStack.end(), emit_stack().begin() + iEmitFrom, emit_stack().end());
+        emit_stack().erase(emit_stack().begin() + iEmitFrom, emit_stack().end());
+    }
+
+    compiler::emit_stack_t& compiler::emitter::emit_stack()
+    {
+        return iEmitStack;
     }
 
     void compiler::emitter::emit(const compiler::emit& aEmit)
     {
-        if (iCompiler.trace_emits())
-            std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
+        if (aEmit.concept != nullptr)
+        {
+            if (iCompiler.trace_emits())
+                std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
+        }
     }
 
     compiler::compiler() :
@@ -135,7 +154,18 @@ namespace neos::language
             {
                 for (auto const& expect : aAtom.expects())
                 {
-                    auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, &*expect, aSource);
+                    if (aPass == compiler_pass::Emit && aAtom.expects().size() == 1 && aAtom.recursive_token(*expect) && postfix_operation_stack().size() >= 2)
+                    {
+                        auto const& current = *std::prev(postfix_operation_stack().end());
+                        auto& previous = *std::prev(std::prev(postfix_operation_stack().end()));
+                        if (aAtom.token().is_related_to(*current.concept) && previous.concept != nullptr && aAtom.token().is_related_to(*previous.concept))
+                        {
+                            emit_stack().push_back(previous);
+                            e.emit();
+                            previous.concept = nullptr;
+                        }
+                    }
+                    auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, expected{ &*expect, &aAtom }, aSource);
                     if (is_finished(result, result.sourceParsed) || result.action == parse_result::Consumed)
                         return result;
                     if (iDeepestProbe == std::nullopt || *iDeepestProbe < result.sourceParsed)
@@ -144,7 +174,7 @@ namespace neos::language
                 return parse_result{ aSource, parse_result::NoMatch };
             }
             else
-                return parse_tokens(aPass, aProgram, aUnit, aAtom, nullptr, aSource);
+                return parse_tokens(aPass, aProgram, aUnit, aAtom, expected{}, aSource);
         }
         else
             return expectingToken ? parse_result{ aSource, parse_result::NoMatch } : parse_result{ aSource };
@@ -153,7 +183,7 @@ namespace neos::language
         //emit(aProgram.text, bytecode::opcode::B, loop);
     }
 
-    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom* aExpected, source_iterator aSource)
+    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
@@ -167,11 +197,17 @@ namespace neos::language
         emitter e{ *this, aPass };
         auto currentSource = aSource;
         bool defaultOk = aAtom.expect_none();
-        auto iterToken = aExpected ? 
-            std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [aExpected](auto&& token) { return *token.first() == *aExpected; }) : 
+        bool const consumeSelf = (aExpected.what == nullptr || *aExpected.context == aAtom);
+        bool handledExpect = false;
+        auto iterToken = aExpected.what ? 
+            std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [aExpected](auto&& token) { return *token.first() == *aExpected.what; }) : 
             aAtom.tokens().begin();
-        if (iterToken == aAtom.tokens().end())
+        if (iterToken == aAtom.tokens().end() && aExpected.what)
+        {
+            if (aAtom.has_parent())
+                return parse_tokens(aPass, aProgram, aUnit, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSource);
             return parse_result{ aSource, parse_result::NoMatch };
+        }
         for (; currentSource != aUnit.source.end() && iterToken != aAtom.tokens().end();)
         {
             auto const& token = *iterToken->first();
@@ -195,20 +231,22 @@ namespace neos::language
                     if (aAtom.is_parent_of(matchedTokenValue))
                         result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, trySource);
                     if (is_finished(result, trySource))
-                        return consume_token(aPass, aProgram, aUnit, aAtom, result);
+                        return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
                     bool const ateSome = (result.action == parse_result::Consumed && result.sourceParsed != trySource);
                     if (ateSome || (result.action == parse_result::Consumed && !aAtom.is_parent_of(matchedTokenValue)))
                     {
                         if (matchedTokenValue.is_schema_atom())
                             result = parse_token_match(aPass, aProgram, aUnit, matchedTokenValue.as_schema_atom().as_schema_node_atom(), token, result.sourceParsed, false);
                         if (is_finished(result, result.sourceParsed))
-                            return consume_token(aPass, aProgram, aUnit, aAtom, 
-                                consume_token(aPass, aProgram, aUnit, matchedTokenValue, result));
+                        {
+                            result = consume_token(aPass, aProgram, aUnit, matchedTokenValue, result);
+                            return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
+                        }
                         if (result.action == parse_result::Consumed)
                         {
                             result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result.sourceParsed);
                             if (is_finished(result, result.sourceParsed))
-                                return consume_token(aPass, aProgram, aUnit, aAtom, result);
+                                return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
                         }
                         if (result.action == parse_result::Consumed)
                         {
@@ -253,11 +291,11 @@ namespace neos::language
             }
             else
             {
-                if (aExpected)
+                if (!handledExpect && aExpected.what)
                     return parse_result{ aSource, parse_result::NoMatch };
                 ++iterToken;
             }
-            aExpected = nullptr;
+            handledExpect = true;
             if (iterToken == aAtom.tokens().end())
             {
                 if (token.is_schema_atom() && token.as_schema_atom().is_schema_terminal_atom() &&
@@ -302,15 +340,21 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
+        emitter poe{ *this, aPass, postfix_operation_stack() };
         std::optional<emitter> e;
         if (!aSelf)
             e.emplace(*this, aPass);
         parse_result result{ aSource };
         if (aConsumeMatchResult)
         {
-            if (aMatchResult.is_concept_atom() && aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Infix)
-                result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result);
-            else if (!aMatchResult.is_concept_atom())
+            if (aMatchResult.is_concept_atom())
+            {
+                if (aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Infix)
+                    result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result);
+                else if (aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Postfix)
+                    result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result, postfix_operation_stack());
+            }
+            else
                 result = consume_token(aPass, aProgram, aUnit, aMatchResult, result);
             if (e)
                 e->emit();
@@ -329,11 +373,7 @@ namespace neos::language
                 }
             }
         }
-        if (aConsumeMatchResult)
-        {
-            if (aMatchResult.is_concept_atom() && aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Postfix)
-                result = consume_concept_atom(aPass, aProgram, aUnit, aMatchResult, aMatchResult.as_concept_atom().concept(), result);
-        }
+        poe.move_to(emit_stack());
         return result;
     }
 
@@ -427,13 +467,18 @@ namespace neos::language
 
     compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult)
     {
+        return consume_concept_atom(aPass, aProgram, aUnit, aAtom, aConcept, aResult, emit_stack());
+    }
+        
+    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, emit_stack_t& aEmitStack)
+    {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace())
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            emit_stack().push_back(emit{ &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            aEmitStack.push_back(emit{ &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return parse_result{ consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch };
     }
@@ -441,6 +486,11 @@ namespace neos::language
     compiler::emit_stack_t& compiler::emit_stack()
     {
         return iEmitStack;
+    }
+
+    compiler::emit_stack_t& compiler::postfix_operation_stack()
+    {
+        return iPostfixOperationStack;
     }
 
     bool compiler::is_finished(const parse_result& aResult, source_iterator aSource)

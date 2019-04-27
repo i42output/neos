@@ -124,8 +124,8 @@
         expect: term
         tokens: {
             term: {
-                '+': math.operator.addition
-                '-': math.operator.subtraction
+                '+': math.operator.add
+                '-': math.operator.subtract
                 math.operator: {
                     expect: term
                     whitespace: ignore
@@ -138,8 +138,8 @@
             expect: term2
             tokens: {
                 term2: {
-                    '*': math.operator.multiplication
-                    '/': math.operator.division
+                    '*': math.operator.multiply
+                    '/': math.operator.divide
                     math.operator: {
                         expect: term2
                         whitespace: ignore

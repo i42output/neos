@@ -67,13 +67,38 @@ namespace neos
                 return *iSymbol;
             }
         public:
-            bool is_schema_atom() const override { return false; }
-            const i_schema_atom& as_schema_atom() const override { throw wrong_type(); }
-            i_schema_atom& as_schema_atom() override { throw wrong_type(); }
-            bool is_concept_atom() const override { return true; }
-            const i_concept_atom& as_concept_atom() const override { return *this; }
-            i_concept_atom& as_concept_atom() override { return *this; }
-            bool is_concept(const i_concept& aConcept) const override { return &aConcept == &concept() || aConcept.is_ancestor_of(concept()); }
+            bool is_schema_atom() const override 
+            { 
+                return false; 
+            }
+            const i_schema_atom& as_schema_atom() const override 
+            { 
+                throw wrong_type(); 
+            }
+            i_schema_atom& as_schema_atom() override 
+            { 
+                throw wrong_type(); 
+            }
+            bool is_concept_atom() const override 
+            { 
+                return true; 
+            }
+            const i_concept_atom& as_concept_atom() const override 
+            { 
+                return *this; 
+            }
+            i_concept_atom& as_concept_atom() override 
+            { 
+                return *this; 
+            }
+            bool is_concept(const i_concept& aConcept) const override 
+            { 
+                return aConcept.is_related_to(concept()); 
+            }
+            bool is_related_to(const i_concept& aConcept) const override 
+            { 
+                return concept().is_related_to(aConcept); 
+            }
         public:
             bool operator==(const i_atom& rhs) const override
             {

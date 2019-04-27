@@ -309,11 +309,11 @@
             tokens: {
                 '=': object.operator.equality
                 ':=': object.operator.assignment
-                '+': math.operator.addition
-                '-': math.operator.subtraction
-                '*': math.operator.multiplication
+                '+': math.operator.add
+                '-': math.operator.subtract
+                '*': math.operator.multiply
                 '**': math.operator.power
-                '/': math.operator.division
+                '/': math.operator.divide
             }
         }
     }

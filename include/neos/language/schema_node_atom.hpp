@@ -93,7 +93,14 @@ namespace neos::language
         bool is_concept(const i_concept& aConcept) const override 
         { 
             for (auto const& concept : is_a())
-                if (&*concept == &aConcept || aConcept.is_ancestor_of(*concept))
+                if (aConcept.is_related_to(*concept))
+                    return true;
+            return false;
+        }
+        bool is_related_to(const i_concept& aConcept) const override
+        {
+            for (auto const& concept : is_a())
+                if (concept->is_related_to(aConcept))
                     return true;
             return false;
         }
@@ -159,6 +166,15 @@ namespace neos::language
                 iterCacheToken = iTokenCache.emplace(&aToken, iterToken != tokens().end() ? &*iterToken->second() : nullptr).first;
             }
             return iterCacheToken->second;
+        }
+        bool recursive_token(const i_atom& aToken) const override
+        {
+            if (is_token_node() && token() == aToken)
+                return true;
+            else if (has_parent() && parent().as_schema_node_atom().is_token_node())
+                return parent().as_schema_node_atom().recursive_token(aToken);
+            else
+                return false;
         }
     private:
         i_schema_atom* iParent;

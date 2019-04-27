@@ -66,6 +66,10 @@ namespace neos
             {
                 return false;
             }
+            bool is_related_to(const i_concept& aConcept) const override
+            {
+                return false;
+            }
         public:
             bool operator==(const i_atom& rhs) const override
             {
