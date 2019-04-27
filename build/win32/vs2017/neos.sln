@@ -4,6 +4,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 VisualStudioVersion = 15.0.28010.2036
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "neos", "neos.vcxproj", "{2FD415FA-62C7-400A-87D8-2C3539FEF004}"
+	ProjectSection(ProjectDependencies) = postProject
+		{5BE004BF-A083-422F-8287-E7238B633466} = {5BE004BF-A083-422F-8287-E7238B633466}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "console", "..\..\..\console\build\win32\vs2017\console.vcxproj", "{D7A45559-D9A1-40A9-A80D-0384B040DBEA}"
 	ProjectSection(ProjectDependencies) = postProject
