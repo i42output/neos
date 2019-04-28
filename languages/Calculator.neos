@@ -161,6 +161,8 @@
                 }
             }
             exponent: {
+                expect: '+'
+                expect: '-'
                 '+': exponent.positive
                 exponent.positive: {
                     expect: digit
