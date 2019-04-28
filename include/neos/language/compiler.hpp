@@ -70,6 +70,7 @@ namespace neos::language
         };
         struct emit
         {
+            uint32_t level;
             const i_concept* concept;
             source_iterator sourceStart;
             source_iterator sourceEnd;
@@ -123,6 +124,7 @@ namespace neos::language
         optional_source_iterator iDeepestProbe;
         emit_stack_t iEmitStack;
         emit_stack_t iPostfixOperationStack;
+        uint32_t iLevel;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
     };

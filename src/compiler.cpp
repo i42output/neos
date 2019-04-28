@@ -19,6 +19,7 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
+#include <neolib/raii.hpp>
 #include <neolib/recursion.hpp>
 #include <neolib/string_utf.hpp>
 #include <neos/bytecode/opcodes.hpp>
@@ -68,12 +69,12 @@ namespace neos::language
         if (aEmit.concept != nullptr)
         {
             if (iCompiler.trace_emits())
-                std::cout << "emit: " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
+                std::cout << "emit: " << "<" << aEmit.level << "> " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
         }
     }
 
     compiler::compiler() :
-        iTrace{ false }, iTraceEmits{ false }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
+        iTrace{ false }, iTraceEmits{ false }, iLevel{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
     }
 
@@ -138,6 +139,7 @@ namespace neos::language
     compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
+        neolib::scoped_counter sc{ iLevel };
         if (aPass == compiler_pass::Emit)
         {
             auto probeResult = parse(compiler_pass::Probe, aProgram, aUnit, aAtom, aSource);
@@ -154,15 +156,21 @@ namespace neos::language
             {
                 for (auto const& expect : aAtom.expects())
                 {
-                    if (aPass == compiler_pass::Emit && aAtom.expects().size() == 1 && aAtom.recursive_token(*expect) && postfix_operation_stack().size() >= 2)
+                    auto recursiveLevel = aAtom.recursive_token(*expect);
+                    if (aAtom.expects().size() == 1 && recursiveLevel != 0u)
                     {
-                        auto const& current = *std::prev(postfix_operation_stack().end());
-                        auto& previous = *std::prev(std::prev(postfix_operation_stack().end()));
-                        if (aAtom.token().is_related_to(*current.concept) && previous.concept != nullptr && aAtom.token().is_related_to(*previous.concept))
+                        if (aPass == compiler_pass::Emit && postfix_operation_stack().size() >= 2)
                         {
-                            emit_stack().push_back(previous);
-                            e.emit();
-                            previous.concept = nullptr;
+                            auto const& current = *std::prev(postfix_operation_stack().end());
+                            auto& previous = *std::prev(std::prev(postfix_operation_stack().end()));
+                            if (current.level == previous.level + recursiveLevel && previous.concept != nullptr &&
+                                aAtom.token().is_related_to(*current.concept) &&
+                                aAtom.token().is_related_to(*previous.concept))
+                            {
+                                emit_stack().push_back(previous);
+                                e.emit();
+                                previous.concept = nullptr;
+                            }
                         }
                     }
                     auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, expected{ &*expect, &aAtom }, aSource);
@@ -460,7 +468,7 @@ namespace neos::language
         {
             if (trace())
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            emit_stack().push_back(emit{ &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            emit_stack().push_back(emit{ iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return parse_result{ consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch };
     }
@@ -478,7 +486,7 @@ namespace neos::language
         {
             if (trace())
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            aEmitStack.push_back(emit{ &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            aEmitStack.push_back(emit{ iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return parse_result{ consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch };
     }

@@ -167,14 +167,14 @@ namespace neos::language
             }
             return iterCacheToken->second;
         }
-        bool recursive_token(const i_atom& aToken) const override
+        uint32_t recursive_token(const i_atom& aToken) const override
         {
             if (is_token_node() && token() == aToken)
-                return true;
+                return 1u;
             else if (has_parent() && parent().as_schema_node_atom().is_token_node())
-                return parent().as_schema_node_atom().recursive_token(aToken);
+                return 1u + parent().as_schema_node_atom().recursive_token(aToken);
             else
-                return false;
+                return 0u;
         }
     private:
         i_schema_atom* iParent;
