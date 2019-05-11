@@ -67,6 +67,7 @@ namespace neos::language
         {
             const i_atom* what;
             const i_atom* context;
+            bool consumed;
         };
         struct emit
         {
