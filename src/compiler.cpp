@@ -263,7 +263,11 @@ namespace neos::language
                             }
                             result = parse_token_match(aPass, aProgram, aUnit, aAtom, *iterToken->first(), result.sourceParsed);
                             if (is_finished(result, result.sourceParsed))
-                                return result;
+                            {
+                                if (matchedTokenValue != *iterToken->first())
+                                    result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), result);
+                                return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
+                            }
                         }
                         else
                         {
