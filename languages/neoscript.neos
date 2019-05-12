@@ -74,7 +74,6 @@
     }
 
     keyword: {
-        is: language.keyword
         tokens: {
             "using": using
             "import": import
