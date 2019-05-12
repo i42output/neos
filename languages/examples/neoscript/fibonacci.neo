@@ -1,6 +1,5 @@
 -- neoscript example: Fibonacci
 
-using a;
 using neos.string;
 using neos.stream;
 

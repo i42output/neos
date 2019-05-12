@@ -16,15 +16,30 @@
     expect: comment
     expect: keyword
 
+    tokens: {
+        whitespace: done
+        comment: done
+        keyword: done
+    }
+
     package: {
         name: {
             is: module.package.name
             tokens: {
-                character.alpha: string
-                string: {
-                    character.alpha: string
-                    '.': string
+                character.alpha: rest
+                rest: done
+            }
+            rest: {
+                expect: none
+                tokens: {
+                    character.alpha: continue
+                    character.period: need_alpha
                     default: next
+                }
+            }
+            need_alpha: {
+                tokens: {
+                    character.alpha: rest
                 }
             }
         }
@@ -37,10 +52,10 @@
     whitespace: {
         is: language.whitespace
         tokens: {
-            ' ': continue
-            character.LF: continue
-            character.CR: continue
-            character.TAB: continue
+            ' ': done
+            '\n': done
+            '\r': done
+            '\t': done
 			default: next
 		}
     }
@@ -51,7 +66,7 @@
         tokens: {
             '-': {
                 '-': {
-                    character.LF: done
+                    '\n': done
                     default: ignore
                 }
             }
@@ -60,28 +75,20 @@
 
     keyword: {
         is: language.keyword
-        candidate: {
-            is: string.utf8
-            tokens: {
-                character.alpha: continue
-                default: next
-            }
-        }
         tokens: {
-            candidate: {
-                "using": using
-                "import": import
-                "def": def
-                "fn": fn
-                "proc": proc
-                "if": if
-                "else": else
-                "return": return
-                language.keyword: done
-            }
+            "using": using
+            "import": import
+            "def": def
+            "fn": fn
+            "proc": proc
+            "if": if
+            "else": else
+            "return": return
+            language.keyword: done
         }
         using: {
             is: language.keyword
+            expect: whitespace
             tokens: {
                 package.name: module.package.import
                 module.package.import: module.package.instantiate
@@ -108,7 +115,9 @@
         tokens: {
             expression: {
                 expect: end
+                end: done
             }
+            end: done
             whitespace: ignore
         }
         end: {
@@ -124,11 +133,11 @@
         expect: term
         tokens: {
             term: {
+                expect: none
                 '+': math.operator.add
                 '-': math.operator.subtract
-                math.operator: {
+                math.operator.addition: {
                     expect: term
-                    whitespace: ignore
                 }
                 whitespace: ignore
                 default: next
@@ -138,11 +147,11 @@
             expect: term2
             tokens: {
                 term2: {
+                    expect: none
                     '*': math.operator.multiply
                     '/': math.operator.divide
-                    math.operator: {
+                    math.operator.multiplication: {
                         expect: term2
-                        whitespace: ignore
                     }
                     whitespace: ignore
                     default: next
@@ -153,12 +162,11 @@
             expect: primary
             tokens: {
                 primary: {
+                    expect: none
                     '**': math.operator.power
                     '^': math.operator.power
                     math.operator: {
                         expect: primary
-                        primary: done
-                        whitespace: ignore
                     }
                     whitespace: ignore
                     default: next
@@ -226,8 +234,11 @@
                 }
             }
             exponent: {
+                expect: '+'
+                expect: '-'
                 '+': exponent.positive
                 exponent.positive: {
+                    expect: digit
                     digit: exponent.digit
                     exponent.digit: {
                         digit: exponent.digit
@@ -237,6 +248,7 @@
                 }
                 '-': exponent.negative
                 exponent.negative: {
+                    expect: digit
                     digit: exponent.digit
                     exponent.digit: {
                         digit: exponent.digit

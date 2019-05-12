@@ -28,9 +28,9 @@
         is: language.whitespace
         tokens: {
             ' ': done
-            character.LF: done
-            character.CR: done
-            character.TAB: done
+            '\n': done
+            '\r': done
+            '\t': done
             default: error
         }
     }
