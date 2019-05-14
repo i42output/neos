@@ -74,34 +74,45 @@
     }
 
     keyword: {
+        expect: root
         tokens: {
-            "using": using
-            "import": import
-            "def": def
-            "fn": fn
-            "proc": proc
-            "if": if
-            "else": else
-            "return": return
-            language.keyword: done
+            root: done
         }
-        using: {
-            is: language.keyword
-            expect: whitespace
+        root: {
             tokens: {
-                package.name: module.package.import
-                module.package.import: module.package.instantiate
-                module.package.instantiate: {
-                    expect: statement.end
-                    statement.end: drain
+                "using": using
+                "import": import
+                "def": def
+                "fn": fn
+                "proc": proc
+                language.keyword: done
+            }
+            using: {
+                is: language.keyword
+                expect: whitespace
+                tokens: {
+                    package.name: module.package.import
+                    module.package.import: module.package.instantiate
+                    module.package.instantiate: {
+                        expect: statement.end
+                        statement.end: drain
+                    }
+                    whitespace: ignore
                 }
-                whitespace: ignore
+            }
+            import: { is: language.keyword }
+            def: { is: language.keyword }
+            fn: { is: language.keyword }
+            proc: { is: language.keyword }
+        }
+        function: {
+            tokens: {
+                "if": if
+                "else": else
+                "return": return
+                language.keyword: done
             }
         }
-        import: { is: language.keyword }
-        def: { is: language.keyword }
-        fn: { is: language.keyword }
-        proc: { is: language.keyword }
         if: { is: language.keyword }
         else: { is: language.keyword }
         return: { is: language.keyword }
