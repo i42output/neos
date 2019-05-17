@@ -65,6 +65,10 @@ namespace neos::language
         {
             return child.has_parent() && child.parent() == *this;
         }
+        bool is_sibling_of(const i_atom& rhs) const
+        {
+            return has_parent() == rhs.has_parent() && (!has_parent() || (rhs.parent() == parent()));
+        }
         bool is_ancestor_of(const i_atom& child) const
         {
             auto a = &child;

@@ -17,9 +17,34 @@
     expect: keyword
 
     tokens: {
-        whitespace: done
-        comment: done
+        whitespace: ignore
+        comment: ignore
         keyword: done
+    }
+
+    whitespace: {
+        is: language.whitespace
+        tokens: {
+            ' ': ignore
+            '\n': ignore
+            '\r': ignore
+            '\t': ignore
+            default: next
+        }
+    }
+
+    comment: {
+        is: language.comment
+        tokens: {
+            "--": {
+                '\n': drain
+                default: ignore
+            }
+        }
+    }
+
+    character: {
+        is: string.utf8.character
     }
 
     package: {
@@ -45,34 +70,6 @@
         }
     }
 
-    character: {
-        is: string.utf8.character
-    }
-
-    whitespace: {
-        is: language.whitespace
-        tokens: {
-            ' ': done
-            '\n': done
-            '\r': done
-            '\t': done
-			default: next
-		}
-    }
-
-    comment: {
-        is: language.comment
-        is: language.whitespace
-        tokens: {
-            '-': {
-                '-': {
-                    '\n': done
-                    default: ignore
-                }
-            }
-        }
-    }
-
     keyword: {
         expect: root
         tokens: {
@@ -83,8 +80,6 @@
                 "using": using
                 "import": import
                 "def": def
-                "fn": fn
-                "proc": proc
                 language.keyword: done
             }
             using: {
@@ -100,9 +95,58 @@
                     whitespace: ignore
                 }
             }
-            import: { is: language.keyword }
-            def: { is: language.keyword }
-            fn: { is: language.keyword }
+            import: {
+                is: language.keyword
+                expect: whitespace
+                tokens: {
+                    "fn": fn
+                    "proc": proc
+                    language.keyword: {
+                        expect: statement.end
+                        statement.end: drain
+                    }
+                    whitespace: ignore
+                }
+            }
+            def: {
+                is: language.keyword
+                expect: whitespace
+                tokens: {
+                    "fn": fn
+                    "proc": proc
+                    language.keyword: {
+                        expect: statement.end
+                        statement.end: drain
+                    }
+                    whitespace: ignore
+                }
+            }
+            fn: {
+                is: language.keyword
+                expect: whitespace
+                tokens: {
+                    identifier: {
+                        '(': {
+                            parameters: {
+                                ')': {
+                                    "->": {
+                                        expect: type
+                                        type: language.function.return
+                                        language.function.return: {
+                                            ';': drain
+                                            whitespace: ignore
+                                        }
+                                    }
+                                    whitespace: ignore
+                                    default: next
+                                }
+                            }
+                        }
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+            }
             proc: { is: language.keyword }
         }
         function: {
@@ -116,6 +160,91 @@
         if: { is: language.keyword }
         else: { is: language.keyword }
         return: { is: language.keyword }
+    }
+
+    identifier: {
+        is: language.identifier
+        tokens: {
+            character.alpha: rest
+            character.underscore: rest
+        }
+        rest: {
+            expect: none
+            tokens: {
+                character.alpha: continue
+                character.underscore: continue
+                character.digit: continue
+                default: next
+            }
+        }
+        end: {
+            expect: none
+            tokens: {
+                character.alpha: error
+                character.underscore: error
+                character.digit: error
+                default: next
+            }
+        }
+    }
+
+    parameters: {
+        is: language.function.parameters
+        tokens: {
+            parameter_block: {
+                expect: none
+                ';': {
+                    expect: parameter_block
+                }
+                whitespace: ignore
+                default: next
+            }
+            whitespace: ignore
+            default: next
+        }
+        parameter_block: {
+            tokens: {
+                parameter: {
+                    ',': {
+                        expect: parameter
+                    }
+                    ':': {
+                        expect: type
+                        type: done
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+        parameter: {
+            is: language.function.parameter
+            tokens: {
+                identifier: done
+                whitespace: ignore
+            }
+        }
+    }
+
+    type: {
+        tokens: {
+            "i8": language.type.i8
+            "u8": language.type.u8
+            "i16": language.type.i16
+            "u16": language.type.u16
+            "i32": language.type.i32
+            "u32": language.type.u32
+            "i64": language.type.i64
+            "u64": language.type.u64
+            "string": language.type.string
+            identifier: language.type.custom
+            language.type.custom: done
+            language.type: {
+                identifier.end: done
+            }
+            whitespace: ignore
+        }
     }
 
     statement: {

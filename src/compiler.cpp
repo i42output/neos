@@ -243,7 +243,7 @@ namespace neos::language
                 if (!matchedTokenValue.is_schema_atom() || matchedTokenValue.as_schema_atom().is_schema_node_atom())
                 {
                     auto trySource = result.sourceParsed;
-                    if (aAtom.is_parent_of(matchedTokenValue))
+                    if (aAtom.is_parent_of(matchedTokenValue) || aAtom.is_sibling_of(matchedTokenValue))
                         result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, trySource);
                     if (is_finished(result, trySource))
                         return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
@@ -261,10 +261,11 @@ namespace neos::language
                                     return parse_tokens(aPass, aProgram, aUnit, aAtom.parent().as_schema_atom().as_schema_node_atom(), expected{ &matchedTokenValue, &aAtom, true }, result.sourceParsed);
                                 return parse_result{ result.sourceParsed, parse_result::NoMatch };
                             }
-                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, *iterToken->first(), result.sourceParsed);
+                            auto& relatedConceptToken = *iterToken->first();
+                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, relatedConceptToken, result.sourceParsed);
                             if (is_finished(result, result.sourceParsed))
                             {
-                                if (matchedTokenValue != *iterToken->first())
+                                if (matchedTokenValue != relatedConceptToken)
                                     result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), result);
                                 return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
                             }
@@ -289,8 +290,10 @@ namespace neos::language
                             currentSource = result.sourceParsed;
                             iterToken = aAtom.tokens().begin();
                         }
-                        else if (result.action != parse_result::Ignored && result.action != parse_result::Continue)
+                        else if (is_finished(result, result.sourceParsed))
                             return result;
+                        else
+                            ++iterToken;
                     }
                     else if (result.action == parse_result::Consumed)
                         ++iterToken;
@@ -483,7 +486,7 @@ namespace neos::language
             result = consume_concept_token(aPass, aProgram, aUnit, aToken.as_concept_atom().concept(), result);
         else if (aToken.is_schema_atom() && aToken.as_schema_atom().is_schema_node_atom())
             for (auto& concept : aToken.as_schema_atom().as_schema_node_atom().is_a())
-                if (result.action != parse_result::NoMatch && result.action != parse_result::Ignored)
+                if (result.action != parse_result::NoMatch && result.action != parse_result::Ignored && result.action != parse_result::Drain)
                     result = consume_concept_atom(aPass, aProgram, aUnit, aToken, *concept, result);
         return result;
     }
