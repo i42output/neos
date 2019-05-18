@@ -246,7 +246,14 @@ namespace neos::language
                     if (aAtom.is_parent_of(matchedTokenValue) || aAtom.is_sibling_of(matchedTokenValue))
                         result = parse_token(aPass, aProgram, aUnit, aAtom, matchedTokenValue, trySource);
                     if (is_finished(result, trySource))
-                        return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
+                    {
+                        if (consumeSelf)
+                            result = consume_token(aPass, aProgram, aUnit, aAtom, result);
+                        if (aAtom.is_parent_of(matchedTokenValue))
+                            return result;
+                        if (consumeSelf && result.action == parse_result::Done)
+                            finished(result, trySource);
+                    }
                     bool const ateSome = (result.action == parse_result::Consumed && result.sourceParsed != trySource);
                     if (ateSome || (result.action == parse_result::Consumed && !aAtom.is_parent_of(matchedTokenValue)))
                     {

@@ -101,9 +101,10 @@
                 tokens: {
                     "fn": fn
                     "proc": proc
-                    language.keyword: {
+                    fn: {
                         expect: statement.end
-                        statement.end: drain
+                        statement.end: language.function.import
+                        language.function.import: done
                     }
                     whitespace: ignore
                 }
@@ -132,10 +133,8 @@
                                     "->": {
                                         expect: type
                                         type: language.function.return
-                                        language.function.return: {
-                                            ';': drain
-                                            whitespace: ignore
-                                        }
+                                        language.function.return: done
+                                        whitespace: ignore
                                     }
                                     whitespace: ignore
                                     default: next
