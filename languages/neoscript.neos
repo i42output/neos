@@ -78,6 +78,8 @@
             "def": def
             "fn": fn
             "proc": proc
+            "in": in
+            "out": out
             "if": if
             "else": else
             "return": return
@@ -95,6 +97,8 @@
         def: { is: language.keyword }
         fn: { is: language.keyword }
         proc: { is: language.keyword }
+        in: { is: language.keyword }
+        out: { is: language.keyword }
         if: { is: language.keyword }
         else: { is: language.keyword }
         return: { is: language.keyword }
@@ -284,7 +288,18 @@
                         expect: parameter
                     }
                     ':': {
+                        expect: keyword
                         expect: type
+                        keyword.in : language.function.parameter.direction.in
+                        language.function.parameter.direction.in : {
+                            expect: type
+                            type: done
+                        }
+                        keyword.out : language.function.parameter.direction.out
+                        language.function.parameter.direction.out : {
+                            expect: type
+                            type: done
+                        }
                         type: done
                     }
                     whitespace: ignore
