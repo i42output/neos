@@ -22,51 +22,44 @@
 #include <neos/neos.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neos/language/i_schema_terminal_atom.hpp>
+#include <neos/language/atom.hpp>
 
 namespace neos
 {
     namespace language
     {
-        class schema_terminal_atom : public neolib::reference_counted<i_schema_terminal_atom>
+        class schema_terminal_atom : public atom<i_schema_terminal_atom>
         {
         public:
             typedef neolib::string symbol_t;
         public:
             schema_terminal_atom(i_schema_atom& aParent, schema_terminal aType, const std::string& aSymbol = std::string{}) :
-                iParent{ &aParent }, iType{ aType }, iSymbol{ aSymbol }
+                atom<i_schema_terminal_atom>{ aParent }, iType{ aType }, iSymbol{ aSymbol }
             {
             }
             schema_terminal_atom() :
-                iParent{ nullptr }
+                atom<i_schema_terminal_atom>{}
             {
             }
         public:
-            bool has_parent() const override
-            {
-                return iParent != nullptr;
-            }
             const i_schema_atom& parent() const override
             {
-                if (has_parent())
-                    return *iParent;
-                throw no_parent();
+                return static_cast<const i_schema_atom&>(atom<i_schema_terminal_atom>::parent());
             }
             i_schema_atom& parent() override
             {
-                if (has_parent())
-                    return *iParent;
-                throw no_parent();
+                return static_cast<i_schema_atom&>(atom<i_schema_terminal_atom>::parent());
             }
             const symbol_t& symbol() const override
             {
                 return iSymbol;
             }
         public:
-            bool is_concept(const i_concept&) const override
+            bool is_conceptually_the_same(const i_concept&) const override
             {
                 return false;
             }
-            bool is_related_to(const i_concept& aConcept) const override
+            bool is_conceptually_related_to(const i_concept&) const override
             {
                 return false;
             }
@@ -84,7 +77,6 @@ namespace neos
                 return iType;
             }
         private:
-            i_schema_atom* iParent;
             schema_terminal iType;
             symbol_t iSymbol;
         };

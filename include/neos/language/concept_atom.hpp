@@ -1,5 +1,5 @@
 /*
-  schema_concept.hpp
+  concept_atom.hpp
 
   Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
 
@@ -25,40 +25,33 @@
 #include <neolib/map.hpp>
 #include <neolib/reference_counted.hpp>
 #include <neos/language/i_concept_atom.hpp>
+#include <neos/language/atom.hpp>
 
 namespace neos
 {
     namespace language
     {
-        class concept_atom : public neolib::reference_counted<i_concept_atom>
+        class concept_atom : public atom<i_concept_atom>
         {
         public:
             typedef neolib::string symbol_t;
         public:
             concept_atom(const neolib::i_ref_ptr<i_concept>& aConcept) : 
-                iParent{ nullptr }, iConcept { aConcept }
+                atom<i_concept_atom>{}, iConcept { aConcept }
             {
             }
             concept_atom(i_concept_atom& aParent, const neolib::i_ref_ptr<i_concept>& aConcept) :
-                iParent{ &aParent }, iConcept{ aConcept }
+                atom<i_concept_atom>{ aParent }, iConcept{ aConcept }
             {
             }
         public:
-            bool has_parent() const override
-            {
-                return iParent != nullptr;
-            }
             const i_concept_atom& parent() const override
             {
-                if (has_parent())
-                    return *iParent;
-                throw no_parent();
+                return static_cast<const i_concept_atom&>(atom<i_concept_atom>::parent());
             }
             i_concept_atom& parent() override
             {
-                if (has_parent())
-                    return *iParent;
-                throw no_parent();
+                return static_cast<i_concept_atom&>(atom<i_concept_atom>::parent());
             }
             const symbol_t& symbol() const override
             {
@@ -91,18 +84,13 @@ namespace neos
             { 
                 return *this; 
             }
-            bool is_concept(const i_concept& aConcept) const override 
-            { 
-                return aConcept.is_related_to(concept()); 
-            }
-            bool is_related_to(const i_concept& aConcept) const override 
-            { 
-                return concept().is_related_to(aConcept); 
-            }
-        public:
-            bool operator==(const i_atom& rhs) const override
+            bool is_conceptually_the_same(const i_concept& aConcept) const override
             {
-                return this == &rhs;
+                return concept().is_same(aConcept);
+            }
+            bool is_conceptually_related_to(const i_concept& aConcept) const override
+            { 
+                return concept().is_related_to(aConcept);
             }
         public:
             const i_concept& concept() const override
@@ -114,7 +102,6 @@ namespace neos
                 return *iConcept;
             }
         private:
-            i_concept_atom* iParent;
             neolib::ref_ptr<i_concept> iConcept;
             mutable std::optional<symbol_t> iSymbol;
         };

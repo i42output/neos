@@ -63,6 +63,10 @@ namespace neos::language
             bool consumed;
         };
     public:
+        bool is_same(const i_concept& other) const
+        {
+            return &other == this;
+        }
         bool is_ancestor_of(const i_concept& child) const
         {
             auto a = &child;
@@ -76,7 +80,7 @@ namespace neos::language
         }
         bool is_related_to(const i_concept& other) const
         {
-            return &other == this || is_ancestor_of(other);
+            return is_same(other) || is_ancestor_of(other);
         }
         template <typename SourceIterator>
         consume_result<SourceIterator> consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const

@@ -128,6 +128,9 @@
     <ClInclude Include="..\..\..\include\neos\language\schema_terminal_atom.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\atom.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\Ada.neos">

@@ -59,6 +59,7 @@ namespace neos
                 { "meta", schema_keyword::Meta},
                 { "libraries", schema_keyword::Libraries},
                 { "is", schema_keyword::Is},
+                { "as", schema_keyword::As},
                 { "done", schema_keyword::Done},
                 { "drain", schema_keyword::Drain},
                 { "next", schema_keyword::Next},
@@ -117,7 +118,16 @@ namespace neos
                         auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
                         auto concept = find_concept(conceptName);
                         if (concept != nullptr)
-                            aParentAtom.is_a().push_back(concept);
+                            aParentAtom.is().push_back(concept);
+                        else
+                            throw_error(aChildNode, "concept '" + conceptName + "' not found");
+                    } },
+                    { schema_keyword::As, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
+                    {
+                        auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
+                        auto concept = find_concept(conceptName);
+                        if (concept != nullptr)
+                            aParentAtom.as() = concept;
                         else
                             throw_error(aChildNode, "concept '" + conceptName + "' not found");
                     } },
@@ -407,7 +417,7 @@ namespace neos
                 if (aLeafName == aStem)
                     return &aNode;
             }
-            for (auto& concept : aNode.is_a())
+            for (auto& concept : aNode.is())
             {
                 if (concept->name() == neolib::string{ aLeafName })
                     return neolib::make_ref<concept_atom>(concept);

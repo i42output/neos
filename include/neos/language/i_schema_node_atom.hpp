@@ -34,7 +34,8 @@ namespace neos::language
     public:
         typedef i_atom::symbol_t symbol_t;
         typedef neolib::i_list<neolib::i_ref_ptr<i_concept>> concept_list_t;
-        typedef concept_list_t is_a_t;
+        typedef concept_list_t is_t;
+        typedef neolib::i_ref_ptr<i_concept> as_t;
         typedef neolib::i_list<neolib::i_ref_ptr<i_atom>> atom_list_t;
         typedef atom_list_t expects_t;
         typedef neolib::i_pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>> atom_map_list_entry_t;
@@ -57,8 +58,10 @@ namespace neos::language
 		virtual const i_atom& token() const = 0; 
 		virtual neolib::i_ref_ptr<i_atom>& token_ref_ptr() = 0;
     public:
-        virtual const is_a_t& is_a() const = 0;
-        virtual is_a_t& is_a() = 0;
+        virtual const is_t& is() const = 0;
+        virtual is_t& is() = 0;
+        virtual const as_t& as() const = 0;
+        virtual as_t& as() = 0;
         virtual const expects_t& expects() const = 0;
         virtual expects_t& expects() = 0;
         virtual bool expect_none() const = 0;

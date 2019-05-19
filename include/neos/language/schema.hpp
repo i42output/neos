@@ -51,6 +51,7 @@ namespace neos
             Meta,
             Libraries,
             Is,
+            As,
             Done,
             Drain,
             Next,

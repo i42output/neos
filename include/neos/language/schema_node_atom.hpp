@@ -24,16 +24,18 @@
 #include <neolib/pair.hpp>
 #include <neolib/map.hpp>
 #include <neolib/reference_counted.hpp>
+#include <neos/language/i_concept_atom.hpp>
 #include <neos/language/i_schema_node_atom.hpp>
+#include <neos/language/atom.hpp>
 
 namespace neos::language
 {
-    class schema_node_atom : public neolib::reference_counted<i_schema_node_atom>
+    class schema_node_atom : public atom<i_schema_node_atom>
     {
     public:
         typedef neolib::string symbol_t;
         typedef neolib::list<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
-        typedef concept_list_t is_a_t;
+        typedef concept_list_t is_t;
         typedef neolib::list<neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_list_t;
         typedef atom_list_t expects_t;
         typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
@@ -47,29 +49,21 @@ namespace neos::language
         typedef std::unordered_map<const i_atom*, const i_atom*> token_cache_t; // for packrat memoization.
     public:
         schema_node_atom(i_schema_atom& aParent, const std::string& aSymbol) :
-			iParent{ &aParent }, iSymbol{ aSymbol }, iExpectNone{ false }
+            atom<i_schema_node_atom>{ aParent }, iSymbol{ aSymbol }, iExpectNone{ false }
         {
         }
 		schema_node_atom() :
-            iParent{ nullptr }, iExpectNone{ false }
+            atom<i_schema_node_atom>{}, iExpectNone{ false }
         {
         }
     public:
-        bool has_parent() const override
-        {
-            return iParent != nullptr;
-        }
         const i_schema_atom& parent() const override
         {
-            if (has_parent())
-                return *iParent;
-            throw no_parent();
+            return static_cast<const i_schema_atom&>(atom<i_schema_node_atom>::parent());
         }
         i_schema_atom& parent() override
         {
-            if (has_parent())
-                return *iParent;
-            throw no_parent();
+            return static_cast<i_schema_atom&>(atom<i_schema_node_atom>::parent());
         }
 		const symbol_t& symbol() const override
         {
@@ -90,33 +84,40 @@ namespace neos::language
 		{
 			return iToken;
 		}
-        bool is_concept(const i_concept& aConcept) const override 
-        { 
-            for (auto const& concept : is_a())
-                if (aConcept.is_related_to(*concept))
+        bool is_conceptually_the_same(const i_concept& aConcept) const override
+        {
+            for (auto const& concept : is())
+                if (concept->is_same(aConcept))
                     return true;
+            if (as() && as()->is_same(aConcept))
+                return true;
             return false;
         }
-        bool is_related_to(const i_concept& aConcept) const override
+        bool is_conceptually_related_to(const i_concept& aConcept) const override
         {
-            for (auto const& concept : is_a())
+            for (auto const& concept : is())
                 if (concept->is_related_to(aConcept))
                     return true;
+            if (as() && as()->is_related_to(aConcept))
+                return true;
             return false;
         }
     public:
-        bool operator==(const i_atom& rhs) const override
+        const is_t& is() const override
         {
-            return this == &rhs;
+            return iIs;
         }
-    public:
-        const is_a_t& is_a() const override
+        is_t& is() override
         {
-            return iIsConcepts;
+            return iIs;
         }
-        is_a_t& is_a() override
+        const as_t& as() const override
         {
-            return iIsConcepts;
+            return iAs;
+        }
+        as_t& as() override
+        {
+            return iAs;
         }
         const expects_t& expects() const override
         {
@@ -158,10 +159,7 @@ namespace neos::language
                 auto iterToken = std::find_if(tokens().begin(), tokens().end(), [&](auto&& aTokenMapEntry)
                 {
                     auto const& token = *aTokenMapEntry.first();
-                    auto const& newTokenValue = *aTokenMapEntry.second();
-                    return (token == aToken ||
-                        (token.is_concept_atom() && aToken.is_concept_atom() &&
-                            token.as_concept_atom().concept().is_ancestor_of(aToken.as_concept_atom().concept())));
+                    return token.is_conceptually_related_to(aToken);
                 });
                 iterCacheToken = iTokenCache.emplace(&aToken, iterToken != tokens().end() ? &*iterToken->second() : nullptr).first;
             }
@@ -177,10 +175,10 @@ namespace neos::language
                 return 0u;
         }
     private:
-        i_schema_atom* iParent;
         symbol_t iSymbol;
 		neolib::ref_ptr<i_atom> iToken;
-        is_a_t iIsConcepts;
+        is_t iIs;
+        neolib::ref_ptr<i_concept> iAs;
         expects_t iExpects;
         bool iExpectNone;
         tokens_t iTokens;

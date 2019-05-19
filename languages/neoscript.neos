@@ -14,12 +14,12 @@
 
     expect: whitespace
     expect: comment
-    expect: keyword
+    expect: root_keyword
 
     tokens: {
         whitespace: ignore
         comment: ignore
-        keyword: done
+        root_keyword: done
     }
 
     whitespace: {
@@ -71,94 +71,131 @@
     }
 
     keyword: {
-        expect: root
+        as: language.keyword
         tokens: {
-            root: done
+            "using": using
+            "import": import
+            "def": def
+            "fn": fn
+            "proc": proc
+            "if": if
+            "else": else
+            "return": return
+            language.keyword: {
+                expect: none
+                character.alpha: error
+                character.underscore: error
+                character.digit: error
+                default: next
+            }
+            whitespace: ignore
         }
-        root: {
+        using: { is: language.keyword }
+        import: { is: language.keyword }
+        def: { is: language.keyword }
+        fn: { is: language.keyword }
+        proc: { is: language.keyword }
+        if: { is: language.keyword }
+        else: { is: language.keyword }
+        return: { is: language.keyword }
+    }
+
+    root_keyword:
+    {
+        expect: keyword
+        tokens: {
+            keyword.using: using
+            keyword.import: import
+            keyword.def: def
+            default: next
+        }
+        using: {
+            expect: whitespace
             tokens: {
-                "using": using
-                "import": import
-                "def": def
-                language.keyword: done
-            }
-            using: {
-                is: language.keyword
-                expect: whitespace
-                tokens: {
-                    package.name: module.package.import
-                    module.package.import: module.package.instantiate
-                    module.package.instantiate: {
-                        expect: statement.end
-                        statement.end: drain
-                    }
-                    whitespace: ignore
+                package.name: module.package.import
+                module.package.import: module.package.instantiate
+                module.package.instantiate: {
+                    expect: statement.end
+                    statement.end: drain
                 }
+                whitespace: ignore
             }
-            import: {
-                is: language.keyword
-                expect: whitespace
-                tokens: {
-                    "fn": fn
-                    "proc": proc
-                    fn: {
-                        expect: statement.end
-                        statement.end: language.function.import
-                        language.function.import: done
-                    }
-                    whitespace: ignore
+        }
+        import: {
+            expect: keyword
+            tokens: {
+                keyword.fn: fn
+                keyword.proc: proc
+                fn: {
+                    expect: statement.end
+                    statement.end: language.function.import
+                    language.function.import: done
                 }
-            }
-            def: {
-                is: language.keyword
-                expect: whitespace
-                tokens: {
-                    "fn": fn
-                    "proc": proc
-                    language.keyword: {
-                        expect: statement.end
-                        statement.end: drain
-                    }
-                    whitespace: ignore
+                proc: {
+                    expect: statement.end
+                    statement.end: language.function.import
+                    language.function.import: done
                 }
+                whitespace: ignore
             }
-            fn: {
-                is: language.keyword
-                expect: whitespace
-                tokens: {
-                    identifier: {
-                        '(': {
-                            parameters: {
-                                ')': {
-                                    "->": {
-                                        expect: type
-                                        type: language.function.return
-                                        language.function.return: done
-                                        whitespace: ignore
-                                    }
+        }
+        def: {
+            expect: keyword
+            tokens: {
+                keyword.fn: fn
+                keyword.proc: proc
+                fn: {
+                    expect: statement.end
+                    statement.end: drain
+                }
+                proc: {
+                    expect: statement.end
+                    statement.end: drain
+                }
+                whitespace: ignore
+            }
+        }
+        fn: {
+            is: language.function.signature
+            expect: whitespace
+            tokens: {
+                identifier: {
+                    '(': {
+                        fn_parameters: {
+                            ')': {
+                                "->": {
+                                    expect: type
+                                    type: language.function.return
+                                    language.function.return: done
                                     whitespace: ignore
-                                    default: next
                                 }
+                                whitespace: ignore
+                                default: next
                             }
                         }
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+        proc: {
+            is: language.function.signature
+            expect: whitespace
+            tokens: {
+                identifier: {
+                    '(': {
+                        proc_parameters: {
+                            ')': done
+                        }
+                        ')': done
                         whitespace: ignore
                     }
                     whitespace: ignore
                 }
-            }
-            proc: { is: language.keyword }
-        }
-        function: {
-            tokens: {
-                "if": if
-                "else": else
-                "return": return
-                language.keyword: done
+                whitespace: ignore
             }
         }
-        if: { is: language.keyword }
-        else: { is: language.keyword }
-        return: { is: language.keyword }
     }
 
     identifier: {
@@ -187,7 +224,46 @@
         }
     }
 
-    parameters: {
+    fn_parameters: {
+        is: language.function.parameters
+        tokens: {
+            parameter_block: {
+                expect: none
+                ';': {
+                    expect: parameter_block
+                }
+                whitespace: ignore
+                default: next
+            }
+            whitespace: ignore
+            default: next
+        }
+        parameter_block: {
+            tokens: {
+                parameter: {
+                    ',': {
+                        expect: parameter
+                    }
+                    ':': {
+                        expect: type
+                        type: done
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+        parameter: {
+            is: language.function.parameter
+            tokens: {
+                identifier: done
+                whitespace: ignore
+            }
+        }
+    }
+
+    proc_parameters: {
         is: language.function.parameters
         tokens: {
             parameter_block: {
