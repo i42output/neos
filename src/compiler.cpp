@@ -283,27 +283,9 @@ namespace neos::language
                     {
                         if (matchedTokenValue.is_concept_atom())
                         {
-                            iterToken = std::find_if(
-                                aAtom.tokens().begin(), aAtom.tokens().end(), 
-                                [&matchedTokenValue](auto&& token) { return token.first()->is_conceptually_the_same(matchedTokenValue); });
-                            if (iterToken == aAtom.tokens().end())
-                                iterToken = std::find_if(
-                                    aAtom.tokens().begin(), aAtom.tokens().end(),
-                                    [&matchedTokenValue](auto&& token) { return token.first()->is_conceptually_related_to(matchedTokenValue); });
-                            if (iterToken == aAtom.tokens().end())
-                            {
-                                if (aAtom.has_parent())
-                                    return parse_tokens(aPass, aProgram, aUnit, aAtom.parent().as_schema_atom().as_schema_node_atom(), expected{ &matchedTokenValue, &aAtom, true }, result.sourceParsed);
-                                return parse_result{ result.sourceParsed, parse_result::NoMatch };
-                            }
-                            auto& relatedConceptToken = *iterToken->first();
-                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, relatedConceptToken, result);
+                            result = parse_token_match(aPass, aProgram, aUnit, aAtom, matchedTokenValue, result);
                             if (is_finished(result))
-                            {
-                                if (matchedTokenValue != relatedConceptToken)
-                                    result = consume_concept_atom(aPass, aProgram, aUnit, matchedTokenValue, matchedTokenValue.as_concept_atom().concept(), result, emit_stack());
                                 return consumeSelf ? consume_token(aPass, aProgram, aUnit, aAtom, result) : result;
-                            }
                         }
                         else
                         {
