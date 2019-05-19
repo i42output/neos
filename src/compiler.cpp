@@ -221,17 +221,19 @@ namespace neos::language
             }
         }
         auto iterToken = expectedAtom ?
-            std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [expectedAtom](auto&& token)
+            std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [expectedAtom](auto&& tokensEntry)
             { 
-            return expectedAtom->is_conceptually_the_same(*token.first());
+                auto const& token = *tokensEntry.first();
+                return *expectedAtom == token;
             }) : 
             aAtom.tokens().begin();
         if (expectedAtom && iterToken == aAtom.tokens().end())
         {
             iterToken = expectedAtom ?
-                std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [expectedAtom](auto&& token)
+                std::find_if(aAtom.tokens().begin(), aAtom.tokens().end(), [expectedAtom](auto&& tokensEntry)
                 { 
-                    return expectedAtom->is_conceptually_related_to(*token.first());
+                    auto const& token = *tokensEntry.first();
+                    return expectedAtom->is_conceptually_related_to(token);
                 }) : 
                 aAtom.tokens().begin();
         }
