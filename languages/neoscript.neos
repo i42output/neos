@@ -111,6 +111,9 @@
             keyword.using: using
             keyword.import: import
             keyword.def: def
+            using: done
+            import: done
+            def: done
             default: next
         }
         using: {
@@ -119,8 +122,8 @@
                 package.name: module.package.import
                 module.package.import: module.package.instantiate
                 module.package.instantiate: {
-                    expect: statement.end
-                    statement.end: drain
+                    expect: end
+                    end: drain
                 }
                 whitespace: ignore
             }
@@ -128,16 +131,16 @@
         import: {
             expect: keyword
             tokens: {
-                keyword.fn: fn
-                keyword.proc: proc
-                fn: {
-                    expect: statement.end
-                    statement.end: language.function.import
+                keyword.fn: fn_sig
+                keyword.proc: proc_sig
+                fn_sig: {
+                    expect: end
+                    end: language.function.import
                     language.function.import: done
                 }
-                proc: {
-                    expect: statement.end
-                    statement.end: language.function.import
+                proc_sig: {
+                    expect: end
+                    end: language.function.import
                     language.function.import: done
                 }
                 whitespace: ignore
@@ -146,57 +149,30 @@
         def: {
             expect: keyword
             tokens: {
-                keyword.fn: fn
-                keyword.proc: proc
-                fn: {
-                    expect: statement.end
-                    statement.end: drain
+                keyword.fn: fn_sig
+                keyword.proc: proc_sig
+                fn_sig: {
+                    expect: fn_scope
+                    fn_scope: language.function
+                    language.function: done
                 }
-                proc: {
-                    expect: statement.end
-                    statement.end: drain
+                proc_sig: {
+                    expect: proc_locals
+                    expect: proc_scope
+                    proc_locals: {
+                        expect: proc_scope
+                        proc_scope: language.function
+                        language.function: done
+                    }
+                    proc_scope: language.function
+                    language.function: done
                 }
                 whitespace: ignore
             }
         }
-        fn: {
-            is: language.function.signature
-            expect: whitespace
+        end: {
             tokens: {
-                identifier: {
-                    '(': {
-                        fn_parameters: {
-                            ')': {
-                                "->": {
-                                    expect: type
-                                    type: language.function.return
-                                    language.function.return: done
-                                    whitespace: ignore
-                                }
-                                whitespace: ignore
-                                default: next
-                            }
-                        }
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-            }
-        }
-        proc: {
-            is: language.function.signature
-            expect: whitespace
-            tokens: {
-                identifier: {
-                    '(': {
-                        proc_parameters: {
-                            ')': done
-                        }
-                        ')': done
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
+                ';': done
                 whitespace: ignore
             }
         }
@@ -225,6 +201,49 @@
                 character.digit: error
                 default: next
             }
+        }
+    }
+
+    fn_sig: {
+        is: language.function.signature
+        expect: whitespace
+        tokens: {
+            identifier: {
+                '(': {
+                    fn_parameters: {
+                        ')': {
+                            "->": {
+                                expect: type
+                                type: language.function.return
+                                language.function.return: done
+                                whitespace: ignore
+                            }
+                            whitespace: ignore
+                            default: next
+                        }
+                    }
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    proc_sig: {
+        is: language.function.signature
+        expect: whitespace
+        tokens: {
+            identifier: {
+                '(': {
+                    proc_parameters: {
+                        ')': done
+                    }
+                    ')': done
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
         }
     }
 
@@ -317,6 +336,232 @@
         }
     }
 
+    proc_locals: {
+        is: language.function.locals
+        tokens: {
+            local_block: continue
+            whitespace: ignore
+            default: next
+        }
+        local_block: {
+            tokens: {
+                local: {
+                    ',': {
+                        expect: local
+                    }
+                    ':': {
+                        expect: type
+                        type: {
+                            expect: end
+                            end: done
+                        }
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+        local: {
+            is: language.function.local
+            tokens: {
+                identifier: done
+                whitespace: ignore
+            }
+        }
+        end: {
+            tokens: {
+                ';': done
+                whitespace: ignore
+            }
+        }    
+    }
+
+    fn_scope: {
+        is: language.function.scope
+        tokens: {
+            '{': {
+                fn_statement: continue
+                whitespace: ignore
+                '}': done
+            }
+            whitespace: ignore
+        }
+    }
+
+    proc_scope: {
+        is: language.function.scope
+        tokens: {
+            '{': {
+                proc_statement: continue
+                whitespace: ignore
+                '}': done
+            }
+            whitespace: ignore
+        }
+    }
+
+    fn_statement: {
+        is: language.statement
+        expect: keyword
+        expect: assignment
+        expect: end
+        tokens: {
+            keyword.return: {
+                expect: whitespace
+                expression: {
+                    expect: end
+                    end: language.function.return
+                    language.function.return: done
+                }
+                whitespace: ignore
+            }
+            keyword.if: if
+        }
+        if: {
+            tokens: {
+                '(': {
+                    expect: boolean_expression
+                    boolean_expression: {
+                        expect: ')'
+                        ')': {
+                            fn_scope: logic.operator.if
+                            fn_statement: logic.operator.if
+                            logic.operator.if : {
+                                expect: else
+                                else: done
+                                default: next
+                            }
+                        }
+                        whitespace: ignore
+                    }
+                }
+                whitespace: ignore
+            }
+        }
+        else: {
+            expect: keyword
+            tokens: {
+                keyword.else: 
+                {
+                    expect: keyword
+                    expect: fn_scope
+                    expect: fn_statement
+                    keyword.if: {
+                        expect: fn_scope
+                        expect: fn_statement
+                        fn_scope: logic.operator.elseif
+                        fn_statement: logic.operator.elseif
+                        logic.operator.elseif: {
+                            expect: else
+                            else: done
+                            default: next
+                        }
+                    }
+                    fn_scope: logic.operator.else
+                    fn_statement: logic.operator.else
+                    logic.operator.else: done
+                }
+            }
+        }
+        end: {
+            tokens: {
+                ';': done
+                whitespace: ignore
+            }
+        }
+    }
+
+    proc_statement: {
+        is: language.statement
+        expect: keyword
+        expect: assignment
+        expect: expression
+        expect: end
+        tokens: {
+            keyword.return: {
+                expect: end
+                end: language.function.return
+                language.function.return: done
+            }
+            assignment: {
+                expect: end
+                end: done
+            }
+            expression: done
+            keyword.if: if
+            end: done
+            whitespace: ignore
+        }
+        if: {
+            tokens: {
+                '(': {
+                    expect: boolean_expression
+                    boolean_expression: {
+                        expect: ')'
+                        ')': {
+                            proc_scope: logic.operator.if
+                            proc_statement: logic.operator.if
+                            logic.operator.if : {
+                                expect: else
+                                else: done
+                                default: next
+                            }
+                        }
+                        whitespace: ignore
+                    }
+                }
+                whitespace: ignore
+            }
+        }
+        else: {
+            expect: keyword
+            tokens: {
+                keyword.else: 
+                {
+                    expect: keyword
+                    expect: proc_scope
+                    expect: proc_statement
+                    keyword.if: {
+                        expect: proc_scope
+                        expect: proc_statement
+                        proc_scope: logic.operator.elseif
+                        proc_statement: logic.operator.elseif
+                        logic.operator.elseif: {
+                            expect: else
+                            else: done
+                            default: next
+                        }
+                    }
+                    proc_scope: logic.operator.else
+                    proc_statement: logic.operator.else
+                    logic.operator.else: done
+                }
+            }
+        }
+        end: {
+            tokens: {
+                ';': done
+                whitespace: ignore
+            }
+        }
+    }
+
+    assignment: {
+        tokens: {
+            identifier: {
+                ":=": {
+                    expect: expression
+                    expect: boolean_expression
+                    expression: object.assign
+                    boolean_expression: object.assign
+                    object.assign: done
+                }
+                whitespace: ignore
+            }
+        }
+    }
+    
     type: {
         tokens: {
             "i8": language.type.i8
@@ -337,22 +582,49 @@
         }
     }
 
-    statement: {
-        is: language.statement
-        expect: end
-        expect: expression
+    boolean_expression: {
+        is: boolean.expression
         tokens: {
-            expression: {
-                expect: end
-                end: done
+            relation: done
+            '!': {
+                expect: boolean_expression
+                boolean_expression: boolean.operator.logical.not
+                boolean.operator.logical.not: done
             }
-            end: done
             whitespace: ignore
         }
-        end: {
+        relation: {
+            expect: term1
             tokens: {
-                ';': done
-                whitespace: ignore
+                term1: {
+                    '=': boolean.operator.relational.equal
+                    "/=": boolean.operator.relational.notequal
+                    "!=": boolean.operator.relational.notequal
+                    '<': boolean.operator.relational.lessthan
+                    '>': boolean.operator.relational.greaterthan
+                    "<=": boolean.operator.relational.lessthanorequal
+                    "<=": boolean.operator.relational.greaterthanorequal
+                    boolean.operator.relational: {
+                        expect: term2
+                        term2: done
+                    }
+                }
+            }
+            term1: {
+                is: boolean.expression.operand
+                tokens: {
+                    expect: expression
+                    expression: done
+                }
+            
+            }
+            term2: {
+                is: boolean.expression.operand
+                tokens: {
+                    expect: expression
+                    expression: done
+                }
+            
             }
         }
     }
@@ -405,8 +677,27 @@
         primary: {
             is: math.expression.operand
             tokens: {
+                string_literal: done
                 math.universal.number.digit: universal_number
                 universal_number: done
+                identifier: {
+                    expect: none
+                    '(': {
+                        expect: expression
+                        expression: language.function.argument
+                        language.function.argument: {
+                            ',': {
+                                expect: expression
+                            }
+                            ')': language.function.call
+                            language.function.call: done
+                            whitespace: ignore
+                        }
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                    default: next
+                }
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary
@@ -423,6 +714,16 @@
                     whitespace: ignore
                 }
                 whitespace: ignore
+            }
+        }
+    }
+
+    string_literal: {
+        is: string.utf8
+        tokens: {
+            '\"': {
+                '\"': done
+                character: continue
             }
         }
     }

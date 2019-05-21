@@ -82,6 +82,7 @@ namespace neos
 
     void context::load_program(const std::string& aPath)
     {
+        iProgram = decltype(iProgram){};
         auto& unit = load_unit(aPath);
         compile_program();
     }
