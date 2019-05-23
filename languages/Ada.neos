@@ -290,46 +290,6 @@
         }
     }
 
-    operand: {
-        tokens: {
-            character.digit: universal_number
-            '\"': string.literal
-            identifier: identifier
-        }
-    }
-
-    expression: {
-        is: statement
-        tokens: {
-            operand: operand
-            '-': math.operator.negate
-            '(': subexpression
-        }
-        object: {
-            tokens: {
-                '=': object.operator.equality
-                ':=': object.operator.assignment
-                '+': math.operator.add
-                '-': math.operator.subtract
-                '*': math.operator.multiply
-                '**': math.operator.power
-                '/': math.operator.divide
-            }
-        }
-    }
-
-    subexpression: {
-        is: expression
-        discard: ')'
-        tokens: {
-            ')': done
-        }
-    }
-
-    object: {
-        is: language.object
-    }
-
     identifier: {
         is: language.identifier
         tokens: {
@@ -343,112 +303,63 @@
     universal_number: {
         is: math.universal.number
         tokens: {
-            character.digit: digit
-            '.': point
-            point: {
-                character.digit: digit
-                'e': exponent
-                'E': exponent
-                whitespace: done
-                character: next
+            digit: {
+                digit: continue
+                '.': point
+                point: {
+                    '.': error
+                    digit: continue
+                    'e': exponent
+                    'E': exponent
+                    default: next
+                }
+                default: next
             }
             '#': base
             base: {
-                character.hexdigit: hexdigit
+                hexdigit: continue
                 '.': point
                 point: {
-                    character.hexdigit: hexdigit
+                    '.': error
+                    hexdigit: continue
                     '#': {
                         'e': exponent
                         'E': exponent
-                        whitespace: done
-                        character: next
+                        default: next
                     }
-                    whitespace: done
-                    character: next
+                    default: next
                 }
                 '#': {
                     'e': exponent
                     'E': exponent
-                    whitespace: done
-                    character: next
+                    default: next
                 }
             }
             exponent: {
+                expect: '+'
+                expect: '-'
                 '+': exponent.positive
                 exponent.positive: {
-                    character.digit: exponent.digit
+                    expect: digit
+                    digit: exponent.digit
                     exponent.digit: {
-                        character.digit: exponent.digit
-                        whitespace: done
-                        character: next
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
                     }
                 }
                 '-': exponent.negative
                 exponent.negative: {
-                    character.digit: exponent.digit
+                    expect: digit
+                    digit: exponent.digit
                     exponent.digit: {
-                        character.digit: exponent.digit
-                        whitespace: done
-                        character: next
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
                     }
                 }
             }
-            whitespace: done
-            character: next
         }
     }
 
-    package.name: {
-        is: module.package.name
-        tokens: {
-            character.alpha: package.name
-            package.name: {
-                character.alpha: package.name
-                character.digit: package.name
-                character.underscore: package.name
-                character.underscore: {
-                    character.alpha: package.name
-                }
-                character.period: package.name
-                character.period: {
-                    character.alpha: package.name
-                }
-                whitespace: done
-                character: next
-            }
-        }
-    }
-
-    character: {
-        is: language.character
-    }
-
-    character.literal: {
-        is: language.character.literal
-        discard: '\''
-        tokens: {
-            '\'': {
-                '\'': character.literal
-                character.literal: done
-            }
-            character: character.literal
-            character.literal: {
-                '\'': done
-            }
-        }
-    }
-
-    string.literal: {
-        is: language.string.literal
-        discard: '\"'
-        tokens: {
-            '\"': {
-                '\"': character.quote
-                whitespace: done
-                character: next
-            }
-            character: string.literal
-        }
-    }
 }

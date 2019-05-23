@@ -18,6 +18,7 @@
 */
 
 #include <neos/neos.hpp>
+#include <neolib/raii.hpp>
 #include <neolib/recursion.hpp>
 #include <neos/language/schema.hpp>
 
@@ -29,15 +30,17 @@ namespace neos
             iSource{ aSource },
             iMeta{ aSource.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
-            iRoot{ neolib::make_ref<schema_node_atom>() }
+            iRoot{ neolib::make_ref<schema_node_atom>() },
+            iParsingTokens{ false }
         {
             parse(aSource.root(), iRoot->as_schema_atom().as_schema_node_atom());
             resolve_references();
             if (!atom_references().empty())
             {
-                std::vector<atom_reference_key_t> references;
+                unresolved_reference_list references;
                 for (auto const& r : atom_references())
-                    references.push_back(r.first);
+                    for (auto const& e : r.second)
+                        references.push_back(e);
                 throw unresolved_references(std::move(references));
             }
         }
@@ -79,8 +82,15 @@ namespace neos
 
         void schema::default_atom_handler(neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
         {
-            if (aChildNode.name_is_keyword() && keyword(aChildNode.name()) != schema_keyword::Invalid)
-                throw_error(aChildNode, "unexpected keyword '" + aChildNode.name() + "'");
+            if (aChildNode.name_is_keyword())
+            {
+                if (keyword(aChildNode.name()) != schema_keyword::Invalid)
+                    throw_error(aChildNode, "unexpected keyword '" + aChildNode.name() + "'");
+                else if (aChildNode.type() != neolib::json_type::Object && !iParsingTokens)
+                    throw_error(aChildNode, "unexpected token match rule");
+            }
+            else if (!iParsingTokens)
+                throw_error(aChildNode, "unexpected token match rule");
             auto newChild = aParentAtom.children().insert(
                 atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) }, atom_ptr{});
             parse(aChildNode, newChild->first()->as_schema_atom().as_schema_node_atom());
@@ -217,6 +227,7 @@ namespace neos
         void schema::parse_tokens(neolib::rjson_value const& aNode, i_schema_node_atom& aAtom)
         {
             _limit_recursion_(schema);
+            neolib::scoped_flag sf{ iParsingTokens };
             auto& result = aAtom.tokens();
             auto parse_token_value = [&aAtom, &result](schema& aSchema, auto&& aToken)
             {
@@ -314,7 +325,7 @@ namespace neos
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
                 {
                     auto const key = atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode.parent(), aNode.name()) };
-                    atom_references()[key].push_back(&aAtom);
+                    atom_references()[key].push_back(atom_reference{ &aNode, &aAtom });
                 }
                 else
                     throw_error(aNode, "unexpected keyword '" + aNode.name() + "'");
@@ -335,7 +346,7 @@ namespace neos
                     case schema_keyword::Invalid:
                         {
                             auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) };
-                            atom_references()[key].push_back(&aAtom);
+                            atom_references()[key].push_back(atom_reference{ &aNode, &aAtom });
                         }
                         break;
                     case schema_keyword::Done:
@@ -377,7 +388,7 @@ namespace neos
                     if (atom != nullptr)
                     {
                         for (auto& r : entry->second)
-                            *r = atom;
+                            *r.atomPtr = atom;
                         entry = atom_references().erase(entry);
                         foundSome = true;
                         continue;
@@ -387,7 +398,7 @@ namespace neos
                     {
                         auto conceptAtom = create_concept_atom(concept);
                         for (auto& r : entry->second)
-                            *r = conceptAtom;
+                            *r.atomPtr = conceptAtom;
                         entry = atom_references().erase(entry);
                         foundSome = true;
                         continue;
@@ -468,7 +479,7 @@ namespace neos
         void schema::throw_error(neolib::rjson_value const& aNode, const std::string aErrorText)
         {
             if (aNode.has_name())
-                throw std::runtime_error(iSource.to_error_text(&aNode.name()[0], aErrorText));
+                throw std::runtime_error(iSource.to_error_text(aNode, aErrorText));
             throw std::runtime_error(aErrorText);
         }
    }

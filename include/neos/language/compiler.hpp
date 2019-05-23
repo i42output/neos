@@ -92,6 +92,7 @@ namespace neos::language
         };
         struct emit
         {
+            translation_unit const* unit;
             uint32_t level;
             const i_concept* concept;
             source_iterator sourceStart;
@@ -139,6 +140,7 @@ namespace neos::language
         emit_stack_t& postfix_operation_stack();
         static bool is_finished(const compiler::parse_result& aResult);
         static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
+        static std::string location(const translation_unit& aUnit, source_iterator aSourcePos);
         static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         bool iTrace;

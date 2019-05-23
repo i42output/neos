@@ -69,7 +69,8 @@ namespace neos::language
         if (aEmit.concept != nullptr)
         {
             if (iCompiler.trace_emits())
-                std::cout << "emit: " << "<" << aEmit.level << "> " << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
+                std::cout << "emit: " << "<" << aEmit.level << ": " << location(*aEmit.unit, aEmit.sourceStart) << "> " 
+                    << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
         }
     }
 
@@ -516,7 +517,7 @@ namespace neos::language
         {
             if (trace())
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            emit_stack().push_back(emit{ iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            emit_stack().push_back(emit{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
@@ -534,7 +535,7 @@ namespace neos::language
         {
             if (trace())
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            aEmitStack.push_back(emit{ iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            aEmitStack.push_back(emit{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
@@ -596,7 +597,7 @@ namespace neos::language
         }
     }
 
-    void compiler::throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError)
+    std::string compiler::location(const translation_unit& aUnit, source_iterator aSourcePos)
     {
         uint32_t line = 1;
         uint32_t col = 1;
@@ -610,6 +611,11 @@ namespace neos::language
             else
                 ++col;
         }
-        throw std::runtime_error("(" + aError + ") line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col));
+        return "line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col);
+    }
+
+    void compiler::throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError)
+    {
+        throw std::runtime_error("(" + aError + ") " + location(aUnit, aSourcePos));
     }
 }

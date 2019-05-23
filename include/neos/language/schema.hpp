@@ -67,20 +67,25 @@ namespace neos
         class schema
         {
         public:
-            struct unresolved_references : std::runtime_error 
-            { 
-                std::vector<std::pair<neolib::rjson_string, std::string>> references;
-                unresolved_references(std::vector<std::pair<neolib::rjson_string, std::string>>&& aReferences) :
-                    std::runtime_error("neos::language::schema::unresolved_references"),
-                    references{ std::move(aReferences) }
-                {} 
-            };
-        public:
             typedef neolib::i_ref_ptr<i_atom> abstract_atom_ptr;
             typedef neolib::ref_ptr<i_atom> atom_ptr;
-            typedef abstract_atom_ptr* atom_reference_t;
             typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
-            typedef std::unordered_map<atom_reference_key_t, std::vector<atom_reference_t>, boost::hash<atom_reference_key_t>> atom_references_t;
+            struct atom_reference
+            {
+                neolib::rjson_value const* node;
+                abstract_atom_ptr* atomPtr;
+            };
+            typedef std::vector<atom_reference> unresolved_reference_list;
+            typedef std::unordered_map<atom_reference_key_t, unresolved_reference_list, boost::hash<atom_reference_key_t>> atom_references_t;
+        public:
+            struct unresolved_references : std::runtime_error
+            {
+                unresolved_reference_list references;
+                unresolved_references(unresolved_reference_list&& aReferences) :
+                    std::runtime_error("neos::language::schema::unresolved_references"),
+                    references{ std::move(aReferences) }
+                {}
+            };
         private:
             typedef std::function<void(neolib::rjson_value const&, i_schema_node_atom&)> atom_handler_t;
             typedef std::map<schema_keyword, atom_handler_t> atom_handlers_t;
@@ -121,6 +126,7 @@ namespace neos
             atom_ptr iRoot;
             atom_references_t iAtomReferences;
             concept_atoms_t iConceptAtoms;
+            bool iParsingTokens;
         };
     }
 }

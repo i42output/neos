@@ -20,3 +20,5 @@
 /build/win32/vs2019/.vs
 /build/win32/vs2019/neos.vcxproj.user
 /build/win32/vs2019/x64/Release
+/build/win32/vs2019/Debug
+/build/win32/vs2019/Release

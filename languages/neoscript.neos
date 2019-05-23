@@ -721,9 +721,40 @@
     string_literal: {
         is: string.utf8
         tokens: {
-            '\"': {
-                '\"': done
+            '\"': start
+        }
+        start: {
+            tokens: {                
+                '\"': {
+                    whitespace: ignore
+                    end: next
+                }
+                escape: continue
+                '\\': error
+                '\n': ignore
+                '\r': ignore
                 character: continue
+            }
+        }
+        end: {
+            tokens: {
+                expect: none
+                '\"': start
+                default: next
+            }
+        }
+        escape: {
+            tokens: {
+                '\\': {
+                    'n': character.LF
+                    character.LF: done
+                    'r': character.CR
+                    character.CR: done
+                    't': character.tab
+                    character.tab: done
+                    '\\': character.backslash
+                    character.backslash: done
+                }
             }
         }
     }
