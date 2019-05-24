@@ -28,50 +28,52 @@
 
 namespace neos::language
 {
-    compiler::emitter::emitter(compiler& aCompiler, compiler_pass aPass) :
-        emitter{ aCompiler, aPass, aCompiler.emit_stack() }
+    compiler::scoped_concept_stack::scoped_concept_stack(compiler& aCompiler, compiler_pass aPass) :
+        scoped_concept_stack{ aCompiler, aPass, aCompiler.parse_stack() }
     {
     }
 
-    compiler::emitter::emitter(compiler& aCompiler, compiler_pass aPass, emit_stack_t& aEmitStack) :
-        iCompiler{ aCompiler }, iPass{ aPass }, iEmitStack{ aEmitStack }, iEmitFrom{ aEmitStack.size() }
+    compiler::scoped_concept_stack::scoped_concept_stack(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack) :
+        iCompiler{ aCompiler }, iPass{ aPass }, iStack{ aStack }, iScopeStart{ aStack.size() }
     {
     }
 
-    compiler::emitter::~emitter()
+    compiler::scoped_concept_stack::~scoped_concept_stack()
     {
-        emit();
+        move_to_fold_stack();
     }
 
-    void compiler::emitter::emit()
+    void compiler::scoped_concept_stack::move_to_fold_stack()
     {
         if (iPass == compiler_pass::Emit)
         {
-            for (emit_stack_t::size_type stackIndex = iEmitFrom; stackIndex < emit_stack().size(); ++stackIndex)
-                emit(emit_stack()[stackIndex]);
-            emit_stack().erase(emit_stack().begin() + iEmitFrom, emit_stack().end());
+            std::for_each(stack().begin() + iScopeStart, stack().end(), 
+                [this](const concept_stack_entry& aEntry)
+                {
+                    if (aEntry.concept != nullptr)
+                    {
+                        if (iCompiler.trace_emits())
+                            std::cout << "emit: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
+                            << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
+                    }
+                    iCompiler.fold_stack().push_back(aEntry);
+                });
         }
+        stack().erase(stack().begin() + iScopeStart, stack().end());
     }
 
-    void compiler::emitter::move_to(emit_stack_t& aOtherStack)
+    void compiler::scoped_concept_stack::move_to(concept_stack_t& aOtherStack)
     {
-        aOtherStack.insert(aOtherStack.end(), emit_stack().begin() + iEmitFrom, emit_stack().end());
-        emit_stack().erase(emit_stack().begin() + iEmitFrom, emit_stack().end());
-    }
-
-    compiler::emit_stack_t& compiler::emitter::emit_stack()
-    {
-        return iEmitStack;
-    }
-
-    void compiler::emitter::emit(const compiler::emit& aEmit)
-    {
-        if (aEmit.concept != nullptr)
+        if (iPass == compiler_pass::Emit)
         {
-            if (iCompiler.trace_emits())
-                std::cout << "emit: " << "<" << aEmit.level << ": " << location(*aEmit.unit, aEmit.sourceStart) << "> " 
-                    << aEmit.concept->name() << " (" << std::string(aEmit.sourceStart, aEmit.sourceEnd) << ")" << std::endl;
+            aOtherStack.insert(aOtherStack.end(), stack().begin() + iScopeStart, stack().end());
+            stack().erase(stack().begin() + iScopeStart, stack().end());
         }
+    }
+
+    compiler::concept_stack_t& compiler::scoped_concept_stack::stack()
+    {
+        return iStack;
     }
 
     compiler::compiler() :
@@ -127,6 +129,7 @@ namespace neos::language
                     source = result.sourceParsed;
                 }
             }
+            fold_concepts();
         }
         catch(...)
         {
@@ -149,7 +152,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
-        emitter e{ *this, aPass };
+        scoped_concept_stack scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
         if (aSource != aUnit.source.end())
         {
@@ -168,8 +171,8 @@ namespace neos::language
                                 aAtom.token().is_conceptually_related_to(*current.concept) &&
                                 aAtom.token().is_conceptually_related_to(*previous.concept))
                             {
-                                emit_stack().push_back(previous);
-                                e.emit();
+                                parse_stack().push_back(previous);
+                                scs.move_to_fold_stack();
                                 previous.concept = nullptr;
                             }
                         }
@@ -203,7 +206,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
-        emitter e{ *this, aPass };
+        scoped_concept_stack scs{ *this, aPass };
         auto currentSource = aSource;
         bool defaultOk = aAtom.expect_none();
         auto expectedAtom = aExpected.what;
@@ -397,10 +400,10 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
-        emitter poe{ *this, aPass, postfix_operation_stack() };
-        std::optional<emitter> e;
+        scoped_concept_stack poe{ *this, aPass, postfix_operation_stack() };
+        std::optional<scoped_concept_stack> scs;
         if (!aSelf)
-            e.emplace(*this, aPass);
+            scs.emplace(*this, aPass);
         parse_result result{ !aAtom.as() || !aAtom.is_conceptually_related_to(aMatchResult) ? aResult : aResult.with_if(aMatchResult)};
         if (aConsumeMatchResult)
         {
@@ -413,8 +416,8 @@ namespace neos::language
             }
             else
                 result = consume_token(aPass, aProgram, aUnit, aMatchResult, result);
-            if (e)
-                e->emit();
+            if (scs)
+                scs->move_to_fold_stack();
         }
         if (result.action == parse_result::Consumed)
         {
@@ -430,7 +433,7 @@ namespace neos::language
                 }
             }
         }
-        poe.move_to(emit_stack());
+        poe.move_to(parse_stack());
         return result;
     }
 
@@ -445,7 +448,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
-        emitter e{ *this, aPass };
+        scoped_concept_stack scs{ *this, aPass };
         if (aToken.is_schema_atom())
         {
             if (aToken.as_schema_atom().is_schema_node_atom())
@@ -516,38 +519,48 @@ namespace neos::language
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace())
-                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            emit_stack().push_back(emit{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
+            parse_stack().push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
 
     compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult)
     {
-        return consume_concept_atom(aPass, aProgram, aUnit, aAtom, aConcept, aResult, emit_stack());
+        return consume_concept_atom(aPass, aProgram, aUnit, aAtom, aConcept, aResult, parse_stack());
     }
         
-    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, emit_stack_t& aEmitStack)
+    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace())
-                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push_emit(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            aEmitStack.push_back(emit{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
+            aConceptStack.push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
 
-    compiler::emit_stack_t& compiler::emit_stack()
+    void compiler::fold_concepts()
     {
-        return iEmitStack;
+        // todo
     }
 
-    compiler::emit_stack_t& compiler::postfix_operation_stack()
+    compiler::concept_stack_t& compiler::parse_stack()
+    {
+        return iParseStack;
+    }
+
+    compiler::concept_stack_t& compiler::postfix_operation_stack()
     {
         return iPostfixOperationStack;
+    }
+
+    compiler::concept_stack_t& compiler::fold_stack()
+    {
+        return iFoldStack;
     }
 
     bool compiler::is_finished(const parse_result& aResult)

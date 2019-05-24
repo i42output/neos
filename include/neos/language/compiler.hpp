@@ -90,7 +90,7 @@ namespace neos::language
             const i_atom* context;
             bool consumed;
         };
-        struct emit
+        struct concept_stack_entry
         {
             translation_unit const* unit;
             uint32_t level;
@@ -98,24 +98,24 @@ namespace neos::language
             source_iterator sourceStart;
             source_iterator sourceEnd;
         };
-        typedef std::vector<emit> emit_stack_t;
-        class emitter
+        typedef std::vector<concept_stack_entry> concept_stack_t;
+        class scoped_concept_stack
         {
         public:
-            emitter(compiler& aCompiler, compiler_pass aPass);
-            emitter(compiler& aCompiler, compiler_pass aPass, emit_stack_t& aEmitStack);
-            ~emitter();
+            scoped_concept_stack(compiler& aCompiler, compiler_pass aPass);
+            scoped_concept_stack(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack);
+            ~scoped_concept_stack();
         public:
-            void emit();
-            void move_to(emit_stack_t& aOtherStack);
+            void move_to_fold_stack();
+            void move_to(concept_stack_t& aOtherStack);
         private:
-            emit_stack_t & emit_stack();
-            void emit(const compiler::emit& aEmit);
+            concept_stack_t& stack();
+            void push(const concept_stack_entry& aEntry);
         private:
             compiler& iCompiler;
             compiler_pass iPass;
-            emit_stack_t& iEmitStack;
-            emit_stack_t::size_type iEmitFrom;
+            concept_stack_t& iStack;
+            concept_stack_t::size_type iScopeStart;
         };
     public:
         compiler();
@@ -124,7 +124,7 @@ namespace neos::language
         bool trace() const;
         void set_trace(bool aTrace);
         bool trace_emits() const;
-        void set_trace_emits(bool aTraceEmits);
+        void set_trace_emits(bool aTraceConcepts);
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
     private:
@@ -135,9 +135,11 @@ namespace neos::language
         parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, const parse_result& aResult);
         parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, const parse_result& aResult);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, emit_stack_t& aEmitStack);
-        emit_stack_t& emit_stack();
-        emit_stack_t& postfix_operation_stack();
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
+        void fold_concepts();
+        concept_stack_t& parse_stack();
+        concept_stack_t& postfix_operation_stack();
+        concept_stack_t& fold_stack();
         static bool is_finished(const compiler::parse_result& aResult);
         static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
         static std::string location(const translation_unit& aUnit, source_iterator aSourcePos);
@@ -146,8 +148,9 @@ namespace neos::language
         bool iTrace;
         bool iTraceEmits;
         optional_source_iterator iDeepestProbe;
-        emit_stack_t iEmitStack;
-        emit_stack_t iPostfixOperationStack;
+        concept_stack_t iParseStack;
+        concept_stack_t iPostfixOperationStack;
+        concept_stack_t iFoldStack;
         uint32_t iLevel;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
