@@ -99,12 +99,12 @@ namespace neos::language
             source_iterator sourceEnd;
         };
         typedef std::vector<concept_stack_entry> concept_stack_t;
-        class scoped_concept_stack
+        class scoped_concept_folder
         {
         public:
-            scoped_concept_stack(compiler& aCompiler, compiler_pass aPass);
-            scoped_concept_stack(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack);
-            ~scoped_concept_stack();
+            scoped_concept_folder(compiler& aCompiler, compiler_pass aPass);
+            scoped_concept_folder(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack);
+            ~scoped_concept_folder();
         public:
             void fold();
             void move_to(concept_stack_t& aOtherStack);

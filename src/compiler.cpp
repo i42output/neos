@@ -28,22 +28,22 @@
 
 namespace neos::language
 {
-    compiler::scoped_concept_stack::scoped_concept_stack(compiler& aCompiler, compiler_pass aPass) :
-        scoped_concept_stack{ aCompiler, aPass, aCompiler.parse_stack() }
+    compiler::scoped_concept_folder::scoped_concept_folder(compiler& aCompiler, compiler_pass aPass) :
+        scoped_concept_folder{ aCompiler, aPass, aCompiler.parse_stack() }
     {
     }
 
-    compiler::scoped_concept_stack::scoped_concept_stack(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack) :
+    compiler::scoped_concept_folder::scoped_concept_folder(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack) :
         iCompiler{ aCompiler }, iPass{ aPass }, iStack{ aStack }, iScopeStart{ aStack.size() }
     {
     }
 
-    compiler::scoped_concept_stack::~scoped_concept_stack()
+    compiler::scoped_concept_folder::~scoped_concept_folder()
     {
         fold();
     }
 
-    void compiler::scoped_concept_stack::fold()
+    void compiler::scoped_concept_folder::fold()
     {
         if (iPass == compiler_pass::Emit)
         {
@@ -63,14 +63,14 @@ namespace neos::language
         stack().erase(stack().begin() + iScopeStart, stack().end());
     }
 
-    void compiler::scoped_concept_stack::move_to(concept_stack_t& aOtherStack)
+    void compiler::scoped_concept_folder::move_to(concept_stack_t& aOtherStack)
     {
         if (iPass == compiler_pass::Emit)
             aOtherStack.insert(aOtherStack.end(), stack().begin() + iScopeStart, stack().end());
         stack().erase(stack().begin() + iScopeStart, stack().end());
     }
 
-    compiler::concept_stack_t& compiler::scoped_concept_stack::stack()
+    compiler::concept_stack_t& compiler::scoped_concept_folder::stack()
     {
         return iStack;
     }
@@ -150,7 +150,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
-        scoped_concept_stack scs{ *this, aPass };
+        scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
         if (aSource != aUnit.source.end())
         {
@@ -204,7 +204,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
-        scoped_concept_stack scs{ *this, aPass };
+        scoped_concept_folder scs{ *this, aPass };
         auto currentSource = aSource;
         bool defaultOk = aAtom.expect_none();
         auto expectedAtom = aExpected.what;
@@ -398,8 +398,8 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
-        scoped_concept_stack poe{ *this, aPass, postfix_operation_stack() };
-        std::optional<scoped_concept_stack> scs;
+        scoped_concept_folder poe{ *this, aPass, postfix_operation_stack() };
+        std::optional<scoped_concept_folder> scs;
         if (!aSelf)
             scs.emplace(*this, aPass);
         parse_result result{ !aAtom.as() || !aAtom.is_conceptually_related_to(aMatchResult) ? aResult : aResult.with_if(aMatchResult)};
@@ -446,7 +446,7 @@ namespace neos::language
         }
         if (trace())
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
-        scoped_concept_stack scs{ *this, aPass };
+        scoped_concept_folder scs{ *this, aPass };
         if (aToken.is_schema_atom())
         {
             if (aToken.as_schema_atom().is_schema_node_atom())
