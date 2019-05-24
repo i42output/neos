@@ -110,7 +110,6 @@ namespace neos::language
             void move_to(concept_stack_t& aOtherStack);
         private:
             concept_stack_t& stack();
-            void push(const concept_stack_entry& aEntry);
         private:
             compiler& iCompiler;
             compiler_pass iPass;
