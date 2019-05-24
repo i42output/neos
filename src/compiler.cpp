@@ -52,11 +52,11 @@ namespace neos::language
                 {
                     if (aEntry.concept != nullptr)
                     {
+                        iCompiler.fold_stack().push_back(aEntry);
                         if (iCompiler.trace_emits())
                             std::cout << "emit: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
-                            << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
+                                << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
-                    iCompiler.fold_stack().push_back(aEntry);
                 });
         }
         stack().erase(stack().begin() + iScopeStart, stack().end());
