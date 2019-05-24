@@ -106,7 +106,7 @@ namespace neos::language
             scoped_concept_stack(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack);
             ~scoped_concept_stack();
         public:
-            void move_to_fold_stack();
+            void fold();
             void move_to(concept_stack_t& aOtherStack);
         private:
             concept_stack_t& stack();
@@ -135,7 +135,7 @@ namespace neos::language
         parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, const parse_result& aResult);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
-        void fold_concepts();
+        void fold();
         concept_stack_t& parse_stack();
         concept_stack_t& postfix_operation_stack();
         concept_stack_t& fold_stack();

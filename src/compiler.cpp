@@ -40,10 +40,10 @@ namespace neos::language
 
     compiler::scoped_concept_stack::~scoped_concept_stack()
     {
-        move_to_fold_stack();
+        fold();
     }
 
-    void compiler::scoped_concept_stack::move_to_fold_stack()
+    void compiler::scoped_concept_stack::fold()
     {
         if (iPass == compiler_pass::Emit)
         {
@@ -58,6 +58,7 @@ namespace neos::language
                                 << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
                 });
+            iCompiler.fold();
         }
         stack().erase(stack().begin() + iScopeStart, stack().end());
     }
@@ -65,10 +66,8 @@ namespace neos::language
     void compiler::scoped_concept_stack::move_to(concept_stack_t& aOtherStack)
     {
         if (iPass == compiler_pass::Emit)
-        {
             aOtherStack.insert(aOtherStack.end(), stack().begin() + iScopeStart, stack().end());
-            stack().erase(stack().begin() + iScopeStart, stack().end());
-        }
+        stack().erase(stack().begin() + iScopeStart, stack().end());
     }
 
     compiler::concept_stack_t& compiler::scoped_concept_stack::stack()
@@ -129,7 +128,6 @@ namespace neos::language
                     source = result.sourceParsed;
                 }
             }
-            fold_concepts();
         }
         catch(...)
         {
@@ -172,7 +170,7 @@ namespace neos::language
                                 aAtom.token().is_conceptually_related_to(*previous.concept))
                             {
                                 parse_stack().push_back(previous);
-                                scs.move_to_fold_stack();
+                                scs.fold();
                                 previous.concept = nullptr;
                             }
                         }
@@ -417,7 +415,7 @@ namespace neos::language
             else
                 result = consume_token(aPass, aProgram, aUnit, aMatchResult, result);
             if (scs)
-                scs->move_to_fold_stack();
+                scs->fold();
         }
         if (result.action == parse_result::Consumed)
         {
@@ -543,7 +541,7 @@ namespace neos::language
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
 
-    void compiler::fold_concepts()
+    void compiler::fold()
     {
         // todo
     }
