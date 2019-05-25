@@ -54,7 +54,7 @@ namespace neos::language
                     {
                         iCompiler.fold_stack().push_back(aEntry);
                         if (iCompiler.trace_emits())
-                            std::cout << "fold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
+                            std::cout << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
                                 << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
                 });
@@ -541,9 +541,75 @@ namespace neos::language
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
 
-    void compiler::fold()
+    bool compiler::fold()
     {
-        // todo
+        bool didSome = false;
+        bool finished = false;
+        while (!finished)
+        {
+            finished = true;
+            while (fold2())
+            {
+                finished = false;
+                didSome = true;
+            }
+            while (fold1())
+            {
+                finished = false;
+                didSome = true;
+            }
+        }
+        return didSome;
+    }
+
+    bool compiler::fold1()
+    {
+        if (fold_stack().size() < 1)
+            return false;
+        bool didSome = false;
+        for (auto isingle = fold_stack().begin(); isingle != fold_stack().end();)
+        {
+            auto& single = *isingle;
+            if (single.can_fold())
+            {
+                if (trace_emits())
+                    std::cout << "fold: " << single.trace() << " <- " << single.trace() << std::flush;
+                single.fold();
+                if (trace_emits())
+                    std::cout << " = " << single.trace() << std::endl;
+                isingle = fold_stack().erase(isingle);
+                didSome = true;
+            }
+            else
+                ++isingle;
+        }
+        return didSome;
+    }
+
+    bool compiler::fold2()
+    {
+        if (fold_stack().size() < 2)
+            return false;
+        bool didSome = false;
+        for (auto irhs = fold_stack().begin(), ilhs = std::next(irhs); ilhs != fold_stack().end();)
+        {
+            auto& rhs = *irhs;
+            auto& lhs = *ilhs;
+            if (lhs.can_fold(rhs))
+            {
+                if (trace_emits())
+                    std::cout << "fold: " << lhs.trace() << " <- " << rhs.trace() << std::flush;
+                lhs.fold(rhs);
+                if (trace_emits())
+                    std::cout << " = " << lhs.trace() << std::endl;
+                irhs = fold_stack().erase(irhs);
+                ilhs = std::next(irhs);
+                didSome = true;
+            }
+            else
+                ++irhs, ++ilhs;
+        }
+        return didSome;
     }
 
     compiler::concept_stack_t& compiler::parse_stack()

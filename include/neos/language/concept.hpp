@@ -93,13 +93,33 @@ namespace neos::language
             aConsumed = true;
             return aSource;
         }
+        source_iterator source() const override
+        {
+            throw not_an_instance();
+        }
+        source_iterator source_end() const override
+        {
+            throw not_an_instance();
+        }
+        const neolib::i_string& trace() const override
+        {
+            thread_local neolib::string traceResult = name() + "()";
+            return traceResult;
+        }
         // emit
     public:
+        bool has_constant_data() const override
+        {
+            return false;
+        }
+        bool can_fold() const override
+        {
+            return false;
+        }
         bool can_fold(const i_concept& aRhs) const override
         {
             return false;
         }
-    protected:
         bool can_instantiate() const override
         {
             if constexpr (!std::is_same_v<instance_type, void>)
@@ -107,28 +127,25 @@ namespace neos::language
             else
                 return false;
         }
-        i_concept* instantiate() const override
-        {
-            if constexpr (!std::is_same_v<instance_type, void>)
-                return new concept_instance<instance_type>{ static_cast<const InstanceType&>(*this) };
-            else
-                throw cannot_instantiate();
-        }
         bool is_instance() const override
         {
             return false;
         }
-        const i_concept* instance() const override
+        const i_concept& as_instance() const override
         {
-            if (can_instantiate())
-            {
-                return instantiate();
-            }
             throw not_an_instance();
         }
-        i_concept* instance() override
+        i_concept& as_instance() override
         {
-            return const_cast<i_concept*>(const_cast<const neos_concept*>(this)->instance());
+            return const_cast<i_concept&>(const_cast<const neos_concept*>(this)->as_instance());
+        }
+    protected:
+        i_concept* do_instantiate(source_iterator aSource, source_iterator aSourceEnd) const override
+        {
+            if constexpr (!std::is_same_v<instance_type, void>)
+                return new concept_instance<instance_type>{ static_cast<const InstanceType&>(*this), aSource, aSourceEnd };
+            else
+                throw cannot_instantiate();
         }
         const void* representation() const override
         {
@@ -138,11 +155,11 @@ namespace neos::language
         {
             throw not_an_instance();
         }
-        bool is_folded() const override
+        i_concept* do_fold() override
         {
-            return false;
+            return nullptr;
         }
-        i_concept* do_fold(const i_concept& aRhs) override
+        i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
         {
             return nullptr;
         }
@@ -168,35 +185,55 @@ namespace neos::language
         // types
     public:
         typedef Concept concept_type;
+        typedef typename concept_type::source_iterator source_iterator;
         typedef typename concept_type::representation_type representation_type;
         // construction
     public:
-        concept_instance(const concept_type& aConcept) :
-            concept_type{ aConcept }, iRepresentation{}
+        concept_instance(const concept_type& aConcept, source_iterator aSource, source_iterator aSourceEnd) :
+            concept_type{ aConcept }, iSource{ aSource }, iSourceEnd{ aSourceEnd }, iRepresentation{}
         {
         }
         concept_instance() = delete;
+        // parse
+    public:
+        source_iterator source() const override
+        {
+            return iSource;
+        }
+        source_iterator source_end() const override
+        {
+            return iSourceEnd;
+        }
+        const neolib::i_string& trace() const override
+        {
+            thread_local neolib::string traceResult;
+            std::ostringstream oss;
+            oss << concept_type::name() << "(" << *static_cast<const representation_type*>(representation()) << ")";
+            traceResult = oss.str();
+            return traceResult;
+        }
         // emit
-    private:
+    public:
         bool can_instantiate() const override
         {
             return false;
-        }
-        i_concept* instantiate() const override
-        {
-            throw already_instantiated();
         }
         bool is_instance() const override
         {
             return true;
         }
-        const concept_type* instance() const override
+        const concept_type& as_instance() const override
         {
-            return this;
+            return *this;
         }
-        concept_type* instance() override
+        concept_type& as_instance() override
         {
-            return this;
+            return *this;
+        }
+    protected:
+        i_concept* do_instantiate(source_iterator, source_iterator) const override
+        {
+            throw already_instantiated();
         }
         const void* representation() const override
         {
@@ -207,6 +244,8 @@ namespace neos::language
             return &iRepresentation;
         }
     private:
+        source_iterator iSource;
+        source_iterator iSourceEnd;
         representation_type iRepresentation;
     };
 }

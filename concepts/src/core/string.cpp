@@ -44,10 +44,17 @@ namespace neos::concept::core
     struct single_char {};
 
     template <char Char>
-    class string_utf8_character<single_char<Char>> : public neos_concept<>
+    class string_utf8_character<single_char<Char>> : public neos_concept<string_utf8_character<single_char<Char>>>
     {
+        // types
     public:
-        using neos_concept::neos_concept;
+        typedef neos_concept<string_utf8_character<single_char<Char>>> base_type;
+        typedef typename base_type::source_iterator source_iterator;
+        typedef char representation_type;
+        // construction
+    public:
+        using base_type::base_type;
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -58,6 +65,18 @@ namespace neos::concept::core
             }
             aConsumed = false;
             return aSource;
+        }
+        // emit
+    public:
+        bool has_constant_data() const override
+        {
+            return true;
+        }
+    protected:
+        const void* representation() const override
+        {
+            static constexpr representation_type sChar = Char;
+            return &sChar;
         }
     };
 
@@ -114,6 +133,7 @@ namespace neos::concept::core
         // types
     public:
         typedef neos_concept<basic_string<Char>> base_type;
+        typedef typename base_type::source_iterator source_iterator;
         typedef Char character_type;
         typedef std::basic_string<character_type> representation_type;
         // construction
@@ -121,16 +141,30 @@ namespace neos::concept::core
         using base_type::base_type;
         // emit
     protected:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        i_concept* do_fold() override
+        {
+            std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
+            return this;
+        }
         bool can_fold(const i_concept& aRhs) const override
         {
             return aRhs.name().to_std_string_view().find(base_type::name().to_std_string_view()) == 0;
         }
-        i_concept* do_fold(const i_concept& aRhs) override
+        i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
         {
-            if (can_fold(aRhs) && base_type::instance()->can_fold(aRhs))
+            if (can_fold(aRhs) && base_type::as_instance().can_fold(aRhs))
             {
-                base_type::instance()->data<representation_type>().push_back(aRhs.data<character_type>());
-                return base_type::instance();
+                if (aRhs.is_instance() || aRhs.has_constant_data())
+                    base_type::as_instance().data<representation_type>().push_back(aRhs.data<character_type>());
+                else if (aRhsSource != std::nullopt)
+                    base_type::as_instance().data<representation_type>().push_back(static_cast<character_type>(*aRhsSource->first));
+                else
+                    throw base_type::invalid_fold();
+                return &base_type::as_instance();
             }
             throw base_type::invalid_fold();
         }

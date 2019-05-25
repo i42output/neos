@@ -97,6 +97,39 @@ namespace neos::language
             const i_concept* concept;
             source_iterator sourceStart;
             source_iterator sourceEnd;
+            neolib::ref_ptr<i_concept> foldedConcept;
+            bool can_fold() const
+            {
+                return foldedConcept ? foldedConcept->can_fold() : concept->can_fold();
+            }
+            bool can_fold(const concept_stack_entry& rhs) const
+            {
+                return foldedConcept ?
+                    foldedConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept) :
+                    concept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept);
+            }
+            void instantiate_if_needed()
+            {
+                if (!foldedConcept)
+                    foldedConcept = concept->instantiate(sourceStart, sourceEnd);
+            }
+            void fold()
+            {
+                instantiate_if_needed();
+                foldedConcept = foldedConcept->fold();
+            }
+            void fold(const concept_stack_entry& rhs)
+            {
+                instantiate_if_needed();
+                if (rhs.foldedConcept)
+                    foldedConcept = foldedConcept->fold(*rhs.foldedConcept);
+                else
+                    foldedConcept = foldedConcept->fold(*rhs.concept, rhs.sourceStart, rhs.sourceEnd);
+            }
+            std::string trace() const
+            {
+                return foldedConcept ? foldedConcept->trace() : concept->trace();
+            }
         };
         typedef std::vector<concept_stack_entry> concept_stack_t;
         class scoped_concept_folder
@@ -135,7 +168,9 @@ namespace neos::language
         parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, const parse_result& aResult);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
         parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
-        void fold();
+        bool fold();
+        bool fold1();
+        bool fold2();
         concept_stack_t& parse_stack();
         concept_stack_t& postfix_operation_stack();
         concept_stack_t& fold_stack();

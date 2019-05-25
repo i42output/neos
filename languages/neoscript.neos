@@ -179,6 +179,7 @@
     }
 
     identifier: {
+        is: string.utf8
         is: language.identifier
         tokens: {
             character.alpha: rest

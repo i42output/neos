@@ -47,6 +47,7 @@ namespace neos::language
         struct cannot_instantiate : std::logic_error { cannot_instantiate() : std::logic_error("neos::language::i_concept::cannot_instantiate") {} };
         struct already_instantiated : std::logic_error { already_instantiated() : std::logic_error("neos::language::i_concept::already_instantiated") {} };
         struct not_an_instance : std::logic_error { not_an_instance() : std::logic_error("neos::language::i_concept::not_an_instance") {} };
+        struct data_is_constant : std::logic_error { data_is_constant() : std::logic_error("neos::language::i_concept::data_is_constant") {} };
     public:
         typedef const char* source_iterator;
     public:
@@ -59,19 +60,24 @@ namespace neos::language
         virtual emit_type emit_as() const = 0;
         virtual source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
         virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
+        virtual source_iterator source() const = 0;
+        virtual source_iterator source_end() const = 0;
+        virtual const neolib::i_string& trace() const = 0;
         // emit
     public:
+        virtual bool has_constant_data() const = 0;
+        virtual bool can_fold() const = 0;
         virtual bool can_fold(const i_concept& aRhs) const = 0;
-    protected:
         virtual bool can_instantiate() const = 0;
-        virtual i_concept* instantiate() const = 0;
         virtual bool is_instance() const = 0;
-        virtual const i_concept* instance() const = 0;
-        virtual i_concept* instance() = 0;
+        virtual const i_concept& as_instance() const = 0;
+        virtual i_concept& as_instance() = 0;
+    protected:
+        virtual i_concept* do_instantiate(source_iterator aSource, source_iterator aSourceEnd) const = 0;
         virtual const void* representation() const = 0;
         virtual void* representation() = 0;
-        virtual bool is_folded() const = 0;
-        virtual i_concept* do_fold(const i_concept& aRhs) = 0;
+        virtual i_concept* do_fold() = 0;
+        virtual i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) = 0;
         // helpers
     public:
         template<typename SourceIterator>
@@ -139,28 +145,43 @@ namespace neos::language
         }
         // emit
     public:
+        template <typename SourceIterator>
+        i_concept* instantiate(SourceIterator aSource, SourceIterator aSourceEnd) const
+        {
+            return do_instantiate(&*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
+        }
+        neolib::ref_ptr<i_concept> fold()
+        {
+            if (can_fold())
+                return as_instance().do_fold();
+            return nullptr;
+        }
         neolib::ref_ptr<i_concept> fold(const i_concept& aRhs)
         {
             if (can_fold(aRhs))
-            {
-                auto lhs = (is_instance() ? this : can_instantiate() ? instantiate() : this);
-                return lhs->do_fold(aRhs);
-            }
+                return as_instance().do_fold(aRhs);
+            return nullptr;
+        }
+        template <typename SourceIterator>
+        neolib::ref_ptr<i_concept> fold(const i_concept& aRhs, SourceIterator aSource, SourceIterator aSourceEnd)
+        {
+            if (can_fold(aRhs))
+                return as_instance().do_fold(aRhs, std::pair<source_iterator, source_iterator>{ &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd))});
             return nullptr;
         }
         template <typename Data>
         const Data& data() const
         {
-            if (is_instance())
-            {
+            if (is_instance() || has_constant_data())
                 return *static_cast<const Data*>(representation());
-            }
             throw not_an_instance();
         }
         template <typename Data>
         Data& data()
         {
-            return const_cast<Data&>(const_cast<const i_concept*>(this)->data<Data>());
+            if (!has_constant_data())
+                return const_cast<Data&>(const_cast<const i_concept*>(this)->data<Data>());
+            throw data_is_constant();
         }
     };
 }
