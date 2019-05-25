@@ -54,7 +54,7 @@ namespace neos::language
                     {
                         iCompiler.fold_stack().push_back(aEntry);
                         if (iCompiler.trace_emits())
-                            std::cout << "emit: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
+                            std::cout << "fold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
                                 << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
                 });
