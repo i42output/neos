@@ -112,6 +112,11 @@ namespace neos::language
 
     void compiler::compile(program& aProgram)
     {
+        iParseStack.clear();
+        iPostfixOperationStack.clear();
+        iFoldStack.clear();
+        iLevel = 0;
+
         iStartTime = std::chrono::steady_clock::now();
 
         try
