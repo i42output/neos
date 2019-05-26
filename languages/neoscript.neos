@@ -554,9 +554,7 @@
             identifier: {
                 ":=": {
                     expect: expression
-                    expect: boolean_expression
                     expression: object.assign
-                    boolean_expression: object.assign
                     object.assign: done
                 }
                 whitespace: ignore
@@ -581,6 +579,16 @@
                 identifier.end: done
             }
             whitespace: ignore
+        }
+    }
+
+    expression: {
+        is: language.expression
+        tokens: {
+            expect: boolean_expression
+            expect: math_expression
+            boolean_expression: done
+            math_expression: done
         }
     }
 
@@ -615,23 +623,23 @@
             term1: {
                 is: boolean.expression.operand
                 tokens: {
-                    expect: expression
-                    expression: done
+                    expect: math_expression
+                    math_expression: done
                 }
             
             }
             term2: {
                 is: boolean.expression.operand
                 tokens: {
-                    expect: expression
-                    expression: done
+                    expect: math_expression
+                    math_expression: done
                 }
             
             }
         }
     }
 
-    expression: {
+    math_expression: {
         is: math.expression
         expect: term
         tokens: {
@@ -685,11 +693,11 @@
                 identifier: {
                     expect: none
                     '(': {
-                        expect: expression
-                        expression: language.function.argument
+                        expect: math_expression
+                        math_expression: language.function.argument
                         language.function.argument: {
                             ',': {
-                                expect: expression
+                                expect: math_expression
                             }
                             ')': language.function.call
                             language.function.call: done
@@ -707,8 +715,8 @@
                     whitespace: ignore
                 }
                 '(': {
-                    expect: expression
-                    expression: {
+                    expect: math_expression
+                    math_expression: {
                         expect: ')'
                         ')': done
                         whitespace: ignore

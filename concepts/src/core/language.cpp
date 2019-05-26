@@ -394,6 +394,8 @@ namespace neos::concept::core
         }
     {
         /* todo */
+        concepts()[neolib::string{ "language.expression" }] = neolib::make_ref<neos::language::unimplemented_concept>("language.expression");
+        concepts()[neolib::string{ "language.expression.operand" }] = neolib::make_ref<neos::language::unimplemented_concept>("language.expression.operand");
         concepts()[neolib::string{ "language.statement" }] = neolib::make_ref<neos::language::unimplemented_concept>("language.statement");
         concepts()[neolib::string{ "language.keyword" }] = neolib::make_ref<language_keyword>();
         concepts()[neolib::string{ "language.identifier" }] = neolib::make_ref<language_identifier>();
