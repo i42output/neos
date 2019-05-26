@@ -49,6 +49,7 @@
 
     package: {
         name: {
+            is: string.utf8
             is: module.package.name
             tokens: {
                 character.alpha: rest

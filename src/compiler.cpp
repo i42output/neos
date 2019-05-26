@@ -611,6 +611,18 @@ namespace neos::language
                 ilhs = std::next(irhs);
                 didSome = true;
             }
+            else if (rhs.can_fold(lhs))
+            {
+                if (trace_emits())
+                    std::cout << "fold: " << lhs.trace() << " -> " << rhs.trace() << std::flush;
+                rhs.fold(lhs);
+                if (trace_emits())
+                    std::cout << " = " << rhs.trace() << std::endl;
+                ilhs = fold_stack().erase(ilhs);
+                irhs = std::prev(ilhs);
+                didSome = true;
+            }
+
             else
                 ++irhs, ++ilhs;
         }
