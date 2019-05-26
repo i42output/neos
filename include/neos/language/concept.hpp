@@ -26,6 +26,17 @@
 
 namespace neos::language
 {
+    template <typename Representation>
+    inline Representation to_representation(i_concept::source_iterator aSource, i_concept::source_iterator aSourceEnd)
+    {
+        return Representation(aSource, aSourceEnd);
+    }
+    template<>
+    inline char to_representation<char>(i_concept::source_iterator aSource, i_concept::source_iterator aSourceEnd)
+    {
+        return *aSource;
+    }
+
     template <typename Concept>
     class concept_instance;
 
@@ -34,6 +45,7 @@ namespace neos::language
     {
         // types
     public:
+        typedef neolib::reference_counted<i_concept> base_type;
         typedef InstanceType instance_type;
         // construction
     public:
@@ -161,7 +173,23 @@ namespace neos::language
         }
         i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
         {
-            return nullptr;
+            if constexpr (!std::is_same_v<instance_type, void>)
+            {
+                typedef typename instance_type::representation_type representation_type;
+                if (can_fold(aRhs) && as_instance().can_fold(aRhs))
+                {
+                    if (aRhs.is_instance() || aRhs.has_constant_data())
+                        as_instance().data<representation_type>() = aRhs.data<representation_type>();
+                    else if (aRhsSource != std::nullopt)
+                        as_instance().data<representation_type>() = to_representation<representation_type>(aRhsSource->first, aRhsSource->second);
+                    else
+                        throw base_type::invalid_fold();
+                    return &as_instance();
+                }
+                throw invalid_fold();
+            }
+            else
+                return nullptr;
         }
         // attributes
     private:

@@ -511,7 +511,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace() >= 3)
+            if (trace() >= 4)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             parse_stack().push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -529,7 +529,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace() >= 3)
+            if (trace() >= 4)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             aConceptStack.push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -570,9 +570,13 @@ namespace neos::language
                 if (trace() >= 1)
                     std::cout << "fold: " << single.trace() << " <- " << single.trace() << std::flush;
                 single.fold();
-                if (trace() >= 1)
-                    std::cout << " = " << single.trace() << std::endl;
-                isingle = fold_stack().erase(isingle);
+                if (single.foldedConcept != nullptr)
+                {
+                    if (trace() >= 1)
+                        std::cout << " = " << single.trace() << std::endl;
+                }
+                else
+                    isingle = fold_stack().erase(isingle);
                 didSome = true;
             }
             else
@@ -598,21 +602,11 @@ namespace neos::language
                 if (trace() >= 1)
                     std::cout << " = " << lhs.trace() << std::endl;
                 irhs = fold_stack().erase(irhs);
+                if (irhs != fold_stack().begin())
+                    --irhs;
                 ilhs = std::next(irhs);
                 didSome = true;
             }
-            else if (rhs.can_fold(lhs))
-            {
-                if (trace() >= 1)
-                    std::cout << "fold: " << lhs.trace() << " -> " << rhs.trace() << std::flush;
-                rhs.fold(lhs);
-                if (trace() >= 1)
-                    std::cout << " = " << rhs.trace() << std::endl;
-                ilhs = fold_stack().erase(ilhs);
-                irhs = std::prev(ilhs);
-                didSome = true;
-            }
-
             else
                 ++irhs, ++ilhs;
         }

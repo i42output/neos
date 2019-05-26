@@ -28,5 +28,5 @@ def proc main()
     print("Enter a positive "
             "integer: ");
     input(s);
-    print("Fibonacci(" + s + "): " + to_string(fib(to_integer(s))) + "\n");
+    print("Fibonacci(" + s + ") = " + to_string(fib(to_integer(s))) + "\n");
 }

@@ -67,18 +67,29 @@ namespace neos::concept::core
         }
     };
 
-    class language_identifier : public neos_concept<>
+    class language_identifier : public neos_concept<language_identifier>
     {
+        // types
+    public:
+        typedef std::string representation_type;
+        // construction
     public:
         language_identifier() :
             neos_concept{ "language.identifier", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
             aConsumed = false;
             return aSource;
+        }
+        // emit
+    protected:
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            return aRhs.name() == "string.utf8";
         }
     };
 

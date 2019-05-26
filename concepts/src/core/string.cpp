@@ -143,11 +143,12 @@ namespace neos::concept::core
     protected:
         bool can_fold() const override
         {
-            return true;
+            return !iFolded;
         }
         i_concept* do_fold() override
         {
             std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
+            iFolded = true;
             return this;
         }
         bool can_fold(const i_concept& aRhs) const override
@@ -168,6 +169,8 @@ namespace neos::concept::core
             }
             throw base_type::invalid_fold();
         }
+    private:
+        bool iFolded = false;
     };
 
     string::string(neos::language::i_concept_library& aParent) :

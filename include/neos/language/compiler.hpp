@@ -118,8 +118,10 @@ namespace neos::language
                 instantiate_if_needed();
                 foldedConcept = foldedConcept->fold();
             }
-            void fold(const concept_stack_entry& rhs)
+            void fold(concept_stack_entry& rhs)
             {
+                if (rhs.can_fold())
+                    rhs.fold();
                 instantiate_if_needed();
                 if (rhs.foldedConcept)
                     foldedConcept = foldedConcept->fold(*rhs.foldedConcept);
