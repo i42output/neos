@@ -53,7 +53,7 @@ namespace neos::language
                     if (aEntry.concept != nullptr)
                     {
                         iCompiler.fold_stack().push_back(aEntry);
-                        if (iCompiler.trace_emits())
+                        if (iCompiler.trace() >= 2)
                             std::cout << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, aEntry.sourceStart) << "> "
                                 << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
@@ -76,28 +76,18 @@ namespace neos::language
     }
 
     compiler::compiler() :
-        iTrace{ false }, iTraceEmits{ false }, iLevel{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
+        iTrace{ 0u }, iLevel{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
     }
 
-    bool compiler::trace() const
+    uint32_t compiler::trace() const
     {
         return iTrace;
     }
 
-    void compiler::set_trace(bool aTrace)
+    void compiler::set_trace(uint32_t aTrace)
     {
         iTrace = aTrace;
-    }
-
-    bool compiler::trace_emits() const
-    {
-        return iTraceEmits;
-    }
-
-    void compiler::set_trace_emits(bool aTraceEmits)
-    {
-        iTraceEmits = aTraceEmits;
     }
 
     const std::chrono::steady_clock::time_point& compiler::start_time() const
@@ -153,7 +143,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace())
+        if (trace() >= 3)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
@@ -207,7 +197,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace())
+        if (trace() >= 3)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         auto currentSource = aSource;
@@ -401,7 +391,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace())
+        if (trace() >= 3)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
         scoped_concept_folder poe{ *this, aPass, postfix_operation_stack() };
         std::optional<scoped_concept_folder> scs;
@@ -449,7 +439,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace())
+        if (trace() >= 3)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         if (aToken.is_schema_atom())
@@ -521,7 +511,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace())
+            if (trace() >= 3)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             parse_stack().push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -539,7 +529,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace())
+            if (trace() >= 3)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             aConceptStack.push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -577,10 +567,10 @@ namespace neos::language
             auto& single = *isingle;
             if (single.can_fold())
             {
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << "fold: " << single.trace() << " <- " << single.trace() << std::flush;
                 single.fold();
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << " = " << single.trace() << std::endl;
                 isingle = fold_stack().erase(isingle);
                 didSome = true;
@@ -602,10 +592,10 @@ namespace neos::language
             auto& lhs = *ilhs;
             if (lhs.can_fold(rhs))
             {
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << "fold: " << lhs.trace() << " <- " << rhs.trace() << std::flush;
                 lhs.fold(rhs);
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << " = " << lhs.trace() << std::endl;
                 irhs = fold_stack().erase(irhs);
                 ilhs = std::next(irhs);
@@ -613,10 +603,10 @@ namespace neos::language
             }
             else if (rhs.can_fold(lhs))
             {
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << "fold: " << lhs.trace() << " -> " << rhs.trace() << std::flush;
                 rhs.fold(lhs);
-                if (trace_emits())
+                if (trace() >= 1)
                     std::cout << " = " << rhs.trace() << std::endl;
                 ilhs = fold_stack().erase(ilhs);
                 irhs = std::prev(ilhs);

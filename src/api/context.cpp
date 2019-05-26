@@ -84,13 +84,11 @@ namespace neos
     {
         iProgram = decltype(iProgram){};
         auto& unit = load_unit(aPath);
-        compile_program();
     }
 
     void context::load_program(std::istream& aStream)
     {
         auto& unit = load_unit(aStream);
-        compile_program();
     }
 
     language::compiler& context::compiler()

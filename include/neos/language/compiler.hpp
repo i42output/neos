@@ -153,10 +153,8 @@ namespace neos::language
         compiler();
     public:
         void compile(program& aProgram);
-        bool trace() const;
-        void set_trace(bool aTrace);
-        bool trace_emits() const;
-        void set_trace_emits(bool aTraceConcepts);
+        uint32_t trace() const;
+        void set_trace(uint32_t aTrace);
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
     private:
@@ -179,8 +177,7 @@ namespace neos::language
         static std::string location(const translation_unit& aUnit, source_iterator aSourcePos);
         static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
-        bool iTrace;
-        bool iTraceEmits;
+        uint32_t iTrace;
         optional_source_iterator iDeepestProbe;
         concept_stack_t iParseStack;
         concept_stack_t iPostfixOperationStack;

@@ -45,13 +45,13 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << "s(chema) <path to language schema>       Load language scheme\n"
                 << "l(oad) <path to program>                 Load program\n"
                 << "list                                     List program\n"
+                << "c(ompile)                                Compile program\n"
                 << "r(un)                                    Run program\n"
                 << "![<expression>]                          Evaluate expression (enter interactive mode if expression omitted)\n"
                 << ":<input>                                 Input (as stdin)\n"
                 << "q(uit)                                   Quit neos\n"
                 << "lc                                       List loaded concept libraries\n"
-                << "ct <true|false>                          Compiler trace\n"
-                << "cte <true|false>                         Compiler trace emits\n"
+                << "t(race) [0|1|2|3]                        Compiler trace\n"
                 << "m(etrics)                                Display metrics of running programs\n"
                 << std::endl;
         }
@@ -65,6 +65,10 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         else if (command == "l" || command == "load")
         {
             aContext.load_program(parameters);
+        }
+        else if (command == "c" || command == "compile")
+        {
+            aContext.compile_program();
             output_compilation_time();
         }
         else if (command == "list")
@@ -102,17 +106,10 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 if (conceptLibrary.second()->depth() == 0)
                     print_concept_library(print_concept_library, *conceptLibrary.second());
         }
-        else if (command == "ct")
+        else if (command == "t" || command == "trace")
         {
             if (words.size() == 2)
-                aContext.compiler().set_trace(command_arg_to_bool(std::string(words[1].first, words[1].second)));
-            else
-                throw std::runtime_error("invalid command argument(s)");
-        }
-        else if (command == "cte")
-        {
-            if (words.size() == 2)
-                aContext.compiler().set_trace_emits(command_arg_to_bool(std::string(words[1].first, words[1].second)));
+                aContext.compiler().set_trace(boost::lexical_cast<uint32_t>(std::string(words[1].first, words[1].second)));
             else
                 throw std::runtime_error("invalid command argument(s)");
         }
@@ -161,10 +158,17 @@ void main_loop(boost::program_options::variables_map& aOptions)
             first = false;
             if (aOptions.count("s"))
                 process_command(context, interactive, "s " + aOptions["s"].as<std::string>());
-            if (aOptions.count("cte"))
-                process_command(context, interactive, "cte 1");
+            if (aOptions.count("schema"))
+                process_command(context, interactive, "s " + aOptions["schema"].as<std::string>());
+            if (aOptions.count("trace"))
+                process_command(context, interactive, "t " + boost::lexical_cast<std::string>(aOptions["trace"].as<uint32_t>()));
+            if (aOptions.count("t"))
+                process_command(context, interactive, "t " + boost::lexical_cast<std::string>(aOptions["t"].as<uint32_t>()));
             if (aOptions.count("program"))
-                process_command(context, interactive, "l " + aOptions["program"].as<std::vector<std::string>>()[0]);
+                for (auto const& p : aOptions["program"].as<std::vector<std::string>>())
+                    process_command(context, interactive, "l " + p);
+            if (aOptions.count("c") || aOptions.count("compile"))
+                process_command(context, interactive, "c");
         }
         std::string line;
         std::cout << (context.schema_loaded() ? context.running() || interactive ? context.schema().meta().name + ">" : context.schema().meta().name + "]" : "]");
@@ -180,9 +184,13 @@ int main(int argc, char* argv[])
     {
         boost::program_options::options_description optionsDescription{ "Allowed options" };
         optionsDescription.add_options()
-            ("s", boost::program_options::value<std::string>(), "schema")
-            ("cte", boost::program_options::value<std::string>(), "enable compiler trace emits")
-            ("program", boost::program_options::value<std::vector<std::string>>(), "program to load");
+            ("schema", boost::program_options::value<std::string>(), "language schema")
+            ("s", boost::program_options::value<std::string>(), "language schema")
+            ("trace", boost::program_options::value<uint32_t>(), "compiler trace")
+            ("t", boost::program_options::value<uint32_t>(), "compiler trace")
+            ("compile", "compile program")
+            ("c", "compile program")
+            ("program", boost::program_options::value<std::vector<std::string>>(), "program(s) to load");
         boost::program_options::positional_options_description positionalOptionsDescription;
         positionalOptionsDescription.add("program", -1);
         boost::program_options::variables_map options;
