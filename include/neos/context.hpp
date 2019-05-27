@@ -45,6 +45,7 @@ namespace neos
     public:
         struct warning : std::runtime_error { using runtime_error::runtime_error; };
         struct error : std::runtime_error { using runtime_error::runtime_error; };
+        struct invalid_fragment : std::logic_error { invalid_fragment() : std::logic_error("neos::context::invalid_fragment") {} };
         struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::context::no_schema_source") {} };
         struct no_schema_loaded : error { no_schema_loaded() : error("no schema loaded") {} };
         struct no_text : warning { no_text() : warning("no text") {} };
@@ -73,8 +74,8 @@ namespace neos
         std::string metrics() const;
     private:
         void init();
-        translation_unit_t& load_unit(const std::string& aPath);
-        translation_unit_t& load_unit(std::istream& aStream);
+        translation_unit_t& load_unit(language::source_fragment&& aFragment);
+        translation_unit_t& load_unit(language::source_fragment&& aFragment, std::istream& aStream);
     private:
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;

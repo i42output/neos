@@ -74,7 +74,12 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         else if (command == "list")
         {
             for (auto const& tu : aContext.program().translationUnits)
-                std::cout << tu.source << std::endl;
+                for (auto const& f : tu.fragments)
+                {
+                    if (f.filePath != std::nullopt)
+                        std::cout << "File '" << *f.filePath << "':" << std::endl;
+                    std::cout << f.source << std::endl;
+                }
         }
         else if (command == "r" || command == "run")
             aContext.run();

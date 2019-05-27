@@ -28,25 +28,84 @@
 
 namespace neos::language
 {
+    typedef std::string source_file_path_t;
+    typedef std::optional<source_file_path_t> optional_source_file_path_t;
+    typedef std::string source_t;
+
+    enum class compilation_status
+    {
+        Pending,
+        Compiling,
+        Compiled
+    };
+
+    struct source_fragment
+    {
+        optional_source_file_path_t filePath;
+        source_t source;
+        mutable compilation_status status;
+        source_t::const_iterator begin() const { return source.begin(); }
+        source_t::const_iterator end() const { return source.end(); }
+        source_t::const_iterator cbegin() const { return source.begin(); }
+        source_t::const_iterator cend() const { return source.end(); }
+        source_t::iterator cbegin() { return source.begin(); }
+        source_t::iterator cend() { return source.end(); }
+    };
+
+    typedef std::shared_ptr<language::schema> schema_pointer_t;
+    typedef std::vector<source_fragment> source_fragments_t;
+
+    struct source_fragment_not_found : std::logic_error { source_fragment_not_found() : std::logic_error("neos::language::source_fragment_not_found") {} };
+
     struct translation_unit
     {
-        std::shared_ptr<language::schema> schema;
-        typedef std::string source_t;
-        source_t source;
+        schema_pointer_t schema;
+        source_fragments_t fragments;
         language::ast ast;
+        const source_fragment& fragment(source_t::const_iterator aSource) const
+        {
+            for (auto const& f : fragments)
+                if (aSource >= f.source.begin() && aSource <= f.source.end())
+                    return f;
+            throw source_fragment_not_found();
+        }
+        source_fragment& fragment(source_t::const_iterator aSource)
+        {
+            return const_cast<source_fragment&>(const_cast<const translation_unit*>(this)->fragment(aSource));
+        }
+        bool pending() const
+        {
+            for (auto const& f : fragments)
+                if (f.status == compilation_status::Pending)
+                    return true;
+            return false;
+        }
+        bool compiling() const
+        {
+            for (auto const& f : fragments)
+                if (f.status == compilation_status::Compiling)
+                    return true;
+            return false;
+        }
+        bool compiled() const
+        {
+            return !pending() && !compiling();
+        }
     };
+
+    typedef std::vector<translation_unit> translation_units_t;
 
     struct program
     {
+        translation_units_t translationUnits;
         symbol_table_t symbolTable;
-        std::vector<translation_unit> translationUnits;
         text_t text;
     };
 
     class compiler
     {
     private:
-        typedef translation_unit::source_t::const_iterator source_iterator;
+        typedef source_t::const_iterator source_iterator;
         typedef std::optional<source_iterator> optional_source_iterator;
         struct parse_result
         {
@@ -93,6 +152,7 @@ namespace neos::language
         struct concept_stack_entry
         {
             translation_unit const* unit;
+            source_fragment const* fragment;
             uint32_t level;
             const i_concept* concept;
             source_iterator sourceStart;
@@ -163,7 +223,7 @@ namespace neos::language
             void trace(const translation_unit& aUnit, bool aTraceOperators) const
             {
                 std::cerr << "'";
-                auto const count = std::min<std::ptrdiff_t>(20, std::distance(source, aUnit.source.end()));
+                auto const count = std::min<std::ptrdiff_t>(20, std::distance(source, aUnit.fragment(source).end()));
                 for (auto c : std::string_view(&*source, count))
                     if (c >= 32)
                         std::cerr << c;
@@ -223,6 +283,7 @@ namespace neos::language
     public:
         void compile(program& aProgram);
         void compile(program& aProgram, const translation_unit& aUnit);
+        void compile(program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment);
         uint32_t trace() const;
         void set_trace(uint32_t aTrace);
         const std::chrono::steady_clock::time_point& start_time() const;    
@@ -230,25 +291,25 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
-        parse_result parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
-        parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
-        parse_result parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
-        parse_result parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
+        parse_result parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource);
+        parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
+        parse_result parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
+        parse_result parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
+        parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult);
+        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult);
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
         bool fold();
         bool fold1();
         bool fold2();
         concept_stack_t& parse_stack();
         concept_stack_t& postfix_operation_stack();
         concept_stack_t& fold_stack();
-        void display_probe_trace(const translation_unit& aUnit);
+        void display_probe_trace(const translation_unit& aUnit, const source_fragment& aFragment);
         static bool is_finished(const compiler::parse_result& aResult);
         static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
-        static std::string location(const translation_unit& aUnit, source_iterator aSourcePos);
-        static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
+        static std::string location(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
+        static void throw_error(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
         uint32_t iTrace;
         std::chrono::steady_clock::time_point iStartTime;
