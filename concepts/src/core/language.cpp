@@ -108,6 +108,21 @@ namespace neos::concept::core
         }
     };
 
+    class language_scope_add : public neos_concept<>
+    {
+    public:
+        language_scope_add() :
+            neos_concept{ "language.scope.add", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
     class language_function : public neos_concept<>
     {
     public:
@@ -415,6 +430,7 @@ namespace neos::concept::core
         concepts()[neolib::string{ "language.keyword" }] = neolib::make_ref<language_keyword>();
         concepts()[neolib::string{ "language.identifier" }] = neolib::make_ref<language_identifier>();
         concepts()[neolib::string{ "language.scope" }] = neolib::make_ref<language_scope>();
+        concepts()[neolib::string{ "language.scope.add" }] = neolib::make_ref<language_scope_add>();
         concepts()[neolib::string{ "language.function" }] = neolib::make_ref<language_function>();
         concepts()[neolib::string{ "language.function.scope" }] = neolib::make_ref<language_function_scope>(*concepts()[neolib::string{ "language.scope" }]);
         concepts()[neolib::string{ "language.function.parameters" }] = neolib::make_ref<language_function_parameters>();

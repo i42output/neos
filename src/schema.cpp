@@ -190,7 +190,7 @@ namespace neos
                         iMeta.copyright = meta.as<neolib::rjson_string>();
                     else if (meta.name() == "version")
                         iMeta.version = meta.as<neolib::rjson_string>();
-                    else if (meta.name() == "sourcecode.file.extension")
+                    else if (meta.name() == "source.file.extension")
                     {
                         if (meta.type() == neolib::json_type::String)
                             iMeta.sourcecodeFileExtension.push_back(meta.as<neolib::rjson_string>());
@@ -198,7 +198,7 @@ namespace neos
                             for (auto const& ext : meta)
                                 iMeta.sourcecodeFileExtension.push_back(ext.as<neolib::rjson_string>());
                     }
-                    else if (meta.name() == "sourcecode.module.package.specification.file.extension")
+                    else if (meta.name() == "source.source.package.specification.file.extension")
                     {
                         if (meta.type() == neolib::json_type::String)
                             iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(meta.as<neolib::rjson_string>());
@@ -206,7 +206,7 @@ namespace neos
                             for (auto const& ext : meta)
                                 iMeta.sourcecodeModulePackageSpecificationFileExtension.push_back(ext.as<neolib::rjson_string>());
                     }
-                    else if (meta.name() == "sourcecode.module.package.implementation.file.extension")
+                    else if (meta.name() == "source.source.package.implementation.file.extension")
                     {
                         if (meta.type() == neolib::json_type::String)
                             iMeta.sourcecodeModulePackageImplementationFileExtension.push_back(meta.as<neolib::rjson_string>());

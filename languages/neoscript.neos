@@ -2,7 +2,9 @@
     meta: {
         language: "neoscript"
         description: "Default neoGFX scripting language"
-        sourcecode.file.extension: [ "neo" ]
+        source.file.extension: ".neo"
+        source.package.specification.file.extension: ".neo"
+        source.package.implementation.file.extension: ".neo"
         copyright: "Copyright (C) 2019 Leigh Johnston"
         version: "1.0.0"
     }
@@ -50,7 +52,7 @@
     package: {
         name: {
             is: string.utf8
-            is: module.package.name
+            is: source.package.name
             tokens: {
                 character.alpha: rest
                 rest: done
@@ -120,9 +122,8 @@
         using: {
             expect: whitespace
             tokens: {
-                package.name: module.package.import
-                module.package.import: module.package.instantiate
-                module.package.instantiate: {
+                package.name: source.package.import
+                source.package.import: {
                     expect: end
                     end: drain
                 }

@@ -1,0 +1,4 @@
+-- neoscript package: string
+
+import fn to_string(x : i32) -> string;
+import fn to_integer(s : string) -> i32;

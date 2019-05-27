@@ -22,48 +22,125 @@
 
 namespace neos::concept::core
 {   
-    class module_package_name : public neos_concept<>
+    class source_package_name : public neos_concept<source_package_name>
     {
+        // types
+    public:
+        typedef std::string representation_type;
+        // construction
+    public:
+        source_package_name() :
+            neos_concept{ "source.package.name", neos::language::emit_type::Infix }
+        {
+        }
+        // parse
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return std::next(aSource);
+        }
+        // emit
+    protected:
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            return aRhs.name() == "string.utf8";
+        }
+    };
+
+    class source_package_import : public neos_concept<source_package_import>
+    {
+        // types
+    public:
+        typedef std::string representation_type;
+        // construction
+    public:
+        source_package_import() :
+            neos_concept{ "source.package.import", neos::language::emit_type::Infix }
+        {
+        }
+        // parse
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+        // emit
+    protected:
+        bool can_fold() const override
+        {
+            return as_instance().data<representation_type>().empty();
+        }
+        i_concept* do_fold() override
+        {
+            // todo
+            return this;
+        }
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            return aRhs.name() == "source.package.name";
+        }
+    };
+
+    class module_package_name : public neos_concept<module_package_name>
+    {
+        // types
+    public:
+        typedef std::string representation_type;
+        // construction
     public:
         module_package_name() :
             neos_concept{ "module.package.name", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
-            aConsumed = true;
+            aConsumed = false;
             return std::next(aSource);
+        }
+        // emit
+    protected:
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            return aRhs.name() == "string.utf8";
         }
     };
 
-    class module_package_import : public neos_concept<>
+    class module_package_import : public neos_concept<module_package_import>
     {
+        // types
+    public:
+        typedef std::string representation_type;
+        // construction
     public:
         module_package_import() :
             neos_concept{ "module.package.import", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
             aConsumed = false;
             return aSource;
         }
-    };
-
-    class module_package_instantiate : public neos_concept<>
-    {
-    public:
-        module_package_instantiate() :
-            neos_concept{ "module.package.instantiate", neos::language::emit_type::Infix }
+        // emit
+    protected:
+        bool can_fold() const override
         {
+            return as_instance().data<representation_type>().empty();
         }
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        i_concept* do_fold() override
         {
-            aConsumed = false;
-            return aSource;
+            // todo
+            return this;
+        }
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            return aRhs.name() == "module.package.name";
         }
     };
 
@@ -80,9 +157,10 @@ namespace neos::concept::core
         }
     {
         /* todo */
-        concepts()[neolib::string{ "module.package.name" }] = neolib::make_ref<module_package_name>();
-        concepts()[neolib::string{ "module.package.import" }] = neolib::make_ref<module_package_import>();
-        concepts()[neolib::string{ "module.package.instantiate" }] = neolib::make_ref<module_package_instantiate>();
+        concepts()[neolib::string{ "source.package.name" }] = neolib::make_ref<source_package_name>();
+        concepts()[neolib::string{ "source.package.import" }] = neolib::make_ref<source_package_import>();
+        concepts()[neolib::string{ "module.package.name" }] = neolib::make_ref<source_package_name>();
+        concepts()[neolib::string{ "module.package.import" }] = neolib::make_ref<source_package_import>();
     }
 
     const std::string& module::library_name()
