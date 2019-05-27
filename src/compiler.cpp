@@ -76,7 +76,7 @@ namespace neos::language
     }
 
     compiler::compiler() :
-        iTrace{ 0u }, iLevel{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
+        iTrace{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
     }
 
@@ -102,31 +102,12 @@ namespace neos::language
 
     void compiler::compile(program& aProgram)
     {
-        iParseStack.clear();
-        iPostfixOperationStack.clear();
-        iFoldStack.clear();
-        iLevel = 0;
-
         iStartTime = std::chrono::steady_clock::now();
 
         try
         {
             for (auto const& unit : aProgram.translationUnits)
-            {
-                auto source = unit.source.begin();
-                while (source != unit.source.end())
-                {
-                    iDeepestProbe = std::nullopt;
-                    auto result = parse(compiler_pass::Emit, aProgram, unit, unit.schema->root(), source);
-                    if (result.action == parse_result::NoMatch)
-                    {
-                        if (trace() >= 3 && iDeepestProbe)
-                            display_probe_trace(unit);
-                        throw_error(unit, iDeepestProbe ? iDeepestProbe->source : source, "syntax error");
-                    }
-                    source = result.sourceParsed;
-                }
-            }
+                compile(aProgram, unit);
         }
         catch(...)
         {
@@ -137,10 +118,41 @@ namespace neos::language
         iEndTime = std::chrono::steady_clock::now();
     }
 
+    void compiler::compile(program& aProgram, const translation_unit& aUnit)
+    {
+        iCompilationStateStack.push_back(compilation_state{});
+
+        auto source = aUnit.source.begin();
+        while (source != aUnit.source.end())
+        {
+            state().iDeepestProbe = std::nullopt;
+            auto result = parse(compiler_pass::Emit, aProgram, aUnit, aUnit.schema->root(), source);
+            if (result.action == parse_result::NoMatch)
+            {
+                if (trace() >= 3 && state().iDeepestProbe)
+                    display_probe_trace(aUnit);
+                throw_error(aUnit, state().iDeepestProbe ? state().iDeepestProbe->source : source, "syntax error");
+            }
+            source = result.sourceParsed;
+        }
+
+        iCompilationStateStack.pop_back();
+    }
+
+    const compiler::compilation_state& compiler::state() const
+    {
+        return iCompilationStateStack.back();
+    }
+
+    compiler::compilation_state& compiler::state()
+    {
+        return iCompilationStateStack.back();
+    }
+
     compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        neolib::scoped_counter sc{ iLevel };
+        neolib::scoped_counter sc{ state().iLevel };
         scoped_stack_trace sst{ *this, aAtom, aSource, "parse" };
         if (aPass == compiler_pass::Emit)
         {
@@ -178,10 +190,10 @@ namespace neos::language
                     auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, expected{ &*expect, &aAtom }, aSource);
                     if (is_finished(result) || result.action == parse_result::Consumed)
                         return result;
-                    if (iDeepestProbe == std::nullopt || iDeepestProbe->source < result.sourceParsed)
-                        iDeepestProbe = deepest_probe{ result.sourceParsed, { iStackTrace } };
-                    else if (iDeepestProbe->source == result.sourceParsed)
-                        iDeepestProbe->stacks.push_back(iStackTrace);
+                    if (state().iDeepestProbe == std::nullopt || state().iDeepestProbe->source < result.sourceParsed)
+                        state().iDeepestProbe = deepest_probe{ result.sourceParsed, { state().iStackTrace } };
+                    else if (state().iDeepestProbe->source == result.sourceParsed)
+                        state().iDeepestProbe->stacks.push_back(state().iStackTrace);
                 }
                 return parse_result{ aSource, parse_result::NoMatch };
             }
@@ -520,7 +532,7 @@ namespace neos::language
         {
             if (trace() >= 5)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            parse_stack().push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            parse_stack().push_back(concept_stack_entry{ &aUnit, state().iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
@@ -538,7 +550,7 @@ namespace neos::language
         {
             if (trace() >= 5)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            aConceptStack.push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            aConceptStack.push_back(concept_stack_entry{ &aUnit, state().iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
@@ -622,17 +634,17 @@ namespace neos::language
 
     compiler::concept_stack_t& compiler::parse_stack()
     {
-        return iParseStack;
+        return state().iParseStack;
     }
 
     compiler::concept_stack_t& compiler::postfix_operation_stack()
     {
-        return iPostfixOperationStack;
+        return state().iPostfixOperationStack;
     }
 
     compiler::concept_stack_t& compiler::fold_stack()
     {
-        return iFoldStack;
+        return state().iFoldStack;
     }
 
     void compiler::display_probe_trace(const translation_unit& aUnit)
@@ -640,16 +652,16 @@ namespace neos::language
         std::cerr << "Probe trace:-" << std::endl;
         std::cerr << "================" << std::endl;
         while (std::adjacent_find(
-            iDeepestProbe->stacks.begin(),
-            iDeepestProbe->stacks.end(),
+            state().iDeepestProbe->stacks.begin(),
+            state().iDeepestProbe->stacks.end(),
             [](auto&& lhs, auto&& rhs) 
             { 
                 bool match = (!lhs.empty() && !rhs.empty() && lhs.front().atom == rhs.front().atom); 
                 return !match;
-            }) == iDeepestProbe->stacks.end())
+            }) == state().iDeepestProbe->stacks.end())
         {
             bool first = true;
-            for (auto& s : iDeepestProbe->stacks)
+            for (auto& s : state().iDeepestProbe->stacks)
             {
                 if (first)
                 {
@@ -659,13 +671,13 @@ namespace neos::language
                 s.pop_front();
             }
         }
-        for (auto i = iDeepestProbe->stacks.begin(); i != iDeepestProbe->stacks.end();)
+        for (auto i = state().iDeepestProbe->stacks.begin(); i != state().iDeepestProbe->stacks.end();)
             if (i->empty())
-                i = iDeepestProbe->stacks.erase(i);
+                i = state().iDeepestProbe->stacks.erase(i);
             else
                 ++i;
         std::cerr << "================" << std::endl;
-        for (auto s : iDeepestProbe->stacks)
+        for (auto s : state().iDeepestProbe->stacks)
         {
             for (auto const& e : s)
             {

@@ -186,19 +186,19 @@ namespace neos::language
             {
                 if (iParent.trace() >= 3)
                 {
-                    if (iParent.iStackTrace.empty() || iParent.iStackTrace.back().atom != &aAtom || iParent.iStackTrace.back().source != aSource)
-                        iParent.iStackTrace.push_back(stack_trace_entry{ aSource, &aAtom, { aWhat } });
+                    if (iParent.state().iStackTrace.empty() || iParent.state().iStackTrace.back().atom != &aAtom || iParent.state().iStackTrace.back().source != aSource)
+                        iParent.state().iStackTrace.push_back(stack_trace_entry{ aSource, &aAtom, { aWhat } });
                     else
-                        iParent.iStackTrace.back().operations.push_back(aWhat);
+                        iParent.state().iStackTrace.back().operations.push_back(aWhat);
                 }
             }
             ~scoped_stack_trace()
             {
                 if (iParent.trace() >= 3)
                 {
-                    iParent.iStackTrace.back().operations.pop_back();
-                    if (iParent.iStackTrace.back().operations.empty())
-                        iParent.iStackTrace.pop_back();
+                    iParent.state().iStackTrace.back().operations.pop_back();
+                    if (iParent.state().iStackTrace.back().operations.empty())
+                        iParent.state().iStackTrace.pop_back();
                 }
             }
         private:
@@ -209,15 +209,27 @@ namespace neos::language
             source_iterator source;
             std::vector<stack_trace_t> stacks;
         };
+        struct compilation_state
+        {
+            std::optional<deepest_probe> iDeepestProbe;
+            stack_trace_t iStackTrace;
+            concept_stack_t iParseStack;
+            concept_stack_t iPostfixOperationStack;
+            concept_stack_t iFoldStack;
+            uint32_t iLevel;
+        };
     public:
         compiler();
     public:
         void compile(program& aProgram);
+        void compile(program& aProgram, const translation_unit& aUnit);
         uint32_t trace() const;
         void set_trace(uint32_t aTrace);
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
     private:
+        const compilation_state& state() const;
+        compilation_state& state();
         parse_result parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, source_iterator aSource);
         parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
         parse_result parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
@@ -239,13 +251,8 @@ namespace neos::language
         static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         uint32_t iTrace;
-        std::optional<deepest_probe> iDeepestProbe;
-        stack_trace_t iStackTrace;
-        concept_stack_t iParseStack;
-        concept_stack_t iPostfixOperationStack;
-        concept_stack_t iFoldStack;
-        uint32_t iLevel;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
+        std::vector<compilation_state> iCompilationStateStack;
     };
 }
