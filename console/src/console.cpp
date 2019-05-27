@@ -51,7 +51,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << ":<input>                                 Input (as stdin)\n"
                 << "q(uit)                                   Quit neos\n"
                 << "lc                                       List loaded concept libraries\n"
-                << "t(race) [0|1|2|3]                        Compiler trace\n"
+                << "t(race) [0|1|2|3|4|5]                    Compiler trace\n"
                 << "m(etrics)                                Display metrics of running programs\n"
                 << std::endl;
         }

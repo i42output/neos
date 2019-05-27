@@ -273,6 +273,21 @@ namespace neos::concept::core
         }
     };
 
+    class language_function_arguments : public neos_concept<>
+    {
+    public:
+        language_function_arguments() :
+            neos_concept{ "language.function.arguments", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
     class language_function_argument : public neos_concept<>
     {
     public:
@@ -411,6 +426,7 @@ namespace neos::concept::core
         concepts()[neolib::string{ "language.function.return" }] = neolib::make_ref<language_function_return>();
         concepts()[neolib::string{ "language.function.signature" }] = neolib::make_ref<language_function_signature>();
         concepts()[neolib::string{ "language.function.import" }] = neolib::make_ref<language_function_import>();
+        concepts()[neolib::string{ "language.function.arguments" }] = neolib::make_ref<language_function_arguments>();
         concepts()[neolib::string{ "language.function.argument" }] = neolib::make_ref<language_function_argument>();
         concepts()[neolib::string{ "language.function.call" }] = neolib::make_ref<language_function_call>();
         concepts()[neolib::string{ "language.type" }] = neolib::make_ref<language_type>();

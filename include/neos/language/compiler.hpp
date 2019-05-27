@@ -151,6 +151,64 @@ namespace neos::language
             concept_stack_t& iStack;
             concept_stack_t::size_type iScopeStart;
         };
+        struct stack_trace_entry
+        {
+            source_iterator source;
+            const i_atom* atom;
+            std::vector<std::string> operations;
+            bool operator==(const stack_trace_entry& rhs) const 
+            { 
+                return atom == rhs.atom && operations == rhs.operations; 
+            }
+            void trace(const translation_unit& aUnit, bool aTraceOperators) const
+            {
+                std::cerr << "'";
+                auto const count = std::min<std::ptrdiff_t>(20, std::distance(source, aUnit.source.end()));
+                for (auto c : std::string_view(&*source, count))
+                    if (c >= 32)
+                        std::cerr << c;
+                    else
+                        std::cerr << ' ';
+                std::cerr << "' " << std::string(20 - count, ' ');
+                std::cerr << "[" << atom->symbol() << "]    ";
+                if (aTraceOperators)
+                    for (auto const& o : operations)
+                        std::cerr << " (" << o << ")";
+                std::cerr << std::endl;
+            }
+        };
+        typedef std::deque<stack_trace_entry> stack_trace_t;
+        class scoped_stack_trace
+        {
+        public:
+            scoped_stack_trace(compiler& aParent, const i_atom& aAtom, source_iterator aSource, const std::string& aWhat)
+                : iParent{aParent}
+            {
+                if (iParent.trace() >= 3)
+                {
+                    if (iParent.iStackTrace.empty() || iParent.iStackTrace.back().atom != &aAtom || iParent.iStackTrace.back().source != aSource)
+                        iParent.iStackTrace.push_back(stack_trace_entry{ aSource, &aAtom, { aWhat } });
+                    else
+                        iParent.iStackTrace.back().operations.push_back(aWhat);
+                }
+            }
+            ~scoped_stack_trace()
+            {
+                if (iParent.trace() >= 3)
+                {
+                    iParent.iStackTrace.back().operations.pop_back();
+                    if (iParent.iStackTrace.back().operations.empty())
+                        iParent.iStackTrace.pop_back();
+                }
+            }
+        private:
+            compiler& iParent;
+        };
+        struct deepest_probe
+        {
+            source_iterator source;
+            std::vector<stack_trace_t> stacks;
+        };
     public:
         compiler();
     public:
@@ -174,13 +232,15 @@ namespace neos::language
         concept_stack_t& parse_stack();
         concept_stack_t& postfix_operation_stack();
         concept_stack_t& fold_stack();
+        void display_probe_trace(const translation_unit& aUnit);
         static bool is_finished(const compiler::parse_result& aResult);
         static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
         static std::string location(const translation_unit& aUnit, source_iterator aSourcePos);
         static void throw_error(const translation_unit& aUnit, source_iterator aSourcePos, const std::string& aError);
     private:
         uint32_t iTrace;
-        optional_source_iterator iDeepestProbe;
+        std::optional<deepest_probe> iDeepestProbe;
+        stack_trace_t iStackTrace;
         concept_stack_t iParseStack;
         concept_stack_t iPostfixOperationStack;
         concept_stack_t iFoldStack;

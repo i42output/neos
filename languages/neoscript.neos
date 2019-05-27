@@ -411,6 +411,7 @@
         tokens: {
             keyword.return: {
                 expect: whitespace
+                expect: expression
                 expression: {
                     expect: end
                     end: language.function.return
@@ -584,12 +585,60 @@
 
     expression: {
         is: language.expression
+        expect: boolean_expression
+        expect: math_expression
+        expect: whitespace
         tokens: {
-            expect: boolean_expression
-            expect: math_expression
             boolean_expression: done
             math_expression: done
+            whitespace: ignore
         }
+        function_call: {
+            expect: identifier
+            tokens: {
+                identifier: {
+                    expect: whitespace
+                    expect: '('
+                    '(': {
+                        ')': language.function.call
+                        language.function.call: done
+                        function_call_arguments: {
+                            ')': language.function.call
+                            language.function.call: done
+                            whitespace: ignore
+                        }
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+        function_call_arguments: {
+            expect: function_call_argument
+            tokens: {
+                function_call_argument: {
+                    expect: none
+                    ',': {
+                        expect: function_call_arguments
+                        function_call_arguments: done
+                    }
+                    whitespace: ignore
+                    default: next
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+        function_call_argument: {
+            expect: math_expression
+            expect: boolean_expression
+            tokens: {
+                boolean_expression: language.function.argument
+                math_expression: language.function.argument
+                language.function.argument: done
+            }
+        }    
     }
 
     boolean_expression: {
@@ -690,24 +739,8 @@
                 string_literal: done
                 math.universal.number.digit: universal_number
                 universal_number: done
-                identifier: {
-                    expect: none
-                    '(': {
-                        expect: math_expression
-                        math_expression: language.function.argument
-                        language.function.argument: {
-                            ',': {
-                                expect: math_expression
-                            }
-                            ')': language.function.call
-                            language.function.call: done
-                            whitespace: ignore
-                        }
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                    default: next
-                }
+                expression.function_call: done
+                identifier: done
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary

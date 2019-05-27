@@ -119,7 +119,11 @@ namespace neos::language
                     iDeepestProbe = std::nullopt;
                     auto result = parse(compiler_pass::Emit, aProgram, unit, unit.schema->root(), source);
                     if (result.action == parse_result::NoMatch)
-                        throw_error(unit, iDeepestProbe ? *iDeepestProbe : source, "syntax error");
+                    {
+                        if (trace() >= 3 && iDeepestProbe)
+                            display_probe_trace(unit);
+                        throw_error(unit, iDeepestProbe ? iDeepestProbe->source : source, "syntax error");
+                    }
                     source = result.sourceParsed;
                 }
             }
@@ -137,13 +141,14 @@ namespace neos::language
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         neolib::scoped_counter sc{ iLevel };
+        scoped_stack_trace sst{ *this, aAtom, aSource, "parse" };
         if (aPass == compiler_pass::Emit)
         {
             auto probeResult = parse(compiler_pass::Probe, aProgram, aUnit, aAtom, aSource);
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace() >= 3)
+        if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
@@ -173,8 +178,10 @@ namespace neos::language
                     auto result = parse_tokens(aPass, aProgram, aUnit, aAtom, expected{ &*expect, &aAtom }, aSource);
                     if (is_finished(result) || result.action == parse_result::Consumed)
                         return result;
-                    if (iDeepestProbe == std::nullopt || *iDeepestProbe < result.sourceParsed)
-                        iDeepestProbe = result.sourceParsed;
+                    if (iDeepestProbe == std::nullopt || iDeepestProbe->source < result.sourceParsed)
+                        iDeepestProbe = deepest_probe{ result.sourceParsed, { iStackTrace } };
+                    else if (iDeepestProbe->source == result.sourceParsed)
+                        iDeepestProbe->stacks.push_back(iStackTrace);
                 }
                 return parse_result{ aSource, parse_result::NoMatch };
             }
@@ -197,7 +204,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace() >= 3)
+        if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         auto currentSource = aSource;
@@ -391,7 +398,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace() >= 3)
+        if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
         scoped_concept_folder poe{ *this, aPass, postfix_operation_stack() };
         std::optional<scoped_concept_folder> scs;
@@ -439,7 +446,7 @@ namespace neos::language
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
-        if (trace() >= 3)
+        if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         if (aToken.is_schema_atom())
@@ -511,7 +518,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace() >= 4)
+            if (trace() >= 5)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             parse_stack().push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -529,7 +536,7 @@ namespace neos::language
         auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aUnit.source.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
-            if (trace() >= 4)
+            if (trace() >= 5)
                 std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             aConceptStack.push_back(concept_stack_entry{ &aUnit, iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
@@ -626,6 +633,46 @@ namespace neos::language
     compiler::concept_stack_t& compiler::fold_stack()
     {
         return iFoldStack;
+    }
+
+    void compiler::display_probe_trace(const translation_unit& aUnit)
+    {
+        std::cerr << "Probe trace:-" << std::endl;
+        std::cerr << "================" << std::endl;
+        while (std::adjacent_find(
+            iDeepestProbe->stacks.begin(),
+            iDeepestProbe->stacks.end(),
+            [](auto&& lhs, auto&& rhs) 
+            { 
+                bool match = (!lhs.empty() && !rhs.empty() && lhs.front().atom == rhs.front().atom); 
+                return !match;
+            }) == iDeepestProbe->stacks.end())
+        {
+            bool first = true;
+            for (auto& s : iDeepestProbe->stacks)
+            {
+                if (first)
+                {
+                    s.front().trace(aUnit, false);
+                    first = false;
+                }
+                s.pop_front();
+            }
+        }
+        for (auto i = iDeepestProbe->stacks.begin(); i != iDeepestProbe->stacks.end();)
+            if (i->empty())
+                i = iDeepestProbe->stacks.erase(i);
+            else
+                ++i;
+        std::cerr << "================" << std::endl;
+        for (auto s : iDeepestProbe->stacks)
+        {
+            for (auto const& e : s)
+            {
+                e.trace(aUnit, &e == &s.back());
+            }
+            std::cerr << "----------------" << std::endl;
+        }
     }
 
     bool compiler::is_finished(const parse_result& aResult)
