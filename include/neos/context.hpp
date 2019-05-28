@@ -24,38 +24,27 @@
 #include <optional>
 #include <vector>
 #include <memory>
-#include <neolib/map.hpp>
-#include <neolib/string.hpp>
 #include <neolib/json.hpp>
 #include <neolib/i_application.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
-#include <neos/language/i_concept_library.hpp>
-#include <neos/bytecode/registers.hpp>
-#include <neos/bytecode/vm/vm.hpp>
+#include <neos/i_context.hpp>
 
 namespace neos
 {
-    class context
+    class context : public i_context
     {
     public:
         typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<language::i_concept_library>, neolib::string, neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
-        struct warning : std::runtime_error { using runtime_error::runtime_error; };
-        struct error : std::runtime_error { using runtime_error::runtime_error; };
-        struct invalid_fragment : std::logic_error { invalid_fragment() : std::logic_error("neos::context::invalid_fragment") {} };
-        struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::context::no_schema_source") {} };
-        struct no_schema_loaded : error { no_schema_loaded() : error("no schema loaded") {} };
-        struct no_text : warning { no_text() : warning("no text") {} };
-        struct compiler_error : error { compiler_error(const std::string& aReason) : error(aReason) {} };
-    public:
         context();
         context(neolib::i_application& aApplication);
         ~context();
     public:
-        const language::concept_libraries_t& concept_libraries() const;
+        const concept_libraries_t& concept_libraries() const override;
+    public:
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
         const neolib::rjson& schema_source() const;
@@ -68,10 +57,10 @@ namespace neos
         program_t& program();
         const text_t& text() const;
     public:
-        bool running() const;
-        void run();
-        bytecode::reg_64 evaluate(const std::string& aExpression);
-        std::string metrics() const;
+        bool running() const override;
+        void run() override;
+        bytecode::reg_64 evaluate(const std::string& aExpression) override;
+        const neolib::i_string& metrics() const override;
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);

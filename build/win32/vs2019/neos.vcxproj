@@ -32,6 +32,8 @@
     <ClInclude Include="..\..\..\include\neos\bytecode\registers.hpp" />
     <ClInclude Include="..\..\..\include\neos\bytecode\vm\vm.hpp" />
     <ClInclude Include="..\..\..\include\neos\context.hpp" />
+    <ClInclude Include="..\..\..\include\neos\fwd.hpp" />
+    <ClInclude Include="..\..\..\include\neos\i_context.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\ast.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\compiler.hpp" />

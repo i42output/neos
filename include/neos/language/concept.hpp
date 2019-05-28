@@ -167,11 +167,11 @@ namespace neos::language
         {
             throw not_an_instance();
         }
-        i_concept* do_fold() override
+        i_concept* do_fold(i_context& aContext) override
         {
             return nullptr;
         }
-        i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
         {
             if constexpr (!std::is_same_v<instance_type, void>)
             {

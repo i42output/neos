@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <string>
+#include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
@@ -173,20 +174,20 @@ namespace neos::language
                 if (!foldedConcept)
                     foldedConcept = concept->instantiate(sourceStart, sourceEnd);
             }
-            void fold()
+            void fold(i_context& aContext)
             {
                 instantiate_if_needed();
-                foldedConcept = foldedConcept->fold();
+                foldedConcept = foldedConcept->fold(aContext);
             }
-            void fold(concept_stack_entry& rhs)
+            void fold(i_context& aContext, concept_stack_entry& rhs)
             {
                 if (rhs.can_fold())
-                    rhs.fold();
+                    rhs.fold(aContext);
                 instantiate_if_needed();
                 if (rhs.foldedConcept)
-                    foldedConcept = foldedConcept->fold(*rhs.foldedConcept);
+                    foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
                 else
-                    foldedConcept = foldedConcept->fold(*rhs.concept, rhs.sourceStart, rhs.sourceEnd);
+                    foldedConcept = foldedConcept->fold(aContext, *rhs.concept, rhs.sourceStart, rhs.sourceEnd);
             }
             std::string trace() const
             {
@@ -279,7 +280,7 @@ namespace neos::language
             uint32_t iLevel;
         };
     public:
-        compiler();
+        compiler(i_context& aContext);
     public:
         void compile(program& aProgram);
         void compile(program& aProgram, const translation_unit& aUnit);
@@ -311,6 +312,7 @@ namespace neos::language
         static std::string location(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
         static void throw_error(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
+        i_context& iContext;
         uint32_t iTrace;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;

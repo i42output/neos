@@ -27,13 +27,15 @@ namespace neos
 {
     context::context() : 
         iPrivateApplication{ std::make_unique<neolib::application>(neolib::application_info{ {}, "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
-        iApplication{ *iPrivateApplication }
+        iApplication{ *iPrivateApplication },
+        iCompiler{ *this }
     {
         init();
     }
 
     context::context(neolib::i_application& aApplication) :
-        iApplication{ aApplication }
+        iApplication{ aApplication },
+        iCompiler{ *this }
     {
         iApplication.plugin_manager().plugin_file_extensions().clear();
         iApplication.plugin_manager().plugin_file_extensions().push_back(neolib::string{ ".ncl" });
@@ -44,7 +46,7 @@ namespace neos
     {
     }
 
-    const language::concept_libraries_t& context::concept_libraries() const
+    const context::concept_libraries_t& context::concept_libraries() const
     {
         return iConceptLibraries;
     }
@@ -143,11 +145,11 @@ namespace neos
         return result;
     }
 
-    std::string context::metrics() const
+    const neolib::i_string& context::metrics() const
     {
-        std::string result;
+        thread_local neolib::string result;
         for (auto const& t : iThreads)
-            result += t->metrics();
+            result += neolib::string{ t->metrics() };
         return result;
     }
 

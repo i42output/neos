@@ -145,7 +145,7 @@ namespace neos::concept::core
         {
             return !iFolded;
         }
-        i_concept* do_fold() override
+        i_concept* do_fold(i_context& aContext) override
         {
             std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
             iFolded = true;
@@ -155,7 +155,7 @@ namespace neos::concept::core
         {
             return aRhs.name().to_std_string_view().find(base_type::name().to_std_string_view()) == 0;
         }
-        i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
         {
             if (can_fold(aRhs) && base_type::as_instance().can_fold(aRhs))
             {

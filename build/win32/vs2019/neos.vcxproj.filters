@@ -128,6 +128,12 @@
     <ClInclude Include="..\..\..\include\neos\language\atom.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\i_context.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\fwd.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\Ada.neos">

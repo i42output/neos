@@ -75,8 +75,8 @@ namespace neos::language
         return iStack;
     }
 
-    compiler::compiler() :
-        iTrace{ 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
+    compiler::compiler(i_context& aContext) :
+        iContext{ aContext }, iTrace { 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
     }
 
@@ -594,7 +594,7 @@ namespace neos::language
             {
                 if (trace() >= 1)
                     std::cout << "fold: " << single.trace() << " <- " << single.trace() << std::flush;
-                single.fold();
+                single.fold(iContext);
                 if (single.foldedConcept != nullptr)
                 {
                     if (trace() >= 1)
@@ -623,7 +623,7 @@ namespace neos::language
             {
                 if (trace() >= 1)
                     std::cout << "fold: " << lhs.trace() << " <- " << rhs.trace() << std::flush;
-                lhs.fold(rhs);
+                lhs.fold(iContext, rhs);
                 if (trace() >= 1)
                     std::cout << " = " << lhs.trace() << std::endl;
                 irhs = fold_stack().erase(irhs);

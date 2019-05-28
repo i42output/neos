@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/i_reference_counted.hpp>
 #include <neolib/i_string.hpp>
+#include <neos/fwd.hpp>
 
 namespace neos::language
 {
@@ -76,8 +77,8 @@ namespace neos::language
         virtual i_concept* do_instantiate(source_iterator aSource, source_iterator aSourceEnd) const = 0;
         virtual const void* representation() const = 0;
         virtual void* representation() = 0;
-        virtual i_concept* do_fold() = 0;
-        virtual i_concept* do_fold(const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) = 0;
+        virtual i_concept* do_fold(i_context& aContext) = 0;
+        virtual i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) = 0;
         // helpers
     public:
         template<typename SourceIterator>
@@ -150,23 +151,23 @@ namespace neos::language
         {
             return do_instantiate(&*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
         }
-        neolib::ref_ptr<i_concept> fold()
+        neolib::ref_ptr<i_concept> fold(i_context& aContext)
         {
             if (can_fold())
-                return as_instance().do_fold();
+                return as_instance().do_fold(aContext);
             return nullptr;
         }
-        neolib::ref_ptr<i_concept> fold(const i_concept& aRhs)
+        neolib::ref_ptr<i_concept> fold(i_context& aContext, const i_concept& aRhs)
         {
             if (can_fold(aRhs))
-                return as_instance().do_fold(aRhs);
+                return as_instance().do_fold(aContext, aRhs);
             return nullptr;
         }
         template <typename SourceIterator>
-        neolib::ref_ptr<i_concept> fold(const i_concept& aRhs, SourceIterator aSource, SourceIterator aSourceEnd)
+        neolib::ref_ptr<i_concept> fold(i_context& aContext, const i_concept& aRhs, SourceIterator aSource, SourceIterator aSourceEnd)
         {
             if (can_fold(aRhs))
-                return as_instance().do_fold(aRhs, std::pair<source_iterator, source_iterator>{ &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd))});
+                return as_instance().do_fold(aContext, aRhs, std::pair<source_iterator, source_iterator>{ &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd))});
             return nullptr;
         }
         template <typename Data>

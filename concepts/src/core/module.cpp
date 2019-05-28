@@ -72,7 +72,7 @@ namespace neos::concept::core
         {
             return as_instance().data<representation_type>().empty();
         }
-        i_concept* do_fold() override
+        i_concept* do_fold(i_context& aContext) override
         {
             // todo
             return this;
@@ -133,7 +133,7 @@ namespace neos::concept::core
         {
             return as_instance().data<representation_type>().empty();
         }
-        i_concept* do_fold() override
+        i_concept* do_fold(i_context& aContext) override
         {
             // todo
             return this;
