@@ -85,7 +85,7 @@ namespace neos
     void context::load_program(const std::string& aPath)
     {
         iProgram = decltype(iProgram){};
-        auto& unit = load_unit(language::source_fragment{ aPath });
+        auto& unit = load_unit(language::source_fragment{ neolib::string{ aPath } });
     }
 
     void context::load_program(std::istream& aStream)
@@ -177,12 +177,12 @@ namespace neos
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
-        if (aFragment.filePath == std::nullopt)
+        if (aFragment.source_file_path() == std::nullopt)
             throw invalid_fragment();
 
-        std::ifstream fragmentStream{ *aFragment.filePath, std::ios::binary };
+        std::ifstream fragmentStream{ *aFragment.source_file_path(), std::ios::binary };
         if (!fragmentStream)
-            throw compiler_error("failed to open source file '" + *aFragment.filePath + "'");
+            throw compiler_error("failed to open source file '" + *aFragment.source_file_path() + "'");
 
         return load_unit(std::move(aFragment), fragmentStream);
     }
@@ -215,24 +215,24 @@ namespace neos
 
         if (count != std::istream::pos_type(0))
         {
-            fragment.source.reserve(static_cast<language::source_t::size_type>(count) + 1);
-            fragment.source.resize(static_cast<language::source_t::size_type>(count));
-            aStream.read(&fragment.source[0], count);
-            fragment.source.resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            fragment.source().reserve(static_cast<language::source_t::size_type>(count) + 1);
+            fragment.source().resize(static_cast<language::source_t::size_type>(count));
+            aStream.read(&fragment.source()[0], count);
+            fragment.source().resize(static_cast<language::source_t::size_type>(aStream.gcount()));
         }
         else
         {
             char buffer[1024];
             while (aStream.read(buffer, sizeof(buffer)))
-                fragment.source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                fragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
-                fragment.source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                fragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
         }
 
-        if (fragment.source.empty())
+        if (fragment.source().empty())
             throw compiler_error("no source code");
 
-        if (!neolib::check_utf8(fragment.source))
+        if (!neolib::check_utf8(fragment.source()))
             throw compiler_error("source file has invalid utf-8");
 
         return unit;

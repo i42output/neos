@@ -128,8 +128,8 @@ namespace neos::language
     {
         iCompilationStateStack.push_back(compilation_state{});
 
-        auto source = aFragment.source.begin();
-        while (source != aFragment.source.end())
+        auto source = aFragment.begin();
+        while (source != aFragment.end())
         {
             state().iDeepestProbe = std::nullopt;
             auto result = parse(compiler_pass::Emit, aProgram, aUnit, aFragment, aUnit.schema->root(), source);
@@ -143,6 +143,11 @@ namespace neos::language
         }
 
         iCompilationStateStack.pop_back();
+    }
+
+    void compiler::compile(const i_source_fragment& aFragment)
+    {
+        // todo
     }
 
     const compiler::compilation_state& compiler::state() const
@@ -170,7 +175,7 @@ namespace neos::language
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
-        if (aSource != aFragment.source.end())
+        if (aSource != aFragment.end())
         {
             if (expectingToken)
             {
@@ -266,7 +271,7 @@ namespace neos::language
             return parse_result{ aSource, parse_result::NoMatch };
         }
         bool skipConsume = (expectedAtom && expectedConsumed);
-        for (; currentSource != aFragment.source.end() && iterToken != aAtom.tokens().end();)
+        for (; currentSource != aFragment.end() && iterToken != aAtom.tokens().end();)
         {
             auto const& token = *iterToken->first();
             auto const& tokenValue = *iterToken->second();
@@ -503,7 +508,7 @@ namespace neos::language
                 case schema_terminal::String:
                     {
                         auto const terminalSymbol = terminal.symbol().to_std_string_view();
-                        if (static_cast<std::size_t>(std::distance(aResult.sourceParsed, aFragment.source.end())) >= terminalSymbol.size() && std::equal(terminalSymbol.begin(), terminalSymbol.end(), aResult.sourceParsed))
+                        if (static_cast<std::size_t>(std::distance(aResult.sourceParsed, aFragment.end())) >= terminalSymbol.size() && std::equal(terminalSymbol.begin(), terminalSymbol.end(), aResult.sourceParsed))
                             return aResult.with(aResult.sourceParsed + terminalSymbol.size());
                     }
                 default:
@@ -533,7 +538,7 @@ namespace neos::language
     compiler::parse_result compiler::consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aFragment.source.end());
+        auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aFragment.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
@@ -551,7 +556,7 @@ namespace neos::language
     compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aFragment.source.end());
+        auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aFragment.end());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
@@ -744,7 +749,7 @@ namespace neos::language
     {
         uint32_t line = 1;
         uint32_t col = 1;
-        for (auto pos = aFragment.source.begin(); pos != aSourcePos; ++pos)
+        for (auto pos = aFragment.begin(); pos != aSourcePos; ++pos)
         {
             if (*pos == '\n')
             {
@@ -754,7 +759,7 @@ namespace neos::language
             else
                 ++col;
         }
-        return (aShowFragmentFilePath && aFragment.filePath != std::nullopt ? "file '" + *aFragment.filePath + "', " : "") + "line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col);
+        return (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? "file '" + *aFragment.source_file_path() + "', " : "") + "line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col);
     }
 
     void compiler::throw_error(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError)

@@ -134,6 +134,9 @@
     <ClInclude Include="..\..\..\include\neos\fwd.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\i_compiler.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\Ada.neos">

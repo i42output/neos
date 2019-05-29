@@ -20,37 +20,85 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <string>
+#include <neolib/string.hpp>
+#include <neolib/optional.hpp>
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
 #include <neos/language/i_concept_library.hpp>
+#include <neos/language/i_compiler.hpp>
 
 namespace neos::language
 {
-    typedef std::string source_file_path_t;
-    typedef std::optional<source_file_path_t> optional_source_file_path_t;
-    typedef std::string source_t;
+    typedef neolib::string source_file_path_t;
+    typedef neolib::optional<i_source_file_path_t, source_file_path_t> optional_source_file_path_t;
+    typedef neolib::string source_t;
+    typedef source_t::const_fast_iterator const_source_iterator;
+    typedef source_t::fast_iterator source_iterator;
 
-    enum class compilation_status
-    {
-        Pending,
-        Compiling,
-        Compiled
-    };
 
-    struct source_fragment
+    class source_fragment : public i_source_fragment
     {
-        optional_source_file_path_t filePath;
-        source_t source;
-        mutable compilation_status status;
-        source_t::const_iterator begin() const { return source.begin(); }
-        source_t::const_iterator end() const { return source.end(); }
-        source_t::const_iterator cbegin() const { return source.begin(); }
-        source_t::const_iterator cend() const { return source.end(); }
-        source_t::iterator cbegin() { return source.begin(); }
-        source_t::iterator cend() { return source.end(); }
+    public:
+        source_fragment(const optional_source_file_path_t& aSourceFilePath = optional_source_file_path_t{}, const source_t& aSource = source_t{}) :
+            iSourceFilePath{ aSourceFilePath }, iSource{ aSource }, iStatus{ compilation_status::Pending }
+        {
+        }
+        source_fragment(const i_source_fragment& aFragment) :
+            iSourceFilePath{ aFragment.source_file_path() }, iSource{ aFragment.source() }, iStatus{ aFragment.status() }
+        {
+        }
+    public:
+        const i_optional_source_file_path_t& source_file_path() const override 
+        { 
+            return iSourceFilePath;
+        }
+        i_optional_source_file_path_t& source_file_path() override 
+        { 
+            return iSourceFilePath;
+        }
+        const i_source_t& source() const override 
+        { 
+            return iSource; 
+        }
+        i_source_t& source() override 
+        { 
+            return iSource; 
+        }
+        compilation_status status() const override 
+        { 
+            return iStatus; 
+        }
+    public:
+        const_source_iterator cbegin() const override
+        { 
+            return source().cfbegin(); 
+        }
+        const_source_iterator cend() const override
+        { 
+            return source().cfend(); 
+        }
+        const_source_iterator begin() const override
+        { 
+            return source().fbegin();
+        }
+        const_source_iterator end() const override
+        { 
+            return source().fend();
+        }
+        source_iterator begin() override
+        { 
+            return source().fbegin();
+        }
+        source_iterator end() override
+        { 
+            return source().fend();
+        }
+    private:
+        optional_source_file_path_t iSourceFilePath;
+        source_t iSource;
+        mutable compilation_status iStatus;
     };
 
     typedef std::shared_ptr<language::schema> schema_pointer_t;
@@ -63,28 +111,28 @@ namespace neos::language
         schema_pointer_t schema;
         source_fragments_t fragments;
         language::ast ast;
-        const source_fragment& fragment(source_t::const_iterator aSource) const
+        const source_fragment& fragment(const_source_iterator aSource) const
         {
             for (auto const& f : fragments)
-                if (aSource >= f.source.begin() && aSource <= f.source.end())
+                if (aSource >= f.begin() && aSource <= f.end())
                     return f;
             throw source_fragment_not_found();
         }
-        source_fragment& fragment(source_t::const_iterator aSource)
+        source_fragment& fragment(const_source_iterator aSource)
         {
             return const_cast<source_fragment&>(const_cast<const translation_unit*>(this)->fragment(aSource));
         }
         bool pending() const
         {
             for (auto const& f : fragments)
-                if (f.status == compilation_status::Pending)
+                if (f.status() == compilation_status::Pending)
                     return true;
             return false;
         }
         bool compiling() const
         {
             for (auto const& f : fragments)
-                if (f.status == compilation_status::Compiling)
+                if (f.status() == compilation_status::Compiling)
                     return true;
             return false;
         }
@@ -103,10 +151,10 @@ namespace neos::language
         text_t text;
     };
 
-    class compiler
+    class compiler : public i_compiler
     {
     private:
-        typedef source_t::const_iterator source_iterator;
+        typedef neos::language::const_source_iterator source_iterator;
         typedef std::optional<source_iterator> optional_source_iterator;
         struct parse_result
         {
@@ -285,6 +333,7 @@ namespace neos::language
         void compile(program& aProgram);
         void compile(program& aProgram, const translation_unit& aUnit);
         void compile(program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment);
+        void compile(const i_source_fragment& aFragment) override;
         uint32_t trace() const;
         void set_trace(uint32_t aTrace);
         const std::chrono::steady_clock::time_point& start_time() const;    

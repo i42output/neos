@@ -76,9 +76,9 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
             for (auto const& tu : aContext.program().translationUnits)
                 for (auto const& f : tu.fragments)
                 {
-                    if (f.filePath != std::nullopt)
-                        std::cout << "File '" << *f.filePath << "':" << std::endl;
-                    std::cout << f.source << std::endl;
+                    if (f.source_file_path() != std::nullopt)
+                        std::cout << "File '" << *f.source_file_path() << "':" << std::endl;
+                    std::cout << f.source() << std::endl;
                 }
         }
         else if (command == "r" || command == "run")

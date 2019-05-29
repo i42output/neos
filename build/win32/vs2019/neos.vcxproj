@@ -42,6 +42,7 @@
     <ClInclude Include="..\..\..\include\neos\language\concept_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\concept_library_plugin.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_atom.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\i_compiler.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept_library.hpp" />
