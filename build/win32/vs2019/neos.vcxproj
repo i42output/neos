@@ -64,6 +64,8 @@
     <None Include="..\..\..\languages\examples\Ada\HelloWorld.ada" />
     <None Include="..\..\..\languages\examples\neoscript\fibonacci.neo" />
     <None Include="..\..\..\languages\neoscript.neos" />
+    <None Include="..\..\..\languages\packages\neoscript\neos.stream.neo" />
+    <None Include="..\..\..\languages\packages\neoscript\neos.string.neo" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>

@@ -23,6 +23,7 @@
 #include <neolib/map.hpp>
 #include <neolib/string.hpp>
 #include <neos/language/i_concept_library.hpp>
+#include <neos/language/i_compiler.hpp>
 #include <neos/bytecode/registers.hpp>
 #include <neos/bytecode/vm/vm.hpp>
 
@@ -43,9 +44,13 @@ namespace neos
     public:
         virtual const concept_libraries_t& concept_libraries() const = 0;
     public:
+        virtual language::i_compiler& compiler() = 0;
+    public:
         virtual bool running() const = 0;
         virtual void run() = 0;
         virtual bytecode::reg_64 evaluate(const std::string& aExpression) = 0;
         virtual const neolib::i_string& metrics() const = 0;
+    public:
+        virtual void load_fragment(language::i_source_fragment& aFragment) = 0;
     };
 }

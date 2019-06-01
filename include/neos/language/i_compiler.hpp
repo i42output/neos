@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/string.hpp>
-#include <neolib/optional.hpp>
+#include <neolib/i_string.hpp>
+#include <neolib/i_optional.hpp>
 
 namespace neos::language
 {
@@ -48,7 +48,10 @@ namespace neos::language
         virtual i_optional_source_file_path_t& source_file_path() = 0;
         virtual const i_source_t& source() const = 0;
         virtual i_source_t& source() = 0;
+        virtual bool imported() const = 0;
+        virtual void set_imported() = 0;
         virtual compilation_status status() const = 0;
+        virtual void set_status(compilation_status aStatus) = 0;
     public:
         virtual const_fast_iterator cbegin() const = 0;
         virtual const_fast_iterator cend() const = 0;

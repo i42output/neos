@@ -163,5 +163,11 @@
     <None Include="..\..\..\languages\examples\Ada\HelloWorld.ada">
       <Filter>Example Scripts</Filter>
     </None>
+    <None Include="..\..\..\languages\packages\neoscript\neos.stream.neo">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\packages\neoscript\neos.string.neo">
+      <Filter>Languages</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -51,7 +51,7 @@ namespace neos
         const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
-        language::compiler& compiler();
+        language::compiler& compiler() override;
         void compile_program();
         const program_t& program() const;
         program_t& program();
@@ -65,6 +65,8 @@ namespace neos
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);
         translation_unit_t& load_unit(language::source_fragment&& aFragment, std::istream& aStream);
+        void load_fragment(language::i_source_fragment& aFragment) override;
+        void load_fragment(language::i_source_fragment& aFragment, std::istream& aStream);
     private:
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;

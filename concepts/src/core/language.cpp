@@ -71,7 +71,7 @@ namespace neos::concept::core
     {
         // types
     public:
-        typedef std::string representation_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         language_identifier() :

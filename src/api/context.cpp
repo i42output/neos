@@ -177,9 +177,6 @@ namespace neos
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
-        if (aFragment.source_file_path() == std::nullopt)
-            throw invalid_fragment();
-
         std::ifstream fragmentStream{ *aFragment.source_file_path(), std::ios::binary };
         if (!fragmentStream)
             throw compiler_error("failed to open source file '" + *aFragment.source_file_path() + "'");
@@ -192,6 +189,40 @@ namespace neos
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
+        auto& unit = *program().translationUnits.insert(program().translationUnits.end(), 
+            translation_unit_t{ iSchema, { std::move(aFragment) }, language::ast{ program().symbolTable } });
+
+        load_fragment(unit.fragments.back(), aStream);
+
+        return unit;
+    }
+
+    void context::load_fragment(language::i_source_fragment& aFragment)
+    {
+        if (aFragment.source_file_path() == std::nullopt)
+            throw invalid_fragment();
+
+        std::optional<std::ifstream> fragmentStream;
+        fragmentStream.emplace(*aFragment.source_file_path(), std::ios::binary);
+        if (!*fragmentStream)
+            for (auto const& ext : schema().meta().sourcecodeFileExtension)
+            {
+                std::string tryPath = "packages/" + schema().meta().name + "/" + *aFragment.source_file_path() + ext;
+                fragmentStream.emplace(tryPath, std::ios::binary);
+                if (*fragmentStream)
+                {
+                    *aFragment.source_file_path() = tryPath;
+                    break;
+                }
+            }
+        if (!*fragmentStream)
+            throw compiler_error("failed to open source file '" + *aFragment.source_file_path() + "'");
+
+        load_fragment(aFragment, *fragmentStream);
+    }
+
+    void context::load_fragment(language::i_source_fragment& aFragment, std::istream& aStream)
+    {
         if (!aStream)
             throw compiler_error("input stream bad");
 
@@ -208,33 +239,26 @@ namespace neos
         else
             aStream.clear();
 
-        auto& unit = *program().translationUnits.insert(program().translationUnits.end(), 
-            translation_unit_t{ iSchema, { std::move(aFragment) }, language::ast{ program().symbolTable } });
-
-        auto& fragment = unit.fragments.back();
-
         if (count != std::istream::pos_type(0))
         {
-            fragment.source().reserve(static_cast<language::source_t::size_type>(count) + 1);
-            fragment.source().resize(static_cast<language::source_t::size_type>(count));
-            aStream.read(&fragment.source()[0], count);
-            fragment.source().resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            aFragment.source().reserve(static_cast<language::source_t::size_type>(count) + 1);
+            aFragment.source().resize(static_cast<language::source_t::size_type>(count));
+            aStream.read(&aFragment.source()[0], count);
+            aFragment.source().resize(static_cast<language::source_t::size_type>(aStream.gcount()));
         }
         else
         {
             char buffer[1024];
             while (aStream.read(buffer, sizeof(buffer)))
-                fragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                aFragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
-                fragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                aFragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
         }
 
-        if (fragment.source().empty())
+        if (aFragment.source().empty())
             throw compiler_error("no source code");
 
-        if (!neolib::check_utf8(fragment.source()))
+        if (!neolib::check_utf8(aFragment.source()))
             throw compiler_error("source file has invalid utf-8");
-
-        return unit;
     }
 }

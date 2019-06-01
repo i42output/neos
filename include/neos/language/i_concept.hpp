@@ -40,8 +40,27 @@ namespace neos::language
         Infix
     };
 
+    enum class representation_kind
+    {
+        Character,
+        String,
+        Object
+    };
+
+    template <typename T>
+    struct representation_class_cracker { static constexpr representation_kind kind = representation_kind::Object; };
+    template <>
+    struct representation_class_cracker<neolib::i_string> { static constexpr representation_kind kind = representation_kind::String; };
+    template <>
+    struct representation_class_cracker<char> { static constexpr representation_kind kind = representation_kind::Character; };
+    template <typename T>
+    inline constexpr representation_kind representation_kind_v = representation_class_cracker<neolib::abstract_interface_t<T>>::kind;
+
+    class concept_instance_proxy;
+
     class i_concept : public neolib::i_reference_counted
     {
+        friend concept_instance_proxy;
     public:
         struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_concept::no_parent") {} };
         struct invalid_fold : std::logic_error { invalid_fold() : std::logic_error("neos::language::i_concept::invalid_fold") {} };
@@ -75,10 +94,10 @@ namespace neos::language
         virtual i_concept& as_instance() = 0;
     protected:
         virtual i_concept* do_instantiate(source_iterator aSource, source_iterator aSourceEnd) const = 0;
-        virtual const void* representation() const = 0;
-        virtual void* representation() = 0;
+        virtual const void* representation(representation_kind aKind) const = 0;
+        virtual void* representation(representation_kind aKind) = 0;
         virtual i_concept* do_fold(i_context& aContext) = 0;
-        virtual i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) = 0;
+        virtual i_concept* do_fold(i_context& aContext, const i_concept& aRhs) = 0;
         // helpers
     public:
         template<typename SourceIterator>
@@ -164,24 +183,24 @@ namespace neos::language
             return nullptr;
         }
         template <typename SourceIterator>
-        neolib::ref_ptr<i_concept> fold(i_context& aContext, const i_concept& aRhs, SourceIterator aSource, SourceIterator aSourceEnd)
+        neolib::ref_ptr<i_concept> fold(i_context& aContext, const i_concept& aRhs)
         {
             if (can_fold(aRhs))
-                return as_instance().do_fold(aContext, aRhs, std::pair<source_iterator, source_iterator>{ &*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd))});
+                return as_instance().do_fold(aContext, aRhs);
             return nullptr;
         }
         template <typename Data>
-        const Data& data() const
+        const neolib::abstract_interface_t<Data>& data() const
         {
             if (is_instance() || has_constant_data())
-                return *static_cast<const Data*>(representation());
+                return *static_cast<const neolib::abstract_interface_t<Data>*>(representation(representation_kind_v<neolib::abstract_interface_t<Data>>));
             throw not_an_instance();
         }
         template <typename Data>
-        Data& data()
+        neolib::abstract_interface_t<Data>& data()
         {
             if (!has_constant_data())
-                return const_cast<Data&>(const_cast<const i_concept*>(this)->data<Data>());
+                return const_cast<neolib::abstract_interface_t<Data>&>(const_cast<const i_concept*>(this)->data<Data>());
             throw data_is_constant();
         }
     };

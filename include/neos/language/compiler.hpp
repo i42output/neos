@@ -26,6 +26,7 @@
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
+#include <neos/language/concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
 
@@ -42,11 +43,15 @@ namespace neos::language
     {
     public:
         source_fragment(const optional_source_file_path_t& aSourceFilePath = optional_source_file_path_t{}, const source_t& aSource = source_t{}) :
-            iSourceFilePath{ aSourceFilePath }, iSource{ aSource }, iStatus{ compilation_status::Pending }
+            iSourceFilePath{ aSourceFilePath }, iSource{ aSource }, iImported{ false }, iStatus{ compilation_status::Pending }
         {
         }
         source_fragment(const i_source_fragment& aFragment) :
-            iSourceFilePath{ aFragment.source_file_path() }, iSource{ aFragment.source() }, iStatus{ aFragment.status() }
+            iSourceFilePath{ aFragment.source_file_path() }, iSource{ aFragment.source() }, iImported{ aFragment.imported() }, iStatus{ aFragment.status() }
+        {
+        }
+        source_fragment(i_source_fragment&& aFragment) :
+            iSourceFilePath{ std::move(aFragment.source_file_path()) }, iSource{ std::move(aFragment.source()) }, iImported{ aFragment.imported() }, iStatus{ aFragment.status() }
         {
         }
     public:
@@ -66,9 +71,21 @@ namespace neos::language
         { 
             return iSource; 
         }
+        bool imported() const override
+        {
+            return iImported;
+        }
+        void set_imported() override
+        {
+            iImported = true;
+        }
         compilation_status status() const override 
         { 
             return iStatus; 
+        }
+        void set_status(compilation_status aStatus) override
+        {
+            iStatus = aStatus;
         }
     public:
         const_source_iterator cbegin() const override
@@ -98,11 +115,12 @@ namespace neos::language
     private:
         optional_source_file_path_t iSourceFilePath;
         source_t iSource;
+        bool iImported;
         mutable compilation_status iStatus;
     };
 
     typedef std::shared_ptr<language::schema> schema_pointer_t;
-    typedef std::vector<source_fragment> source_fragments_t;
+    typedef std::list<source_fragment> source_fragments_t;
 
     struct source_fragment_not_found : std::logic_error { source_fragment_not_found() : std::logic_error("neos::language::source_fragment_not_found") {} };
 
@@ -200,8 +218,8 @@ namespace neos::language
         };
         struct concept_stack_entry
         {
-            translation_unit const* unit;
-            source_fragment const* fragment;
+            translation_unit* unit;
+            i_source_fragment const* fragment;
             uint32_t level;
             const i_concept* concept;
             source_iterator sourceStart;
@@ -235,7 +253,7 @@ namespace neos::language
                 if (rhs.foldedConcept)
                     foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
                 else
-                    foldedConcept = foldedConcept->fold(aContext, *rhs.concept, rhs.sourceStart, rhs.sourceEnd);
+                    foldedConcept = foldedConcept->fold(aContext, concept_instance_proxy{ *rhs.concept, rhs.sourceStart, rhs.sourceEnd });
             }
             std::string trace() const
             {
@@ -320,6 +338,8 @@ namespace neos::language
         };
         struct compilation_state
         {
+            program* program;
+            translation_unit* unit;
             std::optional<deepest_probe> iDeepestProbe;
             stack_trace_t iStackTrace;
             concept_stack_t iParseStack;
@@ -327,12 +347,13 @@ namespace neos::language
             concept_stack_t iFoldStack;
             uint32_t iLevel;
         };
+        typedef std::vector<std::unique_ptr<compilation_state>> compilation_state_stack_t;
     public:
         compiler(i_context& aContext);
     public:
         void compile(program& aProgram);
-        void compile(program& aProgram, const translation_unit& aUnit);
-        void compile(program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment);
+        void compile(program& aProgram, translation_unit& aUnit);
+        void compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         void compile(const i_source_fragment& aFragment) override;
         uint32_t trace() const;
         void set_trace(uint32_t aTrace);
@@ -341,30 +362,30 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
-        parse_result parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource);
-        parse_result parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
-        parse_result parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
-        parse_result parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
+        parse_result parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource);
+        parse_result parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
+        parse_result parse_token_match(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
+        parse_result parse_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
+        parse_result consume_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult);
+        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult);
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
+        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
         bool fold();
         bool fold1();
         bool fold2();
         concept_stack_t& parse_stack();
         concept_stack_t& postfix_operation_stack();
         concept_stack_t& fold_stack();
-        void display_probe_trace(const translation_unit& aUnit, const source_fragment& aFragment);
+        void display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment);
         static bool is_finished(const compiler::parse_result& aResult);
         static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
-        static std::string location(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
-        static void throw_error(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
+        static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
+        static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
         i_context& iContext;
         uint32_t iTrace;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
-        std::vector<compilation_state> iCompilationStateStack;
+        compilation_state_stack_t iCompilationStateStack;
     };
 }

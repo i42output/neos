@@ -18,6 +18,8 @@
 */
 
 #include <neos/language/concept.hpp>
+#include <neos/language/compiler.hpp>
+#include <neos/i_context.hpp>
 #include "module.hpp"
 
 namespace neos::concept::core
@@ -26,7 +28,7 @@ namespace neos::concept::core
     {
         // types
     public:
-        typedef std::string representation_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         source_package_name() :
@@ -46,13 +48,18 @@ namespace neos::concept::core
         {
             return aRhs.name() == "string.utf8";
         }
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        {
+            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+            return this;
+        }
     };
 
     class source_package_import : public neos_concept<source_package_import>
     {
         // types
     public:
-        typedef std::string representation_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         source_package_import() :
@@ -70,16 +77,24 @@ namespace neos::concept::core
     protected:
         bool can_fold() const override
         {
-            return as_instance().data<representation_type>().empty();
+            return !as_instance().data<representation_type>().empty();
         }
         i_concept* do_fold(i_context& aContext) override
         {
-            // todo
-            return this;
+            language::source_fragment file{ neolib::string{data<neolib::string>()} };
+            file.set_imported();
+            aContext.load_fragment(file);
+            aContext.compiler().compile(std::move(file));
+            return nullptr;
         }
         bool can_fold(const i_concept& aRhs) const override
         {
             return aRhs.name() == "source.package.name";
+        }
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        {
+            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+            return this;
         }
     };
 
@@ -87,7 +102,7 @@ namespace neos::concept::core
     {
         // types
     public:
-        typedef std::string representation_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         module_package_name() :
@@ -107,13 +122,18 @@ namespace neos::concept::core
         {
             return aRhs.name() == "string.utf8";
         }
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        {
+            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+            return this;
+        }
     };
 
     class module_package_import : public neos_concept<module_package_import>
     {
         // types
     public:
-        typedef std::string representation_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         module_package_import() :
@@ -131,16 +151,21 @@ namespace neos::concept::core
     protected:
         bool can_fold() const override
         {
-            return as_instance().data<representation_type>().empty();
+            return !as_instance().data<representation_type>().empty();
         }
         i_concept* do_fold(i_context& aContext) override
         {
             // todo
-            return this;
+            return nullptr;
         }
         bool can_fold(const i_concept& aRhs) const override
         {
             return aRhs.name() == "module.package.name";
+        }
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        {
+            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+            return this;
         }
     };
 
@@ -159,8 +184,8 @@ namespace neos::concept::core
         /* todo */
         concepts()[neolib::string{ "source.package.name" }] = neolib::make_ref<source_package_name>();
         concepts()[neolib::string{ "source.package.import" }] = neolib::make_ref<source_package_import>();
-        concepts()[neolib::string{ "module.package.name" }] = neolib::make_ref<source_package_name>();
-        concepts()[neolib::string{ "module.package.import" }] = neolib::make_ref<source_package_import>();
+        concepts()[neolib::string{ "module.package.name" }] = neolib::make_ref<module_package_name>();
+        concepts()[neolib::string{ "module.package.import" }] = neolib::make_ref<module_package_import>();
     }
 
     const std::string& module::library_name()

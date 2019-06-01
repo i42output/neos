@@ -73,7 +73,7 @@ namespace neos::concept::core
             return true;
         }
     protected:
-        const void* representation() const override
+        const void* representation(language::representation_kind) const override
         {
             static constexpr representation_type sChar = Char;
             return &sChar;
@@ -127,15 +127,14 @@ namespace neos::concept::core
         }
     };
 
-    template <typename Char>
-    class basic_string : public neos_concept<basic_string<Char>>
+    class string_utf8 : public neos_concept<string_utf8>
     {
         // types
     public:
-        typedef neos_concept<basic_string<Char>> base_type;
+        typedef neos_concept<string_utf8> base_type;
         typedef typename base_type::source_iterator source_iterator;
-        typedef Char character_type;
-        typedef std::basic_string<character_type> representation_type;
+        typedef char character_type;
+        typedef neolib::string representation_type;
         // construction
     public:
         using base_type::base_type;
@@ -147,7 +146,7 @@ namespace neos::concept::core
         }
         i_concept* do_fold(i_context& aContext) override
         {
-            std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
+            std::reverse(base_type::as_instance().data<representation_type>().fbegin(), base_type::as_instance().data<representation_type>().fend());
             iFolded = true;
             return this;
         }
@@ -155,19 +154,17 @@ namespace neos::concept::core
         {
             return aRhs.name().to_std_string_view().find(base_type::name().to_std_string_view()) == 0;
         }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
         {
             if (can_fold(aRhs) && base_type::as_instance().can_fold(aRhs))
             {
                 if (aRhs.is_instance() || aRhs.has_constant_data())
-                    base_type::as_instance().data<representation_type>().push_back(aRhs.data<character_type>());
-                else if (aRhsSource != std::nullopt)
-                    base_type::as_instance().data<representation_type>().push_back(static_cast<character_type>(*aRhsSource->first));
+                    as_instance().data<representation_type>().push_back(aRhs.data<character_type>());
                 else
-                    throw base_type::invalid_fold();
-                return &base_type::as_instance();
+                    throw invalid_fold();
+                return &as_instance();
             }
-            throw base_type::invalid_fold();
+            throw invalid_fold();
         }
     private:
         bool iFolded = false;
@@ -188,7 +185,7 @@ namespace neos::concept::core
         /* todo */
         concepts()[neolib::string{ "string" }] = neolib::make_ref<neos::language::unimplemented_concept>("string");
         concepts()[neolib::string{ "string.character" }] = neolib::make_ref<neos::language::unimplemented_concept>("string.character");
-        concepts()[neolib::string{ "string.utf8" }] = neolib::make_ref<basic_string<char>>(*concepts()[neolib::string{ "string" }], "string.utf8");
+        concepts()[neolib::string{ "string.utf8" }] = neolib::make_ref<string_utf8>(*concepts()[neolib::string{ "string" }], "string.utf8");
         concepts()[neolib::string{ "string.utf8.character" }] = neolib::make_ref<string_utf8_character<any_char>>(*concepts()[neolib::string{ "string.character" }], "string.utf8.character");
         concepts()[neolib::string{ "string.utf8.character.LF" }] = neolib::make_ref<string_utf8_character<single_char<'\n'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.LF");
         concepts()[neolib::string{ "string.utf8.character.CR" }] = neolib::make_ref<string_utf8_character<single_char<'\r'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.CR");

@@ -102,11 +102,18 @@ namespace neos::language
 
     void compiler::compile(program& aProgram)
     {
+        for (auto& unit : aProgram.translationUnits)
+            for (auto fragment = unit.fragments.begin(); fragment != unit.fragments.end();)
+                if (fragment->imported())
+                    fragment = unit.fragments.erase(fragment);
+                else
+                    (fragment++)->set_status(compilation_status::Pending);
+
         iStartTime = std::chrono::steady_clock::now();
 
         try
         {
-            for (auto const& unit : aProgram.translationUnits)
+            for (auto& unit : aProgram.translationUnits)
                 compile(aProgram, unit);
         }
         catch(...)
@@ -118,18 +125,23 @@ namespace neos::language
         iEndTime = std::chrono::steady_clock::now();
     }
 
-    void compiler::compile(program& aProgram, const translation_unit& aUnit)
+    void compiler::compile(program& aProgram, translation_unit& aUnit)
     {
-        for (auto const& fragment : aUnit.fragments)
+        for (auto& fragment : aUnit.fragments)
             compile(aProgram, aUnit, fragment);
     }
 
-    void compiler::compile(program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment)
+    void compiler::compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment)
     {
-        iCompilationStateStack.push_back(compilation_state{});
+        if (aFragment.status() != compilation_status::Pending)
+            return;
 
-        auto source = aFragment.begin();
-        while (source != aFragment.end())
+        aFragment.set_status(compilation_status::Compiling);
+            
+        iCompilationStateStack.push_back(std::unique_ptr<compilation_state>(new compilation_state{ &aProgram, &aUnit }));
+
+        auto source = aFragment.cbegin();
+        while (source != aFragment.cend())
         {
             state().iDeepestProbe = std::nullopt;
             auto result = parse(compiler_pass::Emit, aProgram, aUnit, aFragment, aUnit.schema->root(), source);
@@ -142,25 +154,30 @@ namespace neos::language
             source = result.sourceParsed;
         }
 
+        aFragment.set_status(compilation_status::Compiled);
+
         iCompilationStateStack.pop_back();
     }
 
     void compiler::compile(const i_source_fragment& aFragment)
     {
-        // todo
+        auto& program = *state().program;
+        auto& unit = *state().unit;
+        auto& fragment = *unit.fragments.emplace(unit.fragments.end(), aFragment);
+        compile(program, unit, fragment);
     }
 
     const compiler::compilation_state& compiler::state() const
     {
-        return iCompilationStateStack.back();
+        return *iCompilationStateStack.back();
     }
 
     compiler::compilation_state& compiler::state()
     {
-        return iCompilationStateStack.back();
+        return *iCompilationStateStack.back();
     }
 
-    compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource)
+    compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         neolib::scoped_counter sc{ state().iLevel };
@@ -175,7 +192,7 @@ namespace neos::language
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
-        if (aSource != aFragment.end())
+        if (aSource != aFragment.cend())
         {
             if (expectingToken)
             {
@@ -218,7 +235,7 @@ namespace neos::language
         //emit(aProgram.text, bytecode::opcode::B, loop);
     }
 
-    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource)
+    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
@@ -271,7 +288,7 @@ namespace neos::language
             return parse_result{ aSource, parse_result::NoMatch };
         }
         bool skipConsume = (expectedAtom && expectedConsumed);
-        for (; currentSource != aFragment.end() && iterToken != aAtom.tokens().end();)
+        for (; currentSource != aFragment.cend() && iterToken != aAtom.tokens().end();)
         {
             auto const& token = *iterToken->first();
             auto const& tokenValue = *iterToken->second();
@@ -409,10 +426,10 @@ namespace neos::language
                 }
             }
         }
-        return parse_result{ currentSource, aAtom.tokens().empty() ? parse_result::Consumed : parse_result::NoMatch };
+        return parse_result{ currentSource, currentSource == aFragment.cend() || aAtom.tokens().empty() ? parse_result::Consumed : parse_result::NoMatch };
     }
 
-    compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult, bool aSelf)
+    compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult, bool aSelf)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
@@ -460,7 +477,7 @@ namespace neos::language
         return result;
     }
 
-    compiler::parse_result compiler::parse_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult)
+    compiler::parse_result compiler::parse_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
@@ -508,7 +525,7 @@ namespace neos::language
                 case schema_terminal::String:
                     {
                         auto const terminalSymbol = terminal.symbol().to_std_string_view();
-                        if (static_cast<std::size_t>(std::distance(aResult.sourceParsed, aFragment.end())) >= terminalSymbol.size() && std::equal(terminalSymbol.begin(), terminalSymbol.end(), aResult.sourceParsed))
+                        if (static_cast<std::size_t>(std::distance(aResult.sourceParsed, aFragment.cend())) >= terminalSymbol.size() && std::equal(terminalSymbol.begin(), terminalSymbol.end(), aResult.sourceParsed))
                             return aResult.with(aResult.sourceParsed + terminalSymbol.size());
                     }
                 default:
@@ -522,7 +539,7 @@ namespace neos::language
         return aResult.with(parse_result::NoMatch);
     }
 
-    compiler::parse_result compiler::consume_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult)
+    compiler::parse_result compiler::consume_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         parse_result result = aResult;
@@ -535,10 +552,10 @@ namespace neos::language
         return result;
     }
 
-    compiler::parse_result compiler::consume_concept_token(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult)
+    compiler::parse_result compiler::consume_concept_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aFragment.end());
+        auto consumeResult = aConcept.consume_token(aPass, aResult.sourceParsed, aFragment.cend());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
@@ -548,15 +565,15 @@ namespace neos::language
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }
 
-    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult)
+    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult)
     {
         return consume_concept_atom(aPass, aProgram, aUnit, aFragment, aAtom, aConcept, aResult, parse_stack());
     }
         
-    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, const translation_unit& aUnit, const source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack)
+    compiler::parse_result compiler::consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
-        auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aFragment.end());
+        auto consumeResult = aConcept.consume_atom(aPass, aAtom, aResult.sourceParsed, aFragment.cend());
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
@@ -597,16 +614,21 @@ namespace neos::language
             auto& single = *isingle;
             if (single.can_fold())
             {
+                std::string traceBefore = single.trace();
                 if (trace() >= 1)
-                    std::cout << "fold: " << single.trace() << " <- " << single.trace() << std::flush;
+                    std::cout << "folding: " << traceBefore << " <- " << traceBefore << std::endl;
                 single.fold(iContext);
                 if (single.foldedConcept != nullptr)
                 {
                     if (trace() >= 1)
-                        std::cout << " = " << single.trace() << std::endl;
+                        std::cout << "folded: " << traceBefore << " <- " << traceBefore << " = " << single.trace() << std::endl;
                 }
                 else
+                {
+                    if (trace() >= 1)
+                        std::cout << "folded: " << traceBefore << " <- " << traceBefore << " = ()" << std::endl;
                     isingle = fold_stack().erase(isingle);
+                }
                 didSome = true;
             }
             else
@@ -626,11 +648,13 @@ namespace neos::language
             auto& lhs = *ilhs;
             if (lhs.can_fold(rhs))
             {
+                std::string lhsTraceBefore = lhs.trace();
+                std::string rhsTraceBefore = rhs.trace();
                 if (trace() >= 1)
-                    std::cout << "fold: " << lhs.trace() << " <- " << rhs.trace() << std::flush;
+                    std::cout << "folding: " << lhsTraceBefore << " <- " << rhsTraceBefore << std::endl;
                 lhs.fold(iContext, rhs);
                 if (trace() >= 1)
-                    std::cout << " = " << lhs.trace() << std::endl;
+                    std::cout << "folded: " << lhsTraceBefore << " <- " << rhsTraceBefore << " = " << lhs.trace() << std::endl;
                 irhs = fold_stack().erase(irhs);
                 if (irhs != fold_stack().begin())
                     --irhs;
@@ -658,7 +682,7 @@ namespace neos::language
         return state().iFoldStack;
     }
 
-    void compiler::display_probe_trace(const translation_unit& aUnit, const source_fragment& aFragment)
+    void compiler::display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment)
     {
         std::cerr << "Probe trace:-" << std::endl;
         std::cerr << "================" << std::endl;
@@ -745,7 +769,7 @@ namespace neos::language
         }
     }
 
-    std::string compiler::location(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath)
+    std::string compiler::location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath)
     {
         uint32_t line = 1;
         uint32_t col = 1;
@@ -762,7 +786,7 @@ namespace neos::language
         return (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? "file '" + *aFragment.source_file_path() + "', " : "") + "line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col);
     }
 
-    void compiler::throw_error(const translation_unit& aUnit, const source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError)
+    void compiler::throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError)
     {
         throw std::runtime_error("(" + aError + ") " + location(aUnit, aFragment, aSourcePos));
     }

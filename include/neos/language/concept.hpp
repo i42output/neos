@@ -26,17 +26,6 @@
 
 namespace neos::language
 {
-    template <typename Representation>
-    inline Representation to_representation(i_concept::source_iterator aSource, i_concept::source_iterator aSourceEnd)
-    {
-        return Representation(aSource, aSourceEnd);
-    }
-    template<>
-    inline char to_representation<char>(i_concept::source_iterator aSource, i_concept::source_iterator aSourceEnd)
-    {
-        return *aSource;
-    }
-
     template <typename Concept>
     class concept_instance;
 
@@ -159,11 +148,11 @@ namespace neos::language
             else
                 throw cannot_instantiate();
         }
-        const void* representation() const override
+        const void* representation(representation_kind) const override
         {
             throw not_an_instance();
         }
-        void* representation() override
+        void* representation(representation_kind) override
         {
             throw not_an_instance();
         }
@@ -171,7 +160,7 @@ namespace neos::language
         {
             return nullptr;
         }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs, const std::optional<std::pair<source_iterator, source_iterator>>& aRhsSource = {}) override
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
         {
             if constexpr (!std::is_same_v<instance_type, void>)
             {
@@ -179,9 +168,7 @@ namespace neos::language
                 if (can_fold(aRhs) && as_instance().can_fold(aRhs))
                 {
                     if (aRhs.is_instance() || aRhs.has_constant_data())
-                        as_instance().data<representation_type>() = aRhs.data<representation_type>();
-                    else if (aRhsSource != std::nullopt)
-                        as_instance().data<representation_type>() = to_representation<representation_type>(aRhsSource->first, aRhsSource->second);
+                        as_instance().data<neolib::abstract_interface_t<representation_type>>() = aRhs.data<neolib::abstract_interface_t<representation_type>>();
                     else
                         throw base_type::invalid_fold();
                     return &as_instance();
@@ -236,7 +223,7 @@ namespace neos::language
         {
             thread_local neolib::string traceResult;
             std::ostringstream oss;
-            oss << concept_type::name() << "(" << *static_cast<const representation_type*>(representation()) << ")";
+            oss << concept_type::name() << "(" << *static_cast<const representation_type*>(representation(representation_kind_v<representation_type>)) << ")";
             traceResult = oss.str();
             return traceResult;
         }
@@ -263,15 +250,137 @@ namespace neos::language
         {
             throw already_instantiated();
         }
-        const void* representation() const override
+        const void* representation(representation_kind) const override
         {
             return &iRepresentation;
         }
-        void* representation() override
+        void* representation(representation_kind) override
         {
             return &iRepresentation;
         }
     private:
+        source_iterator iSource;
+        source_iterator iSourceEnd;
+        representation_type iRepresentation;
+    };
+
+    class concept_instance_proxy : public neolib::reference_counted<i_concept>
+    {
+        // types
+    public:
+        typedef neolib::string representation_type;
+        // construction
+    public:
+        concept_instance_proxy(const i_concept & aSubject, source_iterator aSource, source_iterator aSourceEnd) :
+            iSubject{ aSubject }, iSource{ aSource }, iSourceEnd{ aSourceEnd }, iRepresentation{ aSource, aSourceEnd }
+        {
+        }
+        // family
+    public:
+        bool has_parent() const override
+        {
+            return iSubject.has_parent();
+        }
+        const i_concept& parent() const override
+        {
+            return iSubject.parent();
+        }
+        i_concept& parent() override
+        {
+            return const_cast<i_concept&>(const_cast<const concept_instance_proxy*>(this)->parent());
+        }
+        const neolib::i_string& name() const override
+        {
+            return iSubject.name();
+        }
+        // parse
+    public:
+        emit_type emit_as() const override
+        {
+            return iSubject.emit_as();
+        }
+        source_iterator consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            return iSubject.consume_token(aPass, aSource, aSourceEnd, aConsumed);
+        }
+        source_iterator consume_atom(compiler_pass aPass, const i_atom & aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            return iSubject.consume_atom(aPass, aAtom, aSource, aSourceEnd, aConsumed);
+        }
+        source_iterator source() const override
+        {
+            return iSource;
+        }
+        source_iterator source_end() const override
+        {
+            return iSourceEnd;
+        }
+        const neolib::i_string& trace() const override
+        {
+            return iSubject.trace();
+        }
+        // emit
+    public:
+        bool has_constant_data() const override
+        {
+            return iSubject.has_constant_data();
+        }
+        bool can_fold() const override
+        {
+            return iSubject.can_fold();
+        }
+        bool can_fold(const i_concept & aRhs) const override
+        {
+            return iSubject.can_fold(aRhs);
+        }
+        bool can_instantiate() const override
+        {
+            return false;
+        }
+        bool is_instance() const override
+        {
+            return true;
+        }
+        const i_concept& as_instance() const override
+        {
+            return *this;
+        }
+        i_concept& as_instance() override
+        {
+            return *this;
+        }
+    protected:
+        i_concept* do_instantiate(source_iterator, source_iterator) const override
+        {
+            throw already_instantiated();
+        }
+        const void* representation(representation_kind aKind) const override
+        {
+            switch(aKind)
+            {
+            case representation_kind::Character:
+                return &iRepresentation[0];
+            case representation_kind::String:
+            case representation_kind::Object:
+            default:
+                return static_cast<const neolib::i_string*>(&iRepresentation);
+            }
+        }
+        void* representation(representation_kind aKind) override
+        {
+            return const_cast<void*>(const_cast<const concept_instance_proxy*>(this)->representation(aKind));
+        }
+        i_concept* do_fold(i_context&) override
+        {
+            return this;
+        }
+        i_concept* do_fold(i_context&, const i_concept&) override
+        {
+            return this;
+        }
+        // attributes
+    private:
+        const i_concept& iSubject;
         source_iterator iSource;
         source_iterator iSourceEnd;
         representation_type iRepresentation;
