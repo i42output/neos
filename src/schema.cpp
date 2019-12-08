@@ -18,7 +18,7 @@
 */
 
 #include <neos/neos.hpp>
-#include <neolib/raii.hpp>
+#include <neolib/scoped.hpp>
 #include <neolib/recursion.hpp>
 #include <neos/language/schema.hpp>
 
@@ -269,12 +269,12 @@ namespace neos
                 case schema_keyword::Default:
                     if (iterToken != std::prev(tokensInDocumentOrder.cend()))
                         throw_error(token, "default specifier must appear last in token specification block");
-                    result.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    result.push_back(schema_node_atom::tokens_t::value_type{});
                     result.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
                     parse_token_value(*this, token);
                     break;
                 case schema_keyword::Invalid:
-                    result.push_back(schema_node_atom::tokens_t::concrete_value_type{});
+                    result.push_back(schema_node_atom::tokens_t::value_type{});
                     add_lhs_atom_reference(token, aAtom, result.back().first());
                     parse_token_value(*this, token);
                     break;

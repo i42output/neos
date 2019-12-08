@@ -34,8 +34,8 @@ namespace neos::language
     class concept_library : public neolib::reference_counted<i_concept_library>
     {
     public:
-        typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept_library>, neolib::string, neolib::ref_ptr<i_concept_library>> sublibraries_t;
-        typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<i_concept>, neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
+        typedef neolib::map<neolib::string, neolib::ref_ptr<i_concept_library>> sublibraries_t;
+        typedef neolib::map<neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
     public:
         static constexpr std::size_t RecursionLimit = 16u;
     public:

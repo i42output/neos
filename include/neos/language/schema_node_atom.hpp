@@ -27,6 +27,7 @@
 #include <neos/language/i_concept_atom.hpp>
 #include <neos/language/i_schema_node_atom.hpp>
 #include <neos/language/atom.hpp>
+#include <neos/language/concept.hpp>
 
 namespace neos::language
 {
@@ -34,15 +35,15 @@ namespace neos::language
     {
     public:
         typedef neolib::string symbol_t;
-        typedef neolib::list<neolib::i_ref_ptr<i_concept>, neolib::ref_ptr<i_concept>> concept_list_t;
+        typedef neolib::list<neolib::ref_ptr<i_concept>> concept_list_t;
         typedef concept_list_t is_t;
-        typedef neolib::list<neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_list_t;
+        typedef neolib::list<neolib::ref_ptr<i_atom>> atom_list_t;
         typedef atom_list_t expects_t;
-        typedef neolib::pair<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
-        typedef neolib::list<i_schema_node_atom::atom_map_list_entry_t, atom_map_list_entry_t> atom_map_list_t;
+        typedef neolib::pair<neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_list_entry_t;
+        typedef neolib::list<atom_map_list_entry_t> atom_map_list_t;
         typedef i_schema_node_atom::tokens_t abstract_tokens_t;
         typedef atom_map_list_t tokens_t;
-        typedef neolib::map<neolib::i_ref_ptr<i_atom>, neolib::i_ref_ptr<i_atom>, neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
+        typedef neolib::map<neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
         typedef atom_map_t token_map_t;
         typedef atom_map_t children_t;
     private:

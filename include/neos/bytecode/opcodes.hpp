@@ -57,7 +57,7 @@ namespace neos
             Branch          = 0b00000000000000000000000000000000,
             Data            = 0b00000001000000000000000000000000,
             Memory          = 0b00000010000000000000000000000000,
-            Priviledged     = 0b00000011000000000000000000000000,
+            Privileged      = 0b00000011000000000000000000000000,
             // Link register                    
             Link            = 0b00000100000000000000000000000000,
             // Conditional execute              
@@ -111,6 +111,7 @@ namespace neos
             LDR     = 0b00000000000000010000000000000000 | opcode_type::Memory,
             STR     = 0b00000000000000011000000000000000 | opcode_type::Memory,
             CMP     = 0b00000000000000100000000000000000 | opcode_type::Data,
+            CMPF    = 0b00000000000000100000000000000000 | opcode_type::Data | opcode_type::Float,
             ADD     = 0b00000000000000101000000000000000 | opcode_type::Data,
             ADDF    = 0b00000000000000101000000000000000 | opcode_type::Data | opcode_type::Float,
             ADC     = 0b00000000000000110000000000000000 | opcode_type::Data,
@@ -126,8 +127,8 @@ namespace neos
             XOR     = 0b00000000000001101000000000000000 | opcode_type::Data,
             TEQ     = 0b00000000000001110000000000000000 | opcode_type::Data,
             TST     = 0b00000000000001111000000000000000 | opcode_type::Data,
-            EPRIV   = 0b00000000000010000000000000000000 | opcode_type::Priviledged,
-            LPRIV   = 0b00000000000011000000000000000000 | opcode_type::Priviledged
+            EPRIV   = 0b00000000000010000000000000000000 | opcode_type::Privileged,
+            LPRIV   = 0b00000000000011000000000000000000 | opcode_type::Privileged
         };
 
         inline constexpr opcode operator|(opcode lhs, uint8_t rhs)

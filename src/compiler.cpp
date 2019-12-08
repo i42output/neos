@@ -19,7 +19,7 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
-#include <neolib/raii.hpp>
+#include <neolib/scoped.hpp>
 #include <neolib/recursion.hpp>
 #include <neolib/string_utf.hpp>
 #include <neos/bytecode/opcodes.hpp>

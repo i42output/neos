@@ -35,7 +35,7 @@ namespace neos
     class context : public i_context
     {
     public:
-        typedef neolib::map<neolib::i_string, neolib::i_ref_ptr<language::i_concept_library>, neolib::string, neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
+        typedef neolib::map<neolib::string, neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:

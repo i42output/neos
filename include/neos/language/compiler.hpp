@@ -33,7 +33,7 @@
 namespace neos::language
 {
     typedef neolib::string source_file_path_t;
-    typedef neolib::optional<i_source_file_path_t, source_file_path_t> optional_source_file_path_t;
+    typedef neolib::optional<source_file_path_t> optional_source_file_path_t;
     typedef neolib::string source_t;
     typedef source_t::const_fast_iterator const_source_iterator;
     typedef source_t::fast_iterator source_iterator;
