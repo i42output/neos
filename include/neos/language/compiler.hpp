@@ -287,21 +287,25 @@ namespace neos::language
             { 
                 return atom == rhs.atom && operations == rhs.operations; 
             }
-            void trace(const translation_unit& aUnit, bool aTraceOperators) const
+            template <typename Char, typename CharT>
+            void trace(const translation_unit& aUnit, bool aTraceOperators, const std::optional<std::string>& aFilter, std::basic_ostream<Char, CharT>& aOutput) const
             {
-                std::cerr << "'";
+                std::ostringstream result;
+                result << "'";
                 auto const count = std::min<std::ptrdiff_t>(20, std::distance(source, aUnit.fragment(source).end()));
                 for (auto c : std::string_view(&*source, count))
                     if (c >= 32)
-                        std::cerr << c;
+                        result << c;
                     else
-                        std::cerr << ' ';
-                std::cerr << "' " << std::string(20 - count, ' ');
-                std::cerr << "[" << atom->symbol() << "]    ";
+                        result << ' ';
+                result << "' " << std::string(20 - count, ' ');
+                result << "[" << atom->symbol() << "]    ";
                 if (aTraceOperators)
                     for (auto const& o : operations)
-                        std::cerr << " (" << o << ")";
-                std::cerr << std::endl;
+                        result << " (" << o << ")";
+                result << std::endl;
+                if (!aFilter || result.str().find(*aFilter) != std::string::npos)
+                    aOutput << result.str();
             }
         };
         typedef std::deque<stack_trace_entry> stack_trace_t;
@@ -356,7 +360,8 @@ namespace neos::language
         void compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         void compile(const i_source_fragment& aFragment) override;
         uint32_t trace() const;
-        void set_trace(uint32_t aTrace);
+        const std::optional<std::string>& trace_filter() const;
+        void set_trace(uint32_t aTrace, const std::optional<std::string>& aFilter = {});
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
     private:
@@ -384,6 +389,7 @@ namespace neos::language
     private:
         i_context& iContext;
         uint32_t iTrace;
+        std::optional<std::string> iTraceFilter;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
         compilation_state_stack_t iCompilationStateStack;

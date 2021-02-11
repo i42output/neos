@@ -85,9 +85,15 @@ namespace neos::language
         return iTrace;
     }
 
-    void compiler::set_trace(uint32_t aTrace)
+    const std::optional<std::string>& compiler::trace_filter() const
+    {
+        return iTraceFilter;
+    }
+
+    void compiler::set_trace(uint32_t aTrace, const std::optional<std::string>& aFilter)
     {
         iTrace = aTrace;
+        iTraceFilter = aFilter;
     }
 
     const std::chrono::steady_clock::time_point& compiler::start_time() const
@@ -609,6 +615,7 @@ namespace neos::language
         if (fold_stack().size() < 1)
             return false;
         bool didSome = false;
+        std::ostringstream traceOutput;
         for (auto isingle = fold_stack().begin(); isingle != fold_stack().end();)
         {
             auto& single = *isingle;
@@ -616,19 +623,25 @@ namespace neos::language
             {
                 std::string traceBefore = single.trace();
                 if (trace() >= 1)
-                    std::cout << "folding: " << traceBefore << " <- " << traceBefore << std::endl;
+                    traceOutput << "folding: " << traceBefore << " <- " << traceBefore << std::endl;
+                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
+                    std::cout << traceOutput.str();
+                traceOutput.str({});
                 single.fold(iContext);
                 if (single.foldedConcept != nullptr)
                 {
                     if (trace() >= 1)
-                        std::cout << "folded: " << traceBefore << " <- " << traceBefore << " = " << single.trace() << std::endl;
+                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = " << single.trace() << std::endl;
                 }
                 else
                 {
                     if (trace() >= 1)
-                        std::cout << "folded: " << traceBefore << " <- " << traceBefore << " = ()" << std::endl;
+                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = ()" << std::endl;
                     isingle = fold_stack().erase(isingle);
                 }
+                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
+                    std::cout << traceOutput.str();
+                traceOutput.str({});
                 didSome = true;
             }
             else
@@ -642,6 +655,7 @@ namespace neos::language
         if (fold_stack().size() < 2)
             return false;
         bool didSome = false;
+        std::ostringstream traceOutput;
         for (auto irhs = fold_stack().begin(), ilhs = std::next(irhs); ilhs != fold_stack().end();)
         {
             auto& rhs = *irhs;
@@ -651,10 +665,16 @@ namespace neos::language
                 std::string lhsTraceBefore = lhs.trace();
                 std::string rhsTraceBefore = rhs.trace();
                 if (trace() >= 1)
-                    std::cout << "folding: " << lhsTraceBefore << " <- " << rhsTraceBefore << std::endl;
+                    traceOutput << "folding: " << lhsTraceBefore << " <- " << rhsTraceBefore << std::endl;
+                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
+                    std::cout << traceOutput.str();
+                traceOutput.str({});
                 lhs.fold(iContext, rhs);
                 if (trace() >= 1)
-                    std::cout << "folded: " << lhsTraceBefore << " <- " << rhsTraceBefore << " = " << lhs.trace() << std::endl;
+                    traceOutput << "folded: " << lhsTraceBefore << " <- " << rhsTraceBefore << " = " << lhs.trace() << std::endl;
+                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
+                    std::cout << traceOutput.str();
+                traceOutput.str({});
                 irhs = fold_stack().erase(irhs);
                 if (irhs != fold_stack().begin())
                     --irhs;
@@ -684,8 +704,8 @@ namespace neos::language
 
     void compiler::display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment)
     {
-        std::cerr << "Probe trace:-" << std::endl;
-        std::cerr << "================" << std::endl;
+        std::cout << "Probe trace:-" << std::endl;
+        std::cout << "================" << std::endl;
         while (std::adjacent_find(
             state().iDeepestProbe->stacks.begin(),
             state().iDeepestProbe->stacks.end(),
@@ -700,7 +720,7 @@ namespace neos::language
             {
                 if (first)
                 {
-                    s.front().trace(aUnit, false);
+                    s.front().trace(aUnit, false, trace_filter(), std::cout);
                     first = false;
                 }
                 s.pop_front();
@@ -711,14 +731,14 @@ namespace neos::language
                 i = state().iDeepestProbe->stacks.erase(i);
             else
                 ++i;
-        std::cerr << "================" << std::endl;
+        std::cout << "================" << std::endl;
         for (auto s : state().iDeepestProbe->stacks)
         {
             for (auto const& e : s)
             {
-                e.trace(aUnit, &e == &s.back());
+                e.trace(aUnit, &e == &s.back(), trace_filter(), std::cout);
             }
-            std::cerr << "----------------" << std::endl;
+            std::cout << "----------------" << std::endl;
         }
     }
 

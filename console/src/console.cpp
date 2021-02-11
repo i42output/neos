@@ -51,9 +51,9 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << ":<input>                                 Input (as stdin)\n"
                 << "q(uit)                                   Quit neos\n"
                 << "lc                                       List loaded concept libraries\n"
-                << "t(race) [0|1|2|3|4|5]                    Compiler trace\n"
+                << "t(race) <0|1|2|3|4|5> [<filter>]         Compiler trace\n"
                 << "m(etrics)                                Display metrics of running programs\n"
-                << std::endl;
+                << std::flush;
         }
         else if (command == "s" || command == "schema")
         {
@@ -113,8 +113,10 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         }
         else if (command == "t" || command == "trace")
         {
-            if (words.size() == 2)
-                aContext.compiler().set_trace(boost::lexical_cast<uint32_t>(std::string(words[1].first, words[1].second)));
+            if (words.size() >= 2)
+                aContext.compiler().set_trace(
+                    boost::lexical_cast<uint32_t>(std::string{ words[1].first, words[1].second }), 
+                    words.size() > 2 ? std::string{ words[2].first, words[2].second } : std::optional<std::string>{});
             else
                 throw std::runtime_error("invalid command argument(s)");
         }
