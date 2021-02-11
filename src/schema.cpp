@@ -18,8 +18,8 @@
 */
 
 #include <neos/neos.hpp>
-#include <neolib/scoped.hpp>
-#include <neolib/recursion.hpp>
+#include <neolib/core/scoped.hpp>
+#include <neolib/core/recursion.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos
@@ -126,18 +126,18 @@ namespace neos
                     { schema_keyword::Is, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                     {
                         auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
-                        auto concept = find_concept(conceptName);
-                        if (concept != nullptr)
-                            aParentAtom.is().push_back(concept);
+                        auto concept_ = find_concept(conceptName);
+                        if (concept_ != nullptr)
+                            aParentAtom.is().push_back(concept_);
                         else
                             throw_error(aChildNode, "concept '" + conceptName + "' not found");
                     } },
                     { schema_keyword::As, [this](neolib::rjson_value const& aChildNode, i_schema_node_atom& aParentAtom)
                     {
                         auto const& conceptName = aChildNode.as<neolib::rjson_keyword>().text;
-                        auto concept = find_concept(conceptName);
-                        if (concept != nullptr)
-                            aParentAtom.as() = concept;
+                        auto concept_ = find_concept(conceptName);
+                        if (concept_ != nullptr)
+                            aParentAtom.as() = concept_;
                         else
                             throw_error(aChildNode, "concept '" + conceptName + "' not found");
                     } },
@@ -393,10 +393,10 @@ namespace neos
                         foundSome = true;
                         continue;
                     }
-                    auto concept = find_concept(entry->first.first);
-                    if (concept != nullptr)
+                    auto concept_ = find_concept(entry->first.first);
+                    if (concept_ != nullptr)
                     {
-                        auto conceptAtom = create_concept_atom(concept);
+                        auto conceptAtom = create_concept_atom(concept_);
                         for (auto& r : entry->second)
                             *r.atomPtr = conceptAtom;
                         entry = atom_references().erase(entry);
@@ -428,11 +428,11 @@ namespace neos
                 if (aLeafName == aStem)
                     return &aNode;
             }
-            for (auto& concept : aNode.is())
+            for (auto& concept_ : aNode.is())
             {
-                if (concept->name() == neolib::string{ aLeafName })
-                    return neolib::make_ref<concept_atom>(concept);
-                auto const base = concept->name() + ".";
+                if (concept_->name() == neolib::string{ aLeafName })
+                    return neolib::make_ref<concept_atom>(concept_);
+                auto const base = concept_->name() + ".";
                 auto matchingConcept = find_concept(base + aLeafName);
                 if (matchingConcept == nullptr && aLeafName.find(base.to_std_string()) == 0)
                     matchingConcept = find_concept(aLeafName);
@@ -467,11 +467,11 @@ namespace neos
 
         neolib::ref_ptr<i_concept> schema::find_concept(const std::string& aSymbol) const
         {
-            neolib::ref_ptr<i_concept> concept;
+            neolib::ref_ptr<i_concept> concept_;
             for (auto const& cl : iConceptLibraries)
             {
-                if (cl.second()->find_concept(neolib::string{ aSymbol }, concept))
-                    return concept;
+                if (cl.second()->find_concept(neolib::string{ aSymbol }, concept_))
+                    return concept_;
             }
             return nullptr;
         }

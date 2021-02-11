@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_string.hpp>
-#include <neolib/i_optional.hpp>
+#include <neolib/core/i_string.hpp>
+#include <neolib/core/i_optional.hpp>
 
 namespace neos::language
 {
@@ -39,8 +39,8 @@ namespace neos::language
     class i_source_fragment
     {
     public:
-        typedef const char* const_fast_iterator;
-        typedef char* fast_iterator;
+        typedef i_source_t::const_iterator const_iterator;
+        typedef i_source_t::iterator iterator;
     public:
         virtual ~i_source_fragment() {}
     public:
@@ -53,12 +53,12 @@ namespace neos::language
         virtual compilation_status status() const = 0;
         virtual void set_status(compilation_status aStatus) = 0;
     public:
-        virtual const_fast_iterator cbegin() const = 0;
-        virtual const_fast_iterator cend() const = 0;
-        virtual const_fast_iterator begin() const = 0;
-        virtual const_fast_iterator end() const = 0;
-        virtual fast_iterator begin() = 0;
-        virtual fast_iterator end() = 0;
+        virtual const_iterator cbegin() const = 0;
+        virtual const_iterator cend() const = 0;
+        virtual const_iterator begin() const = 0;
+        virtual const_iterator end() const = 0;
+        virtual iterator begin() = 0;
+        virtual iterator end() = 0;
     };
 
     class i_compiler

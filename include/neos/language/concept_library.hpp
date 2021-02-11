@@ -20,12 +20,12 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/recursion.hpp>
-#include <neolib/reference_counted.hpp>
-#include <neolib/map.hpp>
-#include <neolib/string.hpp>
-#include <neolib/version.hpp>
-#include <neolib/i_application.hpp>
+#include <neolib/core/recursion.hpp>
+#include <neolib/core/reference_counted.hpp>
+#include <neolib/core/map.hpp>
+#include <neolib/core/string.hpp>
+#include <neolib/app/version.hpp>
+#include <neolib/app/i_application.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/concept.hpp>
 
@@ -116,10 +116,10 @@ namespace neos::language
         bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const override
         {
             _limit_recursion_(concept_library);
-            auto concept = concepts().find(aSymbol);
-            if (concept != concepts().end())
+            auto concept_ = concepts().find(aSymbol);
+            if (concept_ != concepts().end())
             {
-                aConcept = concept->second();
+                aConcept = concept_->second();
                 return true;
             }
             for (auto const& cl : sublibraries())

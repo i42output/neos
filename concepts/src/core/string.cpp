@@ -20,7 +20,7 @@
 #include <neos/language/concept.hpp>
 #include "string.hpp"
 
-namespace neos::concept::core
+namespace neos::concepts::core
 {   
     template <typename T>
     class string_utf8_character;
@@ -146,7 +146,7 @@ namespace neos::concept::core
         }
         i_concept* do_fold(i_context& aContext) override
         {
-            std::reverse(base_type::as_instance().data<representation_type>().fbegin(), base_type::as_instance().data<representation_type>().fend());
+            std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
             iFolded = true;
             return this;
         }

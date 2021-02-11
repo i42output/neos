@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/map.hpp>
-#include <neolib/string.hpp>
+#include <neolib/core/map.hpp>
+#include <neolib/core/string.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
 #include <neos/bytecode/registers.hpp>

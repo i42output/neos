@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/reference_counted.hpp>
-#include <neolib/string.hpp>
+#include <neolib/core/reference_counted.hpp>
+#include <neolib/core/string.hpp>
 #include <neos/language/i_concept.hpp>
 
 namespace neos::language
@@ -387,7 +387,7 @@ namespace neos::language
     };
 }
 
-namespace neos::concept
+namespace neos::concepts
 {
     using neos::language::neos_concept;
 }

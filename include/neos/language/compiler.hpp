@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/string.hpp>
-#include <neolib/optional.hpp>
+#include <neolib/core/optional.hpp>
+#include <neolib/core/string.hpp>
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
@@ -35,8 +35,8 @@ namespace neos::language
     typedef neolib::string source_file_path_t;
     typedef neolib::optional<source_file_path_t> optional_source_file_path_t;
     typedef neolib::string source_t;
-    typedef source_t::const_fast_iterator const_source_iterator;
-    typedef source_t::fast_iterator source_iterator;
+    typedef source_t::const_iterator const_source_iterator;
+    typedef source_t::iterator source_iterator;
 
 
     class source_fragment : public i_source_fragment
@@ -90,27 +90,27 @@ namespace neos::language
     public:
         const_source_iterator cbegin() const override
         { 
-            return source().cfbegin(); 
+            return source().cbegin(); 
         }
         const_source_iterator cend() const override
         { 
-            return source().cfend(); 
+            return source().cend(); 
         }
         const_source_iterator begin() const override
         { 
-            return source().fbegin();
+            return source().begin();
         }
         const_source_iterator end() const override
         { 
-            return source().fend();
+            return source().end();
         }
         source_iterator begin() override
         { 
-            return source().fbegin();
+            return source().begin();
         }
         source_iterator end() override
         { 
-            return source().fend();
+            return source().end();
         }
     private:
         optional_source_file_path_t iSourceFilePath;
@@ -221,24 +221,24 @@ namespace neos::language
             translation_unit* unit;
             i_source_fragment const* fragment;
             uint32_t level;
-            const i_concept* concept;
+            const i_concept* concept_;
             source_iterator sourceStart;
             source_iterator sourceEnd;
             neolib::ref_ptr<i_concept> foldedConcept;
             bool can_fold() const
             {
-                return foldedConcept ? foldedConcept->can_fold() : concept->can_fold();
+                return foldedConcept ? foldedConcept->can_fold() : concept_->can_fold();
             }
             bool can_fold(const concept_stack_entry& rhs) const
             {
                 return foldedConcept ?
-                    foldedConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept) :
-                    concept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept);
+                    foldedConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept_) :
+                    concept_->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept_);
             }
             void instantiate_if_needed()
             {
                 if (!foldedConcept)
-                    foldedConcept = concept->instantiate(sourceStart, sourceEnd);
+                    foldedConcept = concept_->instantiate(sourceStart, sourceEnd);
             }
             void fold(i_context& aContext)
             {
@@ -253,11 +253,11 @@ namespace neos::language
                 if (rhs.foldedConcept)
                     foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
                 else
-                    foldedConcept = foldedConcept->fold(aContext, concept_instance_proxy{ *rhs.concept, rhs.sourceStart, rhs.sourceEnd });
+                    foldedConcept = foldedConcept->fold(aContext, concept_instance_proxy{ *rhs.concept_, rhs.sourceStart, rhs.sourceEnd });
             }
             std::string trace() const
             {
-                return foldedConcept ? foldedConcept->trace() : concept->trace();
+                return foldedConcept ? foldedConcept->trace() : concept_->trace();
             }
         };
         typedef std::vector<concept_stack_entry> concept_stack_t;

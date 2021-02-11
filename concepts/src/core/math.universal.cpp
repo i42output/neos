@@ -20,7 +20,7 @@
 #include "core.hpp"
 #include "math.universal.hpp"
 
-namespace neos::concept::core
+namespace neos::concepts::core
 {   
     class math_universal_number_digit : public neos_concept<>
     {

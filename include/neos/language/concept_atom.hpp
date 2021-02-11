@@ -20,10 +20,10 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/list.hpp>
-#include <neolib/pair.hpp>
-#include <neolib/map.hpp>
-#include <neolib/reference_counted.hpp>
+#include <neolib/core/list.hpp>
+#include <neolib/core/pair.hpp>
+#include <neolib/core/map.hpp>
+#include <neolib/core/reference_counted.hpp>
 #include <neos/language/i_concept_atom.hpp>
 #include <neos/language/atom.hpp>
 
@@ -86,18 +86,18 @@ namespace neos
             }
             bool is_conceptually_the_same(const i_concept& aConcept) const override
             {
-                return concept().is_same(aConcept);
+                return get_concept().is_same(aConcept);
             }
             bool is_conceptually_related_to(const i_concept& aConcept) const override
             { 
-                return concept().is_related_to(aConcept);
+                return get_concept().is_related_to(aConcept);
             }
         public:
-            const i_concept& concept() const override
+            const i_concept& get_concept() const override
             {
                 return *iConcept;
             }
-            i_concept& concept() override
+            i_concept& get_concept() override
             {
                 return *iConcept;
             }

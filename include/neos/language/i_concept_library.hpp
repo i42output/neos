@@ -20,10 +20,10 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_discoverable.hpp>
-#include <neolib/i_map.hpp>
-#include <neolib/i_string.hpp>
-#include <neolib/i_version.hpp>
+#include <neolib/core/i_discoverable.hpp>
+#include <neolib/core/i_map.hpp>
+#include <neolib/core/i_string.hpp>
+#include <neolib/app/i_version.hpp>
 #include <neos/language/i_concept.hpp>
 
 namespace neos
@@ -40,6 +40,7 @@ namespace neos
             struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_concept_library::no_parent") {} };
             // types
         public:
+            typedef i_concept_library abstract_type;
             typedef concept_libraries_t sublibraries_t;
             typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
             // sublibrary

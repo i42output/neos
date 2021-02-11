@@ -20,10 +20,10 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_list.hpp>
-#include <neolib/i_map.hpp>
-#include <neolib/i_reference_counted.hpp>
-#include <neolib/i_string.hpp>
+#include <neolib/core/i_list.hpp>
+#include <neolib/core/i_map.hpp>
+#include <neolib/core/i_reference_counted.hpp>
+#include <neolib/core/i_string.hpp>
 #include <neos/language/i_concept.hpp>
 #include <neos/language/i_schema_atom.hpp>
 

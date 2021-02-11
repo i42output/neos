@@ -22,7 +22,7 @@
 #include <neos/i_context.hpp>
 #include "module.hpp"
 
-namespace neos::concept::core
+namespace neos::concepts::core
 {   
     class source_package_name : public neos_concept<source_package_name>
     {

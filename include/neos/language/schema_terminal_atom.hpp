@@ -20,7 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/reference_counted.hpp>
+#include <neolib/core/reference_counted.hpp>
 #include <neos/language/i_schema_terminal_atom.hpp>
 #include <neos/language/atom.hpp>
 

@@ -20,7 +20,7 @@
 #include <neos/language/concept.hpp>
 #include "language.hpp"
 
-namespace neos::concept::core
+namespace neos::concepts::core
 {   
     class language_whitespace : public neos_concept<>
     {

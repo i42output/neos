@@ -19,9 +19,9 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
-#include <neolib/scoped.hpp>
-#include <neolib/recursion.hpp>
-#include <neolib/string_utf.hpp>
+#include <neolib/core/scoped.hpp>
+#include <neolib/core/recursion.hpp>
+#include <neolib/core/string_utf.hpp>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
 #include <neos/language/compiler.hpp>
@@ -50,12 +50,12 @@ namespace neos::language
             std::for_each(stack().begin() + iScopeStart, stack().end(), 
                 [this](const concept_stack_entry& aEntry)
                 {
-                    if (aEntry.concept != nullptr)
+                    if (aEntry.concept_ != nullptr)
                     {
                         iCompiler.fold_stack().push_back(aEntry);
                         if (iCompiler.trace() >= 2)
                             std::cout << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, *aEntry.fragment, aEntry.sourceStart, false) << "> "
-                                << aEntry.concept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
+                                << aEntry.concept_->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
                 });
             iCompiler.fold();
@@ -205,13 +205,13 @@ namespace neos::language
                         {
                             auto const& current = *std::prev(postfix_operation_stack().end());
                             auto& previous = *std::prev(std::prev(postfix_operation_stack().end()));
-                            if (current.level == previous.level + recursiveLevel && previous.concept != nullptr &&
-                                aAtom.token().is_conceptually_related_to(*current.concept) &&
-                                aAtom.token().is_conceptually_related_to(*previous.concept))
+                            if (current.level == previous.level + recursiveLevel && previous.concept_ != nullptr &&
+                                aAtom.token().is_conceptually_related_to(*current.concept_) &&
+                                aAtom.token().is_conceptually_related_to(*previous.concept_))
                             {
                                 parse_stack().push_back(previous);
                                 scs.fold();
-                                previous.concept = nullptr;
+                                previous.concept_ = nullptr;
                             }
                         }
                     }
@@ -449,10 +449,10 @@ namespace neos::language
         {
             if (aMatchResult.is_concept_atom())
             {
-                if (aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Infix)
-                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aMatchResult, aMatchResult.as_concept_atom().concept(), result);
-                else if (aMatchResult.as_concept_atom().concept().emit_as() == emit_type::Postfix)
-                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aMatchResult, aMatchResult.as_concept_atom().concept(), result, postfix_operation_stack());
+                if (aMatchResult.as_concept_atom().get_concept().emit_as() == emit_type::Infix)
+                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aMatchResult, aMatchResult.as_concept_atom().get_concept(), result);
+                else if (aMatchResult.as_concept_atom().get_concept().emit_as() == emit_type::Postfix)
+                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aMatchResult, aMatchResult.as_concept_atom().get_concept(), result, postfix_operation_stack());
             }
             else
                 result = consume_token(aPass, aProgram, aUnit, aFragment, aMatchResult, result);
@@ -544,11 +544,11 @@ namespace neos::language
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         parse_result result = aResult;
         if (aToken.is_concept_atom())
-            result = consume_concept_token(aPass, aProgram, aUnit, aFragment, aToken.as_concept_atom().concept(), result);
+            result = consume_concept_token(aPass, aProgram, aUnit, aFragment, aToken.as_concept_atom().get_concept(), result);
         else if (aToken.is_schema_atom() && aToken.as_schema_atom().is_schema_node_atom())
-            for (auto& concept : aToken.as_schema_atom().as_schema_node_atom().is())
+            for (auto& concept_ : aToken.as_schema_atom().as_schema_node_atom().is())
                 if (result.action != parse_result::NoMatch && result.action != parse_result::Ignored && result.action != parse_result::Drain)
-                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aToken, *concept, result);
+                    result = consume_concept_atom(aPass, aProgram, aUnit, aFragment, aToken, *concept_, result);
         return result;
     }
 

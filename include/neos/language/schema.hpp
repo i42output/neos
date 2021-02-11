@@ -21,9 +21,9 @@
 
 #include <neos/neos.hpp>
 #include <boost/functional/hash.hpp>
-#include <neolib/i_map.hpp>
-#include <neolib/i_string.hpp>
-#include <neolib/json.hpp>
+#include <neolib/core/i_map.hpp>
+#include <neolib/core/i_string.hpp>
+#include <neolib/file/json.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/schema_node_atom.hpp>
 #include <neos/language/schema_terminal_atom.hpp>

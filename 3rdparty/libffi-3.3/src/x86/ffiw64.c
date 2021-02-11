@@ -57,6 +57,7 @@ EFI64(ffi_prep_cif_machdep)(ffi_cif *cif)
   switch (cif->abi)
     {
     case FFI_WIN64:
+    case FFI_VECTORCALL_PARTIAL:
     case FFI_GNUW64:
       break;
     default:
@@ -116,7 +117,7 @@ ffi_call_int (ffi_cif *cif, void (*fn)(void), void *rvalue,
   size_t rsize;
   struct win64_call_frame *frame;
 
-  FFI_ASSERT(cif->abi == FFI_GNUW64 || cif->abi == FFI_WIN64);
+  FFI_ASSERT(cif->abi == FFI_GNUW64 || cif->abi == FFI_WIN64 || cif->abi == FFI_VECTORCALL_PARTIAL);
 
   flags = cif->flags;
   rsize = 0;
@@ -209,6 +210,7 @@ EFI64(ffi_prep_closure_loc)(ffi_closure* closure,
   switch (cif->abi)
     {
     case FFI_WIN64:
+    case FFI_VECTORCALL_PARTIAL:
     case FFI_GNUW64:
       break;
     default:
@@ -232,6 +234,7 @@ EFI64(ffi_prep_go_closure)(ffi_go_closure* closure, ffi_cif* cif,
   switch (cif->abi)
     {
     case FFI_WIN64:
+    case FFI_VECTORCALL_PARTIAL:
     case FFI_GNUW64:
       break;
     default:

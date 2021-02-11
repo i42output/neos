@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_reference_counted.hpp>
-#include <neolib/i_string.hpp>
+#include <neolib/core/i_reference_counted.hpp>
+#include <neolib/core/i_string.hpp>
 #include <neos/fwd.hpp>
 
 namespace neos::language
@@ -69,7 +69,8 @@ namespace neos::language
         struct not_an_instance : std::logic_error { not_an_instance() : std::logic_error("neos::language::i_concept::not_an_instance") {} };
         struct data_is_constant : std::logic_error { data_is_constant() : std::logic_error("neos::language::i_concept::data_is_constant") {} };
     public:
-        typedef const char* source_iterator;
+        typedef i_concept abstract_type;
+        typedef neolib::i_string::const_iterator source_iterator;
     public:
         virtual bool has_parent() const = 0;
         virtual const i_concept& parent() const = 0;
@@ -100,10 +101,9 @@ namespace neos::language
         virtual i_concept* do_fold(i_context& aContext, const i_concept& aRhs) = 0;
         // helpers
     public:
-        template<typename SourceIterator>
         struct consume_result
         {
-            SourceIterator sourceParsed;
+            source_iterator sourceParsed;
             bool consumed;
         };
         // family
@@ -129,46 +129,41 @@ namespace neos::language
         }
         // parse
     public:
-        template <typename SourceIterator>
-        consume_result<SourceIterator> consume_token(compiler_pass aPass, SourceIterator aSource, SourceIterator aSourceEnd) const
+        consume_result consume_token(compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd) const
         {
             if (aSource != aSourceEnd)
             {
                 bool consumed;
-                auto source = &*aSource;
-                auto result = consume_token(aPass, source, std::next(source, std::distance(aSource, aSourceEnd)), consumed);
-                return consume_result<SourceIterator>{ std::next(aSource, std::distance(source, result)), consumed };
+                auto result = consume_token(aPass, aSource, aSourceEnd, consumed);
+                return consume_result{ result, consumed };
             }
             else
             {
                 bool consumed;
                 auto result = consume_token(aPass, nullptr, nullptr, consumed);
-                return consume_result<SourceIterator>{ aSource, consumed };
+                return consume_result{ aSource, consumed };
             }
         }
-        template <typename SourceIterator>
-        consume_result<SourceIterator> consume_atom(compiler_pass aPass, const i_atom& aAtom, SourceIterator aSource, SourceIterator aSourceEnd) const
+        consume_result consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd) const
         {
             if (aSource != aSourceEnd)
             {
                 bool consumed;
-                auto source = &*aSource;
-                auto result = consume_atom(aPass, aAtom, source, std::next(source, std::distance(aSource, aSourceEnd)), consumed);
-                return consume_result<SourceIterator>{ std::next(aSource, std::distance(source, result)), consumed };
+                auto result = consume_atom(aPass, aAtom, aSource, aSourceEnd, consumed);
+                return consume_result{ result, consumed };
             }
             else
             {
                 bool consumed;
                 auto result = consume_atom(aPass, aAtom, nullptr, nullptr, consumed);
-                return consume_result<SourceIterator>{ aSource, consumed };
+                return consume_result{ aSource, consumed };
             }
         }
         // emit
     public:
-        template <typename SourceIterator>
-        i_concept* instantiate(SourceIterator aSource, SourceIterator aSourceEnd) const
+        i_concept* instantiate(source_iterator aSource, source_iterator aSourceEnd) const
         {
-            return do_instantiate(&*aSource, std::next(&*aSource, std::distance(aSource, aSourceEnd)));
+            return do_instantiate(aSource, aSourceEnd);
         }
         neolib::ref_ptr<i_concept> fold(i_context& aContext)
         {
@@ -182,7 +177,7 @@ namespace neos::language
                 return as_instance().do_fold(aContext, aRhs);
             return nullptr;
         }
-        template <typename SourceIterator>
+        template <typename source_iterator>
         neolib::ref_ptr<i_concept> fold(i_context& aContext, const i_concept& aRhs)
         {
             if (can_fold(aRhs))
@@ -206,7 +201,7 @@ namespace neos::language
     };
 }
 
-namespace neos::concept
+namespace neos::concepts
 {
     using neos::language::i_concept;
 }

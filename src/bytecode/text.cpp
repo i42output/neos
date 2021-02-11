@@ -18,7 +18,7 @@
 */
 
 #include <neos/neos.hpp>
-#include <neolib/vecarray.hpp>
+#include <neolib/core/vecarray.hpp>
 #include <neos/bytecode/text.hpp>
 
 namespace neos

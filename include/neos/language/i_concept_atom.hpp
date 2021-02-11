@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_reference_counted.hpp>
-#include <neolib/i_string.hpp>
+#include <neolib/core/i_reference_counted.hpp>
+#include <neolib/core/i_string.hpp>
 #include <neos/language/i_concept.hpp>
 #include <neos/language/i_atom.hpp>
 
@@ -41,8 +41,8 @@ namespace neos
             const i_concept_atom& as_concept_atom() const override { return *this; }
             i_concept_atom& as_concept_atom() override { return *this; }
         public:
-            virtual const i_concept& concept() const = 0;
-            virtual i_concept& concept() = 0;
+            virtual const i_concept& get_concept() const = 0;
+            virtual i_concept& get_concept() = 0;
         };
     }
 }

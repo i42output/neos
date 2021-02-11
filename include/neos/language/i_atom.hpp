@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/i_reference_counted.hpp>
-#include <neolib/i_string.hpp>
+#include <neolib/core/i_reference_counted.hpp>
+#include <neolib/core/i_string.hpp>
 
 namespace neos::language
 {
@@ -35,6 +35,7 @@ namespace neos::language
         struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_atom::no_parent") {} };
         struct wrong_type : std::logic_error { wrong_type() : std::logic_error("neos::language::i_atom::wrong_type") {} };
     public:
+        typedef i_atom abstract_type;
         typedef neolib::i_string symbol_t;
     public:
         virtual bool has_parent() const = 0;

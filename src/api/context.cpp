@@ -19,14 +19,14 @@
 
 #include <neolib/neolib.hpp>
 #include <iostream>
-#include <neolib/application.hpp>
-#include <neolib/string_utf.hpp>
+#include <neolib/core/string_utf.hpp>
+#include <neolib/app/application.hpp>
 #include <neos/context.hpp>
 
 namespace neos
 {
     context::context() : 
-        iPrivateApplication{ std::make_unique<neolib::application>(neolib::application_info{ {}, "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {

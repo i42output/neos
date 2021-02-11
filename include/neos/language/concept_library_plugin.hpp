@@ -21,10 +21,11 @@
 
 #include <neos/neos.hpp>
 #include <boost/dll.hpp>
-#include <neolib/string.hpp>
-#include <neolib/version.hpp>
-#include <neolib/reference_counted.hpp>
-#include <neolib/i_application.hpp>
+#include <neolib/core/string.hpp>
+#include <neolib/core/reference_counted.hpp>
+#include <neolib/app/version.hpp>
+#include <neolib/app/i_application.hpp>
+#include <neos/language/i_concept_library.hpp>
 
 namespace neos
 {

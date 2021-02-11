@@ -21,7 +21,7 @@
 
 #include <neolib/neolib.hpp>
 #include <vector>
-#include <neolib/version.hpp>
+#include <neolib/app/version.hpp>
 
 namespace neos
 {

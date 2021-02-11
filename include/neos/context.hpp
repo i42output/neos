@@ -24,8 +24,8 @@
 #include <optional>
 #include <vector>
 #include <memory>
-#include <neolib/json.hpp>
-#include <neolib/i_application.hpp>
+#include <neolib/file/json.hpp>
+#include <neolib/app/i_application.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/i_context.hpp>

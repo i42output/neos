@@ -68,5 +68,8 @@
     <ClInclude Include="..\..\..\..\src\core\logic.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\..\src\core\object.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

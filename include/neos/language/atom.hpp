@@ -20,7 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <neolib/reference_counted.hpp>
+#include <neolib/core/reference_counted.hpp>
 #include <neos/language/i_concept_atom.hpp>
 
 namespace neos
@@ -64,7 +64,7 @@ namespace neos
             {
                 if (*this == rhs)
                     return true;
-                else if (rhs.is_concept_atom() && is_conceptually_the_same(rhs.as_concept_atom().concept()))
+                else if (rhs.is_concept_atom() && is_conceptually_the_same(rhs.as_concept_atom().get_concept()))
                     return true;
                 else if (rhs.is_schema_atom() && rhs.as_schema_atom().is_schema_node_atom())
                     for (auto const& c : rhs.as_schema_atom().as_schema_node_atom().is())
@@ -77,7 +77,7 @@ namespace neos
             { 
                 if (*this == rhs)
                     return true;
-                else if (rhs.is_concept_atom() && is_conceptually_related_to(rhs.as_concept_atom().concept()))
+                else if (rhs.is_concept_atom() && is_conceptually_related_to(rhs.as_concept_atom().get_concept()))
                     return true;
                 else if (rhs.is_schema_atom() && rhs.as_schema_atom().is_schema_node_atom())
                     for (auto const& c : rhs.as_schema_atom().as_schema_node_atom().is())
