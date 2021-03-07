@@ -16,11 +16,13 @@
 
     expect: whitespace
     expect: comment
-    expect: statement
+//    expect: statement
+    expect: string_literal   // todo: remove this when statement is elaborated
 
     tokens: {
         whitespace: ignore
         comment: ignore
+        string_literal: done
         statement: done
     }
 
@@ -53,10 +55,6 @@
         tokens: {
             '#': {
                 '\n': drain
-                default: ignore
-            }
-            '\"\"\"': {
-                '\"\"\"': drain    
                 default: ignore
             }
         }
@@ -295,22 +293,39 @@
         }
     }
 
+    starred_expression: {
+    }
+
+    yield_expression : {
+    }
+
+    identifier : {
+    }
+
+    attributeref : {
+    }
+
+    subscription : {
+    }
+
+    slicing : {
+    }
+
     character: {
         is: string.utf8.character
     }
 
-   string_literal: {
+    string_literal: {
         is: string.utf8
         tokens: {
-            '\"': start_double
-            '\'': start_single
             "\"\"\"": start_multiline_double
             "\'\'\'": start_multiline_single
+            '\"': start_double
+            '\'': start_single
         }
         start_double: {
             tokens: {                
                 '\"': {
-                    whitespace: ignore
                     end: next
                 }
                 escape: continue
@@ -322,10 +337,11 @@
             end: {
                 tokens: {
                     expect: none
-                    '\"': start_double
-                    '\'': start_single
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
+                    '\"': start_double
+                    '\'': start_single
+                    whitespace: ignore
                     default: next
                 }
             }
@@ -333,7 +349,6 @@
         start_single: {
             tokens: {                
                 '\'': {
-                    whitespace: ignore
                     end: next
                 }
                 escape: continue
@@ -345,10 +360,11 @@
             end: {
                 tokens: {
                     expect: none
-                    '\"': start_double
-                    '\'': start_single
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
+                    '\"': start_double
+                    '\'': start_single
+                    whitespace: ignore
                     default: next
                 }
             }
@@ -356,7 +372,26 @@
         start_multiline_double: {
             tokens: {                
                 "\"\"\"": {
+                    end: next
+                }
+                escape: continue
+                character: continue
+            }
+            end: {
+                tokens: {
+                    expect: none
+                    "\"\"\"": start_multiline_double
+                    "\'\'\'": start_multiline_single
+                    '\"': start_double
+                    '\'': start_single
                     whitespace: ignore
+                    default: next
+                }
+            }
+        }
+        start_multiline_single: {
+            tokens: {                
+                "\'\'\'": {
                     end: next
                 }
                 escape: continue
@@ -369,26 +404,7 @@
                     '\'': start_single
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
-                    default: next
-                }
-            }
-        }
-        start_multiline_double: {
-            tokens: {                
-                "\"\"\"": {
                     whitespace: ignore
-                    end: next
-                }
-                escape: continue
-                character: continue
-            }
-            end: {
-                tokens: {
-                    expect: none
-                    '\"': start_double
-                    '\'': start_single
-                    "\"\"\"": start_multiline_double
-                    "\'\'\'": start_multiline_single
                     default: next
                 }
             }

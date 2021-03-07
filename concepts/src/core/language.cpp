@@ -22,6 +22,21 @@
 
 namespace neos::concepts::core
 {   
+    class language_eof : public neos_concept<>
+    {
+    public:
+        language_eof() :
+            neos_concept{ "language.eof", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = true;
+            return aSource;
+        }
+    };
+
     class language_whitespace : public neos_concept<>
     {
     public:
@@ -526,8 +541,9 @@ namespace neos::concepts::core
 //        concepts()[neolib::string{ "language.type.rational" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.rational");
         concepts()[neolib::string{ "language.type.string" }] = neolib::make_ref<language_type_string<char>>(*concepts()[neolib::string{ "language.type" }], "language.type.string");
         concepts()[neolib::string{ "language.type.custom" }] = neolib::make_ref<language_type_custom>(*concepts()[neolib::string{ "language.type" }]);
-        concepts()[neolib::string{ "language.whitespace" }] = neolib::make_ref<language_whitespace>();
         concepts()[neolib::string{ "language.comment" }] = neolib::make_ref<language_comment>();
+        concepts()[neolib::string{ "language.whitespace" }] = neolib::make_ref<language_whitespace>();
+        concepts()[neolib::string{ "language.eof" }] = neolib::make_ref<language_eof>();
     }
 
     const std::string& language::library_name()

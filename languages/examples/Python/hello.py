@@ -1,3 +1,8 @@
 # Hello, world! example Python program
 
-print("Hello, world")
+"""
+    Multi-line
+    string literal
+"""
+
+# print("Hello, world")

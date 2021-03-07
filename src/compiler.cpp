@@ -24,6 +24,7 @@
 #include <neolib/core/string_utf.hpp>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
+#include <neos/i_context.hpp>
 #include <neos/language/compiler.hpp>
 
 namespace neos::language
@@ -157,6 +158,8 @@ namespace neos::language
                     display_probe_trace(aUnit, aFragment);
                 throw_error(aUnit, aFragment, state().iDeepestProbe ? state().iDeepestProbe->source : source, "syntax error");
             }
+            if (source == result.sourceParsed)
+                throw_error(aUnit, aFragment, state().iDeepestProbe ? state().iDeepestProbe->source : source, "parse halted, bad schema?");
             source = result.sourceParsed;
         }
 
@@ -196,6 +199,8 @@ namespace neos::language
         }
         if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
+        if (aSource == aFragment.cend())
+            return parse_result{ aSource, parse_result::Done, aUnit.schema->eof() };
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
         if (aSource != aFragment.cend())

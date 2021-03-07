@@ -199,6 +199,8 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "string.utf8.character.period" }] = neolib::make_ref<string_utf8_character<single_char<'.'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.period");
         concepts()[neolib::string{ "string.utf8.character.comma" }] = neolib::make_ref<string_utf8_character<single_char<','>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.comma");
         concepts()[neolib::string{ "string.utf8.character.underscore" }] = neolib::make_ref<string_utf8_character<single_char<'_'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.underscore");
+        concepts()[neolib::string{ "string.utf8.character.double_quote" }] = neolib::make_ref<string_utf8_character<single_char<'\"'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.double_quote");
+        concepts()[neolib::string{ "string.utf8.character.single_quote" }] = neolib::make_ref<string_utf8_character<single_char<'\''>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.single_quote");
     }
 
     const std::string& string::library_name()

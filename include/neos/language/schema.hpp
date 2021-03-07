@@ -97,6 +97,7 @@ namespace neos
             schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries);
         public:
             i_schema_node_atom& root() const;
+            const i_atom* eof() const;
             language::meta const& meta() const;
             neolib::ref_ptr<i_concept> find_concept(const std::string& aSymbol) const;
         private:
@@ -129,6 +130,7 @@ namespace neos
             concept_atoms_t iConceptAtoms;
             bool iParsingTokens;
             std::vector<i_schema_node_atom*> iContext;
+            atom_ptr iEof;
         };
     }
 }

@@ -33,6 +33,7 @@ namespace neos
             iRoot{ neolib::make_ref<schema_node_atom>() },
             iParsingTokens{ false }
         {
+            iEof = create_concept_atom(find_concept("language.eof"));
             parse(aSource.root(), iRoot->as_schema_atom().as_schema_node_atom());
             resolve_references();
             if (!atom_references().empty())
@@ -48,6 +49,11 @@ namespace neos
         i_schema_node_atom& schema::root() const
         {
             return iRoot->as_schema_atom().as_schema_node_atom();
+        }
+
+        const i_atom* schema::eof() const
+        {
+            return iEof.ptr();
         }
 
         meta const& schema::meta() const
@@ -231,18 +237,18 @@ namespace neos
             _limit_recursion_(schema);
             neolib::scoped_flag sf{ iParsingTokens };
             auto& result = aAtom.tokens();
-            auto parse_token_value = [&aAtom, &result](schema& aSchema, auto&& aToken)
+            auto parse_token_value = [&aAtom](schema& aSchema, i_schema_node_atom::atom_map_list_entry_t& aEntry, auto&& aToken)
             {
-                aToken.visit([&aSchema, &aToken, &aAtom, &result](auto&& aNodeValue)
+                aToken.visit([&aSchema, &aToken, &aAtom, &aEntry](auto&& aNodeValue)
                 {
                     typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
                     if constexpr (std::is_same_v<type_t, neolib::rjson_keyword> || std::is_same_v<type_t, neolib::rjson_string>)
-                        aSchema.add_rhs_atom_reference(aToken, aAtom, result.back().second());
+                        aSchema.add_rhs_atom_reference(aToken, aAtom, aEntry.second());
                     else if constexpr (std::is_same_v<type_t, neolib::rjson_object>)
                     {
                         auto newNode = neolib::make_ref<schema_node_atom>(aAtom, aToken.name() + ".*");
                         aSchema.add_lhs_atom_reference(aToken, aAtom, newNode->token_ref_ptr());
-                        result.back().second() = newNode;
+                        aEntry.second() = newNode;
                         aSchema.parse_tokens(aToken, *newNode);
                     }
                 }, false);
@@ -271,16 +277,20 @@ namespace neos
                             aAtom.set_expect_none();
                         break;
                     case schema_keyword::Default:
-                        if (iterToken != std::prev(tokensInDocumentOrder.cend()))
-                            throw_error(token, "default specifier must appear last in token specification block");
-                        result.push_back(schema_node_atom::tokens_t::value_type{});
-                        result.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
-                        parse_token_value(*this, token);
+                        {
+                            if (iterToken != std::prev(tokensInDocumentOrder.cend()))
+                                throw_error(token, "default specifier must appear last in token specification block");
+                            neolib::ref_ptr<schema_terminal_atom> key = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
+                            auto newEntry = result.insert(result.end(), schema_node_atom::tokens_t::value_type{key , neolib::ref_ptr<i_atom>{} });
+                            parse_token_value(*this, *newEntry, token);
+                        }
                         break;
                     case schema_keyword::Invalid:
-                        result.push_back(schema_node_atom::tokens_t::value_type{});
-                        add_lhs_atom_reference(token, aAtom, result.back().first());
-                        parse_token_value(*this, token);
+                        {
+                            auto newEntry = result.insert(result.end(), schema_node_atom::tokens_t::value_type{});
+                            add_lhs_atom_reference(token, aAtom, newEntry->first());
+                            parse_token_value(*this, *newEntry, token);
+                        }
                         break;
                     case schema_keyword::Is:
                         {
@@ -299,9 +309,9 @@ namespace neos
                 }
                 else
                 {
-                    result.push_back(schema_node_atom::tokens_t::value_type{});
-                    add_lhs_atom_reference(token, aAtom, result.back().first());
-                    parse_token_value(*this, token);
+                    auto newEntry = result.insert(result.end(), schema_node_atom::tokens_t::value_type{});
+                    add_lhs_atom_reference(token, aAtom, newEntry->first());
+                    parse_token_value(*this, *newEntry, token);
                 }
             }
         }

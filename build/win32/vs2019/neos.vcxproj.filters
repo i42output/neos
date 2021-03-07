@@ -169,5 +169,8 @@
     <None Include="..\..\..\languages\packages\neoscript\neos.string.neo">
       <Filter>Languages</Filter>
     </None>
+    <None Include="..\..\..\languages\Python.neos">
+      <Filter>Languages</Filter>
+    </None>
   </ItemGroup>
 </Project>
