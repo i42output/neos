@@ -42,7 +42,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         else if (command == "?" || command == "h" || command == "help")
         {
             std::cout << "h(elp)\n"
-                << "s(chema) <path to language schema>       Load language scheme\n"
+                << "s(chema) <path to language schema>       Load language schema\n"
                 << "l(oad) <path to program>                 Load program\n"
                 << "list                                     List program\n"
                 << "c(ompile)                                Compile program\n"
@@ -52,7 +52,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << "q(uit)                                   Quit neos\n"
                 << "lc                                       List loaded concept libraries\n"
                 << "t(race) <0|1|2|3|4|5> [<filter>]         Compiler trace\n"
-                << "m(etrics)                                Display metrics of running programs\n"
+                << "m(etrics)                                Display metrics for running programs\n"
                 << std::flush;
         }
         else if (command == "s" || command == "schema")
@@ -131,7 +131,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
     {
         for (auto const& r : e.references)
         {
-            std::cerr << "Error: " << aContext.schema_source().to_error_text(*r.node, "unresolved schema reference '" + r.node->name() + "'") << std::endl;
+            std::cerr << "Error: " << aContext.schema_source().to_error_text(*r.node, "unresolved schema reference '" + r.symbol + "'") << std::endl;
         }
         throw;
     }

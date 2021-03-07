@@ -108,11 +108,56 @@ namespace neos::concepts::core
         }
     };
 
-    class language_scope_add : public neos_concept<>
+    class language_scope_open : public neos_concept<>
     {
     public:
-        language_scope_add() :
-            neos_concept{ "language.scope.add", neos::language::emit_type::Infix }
+        language_scope_open() :
+            neos_concept{ "language.scope.open", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
+    class language_scope_open_by_indentation : public neos_concept<>
+    {
+    public:
+        language_scope_open_by_indentation() :
+            neos_concept{ "language.scope.open.by_indentation", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
+    class language_scope_close : public neos_concept<>
+    {
+    public:
+        language_scope_close() :
+            neos_concept{ "language.scope.close", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
+    class language_scope_add_package : public neos_concept<>
+    {
+    public:
+        language_scope_add_package() :
+            neos_concept{ "language.scope.add.package", neos::language::emit_type::Infix }
         {
         }
     public:
@@ -348,11 +393,26 @@ namespace neos::concepts::core
         }
     };
 
-    template <typename Float>
-    class language_float_type : public neos_concept<>
+    class language_type_tuple : public neos_concept<>
     {
     public:
-        language_float_type(i_concept& aParent, const std::string& aName) :
+        language_type_tuple() :
+            neos_concept{ "language.type.tuple", neos::language::emit_type::Infix }
+        {
+        }
+    public:
+        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        {
+            aConsumed = false;
+            return aSource;
+        }
+    };
+
+    template <typename Float>
+    class language_type_float : public neos_concept<>
+    {
+    public:
+        language_type_float(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
@@ -365,10 +425,10 @@ namespace neos::concepts::core
     };
 
     template <typename Integer>
-    class language_integer_type : public neos_concept<>
+    class language_type_integer : public neos_concept<>
     {
     public:
-        language_integer_type(i_concept& aParent, const std::string& aName) :
+        language_type_integer(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
@@ -381,10 +441,10 @@ namespace neos::concepts::core
     };
 
     template <typename Character>
-    class language_string_type : public neos_concept<>
+    class language_type_string : public neos_concept<>
     {
     public:
-        language_string_type(i_concept& aParent, const std::string& aName) :
+        language_type_string(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
@@ -396,10 +456,10 @@ namespace neos::concepts::core
         }
     };
 
-    class language_custom_type : public neos_concept<>
+    class language_type_custom : public neos_concept<>
     {
     public:
-        language_custom_type(i_concept& aParent) :
+        language_type_custom(i_concept& aParent) :
             neos_concept{ aParent, "language.type.custom", neos::language::emit_type::Infix }
         {
         }
@@ -430,7 +490,10 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.keyword" }] = neolib::make_ref<language_keyword>();
         concepts()[neolib::string{ "language.identifier" }] = neolib::make_ref<language_identifier>();
         concepts()[neolib::string{ "language.scope" }] = neolib::make_ref<language_scope>();
-        concepts()[neolib::string{ "language.scope.add" }] = neolib::make_ref<language_scope_add>();
+        concepts()[neolib::string{ "language.scope.open" }] = neolib::make_ref<language_scope_open>();
+        concepts()[neolib::string{ "language.scope.open.by_indentation" }] = neolib::make_ref<language_scope_open_by_indentation>();
+        concepts()[neolib::string{ "language.scope.close" }] = neolib::make_ref<language_scope_close>();
+        concepts()[neolib::string{ "language.scope.add.package" }] = neolib::make_ref<language_scope_add_package>();
         concepts()[neolib::string{ "language.function" }] = neolib::make_ref<language_function>();
         concepts()[neolib::string{ "language.function.scope" }] = neolib::make_ref<language_function_scope>(*concepts()[neolib::string{ "language.scope" }]);
         concepts()[neolib::string{ "language.function.parameters" }] = neolib::make_ref<language_function_parameters>();
@@ -446,18 +509,23 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.function.argument" }] = neolib::make_ref<language_function_argument>();
         concepts()[neolib::string{ "language.function.call" }] = neolib::make_ref<language_function_call>();
         concepts()[neolib::string{ "language.type" }] = neolib::make_ref<language_type>();
-        concepts()[neolib::string{ "language.type.f32" }] = neolib::make_ref<language_float_type<float>>(*concepts()[neolib::string{ "language.type" }], "language.type.f32");
-        concepts()[neolib::string{ "language.type.f64" }] = neolib::make_ref<language_float_type<double>>(*concepts()[neolib::string{ "language.type" }], "language.type.f64");
-        concepts()[neolib::string{ "language.type.i8" }] = neolib::make_ref<language_integer_type<int8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
-        concepts()[neolib::string{ "language.type.u8" }] = neolib::make_ref<language_integer_type<uint8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
-        concepts()[neolib::string{ "language.type.i16" }] = neolib::make_ref<language_integer_type<int16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
-        concepts()[neolib::string{ "language.type.u16" }] = neolib::make_ref<language_integer_type<uint16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
-        concepts()[neolib::string{ "language.type.i32" }] = neolib::make_ref<language_integer_type<int32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
-        concepts()[neolib::string{ "language.type.u32" }] = neolib::make_ref<language_integer_type<uint32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
-        concepts()[neolib::string{ "language.type.i64" }] = neolib::make_ref<language_integer_type<int64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
-        concepts()[neolib::string{ "language.type.u64" }] = neolib::make_ref<language_integer_type<uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
-        concepts()[neolib::string{ "language.type.string" }] = neolib::make_ref<language_string_type<char>>(*concepts()[neolib::string{ "language.type" }], "language.type.string");
-        concepts()[neolib::string{ "language.type.custom" }] = neolib::make_ref<language_custom_type>(*concepts()[neolib::string{ "language.type" }]);
+        concepts()[neolib::string{ "language.type.tuple" }] = neolib::make_ref<language_type_tuple>();
+        concepts()[neolib::string{ "language.type.f32" }] = neolib::make_ref<language_type_float<float>>(*concepts()[neolib::string{ "language.type" }], "language.type.f32");
+        concepts()[neolib::string{ "language.type.f64" }] = neolib::make_ref<language_type_float<double>>(*concepts()[neolib::string{ "language.type" }], "language.type.f64");
+        concepts()[neolib::string{ "language.type.i8" }] = neolib::make_ref<language_type_integer<int8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
+        concepts()[neolib::string{ "language.type.u8" }] = neolib::make_ref<language_type_integer<uint8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
+        concepts()[neolib::string{ "language.type.i16" }] = neolib::make_ref<language_type_integer<int16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
+        concepts()[neolib::string{ "language.type.u16" }] = neolib::make_ref<language_type_integer<uint16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
+        concepts()[neolib::string{ "language.type.i32" }] = neolib::make_ref<language_type_integer<int32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
+        concepts()[neolib::string{ "language.type.u32" }] = neolib::make_ref<language_type_integer<uint32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
+        concepts()[neolib::string{ "language.type.i64" }] = neolib::make_ref<language_type_integer<int64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
+        concepts()[neolib::string{ "language.type.u64" }] = neolib::make_ref<language_type_integer<uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
+// bignum
+//        concepts()[neolib::string{ "language.type.integer" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.integer");
+//        concepts()[neolib::string{ "language.type.float" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.float");
+//        concepts()[neolib::string{ "language.type.rational" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.rational");
+        concepts()[neolib::string{ "language.type.string" }] = neolib::make_ref<language_type_string<char>>(*concepts()[neolib::string{ "language.type" }], "language.type.string");
+        concepts()[neolib::string{ "language.type.custom" }] = neolib::make_ref<language_type_custom>(*concepts()[neolib::string{ "language.type" }]);
         concepts()[neolib::string{ "language.whitespace" }] = neolib::make_ref<language_whitespace>();
         concepts()[neolib::string{ "language.comment" }] = neolib::make_ref<language_comment>();
     }

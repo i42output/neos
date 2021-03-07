@@ -300,7 +300,7 @@
         expect: source.package.name
         tokens: {
             whitespace: whitespace
-            ';': language.scope.add
+            ';': language.scope.add.package
         }
     }
 

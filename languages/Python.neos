@@ -1,0 +1,477 @@
+{
+    meta: {
+        language: "Python"
+        description: "Python 3.x"
+        source.file.extension: ".py"
+        source.package.specification.file.extension: ".py"
+        source.package.implementation.file.extension: ".py"
+        copyright: "Copyright (C) 2021 Leigh Johnston"
+        version: "1.0.0"
+    }
+
+    libraries: [
+        neos.core
+        neos.math.universal
+    ]
+
+    expect: whitespace
+    expect: comment
+    expect: statement
+
+    tokens: {
+        whitespace: ignore
+        comment: ignore
+        statement: done
+    }
+
+    whitespace: {
+        is: language.whitespace
+        tokens: {
+            ' ': ignore
+            '\t': ignore
+            '\n': ignore
+            '\r': ignore
+            default: next
+        }
+    }
+
+    scoping_whitespace : {
+        is: language.whitespace
+        is: language.function.scope
+        tokens: {
+            ' ': language.scope.open.by_indentation
+            '\t': language.scope.open.by_indentation
+            '\n': whitespace
+            '\r': whitespace
+            whitespace: done
+            default: next
+        }
+    }
+
+    comment: {
+        is: language.comment
+        tokens: {
+            '#': {
+                '\n': drain
+                default: ignore
+            }
+            '\"\"\"': {
+                '\"\"\"': drain    
+                default: ignore
+            }
+        }
+    }
+
+    keyword: {
+        as: language.keyword
+        tokens: {
+            "and":       and
+            "as":        _as_
+            "assert":    assert
+            "break":     break
+            "class":     class
+            "continue":  _continue_
+            "def":       def
+            "del":       del
+            "elif":      elif
+            "else":      else
+            "except":    except
+            "False":     False
+            "finally":   finally
+            "for":       for
+            "from":      from
+            "global":    global
+            "if":        if
+            "import":    import
+            "in":        in
+            "is":        _is_
+            "lambda":    lambda
+            "None":      None
+            "nonlocal":  nonlocal
+            "not":       not
+            "or":        or
+            "pass":      pass
+            "raise":     raise
+            "return":    return
+            "True":      True
+            "try":       try
+            "while":     while
+            "with":      with
+            "yield":     yield
+            language.keyword: {
+                expect: none
+                character.alpha: error
+                character.underscore: error
+                character.digit: error
+                default: next
+            }
+            whitespace: ignore
+        }
+        and:       { is: language.keyword }
+        _as_:      { is: language.keyword }
+        assert:    { is: language.keyword }
+        break:     { is: language.keyword }
+        class:     { is: language.keyword }
+        _continue_:{ is: language.keyword }
+        def:       { is: language.keyword }
+        del:       { is: language.keyword }
+        elif:      { is: language.keyword }
+        else:      { is: language.keyword }
+        except:    { is: language.keyword }
+        False:     { is: language.keyword }
+        finally:   { is: language.keyword }
+        for:       { is: language.keyword }
+        from:      { is: language.keyword }
+        global:    { is: language.keyword }
+        if:        { is: language.keyword }
+        import:    { is: language.keyword }
+        in:        { is: language.keyword }
+        _is_:      { is: language.keyword }
+        lambda:    { is: language.keyword }
+        None:      { is: language.keyword }
+        nonlocal:  { is: language.keyword }
+        not:       { is: language.keyword }
+        or:        { is: language.keyword }
+        pass:      { is: language.keyword }
+        raise:     { is: language.keyword }
+        return:    { is: language.keyword }
+        True:      { is: language.keyword }
+        try:       { is: language.keyword }
+        while:     { is: language.keyword }
+        with:      { is: language.keyword }
+        yield:     { is: language.keyword }
+    }
+
+    statement: {
+        tokens: {
+            simple_stmt: done
+            compound_stmt: done
+            default: next
+        }
+        simple_stmt: {
+            tokens: {
+                expression_stmt : done
+                assert_stmt : done
+                assignment_stmt : done
+                augmented_assignment_stmt : done
+                annotated_assignment_stmt : done
+                pass_stmt : done
+                del_stmt : done
+                return_stmt : done
+                yield_stmt : done
+                raise_stmt : done
+                break_stmt : done
+                continue_stmt : done
+                import_stmt : done
+                future_stmt : done
+                global_stmt : done
+                nonlocal_stmt : done
+            }
+            expression_stmt : {
+                tokens: {
+                    starred_expression: done
+                }
+            }
+            assert_stmt : {
+            }
+            assignment_stmt : {
+                tokens: {
+                    target_list: {
+                        '=': {
+                            starred_expression: done
+                            yield_expression : done
+                            whitespace: ignore
+                        }
+                        whitespace: ignore
+                    }
+                }
+                target_list: {
+                    is: language.type
+                    expect: target
+                    tokens: {
+                        target: {
+                            ',': {
+                                is: language.type.tuple
+                                expect: target
+                                target: continue
+                            }
+                            whitespace: ignore
+                            default: next
+                        }
+                    }
+                }
+                target: {
+                    expect: identifier
+                    expect: attributeref
+                    expect: subscription
+                    expect: slicing
+                    tokens: {
+                        '(': {
+                            expect: target_list
+                            target_list: {
+                                expect: ')'
+                                ')' : done
+                                whitespace: ignore
+                            }
+                            whitespace: ignore
+                        }            
+                        '[': {
+                            expect: target_list
+                            target_list: {
+                                expect: ')'
+                                ']' : done
+                                whitespace: ignore
+                            }
+                            whitespace: ignore
+                        } 
+                        '*' : {
+                            expect: target
+                            target: done
+                        }
+                        whitespace: ignore
+                    }
+                }
+            }
+            augmented_assignment_stmt : {
+            }
+            annotated_assignment_stmt : {
+            }
+            pass_stmt : {
+            }
+            del_stmt : {
+            }
+            return_stmt : {
+            }
+            yield_stmt : {
+            }
+            raise_stmt : {
+            }
+            break_stmt : {
+            }
+            continue_stmt : {
+            }
+            import_stmt : {
+            }
+            future_stmt : {
+            }
+            global_stmt : {
+            }
+            nonlocal_stmt : {
+            }
+        }
+        compound_stmt: {
+            tokens: {
+                if_stmt: done
+                while_stmt: done
+                for_stmt: done
+                try_stmt: done
+                with_stmt: done
+                funcdef: done
+                classdef: done
+                async_with_stmt: done
+                async_for_stmt: done
+                async_funcdef: done
+            }
+            if_stmt : {
+            }
+            while_stmt: {
+            }
+            for_stmt: {
+            }
+            try_stmt: {
+            }
+            with_stmt: {
+            }
+            funcdef: {
+            }
+            classdef: {
+            }
+            async_with_stmt: {
+            }
+            async_for_stmt: {
+            }
+            async_funcdef: {
+            }
+        }
+    }
+
+    character: {
+        is: string.utf8.character
+    }
+
+   string_literal: {
+        is: string.utf8
+        tokens: {
+            '\"': start_double
+            '\'': start_single
+            "\"\"\"": start_multiline_double
+            "\'\'\'": start_multiline_single
+        }
+        start_double: {
+            tokens: {                
+                '\"': {
+                    whitespace: ignore
+                    end: next
+                }
+                escape: continue
+                '\\': error
+                '\n': error
+                '\r': error
+                character: continue
+            }
+            end: {
+                tokens: {
+                    expect: none
+                    '\"': start_double
+                    '\'': start_single
+                    "\"\"\"": start_multiline_double
+                    "\'\'\'": start_multiline_single
+                    default: next
+                }
+            }
+        }
+        start_single: {
+            tokens: {                
+                '\'': {
+                    whitespace: ignore
+                    end: next
+                }
+                escape: continue
+                '\\': error
+                '\n': error
+                '\r': error
+                character: continue
+            }
+            end: {
+                tokens: {
+                    expect: none
+                    '\"': start_double
+                    '\'': start_single
+                    "\"\"\"": start_multiline_double
+                    "\'\'\'": start_multiline_single
+                    default: next
+                }
+            }
+        }
+        start_multiline_double: {
+            tokens: {                
+                "\"\"\"": {
+                    whitespace: ignore
+                    end: next
+                }
+                escape: continue
+                character: continue
+            }
+            end: {
+                tokens: {
+                    expect: none
+                    '\"': start_double
+                    '\'': start_single
+                    "\"\"\"": start_multiline_double
+                    "\'\'\'": start_multiline_single
+                    default: next
+                }
+            }
+        }
+        start_multiline_double: {
+            tokens: {                
+                "\"\"\"": {
+                    whitespace: ignore
+                    end: next
+                }
+                escape: continue
+                character: continue
+            }
+            end: {
+                tokens: {
+                    expect: none
+                    '\"': start_double
+                    '\'': start_single
+                    "\"\"\"": start_multiline_double
+                    "\'\'\'": start_multiline_single
+                    default: next
+                }
+            }
+        }
+        escape: {
+            tokens: {
+                '\\': {
+                    'n': character.LF
+                    character.LF: done
+                    'r': character.CR
+                    character.CR: done
+                    't': character.tab
+                    character.tab: done
+                    '\"': character.double_quote
+                    character.backslash: done
+                    '\'': character.single_quote
+                    character.backslash: done
+                    '\\': character.backslash
+                    character.backslash: done
+                }
+            }
+        }
+    }
+
+    universal_number: {
+        is: math.universal.number
+        tokens: {
+            digit: {
+                digit: continue
+                '.': point
+                point: {
+                    '.': error
+                    digit: continue
+                    'e': exponent
+                    'E': exponent
+                    default: next
+                }
+                default: next
+            }
+            '#': base
+            base: {
+                hexdigit: continue
+                '.': point
+                point: {
+                    '.': error
+                    hexdigit: continue
+                    '#': {
+                        'e': exponent
+                        'E': exponent
+                        default: next
+                    }
+                    default: next
+                }
+                '#': {
+                    'e': exponent
+                    'E': exponent
+                    default: next
+                }
+            }
+            exponent: {
+                expect: '+'
+                expect: '-'
+                '+': exponent.positive
+                exponent.positive: {
+                    expect: digit
+                    digit: exponent.digit
+                    exponent.digit: {
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
+                    }
+                }
+                '-': exponent.negative
+                exponent.negative: {
+                    expect: digit
+                    digit: exponent.digit
+                    exponent.digit: {
+                        digit: exponent.digit
+                        exponent.digit: continue
+                        default: next
+                    }
+                }
+            }
+        }
+    }
+}

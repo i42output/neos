@@ -66,7 +66,7 @@ namespace neos::concepts::core
             library_name(), 
             "neos math universal number language concept", 
             neolib::version{ 1, 0, 0 }, 
-            "Copyright (c) 2019 Leigh Johnston.  All Rights Reserved."
+            "Copyright (c) 2021 Leigh Johnston.  All Rights Reserved."
         }
     {
         /* todo */

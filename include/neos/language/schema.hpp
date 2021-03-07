@@ -72,8 +72,9 @@ namespace neos
             typedef std::pair<neolib::rjson_string, std::string> atom_reference_key_t;
             struct atom_reference
             {
-                neolib::rjson_value const* node;
-                abstract_atom_ptr* atomPtr;
+                std::string symbol;
+                neolib::rjson_value const* node = nullptr;
+                abstract_atom_ptr* atomPtr = nullptr;
             };
             typedef std::vector<atom_reference> unresolved_reference_list;
             typedef std::unordered_map<atom_reference_key_t, unresolved_reference_list, boost::hash<atom_reference_key_t>> atom_references_t;
@@ -127,6 +128,7 @@ namespace neos
             atom_references_t iAtomReferences;
             concept_atoms_t iConceptAtoms;
             bool iParsingTokens;
+            std::vector<i_schema_node_atom*> iContext;
         };
     }
 }

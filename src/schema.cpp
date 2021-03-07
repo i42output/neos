@@ -93,7 +93,9 @@ namespace neos
                 throw_error(aChildNode, "unexpected token match rule");
             auto newChild = aParentAtom.children().insert(
                 atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) }, atom_ptr{});
+            iContext.push_back(&newChild->first()->as_schema_atom().as_schema_node_atom());
             parse(aChildNode, newChild->first()->as_schema_atom().as_schema_node_atom());
+            iContext.pop_back();
         }
 
         schema::atom_handlers_t& schema::atom_handlers()
@@ -254,33 +256,52 @@ namespace neos
             for (auto iterToken = tokensInDocumentOrder.cbegin(); iterToken != tokensInDocumentOrder.cend(); ++iterToken)
             {
                 auto const& token = *iterToken->second;
-                switch (keyword(token.name()))
+                if (token.name_is_keyword())
                 {
-                case schema_keyword::Expect:
-                    if (token.type() != neolib::json_type::Keyword ||
-                        keyword(token.as<neolib::rjson_keyword>().text) != schema_keyword::None)
+                    switch (keyword(token.name()))
                     {
-                        aAtom.expects().push_back(atom_ptr{});
-                        add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
+                    case schema_keyword::Expect:
+                        if (token.type() != neolib::json_type::Keyword ||
+                            keyword(token.as<neolib::rjson_keyword>().text) != schema_keyword::None)
+                        {
+                            aAtom.expects().push_back(atom_ptr{});
+                            add_rhs_atom_reference(token, aAtom, aAtom.expects().back());
+                        }
+                        else
+                            aAtom.set_expect_none();
+                        break;
+                    case schema_keyword::Default:
+                        if (iterToken != std::prev(tokensInDocumentOrder.cend()))
+                            throw_error(token, "default specifier must appear last in token specification block");
+                        result.push_back(schema_node_atom::tokens_t::value_type{});
+                        result.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
+                        parse_token_value(*this, token);
+                        break;
+                    case schema_keyword::Invalid:
+                        result.push_back(schema_node_atom::tokens_t::value_type{});
+                        add_lhs_atom_reference(token, aAtom, result.back().first());
+                        parse_token_value(*this, token);
+                        break;
+                    case schema_keyword::Is:
+                        {
+                            auto const& conceptName = token.as<neolib::rjson_keyword>().text;
+                            auto concept_ = find_concept(conceptName);
+                            if (concept_ != nullptr)
+                                iContext.back()->is().push_back(concept_);
+                            else
+                                throw_error(token, "concept '" + conceptName + "' not found");
+                        }
+                        break;
+                    default:
+                        throw_error(token, "unexpected keyword '" + token.name() + "' in token specification");
+                        break;
                     }
-                    else
-                        aAtom.set_expect_none();
-                    break;
-                case schema_keyword::Default:
-                    if (iterToken != std::prev(tokensInDocumentOrder.cend()))
-                        throw_error(token, "default specifier must appear last in token specification block");
-                    result.push_back(schema_node_atom::tokens_t::value_type{});
-                    result.back().first() = neolib::make_ref<schema_terminal_atom>(aAtom, schema_terminal::Default);
-                    parse_token_value(*this, token);
-                    break;
-                case schema_keyword::Invalid:
+                }
+                else
+                {
                     result.push_back(schema_node_atom::tokens_t::value_type{});
                     add_lhs_atom_reference(token, aAtom, result.back().first());
                     parse_token_value(*this, token);
-                    break;
-                default:
-                    throw_error(aNode, "unexpected keyword '" + token.name() + "' in token specification");
-                    break;
                 }
             }
         }
@@ -325,7 +346,7 @@ namespace neos
                 if (keyword(aNode.name()) == schema_keyword::Invalid)
                 {
                     auto const key = atom_reference_key_t{ aNode.name(), fully_qualified_name(aNode.parent(), aNode.name()) };
-                    atom_references()[key].push_back(atom_reference{ &aNode, &aAtom });
+                    atom_references()[key].push_back(atom_reference{ aNode.name(), &aNode, &aAtom });
                 }
                 else
                     throw_error(aNode, "unexpected keyword '" + aNode.name() + "'");
@@ -346,7 +367,7 @@ namespace neos
                     case schema_keyword::Invalid:
                         {
                             auto const key = atom_reference_key_t{ aNodeValue.text, fully_qualified_name(aNode.parent(), aNodeValue.text) };
-                            atom_references()[key].push_back(atom_reference{ &aNode, &aAtom });
+                            atom_references()[key].push_back(atom_reference{ aNodeValue.text, &aNode, &aAtom });
                         }
                         break;
                     case schema_keyword::Done:
