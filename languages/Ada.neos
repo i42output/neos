@@ -22,7 +22,7 @@
 
     whitespace: {
         is: language.whitespace
-        tokens: {
+        @: {
             ' ': ignore
             '\n': ignore
             '\r': ignore
@@ -33,7 +33,7 @@
 
     comment: {
         is: language.comment
-        tokens: {
+        @: {
             "--": {
                 '\n': drain
                 default: ignore
@@ -47,7 +47,7 @@
     expect: keyword.use
     expect: keyword.package
 
-    tokens: {
+    @: {
         whitespace: ignore
         comment: ignore
         keyword.with: done
@@ -57,7 +57,7 @@
 
     keyword: {
         as: language.keyword
-        tokens: {
+        @: {
             "with": with
             "use": use
             "package": package
@@ -151,7 +151,7 @@
             expect: character.literal
             met: {
                 is: enumerator
-                tokens: {
+                @: {
                     whitespace: whitespace
                     ',': item
                     ')': {
@@ -170,7 +170,7 @@
         language.type.name: {
             expect: keyword.is
             keyword.is: {
-                tokens: {
+                @: {
                     '(': enumerator_list
                 }
             }
@@ -200,7 +200,7 @@
 
     package.specification: {
         is: source.package.specification
-        tokens: {
+        @: {
             type: type.definition
             procedure: language.error.not_implemented
             function: language.error.not_implemented
@@ -218,13 +218,13 @@
 
     package.body: {
         is: source.package.body
-        tokens: {
+        @: {
             procedure: language.error.not_implemented
             function: language.error.not_implemented
             begin: package.initialization
         }
         package.initialization: {
-            tokens: {
+            @: {
                 end: {
                     identifier: source.package.name
                 }
@@ -239,7 +239,7 @@
 
     arguments: {
         is: language.argument.list
-        tokens: {
+        @: {
             whitespace: whitespace
             '(': item
         }
@@ -248,7 +248,7 @@
             expect: expression
             met: {
                 is: language.argument
-                tokens: {
+                @: {
                     whitespace: whitespace
                     ',': item
                     ')': done
@@ -258,7 +258,7 @@
     }
 
     statement.end: {
-        tokens: {
+        @: {
             whitespace: whitespace
             ';': done
         }
@@ -290,7 +290,7 @@
 
     with: {
         expect: source.package.name
-        tokens: {
+        @: {
             whitespace: whitespace
             ';': source.package.import
         }
@@ -298,7 +298,7 @@
 
     use: {
         expect: source.package.name
-        tokens: {
+        @: {
             whitespace: whitespace
             ';': language.scope.add.package
         }
@@ -306,7 +306,7 @@
 
     identifier: {
         is: language.identifier
-        tokens: {
+        @: {
             character.alpha: identifier
             character.digit: identifier
             character.underscore: identifier
@@ -316,7 +316,7 @@
 
     universal_number: {
         is: math.universal.number
-        tokens: {
+        @: {
             digit: {
                 digit: continue
                 '.': point

@@ -78,7 +78,7 @@ namespace neos
                 { "error", schema_keyword::Error},
                 { "default", schema_keyword::Default},
                 { "expect", schema_keyword::Expect},
-                { "tokens", schema_keyword::Tokens},
+                { "@", schema_keyword::Tokens},
             };
             auto result = sKeywords.find(aSymbol);
             if (result != sKeywords.end())

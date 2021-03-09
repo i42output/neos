@@ -18,7 +18,7 @@
     expect: comment
     expect: root_keyword
 
-    tokens: {
+    @: {
         whitespace: ignore
         comment: ignore
         root_keyword: done
@@ -26,7 +26,7 @@
 
     whitespace: {
         is: language.whitespace
-        tokens: {
+        @: {
             ' ': ignore
             '\n': ignore
             '\r': ignore
@@ -37,7 +37,7 @@
 
     comment: {
         is: language.comment
-        tokens: {
+        @: {
             "--": {
                 '\n': drain
                 default: ignore
@@ -53,20 +53,20 @@
         name: {
             is: string.utf8
             is: source.package.name
-            tokens: {
+            @: {
                 character.alpha: rest
                 rest: done
             }
             rest: {
                 expect: none
-                tokens: {
+                @: {
                     character.alpha: continue
                     character.period: need_alpha
                     default: next
                 }
             }
             need_alpha: {
-                tokens: {
+                @: {
                     character.alpha: rest
                 }
             }
@@ -75,7 +75,7 @@
 
     keyword: {
         as: language.keyword
-        tokens: {
+        @: {
             "using": using
             "import": import
             "def": def
@@ -110,7 +110,7 @@
     root_keyword:
     {
         expect: keyword
-        tokens: {
+        @: {
             keyword.using: using
             keyword.import: import
             keyword.def: def
@@ -121,7 +121,7 @@
         }
         using: {
             expect: whitespace
-            tokens: {
+            @: {
                 package.name: source.package.import
                 source.package.import: {
                     expect: end
@@ -132,7 +132,7 @@
         }
         import: {
             expect: keyword
-            tokens: {
+            @: {
                 keyword.fn: fn_sig
                 keyword.proc: proc_sig
                 fn_sig: {
@@ -150,7 +150,7 @@
         }
         def: {
             expect: keyword
-            tokens: {
+            @: {
                 keyword.fn: fn_sig
                 keyword.proc: proc_sig
                 fn_sig: {
@@ -173,7 +173,7 @@
             }
         }
         end: {
-            tokens: {
+            @: {
                 ';': done
                 whitespace: ignore
             }
@@ -183,13 +183,13 @@
     identifier: {
         is: string.utf8
         is: language.identifier
-        tokens: {
+        @: {
             character.alpha: rest
             character.underscore: rest
         }
         rest: {
             expect: none
-            tokens: {
+            @: {
                 character.alpha: continue
                 character.underscore: continue
                 character.digit: continue
@@ -198,7 +198,7 @@
         }
         end: {
             expect: none
-            tokens: {
+            @: {
                 character.alpha: error
                 character.underscore: error
                 character.digit: error
@@ -210,7 +210,7 @@
     fn_sig: {
         is: language.function.signature
         expect: whitespace
-        tokens: {
+        @: {
             identifier: {
                 '(': {
                     fn_parameters: {
@@ -235,7 +235,7 @@
     proc_sig: {
         is: language.function.signature
         expect: whitespace
-        tokens: {
+        @: {
             identifier: {
                 '(': {
                     proc_parameters: {
@@ -252,7 +252,7 @@
 
     fn_parameters: {
         is: language.function.parameters
-        tokens: {
+        @: {
             parameter_block: {
                 expect: none
                 ';': {
@@ -265,7 +265,7 @@
             default: next
         }
         parameter_block: {
-            tokens: {
+            @: {
                 parameter: {
                     ',': {
                         expect: parameter
@@ -282,7 +282,7 @@
         }
         parameter: {
             is: language.function.parameter
-            tokens: {
+            @: {
                 identifier: done
                 whitespace: ignore
             }
@@ -291,7 +291,7 @@
 
     proc_parameters: {
         is: language.function.parameters
-        tokens: {
+        @: {
             parameter_block: {
                 expect: none
                 ';': {
@@ -304,7 +304,7 @@
             default: next
         }
         parameter_block: {
-            tokens: {
+            @: {
                 parameter: {
                     ',': {
                         expect: parameter
@@ -332,7 +332,7 @@
         }
         parameter: {
             is: language.function.parameter
-            tokens: {
+            @: {
                 identifier: done
                 whitespace: ignore
             }
@@ -341,13 +341,13 @@
 
     proc_locals: {
         is: language.function.locals
-        tokens: {
+        @: {
             local_block: continue
             whitespace: ignore
             default: next
         }
         local_block: {
-            tokens: {
+            @: {
                 local: {
                     ',': {
                         expect: local
@@ -367,13 +367,13 @@
         }
         local: {
             is: language.function.local
-            tokens: {
+            @: {
                 identifier: done
                 whitespace: ignore
             }
         }
         end: {
-            tokens: {
+            @: {
                 ';': done
                 whitespace: ignore
             }
@@ -382,7 +382,7 @@
 
     fn_scope: {
         is: language.function.scope
-        tokens: {
+        @: {
             '{': {
                 fn_statement: continue
                 whitespace: ignore
@@ -394,7 +394,7 @@
 
     proc_scope: {
         is: language.function.scope
-        tokens: {
+        @: {
             '{': {
                 proc_statement: continue
                 whitespace: ignore
@@ -409,7 +409,7 @@
         expect: keyword
         expect: assignment
         expect: end
-        tokens: {
+        @: {
             keyword.return: {
                 expect: whitespace
                 expect: expression
@@ -423,7 +423,7 @@
             keyword.if: if
         }
         if: {
-            tokens: {
+            @: {
                 '(': {
                     expect: boolean_expression
                     boolean_expression: {
@@ -445,7 +445,7 @@
         }
         else: {
             expect: keyword
-            tokens: {
+            @: {
                 keyword.else: 
                 {
                     expect: keyword
@@ -469,7 +469,7 @@
             }
         }
         end: {
-            tokens: {
+            @: {
                 ';': done
                 whitespace: ignore
             }
@@ -482,7 +482,7 @@
         expect: assignment
         expect: expression
         expect: end
-        tokens: {
+        @: {
             keyword.return: {
                 expect: end
                 end: language.function.return
@@ -498,7 +498,7 @@
             whitespace: ignore
         }
         if: {
-            tokens: {
+            @: {
                 '(': {
                     expect: boolean_expression
                     boolean_expression: {
@@ -520,7 +520,7 @@
         }
         else: {
             expect: keyword
-            tokens: {
+            @: {
                 keyword.else: 
                 {
                     expect: keyword
@@ -544,7 +544,7 @@
             }
         }
         end: {
-            tokens: {
+            @: {
                 ';': done
                 whitespace: ignore
             }
@@ -552,7 +552,7 @@
     }
 
     assignment: {
-        tokens: {
+        @: {
             identifier: {
                 ":=": {
                     expect: expression
@@ -565,7 +565,7 @@
     }
     
     type: {
-        tokens: {
+        @: {
             "i8": language.type.i8
             "u8": language.type.u8
             "i16": language.type.i16
@@ -589,14 +589,14 @@
         expect: boolean_expression
         expect: math_expression
         expect: whitespace
-        tokens: {
+        @: {
             boolean_expression: done
             math_expression: done
             whitespace: ignore
         }
         function_call: {
             expect: identifier
-            tokens: {
+            @: {
                 identifier: {
                     expect: whitespace
                     expect: '('
@@ -617,7 +617,7 @@
         }
         function_call_arguments: {
             expect: function_call_argument
-            tokens: {
+            @: {
                 function_call_argument: {
                     expect: none
                     ',': {
@@ -634,7 +634,7 @@
         function_call_argument: {
             expect: math_expression
             expect: boolean_expression
-            tokens: {
+            @: {
                 boolean_expression: language.function.argument
                 math_expression: language.function.argument
                 language.function.argument: done
@@ -644,7 +644,7 @@
 
     boolean_expression: {
         is: boolean.expression
-        tokens: {
+        @: {
             relation: done
             '!': {
                 expect: boolean_expression
@@ -655,7 +655,7 @@
         }
         relation: {
             expect: term1
-            tokens: {
+            @: {
                 term1: {
                     '=': boolean.operator.relational.equal
                     "/=": boolean.operator.relational.notequal
@@ -672,7 +672,7 @@
             }
             term1: {
                 is: boolean.expression.operand
-                tokens: {
+                @: {
                     expect: math_expression
                     math_expression: done
                 }
@@ -680,7 +680,7 @@
             }
             term2: {
                 is: boolean.expression.operand
-                tokens: {
+                @: {
                     expect: math_expression
                     math_expression: done
                 }
@@ -692,7 +692,7 @@
     math_expression: {
         is: math.expression
         expect: term
-        tokens: {
+        @: {
             term: {
                 expect: none
                 '+': math.operator.add
@@ -706,7 +706,7 @@
         }
         term: {
             expect: term2
-            tokens: {
+            @: {
                 term2: {
                     expect: none
                     '*': math.operator.multiply
@@ -721,7 +721,7 @@
         }
         term2: {
             expect: primary
-            tokens: {
+            @: {
                 primary: {
                     expect: none
                     '**': math.operator.power
@@ -736,7 +736,7 @@
         }
         primary: {
             is: math.expression.operand
-            tokens: {
+            @: {
                 string_literal: done
                 math.universal.number.digit: universal_number
                 universal_number: done
@@ -764,11 +764,11 @@
 
     string_literal: {
         is: string.utf8
-        tokens: {
+        @: {
             '\"': start
         }
         start: {
-            tokens: {                
+            @: {                
                 '\"': {
                     whitespace: ignore
                     end: next
@@ -781,14 +781,14 @@
             }
         }
         end: {
-            tokens: {
+            @: {
                 expect: none
                 '\"': start
                 default: next
             }
         }
         escape: {
-            tokens: {
+            @: {
                 '\\': {
                     'n': character.LF
                     character.LF: done
@@ -805,7 +805,7 @@
 
     universal_number: {
         is: math.universal.number
-        tokens: {
+        @: {
             digit: {
                 digit: continue
                 '.': point

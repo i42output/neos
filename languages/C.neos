@@ -23,7 +23,7 @@
     expect: comment
     expect: identifier
 
-    tokens.unmatched: {
+    @.unmatched: {
         ' ': whitespace
         character.LF: whitespace
         character.CR: whitespace
@@ -36,7 +36,7 @@
 
     whitespace: {
         is: language.whitespace
-        tokens: {
+        @: {
             ' ': whitespace
             character.LF: whitespace
             character.CR: whitespace
@@ -47,7 +47,7 @@
 
     comment: {
         is: language.comment
-        tokens: {
+        @: {
             '*': {
                 '/': done
                 transform: comment    
@@ -76,7 +76,7 @@
     }
 
     keyword: {
-        tokens: {
+        @: {
             character.alpha: keyword
             whitespace: done
         }
@@ -94,7 +94,7 @@
 
     identifier: {
         is: language.identifier
-        tokens: {
+        @: {
             character.alpha: identifier
             character.digit: identifier
             character.underscore: identifier

@@ -16,19 +16,17 @@
 
     expect: whitespace
     expect: comment
-//    expect: statement
-    expect: string_literal   // todo: remove this when statement is elaborated
+    expect: statement
 
-    tokens: {
+    @: {
         whitespace: ignore
         comment: ignore
-        string_literal: done
         statement: done
     }
 
     whitespace: {
         is: language.whitespace
-        tokens: {
+        @: {
             ' ': ignore
             '\t': ignore
             '\n': ignore
@@ -40,7 +38,7 @@
     scoping_whitespace : {
         is: language.whitespace
         is: language.function.scope
-        tokens: {
+        @: {
             ' ': language.scope.open.by_indentation
             '\t': language.scope.open.by_indentation
             '\n': whitespace
@@ -52,7 +50,7 @@
 
     comment: {
         is: language.comment
-        tokens: {
+        @: {
             '#': {
                 '\n': drain
                 default: ignore
@@ -62,7 +60,7 @@
 
     keyword: {
         as: language.keyword
-        tokens: {
+        @: {
             "and":       and
             "as":        _as_
             "assert":    assert
@@ -141,39 +139,39 @@
     }
 
     statement: {
-        tokens: {
+        @: {
             simple_stmt: done
             compound_stmt: done
             default: next
         }
         simple_stmt: {
-            tokens: {
+            @: {
                 expression_stmt : done
-                assert_stmt : done
-                assignment_stmt : done
-                augmented_assignment_stmt : done
-                annotated_assignment_stmt : done
-                pass_stmt : done
-                del_stmt : done
-                return_stmt : done
-                yield_stmt : done
-                raise_stmt : done
-                break_stmt : done
-                continue_stmt : done
-                import_stmt : done
-                future_stmt : done
-                global_stmt : done
-                nonlocal_stmt : done
+     //           assert_stmt : done
+     //           assignment_stmt : done
+     //           augmented_assignment_stmt : done
+     //           annotated_assignment_stmt : done
+     //           pass_stmt : done
+     //           del_stmt : done
+     //           return_stmt : done
+     //           yield_stmt : done
+     //           raise_stmt : done
+     //           break_stmt : done
+     //           continue_stmt : done
+     //           import_stmt : done
+     //           future_stmt : done
+     //           global_stmt : done
+     //           nonlocal_stmt : done
             }
             expression_stmt : {
-                tokens: {
+                @: {
                     starred_expression: done
                 }
             }
             assert_stmt : {
             }
             assignment_stmt : {
-                tokens: {
+                @: {
                     target_list: {
                         '=': {
                             starred_expression: done
@@ -186,7 +184,7 @@
                 target_list: {
                     is: language.type
                     expect: target
-                    tokens: {
+                    @: {
                         target: {
                             ',': {
                                 is: language.type.tuple
@@ -203,7 +201,7 @@
                     expect: attributeref
                     expect: subscription
                     expect: slicing
-                    tokens: {
+                    @: {
                         '(': {
                             expect: target_list
                             target_list: {
@@ -258,7 +256,7 @@
             }
         }
         compound_stmt: {
-            tokens: {
+            @: {
                 if_stmt: done
                 while_stmt: done
                 for_stmt: done
@@ -293,7 +291,382 @@
         }
     }
 
+    expressions: {
+        @: {
+            expression: {
+                ',': expression
+                default: next
+            }
+        }
+    }
+
+    expression: {
+        @: {
+            disjunction: {
+                expect: "if"
+                "if": {
+                    expect: disjunction
+                    disjunction: {
+                        expect: "else"
+                        "else": {
+                            expect: expression
+                            expression: done
+                        }
+                    }
+                }
+            }
+            disjunction : done
+            lambdef : done
+        }
+    }
+
+    lambdef: {
+        @: {
+            expect: "lambda"
+            "lambda" : {
+                expect: lambda_params
+                lambda_params : {
+                    expect: ":"
+                    ":": {
+                        expect: expression
+                        expression: done
+                    }
+                }
+            }
+        }
+    }
+
+    lambda_params: {
+        @: {
+            expect: lambda_parameters
+            lambda_parameters: done
+        }
+    }
+    
+
+    lambda_parameters: {
+        // todo   
+    }
+
+    disjunction: {
+        expect: conjunction
+        @: {
+            conjunction : {
+                expect: none
+                "or": boolean.operator.logical.or
+                boolean.operator.logical.or: {
+                    expect: conjunction
+                }
+            }
+            default: next
+        }
+    }
+
+    conjunction: {
+        expect: inversion
+        @: {
+            inversion : {
+                expect: none
+                "and": boolean.operator.logical.and
+                boolean.operator.logical.and: {
+                    expect: inversion
+                }
+            }
+            default: next
+        }
+    }
+
+    inversion: {
+        expect: comparison
+        @: {
+            comparison: done
+            "not": {
+                expect: inversion
+                inversion : boolean.operator.logical.not
+                boolean.operator.logical.not: done
+            }
+            default: next
+        }
+    }
+    
+    comparison: {
+        expect: bitwise_or
+        @: {
+            bitwise_or: {
+                compare_op_bitwise_or_pair: again
+                default: next
+            }
+        }
+        again: {
+            @: {
+                compare_op_bitwise_or_pair: again
+                default: next 
+            }
+        }
+    }
+
+    compare_op_bitwise_or_pair: {
+        @: {
+            eq_bitwise_or: done
+            noteq_bitwise_or: done
+            lte_bitwise_or: done
+            lt_bitwise_or: done
+            gte_bitwise_or: done
+            gt_bitwise_or: done
+            notin_bitwise_or: done
+            in_bitwise_or: done
+            isnot_bitwise_or: done
+            is_bitwise_or: done
+        }
+    }
+
+    eq_bitwise_or: {
+        @: {
+            "==": boolean.operator.relational.equal
+            boolean.operator.relational.equal: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    noteq_bitwise_or: {
+        @: {
+            "!=": boolean.operator.relational.notequal
+            boolean.operator.relational.notequal: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    lte_bitwise_or: {
+        @: {
+            "<=": boolean.operator.relational.lessthanorequal
+            boolean.operator.relational.lessthanorequal: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    lt_bitwise_or: {
+        @: {
+            "<": boolean.operator.relational.lessthan
+            boolean.operator.relational.lessthan: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    gte_bitwise_or: {
+        @: {
+            ">=": boolean.operator.relational.greaterthanorequal
+            boolean.operator.relational.greaterthanorequal: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    gt_bitwise_or: {
+        @: {
+            ">": boolean.operator.relational.greaterthan
+            boolean.operator.relational.greaterthan: bitwise_or 
+            bitwise_or: done
+            whitespace: ignore
+        }
+    }
+
+    // todo
+    notin_bitwise_or: {
+        @: {
+            expect: "not"
+            "not": {
+                expect: "in"
+                "in": {
+                    expect: bitwise_or
+                    bitwise_or: done
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    // todo
+    in_bitwise_or: {
+        @: {
+            expect: "in"
+            "in": {
+                expect: bitwise_or
+                bitwise_or: done
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    // todo
+    isnot_bitwise_or: {
+        @: {
+            expect: "is"
+            "is": {
+                expect: "not"
+                "not": {
+                    expect: bitwise_or
+                    bitwise_or: done
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    // todo
+    is_bitwise_or: {
+        @: {
+            expect: "is"
+            "is": {
+                expect: bitwise_or
+                bitwise_or: done
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    bitwise_or: {
+        @: {
+            expect: '|'
+            expect: bitwise_xor
+            '|': bitwise.operator.or
+            bitwise.operator.or: {
+                expect: bitwise_or
+                expect: bitwise_xor
+                bitwise_or: done
+                bitwise_xor: done
+            }
+            bitwise_xor: done
+            whitespace: ignore
+        }
+    }
+
+    bitwise_xor: {
+        @: {
+            expect: '^'
+            expect: bitwise_and
+            '^': bitwise.operator.xor
+            bitwise.operator.or: {
+                expect: bitwise_xor
+                expect: bitwise_and
+                bitwise_xor: done
+                bitwise_and: done
+            }
+            bitwise_and: done
+            whitespace: ignore
+        }
+    }
+
+    bitwise_and: {
+        @: {
+            expect: '&'
+            expect: shift_expr
+            '&': bitwise.operator.and
+            bitwise.operator.and: {
+                expect: bitwise_and
+                expect: shift_expr
+                bitwise_and: done
+                shift_expr: done
+            }
+            shift_expr: done
+            whitespace: ignore
+        }
+    }
+
+    shift_expr: {
+        @: {
+            expect: "<<"
+            expect: ">>"
+            expect: sum
+            "<<": bitwise.operator.shift.left
+            ">>": bitwise.operator.shift.right
+            bitwise.operator.shift.left: {
+                expect: shift_expr
+                expect: sum
+                shift_expr: done
+                sum: done
+            }
+            sum: done
+            whitespace: ignore
+        }
+    }
+/*
+sum:
+    | sum '+' term 
+    | sum '-' term 
+    | term
+term:
+    | term '*' factor 
+    | term '/' factor 
+    | term '//' factor 
+    | term '%' factor 
+    | term '@' factor 
+    | factor
+factor:
+    | '+' factor 
+    | '-' factor 
+    | '~' factor 
+    | power
+power:
+    | await_primary '**' factor 
+    | await_primary
+await_primary:
+    | AWAIT primary 
+    | primary
+primary:
+    | invalid_primary  # must be before 'primay genexp' because of invalid_genexp
+    | primary '.' NAME 
+    | primary genexp 
+    | primary '(' [arguments] ')' 
+    | primary '[' slices ']' 
+    | atom
+
+slices:
+    | slice !',' 
+    | ','.slice+ [','] 
+slice:
+    | [expression] ':' [expression] [':' [expression] ] 
+    | expression 
+atom:
+    | NAME
+    | 'True' 
+    | 'False' 
+    | 'None' 
+    | '__peg_parser__' 
+    | strings
+    | NUMBER
+    | (tuple | group | genexp)
+    | (list | listcomp)
+    | (dict | set | dictcomp | setcomp)
+    | '...' 
+*/
+    assignment_expression: {
+    }
+
     starred_expression: {
+        @: {
+            expression: done
+            starred_item : {
+                ',' : starred_item
+                default: next
+            }
+        }
+        starred_item : {
+            @: {
+                '*': or_expr
+                assignment_expression: done
+                default: next
+            }
+        }
     }
 
     yield_expression : {
@@ -317,14 +690,14 @@
 
     string_literal: {
         is: string.utf8
-        tokens: {
+        @: {
             "\"\"\"": start_multiline_double
             "\'\'\'": start_multiline_single
             '\"': start_double
             '\'': start_single
         }
         start_double: {
-            tokens: {                
+            @: {                
                 '\"': {
                     end: next
                 }
@@ -335,7 +708,7 @@
                 character: continue
             }
             end: {
-                tokens: {
+                @: {
                     expect: none
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
@@ -347,7 +720,7 @@
             }
         }
         start_single: {
-            tokens: {                
+            @: {                
                 '\'': {
                     end: next
                 }
@@ -358,7 +731,7 @@
                 character: continue
             }
             end: {
-                tokens: {
+                @: {
                     expect: none
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
@@ -370,7 +743,7 @@
             }
         }
         start_multiline_double: {
-            tokens: {                
+            @: {                
                 "\"\"\"": {
                     end: next
                 }
@@ -378,7 +751,7 @@
                 character: continue
             }
             end: {
-                tokens: {
+                @: {
                     expect: none
                     "\"\"\"": start_multiline_double
                     "\'\'\'": start_multiline_single
@@ -390,7 +763,7 @@
             }
         }
         start_multiline_single: {
-            tokens: {                
+            @: {                
                 "\'\'\'": {
                     end: next
                 }
@@ -398,7 +771,7 @@
                 character: continue
             }
             end: {
-                tokens: {
+                @: {
                     expect: none
                     '\"': start_double
                     '\'': start_single
@@ -410,7 +783,7 @@
             }
         }
         escape: {
-            tokens: {
+            @: {
                 '\\': {
                     'n': character.LF
                     character.LF: done
@@ -431,7 +804,7 @@
 
     universal_number: {
         is: math.universal.number
-        tokens: {
+        @: {
             digit: {
                 digit: continue
                 '.': point

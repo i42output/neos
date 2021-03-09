@@ -130,10 +130,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
     catch (const neos::language::schema::unresolved_references& e)
     {
         for (auto const& r : e.references)
-        {
             std::cerr << "Error: " << aContext.schema_source().to_error_text(*r.node, "unresolved schema reference '" + r.symbol + "'") << std::endl;
-        }
-        throw;
     }
     catch (const neos::context::warning& e)
     {

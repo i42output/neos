@@ -200,7 +200,7 @@ namespace neos::language
         if (trace() >= 4)
             std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         if (aSource == aFragment.cend())
-            return parse_result{ aSource, parse_result::Done, aUnit.schema->eof() };
+            return parse_result{ aSource, parse_result::NoMatch, aUnit.schema->eof() };
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
         if (aSource != aFragment.cend())

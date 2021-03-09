@@ -174,6 +174,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\..\..\src\common\dllmain.cpp" />
+    <ClCompile Include="..\..\..\..\src\core\bitwise.cpp" />
     <ClCompile Include="..\..\..\..\src\core\core.cpp" />
     <ClCompile Include="..\..\..\..\src\core\boolean.cpp" />
     <ClCompile Include="..\..\..\..\src\core\logic.cpp" />
@@ -185,6 +186,7 @@
     <ClCompile Include="..\..\..\..\src\core\string.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\..\..\src\core\bitwise.hpp" />
     <ClInclude Include="..\..\..\..\src\core\core.hpp" />
     <ClInclude Include="..\..\..\..\src\core\language.hpp" />
     <ClInclude Include="..\..\..\..\src\core\boolean.hpp" />

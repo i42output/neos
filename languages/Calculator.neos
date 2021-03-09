@@ -15,7 +15,7 @@
     expect: statement
     expect: whitespace
 
-    tokens: {
+    @: {
         statement: done
         whitespace: done
     }
@@ -26,7 +26,7 @@
 
     whitespace: {
         is: language.whitespace
-        tokens: {
+        @: {
             ' ': done
             '\n': done
             '\r': done
@@ -39,7 +39,7 @@
         is: language.statement
         expect: end
         expect: expression
-        tokens: {
+        @: {
             expression: {
                 expect: end
                 end: done
@@ -48,7 +48,7 @@
             whitespace: ignore
         }
         end: {
-            tokens: {
+            @: {
                 ';': done
                 whitespace: ignore
             }
@@ -58,7 +58,7 @@
     expression: {
         is: math.expression
         expect: term
-        tokens: {
+        @: {
             term: {
                 expect: none
                 '+': math.operator.add
@@ -72,7 +72,7 @@
         }
         term: {
             expect: term2
-            tokens: {
+            @: {
                 term2: {
                     expect: none
                     '*': math.operator.multiply
@@ -87,7 +87,7 @@
         }
         term2: {
             expect: primary
-            tokens: {
+            @: {
                 primary: {
                     expect: none
                     '**': math.operator.power
@@ -102,7 +102,7 @@
         }
         primary: {
             is: math.expression.operand
-            tokens: {
+            @: {
                 math.universal.number.digit: universal_number
                 universal_number: done
                 '-': math.operator.negate
@@ -127,7 +127,7 @@
 
     universal_number: {
         is: math.universal.number
-        tokens: {
+        @: {
             digit: {
                 digit: continue
                 '.': point

@@ -30,3 +30,4 @@ def proc main()
     input(s);
     print("Fibonacci(" + s + ") = " + to_string(fib(to_integer(s))) + "\n");
 }
+
