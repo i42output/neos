@@ -7,7 +7,9 @@ Development started on 7 Feb 2019 so don't expect a release anytime soon.
 
 # Dependencies
 * Boost
+* libffi
 * neolib
+* neonumeric
 
 # Features
 * Language agnostic: a schema combined with a semantic concept library describes syntax and semantics of the scripting language to use (theoretically allowing any language to be used).
