@@ -599,23 +599,74 @@
             whitespace: ignore
         }
     }
+
+    sum: {
+        @: {
+            expect: '+'
+            expect: '-'
+            expect: term
+            '+': math.operator.add
+            '-': math.operator.subtract
+            math.operator.addition: {
+                expect: sum
+                expect: term
+                sum: done
+                term: done
+            }
+            term: done
+            whitespace: ignore
+        }
+    }
+
+    term: {
+        @: {
+            expect: '*'
+            expect: "//"
+            expect: '/'
+            expect: '%'
+            expect: '@'
+            expect: term
+            '*': math.operator.multiply
+            "//": math.operator.divide.floor
+            '/': math.operator.divide
+            '%': math.operator.divide.remainder
+            '@': math.operator.multiply.matrix
+            math.operator.multiplication: {
+                expect: term
+                expect: factor
+                term: done
+                factor: done
+            }
+            factor: done
+            whitespace: ignore
+        }
+    }
+
+    factor: {
+        @: {
+            expect: '+'
+            expect: "-"
+            expect: '~'
+            expect: power
+            '+': math.operator.identity
+            "-": math.operator.negate
+            '~': bitwise.operator.not
+            math.operator: {
+                expect: factor
+                factor: done
+            }
+            bitwise.operator: {
+                expect: factor
+                factor: done
+            }
+            power: done
+            factor: done
+            whitespace: ignore
+        }
+    }
+
+
 /*
-sum:
-    | sum '+' term 
-    | sum '-' term 
-    | term
-term:
-    | term '*' factor 
-    | term '/' factor 
-    | term '//' factor 
-    | term '%' factor 
-    | term '@' factor 
-    | factor
-factor:
-    | '+' factor 
-    | '-' factor 
-    | '~' factor 
-    | power
 power:
     | await_primary '**' factor 
     | await_primary
