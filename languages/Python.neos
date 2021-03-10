@@ -621,13 +621,13 @@
     term: {
         @: {
             expect: '*'
-            expect: "//"
+            expect: "\/\/"
             expect: '/'
             expect: '%'
             expect: '@'
             expect: term
             '*': math.operator.multiply
-            "//": math.operator.divide.floor
+            "\/\/": math.operator.divide.floor
             '/': math.operator.divide
             '%': math.operator.divide.remainder
             '@': math.operator.multiply.matrix
@@ -665,11 +665,23 @@
         }
     }
 
+    power: {
+        @: {
+            expect: await_primary
+            await_primary: {
+                expect: "**"
+                "**": math.operator.power
+                math.operator.power: {
+                    expect: factor
+                    factor: done
+                }
+            }
+            await_primary: done
+            whitespace: ignore
+        }
+    }
 
 /*
-power:
-    | await_primary '**' factor 
-    | await_primary
 await_primary:
     | AWAIT primary 
     | primary
