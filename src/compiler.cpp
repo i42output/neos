@@ -41,7 +41,8 @@ namespace neos::language
 
     compiler::scoped_concept_folder::~scoped_concept_folder()
     {
-        fold();
+        if (std::uncaught_exceptions() == 0)
+            fold();
     }
 
     void compiler::scoped_concept_folder::fold()

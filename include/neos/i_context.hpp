@@ -38,6 +38,7 @@ namespace neos
         struct error : std::runtime_error { using runtime_error::runtime_error; };
         struct invalid_fragment : std::logic_error { invalid_fragment() : std::logic_error("neos::i_context::invalid_fragment") {} };
         struct no_schema_source : std::logic_error { no_schema_source() : std::logic_error("neos::i_context::no_schema_source") {} };
+        struct no_schema_path_specified : warning { no_schema_path_specified() : warning("neos::i_context::no_schema_path_specified") {} };
         struct no_schema_loaded : error { no_schema_loaded() : error("no schema loaded") {} };
         struct no_text : warning { no_text() : warning("no text") {} };
         struct compiler_error : error { compiler_error(const std::string& aReason) : error(aReason) {} };

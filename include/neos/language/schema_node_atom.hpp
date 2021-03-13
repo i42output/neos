@@ -152,6 +152,19 @@ namespace neos::language
         {
             return iChildren;
         }
+        const i_atom& context() const override
+        {
+            if (!is_token_node())
+                return *this;
+            else if (has_parent())
+                return parent().as_schema_node_atom().context();
+            else
+                throw no_context();
+        }
+        i_atom& context() override
+        {
+            return const_cast<i_atom&>(const_cast<schema_node_atom const&>(*this).context());
+        }
         const i_atom* find_token(const i_atom& aToken) const override
         {
             auto iterCacheToken = iTokenCache.find(&aToken);

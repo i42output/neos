@@ -14,11 +14,10 @@
         neos.math.universal
     ]
 
-    expect: whitespace
-    expect: comment
-    expect: statement
-
     @: {
+        expect: whitespace
+        expect: comment
+        expect: statement
         whitespace: ignore
         comment: ignore
         statement: done
@@ -136,6 +135,10 @@
         while:     { is: language.keyword }
         with:      { is: language.keyword }
         yield:     { is: language.keyword }
+    }
+
+    NAME: {
+        is: language.identifier
     }
 
     statement: {
@@ -310,7 +313,6 @@
                         expect: "else"
                         "else": {
                             expect: expression
-                            expression: done
                         }
                     }
                 }
@@ -329,7 +331,6 @@
                     expect: ":"
                     ":": {
                         expect: expression
-                        expression: done
                     }
                 }
             }
@@ -339,7 +340,6 @@
     lambda_params: {
         @: {
             expect: lambda_parameters
-            lambda_parameters: done
         }
     }
     
@@ -349,8 +349,8 @@
     }
 
     disjunction: {
-        expect: conjunction
         @: {
+            expect: conjunction
             conjunction : {
                 expect: none
                 "or": boolean.operator.logical.or
@@ -363,8 +363,8 @@
     }
 
     conjunction: {
-        expect: inversion
         @: {
+            expect: inversion
             inversion : {
                 expect: none
                 "and": boolean.operator.logical.and
@@ -377,9 +377,8 @@
     }
 
     inversion: {
-        expect: comparison
         @: {
-            comparison: done
+            expect: comparison
             "not": {
                 expect: inversion
                 inversion : boolean.operator.logical.not
@@ -482,7 +481,6 @@
                 expect: "in"
                 "in": {
                     expect: bitwise_or
-                    bitwise_or: done
                     whitespace: ignore
                 }
                 whitespace: ignore
@@ -527,7 +525,6 @@
             expect: "is"
             "is": {
                 expect: bitwise_or
-                bitwise_or: done
                 whitespace: ignore
             }
             whitespace: ignore
@@ -542,8 +539,6 @@
             bitwise.operator.or: {
                 expect: bitwise_or
                 expect: bitwise_xor
-                bitwise_or: done
-                bitwise_xor: done
             }
             bitwise_xor: done
             whitespace: ignore
@@ -558,8 +553,6 @@
             bitwise.operator.or: {
                 expect: bitwise_xor
                 expect: bitwise_and
-                bitwise_xor: done
-                bitwise_and: done
             }
             bitwise_and: done
             whitespace: ignore
@@ -574,10 +567,7 @@
             bitwise.operator.and: {
                 expect: bitwise_and
                 expect: shift_expr
-                bitwise_and: done
-                shift_expr: done
             }
-            shift_expr: done
             whitespace: ignore
         }
     }
@@ -586,16 +576,12 @@
         @: {
             expect: "<<"
             expect: ">>"
-            expect: sum
             "<<": bitwise.operator.shift.left
             ">>": bitwise.operator.shift.right
             bitwise.operator.shift.left: {
                 expect: shift_expr
                 expect: sum
-                shift_expr: done
-                sum: done
             }
-            sum: done
             whitespace: ignore
         }
     }
@@ -610,10 +596,7 @@
             math.operator.addition: {
                 expect: sum
                 expect: term
-                sum: done
-                term: done
             }
-            term: done
             whitespace: ignore
         }
     }
@@ -626,6 +609,7 @@
             expect: '%'
             expect: '@'
             expect: term
+            expect: factor
             '*': math.operator.multiply
             "\/\/": math.operator.divide.floor
             '/': math.operator.divide
@@ -634,10 +618,7 @@
             math.operator.multiplication: {
                 expect: term
                 expect: factor
-                term: done
-                factor: done
             }
-            factor: done
             whitespace: ignore
         }
     }
@@ -653,15 +634,10 @@
             '~': bitwise.operator.not
             math.operator: {
                 expect: factor
-                factor: done
             }
             bitwise.operator: {
                 expect: factor
-                factor: done
             }
-            power: done
-            factor: done
-            whitespace: ignore
         }
     }
 
@@ -677,22 +653,95 @@
                 }
             }
             await_primary: done
+        }
+    }
+
+    await_primary: {
+        @: {
+            "await": AWAIT
+            AWAIT: {
+                expect: primary
+                primary: done
+            }
+            primary: done
+        }
+        AWAIT: {
+            is: concept.unrealized
+        }    
+    }
+
+    primary: {
+        @: {
+            expect: primary
+            expect: atom
+            primary: {
+                expect: '.'
+                '.': NAME 
+                NAME: done
+                whitespace: ignore
+            }
+            primary: {
+                expect: genexp 
+                genexp: done
+                whitespace: ignore
+            }
+            primary: {
+                expect: '('
+                '(': {
+                    expect: ')'
+                    expect: arguments
+                    ')': done
+                    arguments: {
+                        expect: ')'
+                        ')': done
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            primary: {
+                expect: '['
+                '[': {
+                    expect: slices
+                    slices: {
+                        expect: ']'
+                        ']': done
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
             whitespace: ignore
         }
     }
 
-/*
-await_primary:
-    | AWAIT primary 
-    | primary
-primary:
-    | invalid_primary  # must be before 'primay genexp' because of invalid_genexp
-    | primary '.' NAME 
-    | primary genexp 
-    | primary '(' [arguments] ')' 
-    | primary '[' slices ']' 
-    | atom
+    slices: {
+        @: {
+            expect: slice
+            expect: list
+            whitespace: ignore
+        }
+        list: {
+            @: {
+                expect: slice
+                expect: ','
+                slice: {
+                    ',': {
+                        list: done
+                        default: next
+                    }
+                    whitespace: ignore
+                    default: next
+                }
+                whitespace: ignore
+                default: next
+            }
+        }
+    }
 
+/*
 slices:
     | slice !',' 
     | ','.slice+ [','] 

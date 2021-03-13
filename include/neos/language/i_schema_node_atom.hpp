@@ -46,6 +46,7 @@ namespace neos::language
         typedef atom_map_t children_t;
 	public:
 		struct not_a_token_node : std::logic_error { not_a_token_node() : std::logic_error("neos::language::i_schema_node_atom::not_a_token_node") {} };
+        struct no_context : std::logic_error { no_context() : std::logic_error("neos::language::i_schema_node_atom::no_context") {} };
     public:
         bool is_schema_node_atom() const override { return true; }
         const i_schema_node_atom& as_schema_node_atom() const override { return *this; }
@@ -71,6 +72,8 @@ namespace neos::language
         virtual const children_t& children() const = 0;
         virtual children_t& children() = 0;
     public:
+        virtual const i_atom& context() const = 0;
+        virtual i_atom& context() = 0;
         virtual const i_atom* find_token(const i_atom& aToken) const = 0;
         virtual uint32_t recursive_token(const i_atom& aToken) const = 0;
     };

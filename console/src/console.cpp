@@ -65,6 +65,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         else if (command == "l" || command == "load")
         {
             aContext.load_program(parameters);
+            std::cout << "Program: " << parameters << std::endl;
         }
         else if (command == "c" || command == "compile")
         {
@@ -188,12 +189,9 @@ int main(int argc, char* argv[])
     {
         boost::program_options::options_description optionsDescription{ "Allowed options" };
         optionsDescription.add_options()
-            ("schema", boost::program_options::value<std::string>(), "language schema")
-            ("s", boost::program_options::value<std::string>(), "language schema")
-            ("trace", boost::program_options::value<uint32_t>(), "compiler trace")
-            ("t", boost::program_options::value<uint32_t>(), "compiler trace")
-            ("compile", "compile program")
-            ("c", "compile program")
+            ("schema,s", boost::program_options::value<std::string>(), "language schema")
+            ("trace,t", boost::program_options::value<uint32_t>(), "compiler trace")
+            ("compile,c", "compile program")
             ("program", boost::program_options::value<std::vector<std::string>>(), "program(s) to load");
         boost::program_options::positional_options_description positionalOptionsDescription;
         positionalOptionsDescription.add("program", -1);

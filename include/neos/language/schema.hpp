@@ -94,8 +94,9 @@ namespace neos
         public:
             static constexpr std::size_t RecursionLimit = 64u;
         public:
-            schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries);
+            schema(std::string const& aPath, neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries);
         public:
+            std::string const& path() const;
             i_schema_node_atom& root() const;
             const i_atom* eof() const;
             language::meta const& meta() const;
@@ -114,12 +115,14 @@ namespace neos
             void add_lhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom);
             void add_rhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom);
             void resolve_references();
+            void fixup_expected(i_atom& aAtom);
             std::string fully_qualified_name(const i_atom& aAtom) const;
             atom_ptr leaf(const std::string& aStem, const neolib::rjson_string& aLeafName);
             atom_ptr leaf(i_schema_node_atom& aNode, const std::string& aStem, const neolib::rjson_string& aLeafName);
             atom_ptr create_concept_atom(const neolib::i_ref_ptr<i_concept>& aConcept);
             void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText);
         private:
+            std::string iPath;
             neolib::rjson const& iSource;
             std::optional<atom_handler_t> iDefaultAtomHandler;
             std::optional<atom_handlers_t> iAtomHandlers;

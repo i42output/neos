@@ -58,14 +58,20 @@ namespace neos
 
     void context::load_schema(const std::string& aSchemaPath)
     {
-        std::cout << "Loading schema '" + aSchemaPath + "'..." << std::endl;
+        std::string const schemaPath = (aSchemaPath.empty() && iSchema ? schema().path() : aSchemaPath);
+        if (schemaPath.empty())
+            throw no_schema_path_specified();
+        std::cout << "Loading schema '" + schemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
-        if (boost::filesystem::exists(aSchemaPath))
-            iSchemaSource.emplace(aSchemaPath);
-        else if (boost::filesystem::exists(aSchemaPath + ".neos"))
-            iSchemaSource.emplace(aSchemaPath + ".neos");
-        iSchema = std::make_shared<language::schema>(*iSchemaSource, concept_libraries());
+        if (boost::filesystem::exists(schemaPath))
+            iSchemaSource.emplace(schemaPath);
+        else if (boost::filesystem::exists(schemaPath + ".neos"))
+            iSchemaSource.emplace(schemaPath + ".neos");
+        iSchema = std::make_shared<language::schema>(schemaPath, *iSchemaSource, concept_libraries());
+
+        for (auto& unit : program().translationUnits)
+            unit.schema = iSchema;
     }
 
     const neolib::rjson& context::schema_source() const
@@ -84,8 +90,9 @@ namespace neos
 
     void context::load_program(const std::string& aPath)
     {
+        std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? *iProgram.translationUnits.front().fragments.front().source_file_path() : aPath);
         iProgram = decltype(iProgram){};
-        auto& unit = load_unit(language::source_fragment{ neolib::string{ aPath } });
+        auto& unit = load_unit(language::source_fragment{ neolib::string{ path } });
     }
 
     void context::load_program(std::istream& aStream)

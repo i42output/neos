@@ -26,7 +26,8 @@ namespace neos
 {
     namespace language
     {
-        schema::schema(neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries) :
+        schema::schema(std::string const& aPath, neolib::rjson const& aSource, const concept_libraries_t& aConceptLibraries) :
+            iPath{ aPath },
             iSource{ aSource },
             iMeta{ aSource.root().as<neolib::rjson_object>().at("meta").as<neolib::rjson_object>().at("language").as<neolib::rjson_string>() },
             iConceptLibraries{ aConceptLibraries },
@@ -44,6 +45,12 @@ namespace neos
                         references.push_back(e);
                 throw unresolved_references(std::move(references));
             }
+            fixup_expected(*iRoot);
+        }
+
+        std::string const& schema::path() const
+        {
+            return iPath;
         }
 
         i_schema_node_atom& schema::root() const
@@ -367,7 +374,8 @@ namespace neos
 
         void schema::add_rhs_atom_reference(neolib::rjson_value const& aNode, i_schema_node_atom& aParentAtom, abstract_atom_ptr& aAtom)
         {
-            aNode.visit([this, &aNode, &aParentAtom, &aAtom](auto&& aNodeValue)
+            bool foundReference = false;
+            aNode.visit([this, &aNode, &aParentAtom, &aAtom, &foundReference](auto&& aNodeValue)
             {
                 typedef typename std::remove_cv<typename std::remove_reference<decltype(aNodeValue)>::type>::type type_t;
                 if constexpr (std::is_same_v<type_t, neolib::rjson_keyword>)
@@ -437,6 +445,34 @@ namespace neos
                     ++entry;
                 }
             } while (foundSome);
+        }
+
+        void schema::fixup_expected(i_atom& aAtom)
+        {
+            if (!aAtom.is_schema_atom() || !aAtom.as_schema_atom().is_schema_node_atom())
+                return;
+            for (auto const& expect : aAtom.as_schema_atom().as_schema_node_atom().expects())
+            {
+                bool hasRule = false;
+                for (auto const& token : aAtom.as_schema_atom().as_schema_node_atom().tokens())
+                    if (expect->is_conceptually_related_to(*token.first()))
+                    {
+                        hasRule = true;
+                        break;
+                    }
+                if (!hasRule)
+                {
+                    aAtom.as_schema_atom().as_schema_node_atom().tokens().push_back(
+                        neolib::make_pair(
+                            atom_ptr{ expect }, 
+                            neolib::make_ref<schema_terminal_atom>(aAtom.as_schema_atom().as_schema_node_atom().context().as_schema_atom(), schema_terminal::Done)));
+                }
+            }
+//            for (auto& token : aAtom.as_schema_atom().as_schema_node_atom().tokens())
+//                if (token.second()->is_schema_atom() && token.second()->as_schema_atom().is_schema_node_atom() && token.second()->as_schema_atom().as_schema_node_atom().is_token_node())
+//                    fixup_expected(*token.second());
+            for (auto& child : aAtom.as_schema_atom().as_schema_node_atom().children())
+                fixup_expected(*child.first());
         }
 
         std::string schema::fully_qualified_name(const i_atom& aAtom) const
