@@ -56,6 +56,7 @@ namespace neos
             Drain,
             Next,
             Continue,
+            Recurse,
             Ignore,
             None,
             Error,

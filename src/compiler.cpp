@@ -389,6 +389,10 @@ namespace neos::language
                         currentSource = result.sourceParsed;
                         iterToken = aAtom.tokens().begin();
                         break;
+                    case parse_result::Recurse:
+                        if (aAtom.has_parent())
+                            return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSource);
+                        return parse_result{ aSource, parse_result::NoMatch };
                     case parse_result::NoMatch:
                         if (token.is_schema_atom() && token.as_schema_atom().is_schema_terminal_atom() && token.as_schema_atom().as_schema_terminal_atom().type() == schema_terminal::String)
                             result.sourceParsed = std::prev(result.sourceParsed, token.symbol().size());
@@ -521,6 +525,13 @@ namespace neos::language
                         auto result = consume_token(aPass, aProgram, aUnit, aFragment, aAtom, aResult);
                         if (result.action == parse_result::Consumed)
                             result.action = parse_result::Continue;
+                        return result;
+                    }
+                case schema_terminal::Recurse:
+                    {
+                        auto result = consume_token(aPass, aProgram, aUnit, aFragment, aAtom, aResult);
+                        if (result.action == parse_result::Consumed)
+                            result.action = parse_result::Recurse;
                         return result;
                     }
                 case schema_terminal::Done:

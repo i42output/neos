@@ -184,6 +184,7 @@ namespace neos::language
                 Done,
                 ForNext,
                 Continue,
+                Recurse,
                 Ignored,
                 NoMatch,
                 Error

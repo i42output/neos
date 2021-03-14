@@ -33,6 +33,7 @@ namespace neos
             Drain,
             Next,
             Continue,
+            Recurse,
             Ignore,
             Error,
             Default

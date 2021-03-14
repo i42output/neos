@@ -20,7 +20,6 @@
         expect: root_keyword
         whitespace: ignore
         comment: ignore
-        root_keyword: done
     }
 
     whitespace: {
@@ -256,6 +255,8 @@
                 expect: none
                 ';': {
                     expect: parameter_block
+                    parameter_block: recurse
+                    whitespace: ignore
                 }
                 whitespace: ignore
                 default: next
@@ -268,10 +269,12 @@
                 parameter: {
                     ',': {
                         expect: parameter
+                        parameter: recurse
+                        whitespace: ignore
                     }
                     ':': {
                         expect: type
-                        type: done
+                        whitespace: ignore
                     }
                     whitespace: ignore
                 }
@@ -295,10 +298,12 @@
                 expect: none
                 ';': {
                     expect: parameter_block
+                    parameter_block: recurse
+                    whitespace: ignore
                 }
                 whitespace: ignore
                 default: next
-            }
+            }   
             whitespace: ignore
             default: next
         }
@@ -307,6 +312,8 @@
                 parameter: {
                     ',': {
                         expect: parameter
+                        parameter: recurse
+                        whitespace: ignore
                     }
                     ':': {
                         expect: keyword
@@ -314,14 +321,12 @@
                         keyword.in : language.function.parameter.direction.in
                         language.function.parameter.direction.in : {
                             expect: type
-                            type: done
                         }
                         keyword.out : language.function.parameter.direction.out
                         language.function.parameter.direction.out : {
                             expect: type
-                            type: done
                         }
-                        type: done
+                        whitespace: ignore
                     }
                     whitespace: ignore
                 }
@@ -355,7 +360,6 @@
                         expect: type
                         type: {
                             expect: end
-                            end: done
                         }
                     }
                     whitespace: ignore
@@ -422,14 +426,11 @@
             }
             expression: {
                 expect: end
-                end: done
             }
             assignment: {
                 expect: end
-                end: done
             }
             keyword.if: if
-            end: done
             whitespace: ignore
         }
         if: {
@@ -443,7 +444,6 @@
                             fn_statement: logic.operator.if
                             logic.operator.if : {
                                 expect: else
-                                else: done
                                 default: next
                             }
                         }
@@ -468,7 +468,6 @@
                         fn_statement: logic.operator.elseif
                         logic.operator.elseif: {
                             expect: else
-                            else: done
                             default: next
                         }
                     }
@@ -500,14 +499,11 @@
             }
             expression: {
                 expect: end
-                end: done
             }
             assignment: {
                 expect: end
-                end: done
             }
             keyword.if: if
-            end: done
             whitespace: ignore
         }
         if: {
@@ -521,7 +517,6 @@
                             proc_statement: logic.operator.if
                             logic.operator.if : {
                                 expect: else
-                                else: done
                                 default: next
                             }
                         }
@@ -546,7 +541,6 @@
                         proc_statement: logic.operator.elseif
                         logic.operator.elseif: {
                             expect: else
-                            else: done
                             default: next
                         }
                     }
@@ -679,7 +673,6 @@
                     "<=": boolean.operator.relational.greaterthanorequal
                     boolean.operator.relational: {
                         expect: term2
-                        term2: done
                     }
                 }
             }
@@ -687,7 +680,6 @@
                 is: boolean.expression.operand
                 @: {
                     expect: math_expression
-                    math_expression: done
                 }
             
             }
@@ -695,7 +687,6 @@
                 is: boolean.expression.operand
                 @: {
                     expect: math_expression
-                    math_expression: done
                 }
             
             }
@@ -712,6 +703,7 @@
                 '-': math.operator.subtract
                 math.operator.addition: {
                     expect: term
+                    term: recurse
                 }
                 whitespace: ignore
                 default: next
@@ -726,6 +718,7 @@
                     '/': math.operator.divide
                     math.operator.multiplication: {
                         expect: term2
+                        term2: recurse
                     }
                     whitespace: ignore
                     default: next
@@ -741,6 +734,7 @@
                     '^': math.operator.power
                     math.operator: {
                         expect: primary
+                        primary: recurse
                     }
                     whitespace: ignore
                     default: next
@@ -758,7 +752,6 @@
                 '-': math.operator.negate
                 math.operator.negate: {
                     expect: primary
-                    primary: done
                     whitespace: ignore
                 }
                 '(': {

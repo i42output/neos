@@ -80,6 +80,7 @@ namespace neos
                 { "drain", schema_keyword::Drain},
                 { "next", schema_keyword::Next},
                 { "continue", schema_keyword::Continue},
+                { "recurse", schema_keyword::Recurse},
                 { "ignore", schema_keyword::Ignore},
                 { "none", schema_keyword::None},
                 { "error", schema_keyword::Error},
@@ -400,6 +401,9 @@ namespace neos
                     case schema_keyword::Continue:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Continue);
                         break;
+                    case schema_keyword::Recurse:
+                        aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Recurse);
+                        break;
                     case schema_keyword::Ignore:
                         aAtom = neolib::make_ref<schema_terminal_atom>(aParentAtom, schema_terminal::Ignore);
                         break;
@@ -462,15 +466,16 @@ namespace neos
                     }
                 if (!hasRule)
                 {
+                    std::cout << "expecting " << expect->symbol() << " in " << aAtom.symbol() << std::endl;
                     aAtom.as_schema_atom().as_schema_node_atom().tokens().push_back(
                         neolib::make_pair(
                             atom_ptr{ expect }, 
                             neolib::make_ref<schema_terminal_atom>(aAtom.as_schema_atom().as_schema_node_atom().context().as_schema_atom(), schema_terminal::Done)));
                 }
             }
-//            for (auto& token : aAtom.as_schema_atom().as_schema_node_atom().tokens())
-//                if (token.second()->is_schema_atom() && token.second()->as_schema_atom().is_schema_node_atom() && token.second()->as_schema_atom().as_schema_node_atom().is_token_node())
-//                    fixup_expected(*token.second());
+            for (auto& token : aAtom.as_schema_atom().as_schema_node_atom().tokens())
+                if (token.second()->is_schema_atom() && token.second()->as_schema_atom().is_schema_node_atom() && token.second()->as_schema_atom().as_schema_node_atom().is_token_node())
+                    fixup_expected(*token.second());
             for (auto& child : aAtom.as_schema_atom().as_schema_node_atom().children())
                 fixup_expected(*child.first());
         }
