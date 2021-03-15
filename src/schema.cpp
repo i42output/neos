@@ -105,8 +105,10 @@ namespace neos
             }
             else if (!iParsingTokens)
                 throw_error(aChildNode, "unexpected token match rule");
-            auto newChild = aParentAtom.children().insert(
-                atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) }, atom_ptr{});
+            auto const key = atom_ptr{ neolib::make_ref<schema_node_atom>(aParentAtom, aChildNode.name()) };
+            if (aParentAtom.children().find(key) != aParentAtom.children().end())
+                throw_error(aChildNode, "duplicate key '" + key->symbol() + "'");
+            auto newChild = aParentAtom.children().insert(key, atom_ptr{});
             iContext.push_back(&newChild->first()->as_schema_atom().as_schema_node_atom());
             parse(aChildNode, newChild->first()->as_schema_atom().as_schema_node_atom());
             iContext.pop_back();

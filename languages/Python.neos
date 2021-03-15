@@ -57,6 +57,18 @@
         }
     }
 
+    STRING: {
+        @: {
+            expect: string_literal
+        }
+    }
+
+    NAME: {
+        @: {
+            expect: identifier
+        }
+    }
+
     keyword: {
         as: language.keyword
         @: {
@@ -135,10 +147,6 @@
         while:     { is: language.keyword }
         with:      { is: language.keyword }
         yield:     { is: language.keyword }
-    }
-
-    NAME: {
-        is: language.identifier
     }
 
     statement: {
@@ -726,10 +734,10 @@
         list: {
             @: {
                 expect: slice
-                expect: ','
                 slice: {
+                    expect: ','
                     ',': {
-                        list: done
+                        list: recurse
                         default: next
                     }
                     whitespace: ignore
@@ -741,26 +749,149 @@
         }
     }
 
+    slice: {
+        @: {
+            expect: expression
+            expect: lower_bound
+            expect: ':'
+            lower_bound: {
+                expect: ':'
+                ':': {
+                    expect: upper_bound_or_stride
+                }
+            }
+            ':': {
+                expect: upper_bound_or_stride
+            }
+            whitespace: ignore
+        }
+        upper_bound_or_stride: {
+            @: {
+                expect: upper_bound
+                expect: ':'
+                upper_bound: {
+                    ':': {
+                        stride: done
+                        default: next
+                    }
+                }
+                ':': {
+                    stride: done
+                    default: next
+                }
+                whitespace: ignore
+            }
+        }
+        lower_bound: {
+            expect: expression
+        }
+        upper_bound: {
+            expect: expression
+        }
+        stride: {
+            expect: expression
+        }
+    }
+
+    atom: {
+        @: {
+            NAME: done
+            "True" : done
+            "False" : done
+            "None" : done
+            "__peg_parser__": error
+            strings : done
+            NUMBER : done
+            tuple: done
+            group: done
+            genexp: done
+            list: done
+            listcomp: done
+            dict: done
+            set: done
+            dictcomp: done
+            setcomp: done
+            "...": done
+            whitespace: ignore
+        }
+    }
+
+    strings: {
+        @: {
+            expect: STRING
+            STRING: continue
+            default: next
+        }
+    }
+
+    list: {
+        @: {
+            expect: '['
+            '[': {
+                expect: star_named_expressions
+                expect: ']'
+                star_named_expressions: {
+                    expect: ']'
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    listcomp: {
+        @: {
+            expect: '['
+            '[': {
+                expect: named_expression
+                named_expression: {
+                    expect: for_if_clauses
+                    for_if_clauses: {
+                        expect: ']'
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
 /*
-slices:
-    | slice !',' 
-    | ','.slice+ [','] 
-slice:
-    | [expression] ':' [expression] [':' [expression] ] 
-    | expression 
-atom:
-    | NAME
-    | 'True' 
-    | 'False' 
-    | 'None' 
-    | '__peg_parser__' 
-    | strings
-    | NUMBER
-    | (tuple | group | genexp)
-    | (list | listcomp)
-    | (dict | set | dictcomp | setcomp)
-    | '...' 
-*/
+    strings: STRING+ 
+list:
+    | '[' [star_named_expressions] ']' 
+listcomp:
+    | '[' named_expression ~ for_if_clauses ']' 
+tuple:
+    | '(' [star_named_expression ',' [star_named_expressions]  ] ')' 
+group:
+    | '(' (yield_expr | named_expression) ')' 
+genexp:
+    | '(' named_expression ~ for_if_clauses ')' 
+set: '{' star_named_expressions '}' 
+setcomp:
+    | '{' named_expression ~ for_if_clauses '}' 
+dict:
+    | '{' [double_starred_kvpairs] '}' 
+dictcomp:
+    | '{' kvpair for_if_clauses '}' 
+double_starred_kvpairs: ','.double_starred_kvpair+ [','] 
+double_starred_kvpair:
+    | '**' bitwise_or 
+    | kvpair
+kvpair: expression ':' expression 
+for_if_clauses:
+    | for_if_clause+
+for_if_clause:
+    | ASYNC 'for' star_targets 'in' ~ disjunction ('if' disjunction )* 
+    | 'for' star_targets 'in' ~ disjunction ('if' disjunction )* 
+yield_expr:
+    | 'yield' 'from' expression 
+    | 'yield' [star_expressions] 
+    */
     assignment_expression: {
     }
 

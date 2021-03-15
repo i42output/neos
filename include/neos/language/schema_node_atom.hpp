@@ -44,7 +44,6 @@ namespace neos::language
         typedef i_schema_node_atom::tokens_t abstract_tokens_t;
         typedef atom_map_list_t tokens_t;
         typedef neolib::map<neolib::ref_ptr<i_atom>, neolib::ref_ptr<i_atom>> atom_map_t;
-        typedef atom_map_t token_map_t;
         typedef atom_map_t children_t;
     private:
         typedef std::unordered_map<const i_atom*, const i_atom*> token_cache_t; // for packrat memoization.
