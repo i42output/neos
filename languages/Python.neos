@@ -859,6 +859,31 @@
         }
     }
 
+    tuple: {
+        @: {
+            expect: '('
+            '(': {
+                expect: star_named_expression
+                expect: ')'
+                star_named_expression: {
+                    expect: ','
+                    ',': {
+                        expect: star_named_expressions
+                        star_named_expressions: {
+                            expect: ')'
+                            whitespace: ignore
+                        }
+                        expect: ')'
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
 /*
     strings: STRING+ 
 list:

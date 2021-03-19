@@ -468,7 +468,6 @@ namespace neos
                     }
                 if (!hasRule)
                 {
-                    std::cout << "expecting " << expect->symbol() << " in " << aAtom.symbol() << std::endl;
                     aAtom.as_schema_atom().as_schema_node_atom().tokens().push_back(
                         neolib::make_pair(
                             atom_ptr{ expect }, 

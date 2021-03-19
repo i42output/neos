@@ -24,11 +24,13 @@ namespace neos::concepts::core
 {   
     class language_eof : public neos_concept<>
     {
+        // construction
     public:
         language_eof() :
             neos_concept{ "language.eof", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -39,11 +41,13 @@ namespace neos::concepts::core
 
     class language_whitespace : public neos_concept<>
     {
+        // construction
     public:
         language_whitespace() :
             neos_concept{ "language.whitespace", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -54,11 +58,13 @@ namespace neos::concepts::core
 
     class language_comment : public neos_concept<>
     {
+        // construction
     public:
         language_comment() :
             neos_concept{ "language.comment", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -69,11 +75,13 @@ namespace neos::concepts::core
 
     class language_keyword : public neos_concept<>
     {
+        // construction
     public:
         language_keyword() :
             neos_concept{ "language.keyword", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -110,11 +118,13 @@ namespace neos::concepts::core
 
     class language_scope : public neos_concept<>
     {
+        // construction
     public:
         language_scope() :
             neos_concept{ "language.scope", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -125,11 +135,13 @@ namespace neos::concepts::core
 
     class language_scope_open : public neos_concept<>
     {
+        // construction
     public:
         language_scope_open() :
             neos_concept{ "language.scope.open", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -140,11 +152,13 @@ namespace neos::concepts::core
 
     class language_scope_open_by_indentation : public neos_concept<>
     {
+        // construction
     public:
         language_scope_open_by_indentation() :
             neos_concept{ "language.scope.open.by_indentation", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -155,11 +169,13 @@ namespace neos::concepts::core
 
     class language_scope_close : public neos_concept<>
     {
+        // construction
     public:
         language_scope_close() :
             neos_concept{ "language.scope.close", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -170,11 +186,13 @@ namespace neos::concepts::core
 
     class language_scope_add_package : public neos_concept<>
     {
+        // construction
     public:
         language_scope_add_package() :
             neos_concept{ "language.scope.add.package", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -185,26 +203,42 @@ namespace neos::concepts::core
 
     class language_function : public neos_concept<>
     {
+        // construction
     public:
         language_function() :
             neos_concept{ "language.function", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
             aConsumed = false;
             return aSource;
         }
+        // emit
+    protected:
+        bool can_fold() const override
+        {
+            return false;
+        }
+        bool can_fold(const i_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.function.scope")
+                return true;
+            return false;
+        }
     };
 
     class language_function_scope : public neos_concept<>
     {
+        // construction
     public:
         language_function_scope(i_concept& aParent) :
             neos_concept{ aParent, "language.function.scope", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -215,11 +249,13 @@ namespace neos::concepts::core
 
     class language_function_parameters : public neos_concept<>
     {
+        // construction
     public:
         language_function_parameters() :
             neos_concept{ "language.function.parameters", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -230,11 +266,13 @@ namespace neos::concepts::core
 
     class language_function_parameter : public neos_concept<>
     {
+        // construction
     public:
         language_function_parameter() :
             neos_concept{ "language.function.parameter", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -245,11 +283,13 @@ namespace neos::concepts::core
 
     class language_function_parameter_direction_in : public neos_concept<>
     {
+        // construction
     public:
         language_function_parameter_direction_in() :
             neos_concept{ "language.function.parameter.direction.in", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -260,11 +300,13 @@ namespace neos::concepts::core
 
     class language_function_parameter_direction_out : public neos_concept<>
     {
+        // construction
     public:
         language_function_parameter_direction_out() :
             neos_concept{ "language.function.parameter.direction.out", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -275,11 +317,13 @@ namespace neos::concepts::core
 
     class language_function_locals : public neos_concept<>
     {
+        // construction
     public:
         language_function_locals() :
             neos_concept{ "language.function.locals", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -290,11 +334,13 @@ namespace neos::concepts::core
 
     class language_function_local : public neos_concept<>
     {
+        // construction
     public:
         language_function_local() :
             neos_concept{ "language.function.local", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -305,11 +351,13 @@ namespace neos::concepts::core
 
     class language_function_return : public neos_concept<>
     {
+        // construction
     public:
         language_function_return() :
             neos_concept{ "language.function.return", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -320,11 +368,13 @@ namespace neos::concepts::core
 
     class language_function_signature : public neos_concept<>
     {
+        // construction
     public:
         language_function_signature() :
             neos_concept{ "language.function.signature", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -335,11 +385,13 @@ namespace neos::concepts::core
 
     class language_function_import : public neos_concept<>
     {
+        // construction
     public:
         language_function_import() :
             neos_concept{ "language.function.import", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -350,11 +402,13 @@ namespace neos::concepts::core
 
     class language_function_arguments : public neos_concept<>
     {
+        // construction
     public:
         language_function_arguments() :
             neos_concept{ "language.function.arguments", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -365,11 +419,13 @@ namespace neos::concepts::core
 
     class language_function_argument : public neos_concept<>
     {
+        // construction
     public:
         language_function_argument() :
             neos_concept{ "language.function.argument", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -380,11 +436,13 @@ namespace neos::concepts::core
 
     class language_function_call : public neos_concept<>
     {
+        // construction
     public:
         language_function_call() :
             neos_concept{ "language.function.call", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -395,11 +453,13 @@ namespace neos::concepts::core
 
     class language_type : public neos_concept<>
     {
+        // construction
     public:
         language_type() :
             neos_concept{ "language.type", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -410,11 +470,13 @@ namespace neos::concepts::core
 
     class language_type_tuple : public neos_concept<>
     {
+        // construction
     public:
         language_type_tuple() :
             neos_concept{ "language.type.tuple", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -426,11 +488,13 @@ namespace neos::concepts::core
     template <typename Float>
     class language_type_float : public neos_concept<>
     {
+        // construction
     public:
         language_type_float(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -442,11 +506,13 @@ namespace neos::concepts::core
     template <typename Integer>
     class language_type_integer : public neos_concept<>
     {
+        // construction
     public:
         language_type_integer(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -458,11 +524,13 @@ namespace neos::concepts::core
     template <typename Character>
     class language_type_string : public neos_concept<>
     {
+        // construction
     public:
         language_type_string(i_concept& aParent, const std::string& aName) :
             neos_concept{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
@@ -473,11 +541,13 @@ namespace neos::concepts::core
 
     class language_type_custom : public neos_concept<>
     {
+        // construction
     public:
         language_type_custom(i_concept& aParent) :
             neos_concept{ aParent, "language.type.custom", neos::language::emit_type::Infix }
         {
         }
+        // parse
     public:
         source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
         {
