@@ -39,11 +39,13 @@ namespace neos
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
-        context();
-        context(neolib::i_application& aApplication);
+        context(std::ostream& aCout);
+        context(std::ostream& aCout, neolib::i_application& aApplication);
         ~context();
     public:
-        const concept_libraries_t& concept_libraries() const override;
+        std::ostream& cout() final;
+    public:
+        const concept_libraries_t& concept_libraries() const final;
     public:
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
@@ -51,23 +53,24 @@ namespace neos
         const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
-        language::compiler& compiler() override;
+        language::compiler& compiler() final;
         void compile_program();
         const program_t& program() const;
         program_t& program();
         const text_t& text() const;
     public:
-        bool running() const override;
-        void run() override;
-        bytecode::reg_64 evaluate(const std::string& aExpression) override;
-        const neolib::i_string& metrics() const override;
+        bool running() const final;
+        void run() final;
+        bytecode::reg_64 evaluate(const std::string& aExpression) final;
+        const neolib::i_string& metrics() const final;
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);
         translation_unit_t& load_unit(language::source_fragment&& aFragment, std::istream& aStream);
-        void load_fragment(language::i_source_fragment& aFragment) override;
+        void load_fragment(language::i_source_fragment& aFragment) final;
         void load_fragment(language::i_source_fragment& aFragment, std::istream& aStream);
     private:
+        std::ostream& iCout;
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;
         concept_libraries_t iConceptLibraries;

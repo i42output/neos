@@ -52,3 +52,6 @@
 /3rdparty/libffi-3.3/win32/vs16_x86/libffi-msvc.sln
 /3rdparty/libffi-3.3/win32/vs16_x86/libffi/libffi.vcxproj
 /3rdparty/libffi-3.3/winlibs.mak
+/lib/neos.pdb
+/lib/neosd.idb
+/lib/neosd.pdb

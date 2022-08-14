@@ -56,7 +56,7 @@ namespace neos::language
                     {
                         iCompiler.fold_stack().push_back(aEntry);
                         if (iCompiler.trace() >= 2)
-                            std::cout << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, *aEntry.fragment, aEntry.sourceStart, false) << "> "
+                            iCompiler.iContext.cout() << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, *aEntry.fragment, aEntry.sourceStart, false) << "> "
                                 << aEntry.concept_->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
                     }
                 });
@@ -199,7 +199,7 @@ namespace neos::language
                 return probeResult;
         }
         if (trace() >= 4)
-            std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
+            iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
         if (aSource == aFragment.cend())
             return parse_result{ aSource, parse_result::NoMatch, aUnit.schema->eof() };
         scoped_concept_folder scs{ *this, aPass };
@@ -257,7 +257,7 @@ namespace neos::language
                 return probeResult;
         }
         if (trace() >= 4)
-            std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
+            iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         auto currentSource = aSource;
         bool defaultOk = aAtom.expect_none();
@@ -455,7 +455,7 @@ namespace neos::language
                 return probeResult;
         }
         if (trace() >= 4)
-            std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
+            iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token_match(" << aAtom.symbol() << ":" << aMatchResult.symbol() << ")" << std::endl;
         scoped_concept_folder poe{ *this, aPass, postfix_operation_stack() };
         std::optional<scoped_concept_folder> scs;
         if (!aSelf)
@@ -503,7 +503,7 @@ namespace neos::language
                 return probeResult;
         }
         if (trace() >= 4)
-            std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
+            iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_token(" << aAtom.symbol() << ":" << aToken.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
         if (aToken.is_schema_atom())
         {
@@ -582,7 +582,7 @@ namespace neos::language
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
-                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
+                iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(token): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             parse_stack().push_back(concept_stack_entry{ &aUnit, &aFragment, state().iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
@@ -600,7 +600,7 @@ namespace neos::language
         if (consumeResult.consumed && aPass == compiler_pass::Emit)
         {
             if (trace() >= 5)
-                std::cout << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
+                iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
             aConceptStack.push_back(concept_stack_entry{ &aUnit, &aFragment, state().iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
@@ -642,7 +642,7 @@ namespace neos::language
                 if (trace() >= 1)
                     traceOutput << "folding: " << traceBefore << " <- " << traceBefore << std::endl;
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    std::cout << traceOutput.str();
+                    iContext.cout() << traceOutput.str();
                 traceOutput.str({});
                 single.fold(iContext);
                 if (single.foldedConcept != nullptr)
@@ -657,7 +657,7 @@ namespace neos::language
                     isingle = fold_stack().erase(isingle);
                 }
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    std::cout << traceOutput.str();
+                    iContext.cout() << traceOutput.str();
                 traceOutput.str({});
                 didSome = true;
             }
@@ -684,13 +684,13 @@ namespace neos::language
                 if (trace() >= 1)
                     traceOutput << "folding: " << lhsTraceBefore << " <- " << rhsTraceBefore << std::endl;
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    std::cout << traceOutput.str();
+                    iContext.cout() << traceOutput.str();
                 traceOutput.str({});
                 lhs.fold(iContext, rhs);
                 if (trace() >= 1)
                     traceOutput << "folded: " << lhsTraceBefore << " <- " << rhsTraceBefore << " = " << lhs.trace() << std::endl;
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    std::cout << traceOutput.str();
+                    iContext.cout() << traceOutput.str();
                 traceOutput.str({});
                 irhs = fold_stack().erase(irhs);
                 if (irhs != fold_stack().begin())
@@ -721,8 +721,8 @@ namespace neos::language
 
     void compiler::display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment)
     {
-        std::cout << "Probe trace:-" << std::endl;
-        std::cout << "================" << std::endl;
+        iContext.cout() << "Probe trace:-" << std::endl;
+        iContext.cout() << "================" << std::endl;
         while (std::adjacent_find(
             state().iDeepestProbe->stacks.begin(),
             state().iDeepestProbe->stacks.end(),
@@ -737,7 +737,7 @@ namespace neos::language
             {
                 if (first)
                 {
-                    s.front().trace(aUnit, false, trace_filter(), std::cout);
+                    s.front().trace(aUnit, false, trace_filter(), iContext.cout());
                     first = false;
                 }
                 s.pop_front();
@@ -748,14 +748,14 @@ namespace neos::language
                 i = state().iDeepestProbe->stacks.erase(i);
             else
                 ++i;
-        std::cout << "================" << std::endl;
+        iContext.cout() << "================" << std::endl;
         for (auto s : state().iDeepestProbe->stacks)
         {
             for (auto const& e : s)
             {
-                e.trace(aUnit, &e == &s.back(), trace_filter(), std::cout);
+                e.trace(aUnit, &e == &s.back(), trace_filter(), iContext.cout());
             }
-            std::cout << "----------------" << std::endl;
+            iContext.cout() << "----------------" << std::endl;
         }
     }
 

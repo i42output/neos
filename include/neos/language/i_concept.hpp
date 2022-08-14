@@ -64,7 +64,7 @@ namespace neos::language
     public:
         struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_concept::no_parent") {} };
         struct invalid_fold : std::logic_error { invalid_fold() : std::logic_error("neos::language::i_concept::invalid_fold") {} };
-        struct cannot_instantiate : std::logic_error { cannot_instantiate() : std::logic_error("neos::language::i_concept::cannot_instantiate") {} };
+        struct cannot_instantiate : std::logic_error { cannot_instantiate(std::string const& aName) : std::logic_error("neos::language::i_concept::cannot_instantiate: " + aName) {} };
         struct already_instantiated : std::logic_error { already_instantiated() : std::logic_error("neos::language::i_concept::already_instantiated") {} };
         struct not_an_instance : std::logic_error { not_an_instance() : std::logic_error("neos::language::i_concept::not_an_instance") {} };
         struct data_is_constant : std::logic_error { data_is_constant() : std::logic_error("neos::language::i_concept::data_is_constant") {} };

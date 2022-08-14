@@ -25,7 +25,8 @@
 
 namespace neos
 {
-    context::context() : 
+    context::context(std::ostream& aCout) :
+        iCout{ aCout },
         iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
@@ -33,7 +34,8 @@ namespace neos
         init();
     }
 
-    context::context(neolib::i_application& aApplication) :
+    context::context(std::ostream& aCout, neolib::i_application& aApplication) :
+        iCout{ aCout },
         iApplication{ aApplication },
         iCompiler{ *this }
     {
@@ -44,6 +46,11 @@ namespace neos
 
     context::~context()
     {
+    }
+
+    std::ostream& context::cout()
+    {
+        return iCout;
     }
 
     const context::concept_libraries_t& context::concept_libraries() const
@@ -61,7 +68,7 @@ namespace neos
         std::string const schemaPath = (aSchemaPath.empty() && iSchema ? schema().path() : aSchemaPath);
         if (schemaPath.empty())
             throw no_schema_path_specified();
-        std::cout << "Loading schema '" + schemaPath + "'..." << std::endl;
+        cout() << "Loading schema '" + schemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
         if (boost::filesystem::exists(schemaPath))

@@ -146,7 +146,7 @@ namespace neos::language
             if constexpr (!std::is_same_v<instance_type, void>)
                 return new concept_instance<instance_type>{ static_cast<const InstanceType&>(*this), aSource, aSourceEnd };
             else
-                throw cannot_instantiate();
+                throw cannot_instantiate(name());
         }
         const void* representation(representation_kind) const override
         {

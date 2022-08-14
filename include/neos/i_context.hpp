@@ -43,6 +43,8 @@ namespace neos
         struct no_text : warning { no_text() : warning("no text") {} };
         struct compiler_error : error { compiler_error(const std::string& aReason) : error(aReason) {} };
     public:
+        virtual std::ostream& cout() = 0;
+    public:
         virtual const concept_libraries_t& concept_libraries() const = 0;
     public:
         virtual language::i_compiler& compiler() = 0;
