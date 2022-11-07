@@ -55,3 +55,6 @@
 /lib/neos.pdb
 /lib/neosd.idb
 /lib/neosd.pdb
+/build/win32/vs2022/x64
+/build/win32/vs2022/.vs
+/build/win32/vs2022/neos.vcxproj.user

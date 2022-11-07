@@ -152,7 +152,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
 void main_loop(boost::program_options::variables_map& aOptions)
 {
     std::cout << "neos " << neos::NEOS_VERSION << std::endl;
-    neos::context context;
+    neos::context context{ std::cout };
     bool interactive = false;
     bool first = true;
     for (;;)
