@@ -34,6 +34,15 @@ namespace neos
         init();
     }
 
+    context::context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) :
+        iCout{ aCout },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }, aServiceProvider) },
+        iApplication{ *iPrivateApplication },
+        iCompiler{ *this }
+    {
+        init();
+    }
+
     context::context(std::ostream& aCout, neolib::i_application& aApplication) :
         iCout{ aCout },
         iApplication{ aApplication },

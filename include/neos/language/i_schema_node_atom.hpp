@@ -56,6 +56,7 @@ namespace neos::language
         i_schema_terminal_atom& as_schema_terminal_atom() override { throw wrong_type(); }
     public:
 		virtual bool is_token_node() const = 0;
+        virtual bool is_string_token_node() const = 0;
 		virtual const i_atom& token() const = 0; 
 		virtual neolib::i_ref_ptr<i_atom>& token_ref_ptr() = 0;
     public:

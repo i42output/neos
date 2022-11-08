@@ -40,6 +40,7 @@ namespace neos
         typedef language::program program_t;
     public:
         context(std::ostream& aCout);
+        context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider);
         context(std::ostream& aCout, neolib::i_application& aApplication);
         ~context();
     public:

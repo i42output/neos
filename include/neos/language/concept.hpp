@@ -102,6 +102,10 @@ namespace neos::language
         {
             throw not_an_instance();
         }
+        void update_source(source_iterator aSource, source_iterator aSourceEnd) override
+        {
+            throw not_an_instance();
+        }
         const neolib::i_string& trace() const override
         {
             thread_local neolib::string traceResult = name() + "()";
@@ -167,10 +171,13 @@ namespace neos::language
                 typedef typename instance_type::representation_type representation_type;
                 if (can_fold(aRhs) && as_instance().can_fold(aRhs))
                 {
-                    if (aRhs.is_instance() || aRhs.has_constant_data())
-                        as_instance().data<neolib::abstract_interface_t<representation_type>>() = aRhs.data<neolib::abstract_interface_t<representation_type>>();
-                    else
-                        throw base_type::invalid_fold();
+                    if constexpr (!std::is_same_v<representation_type, void>)
+                    {
+                        if (aRhs.is_instance() || aRhs.has_constant_data())
+                            as_instance().data<neolib::abstract_interface_t<representation_type>>() = aRhs.data<neolib::abstract_interface_t<representation_type>>();
+                        else
+                            throw base_type::invalid_fold();
+                    }
                     return &as_instance();
                 }
                 throw invalid_fold();
@@ -191,6 +198,20 @@ namespace neos::language
         using neos_concept::neos_concept;
     };
 
+    template <typename R>
+    struct concept_representation_instance
+    {
+        typedef R instance_type;
+    };
+    template <>
+    struct concept_representation_instance<void>
+    {
+        typedef struct {} instance_type;
+    };
+
+    template <typename R>
+    using concept_representation_instance_t = typename concept_representation_instance<R>::instance_type;
+        
     template <typename Concept>
     class concept_instance : public Concept
     {
@@ -219,11 +240,19 @@ namespace neos::language
         {
             return iSourceEnd;
         }
+        void update_source(source_iterator aSource, source_iterator aSourceEnd) override
+        {
+            iSource = aSource;
+            iSourceEnd = aSourceEnd;
+        }
         const neolib::i_string& trace() const override
         {
             thread_local neolib::string traceResult;
             std::ostringstream oss;
-            oss << concept_type::name() << "(" << *static_cast<const representation_type*>(representation(representation_kind_v<representation_type>)) << ")";
+            if constexpr (!std::is_same_v<representation_type, void>)
+                oss << concept_type::name() << "(" << *static_cast<const representation_type*>(representation(representation_kind_v<representation_type>)) << ")";
+            else
+                oss << concept_type::name() << "(*)";
             traceResult = oss.str();
             return traceResult;
         }
@@ -261,7 +290,7 @@ namespace neos::language
     private:
         source_iterator iSource;
         source_iterator iSourceEnd;
-        representation_type iRepresentation;
+        concept_representation_instance_t<representation_type> iRepresentation;
     };
 
     class concept_instance_proxy : public neolib::reference_counted<i_concept>
@@ -314,6 +343,11 @@ namespace neos::language
         source_iterator source_end() const override
         {
             return iSourceEnd;
+        }
+        void update_source(source_iterator aSource, source_iterator aSourceEnd) override
+        {
+            iSource = aSource;
+            iSourceEnd = aSourceEnd;
         }
         const neolib::i_string& trace() const override
         {

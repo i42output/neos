@@ -152,7 +152,7 @@ namespace neos::language
         while (source != aFragment.cend())
         {
             state().iDeepestProbe = std::nullopt;
-            auto result = parse(compiler_pass::Emit, aProgram, aUnit, aFragment, aUnit.schema->root(), source);
+            auto result = parse(compiler_pass::Emit, aProgram, aUnit, aFragment, aUnit.schema->root(), source, source);
             if (result.action == parse_result::NoMatch)
             {
                 if (trace() >= 3 && state().iDeepestProbe)
@@ -187,24 +187,24 @@ namespace neos::language
         return *iCompilationStateStack.back();
     }
 
-    compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource)
+    compiler::parse_result compiler::parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSourceStart, source_iterator aSourceParsed)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         neolib::scoped_counter sc{ state().iLevel };
-        scoped_stack_trace sst{ *this, aAtom, aSource, "parse" };
+        scoped_stack_trace sst{ *this, aAtom, aSourceParsed, "parse" };
         if (aPass == compiler_pass::Emit)
         {
-            auto probeResult = parse(compiler_pass::Probe, aProgram, aUnit, aFragment, aAtom, aSource);
+            auto probeResult = parse(compiler_pass::Probe, aProgram, aUnit, aFragment, aAtom, aSourceStart, aSourceParsed);
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
         if (trace() >= 4)
             iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse(" << aAtom.symbol() << ")" << std::endl;
-        if (aSource == aFragment.cend())
-            return parse_result{ aSource, parse_result::NoMatch, aUnit.schema->eof() };
+        if (aSourceParsed == aFragment.cend())
+            return parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch, aUnit.schema->eof() };
         scoped_concept_folder scs{ *this, aPass };
         bool const expectingToken = !aAtom.expects().empty();
-        if (aSource != aFragment.cend())
+        if (aSourceParsed != aFragment.cend())
         {
             if (expectingToken)
             {
@@ -227,7 +227,7 @@ namespace neos::language
                             }
                         }
                     }
-                    auto result = parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom, expected{ &*expect, &aAtom }, aSource);
+                    auto result = parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom, expected{ &*expect, &aAtom }, aSourceStart, aSourceParsed);
                     if (is_finished(result) || result.action == parse_result::Consumed)
                         return result;
                     if (state().iDeepestProbe == std::nullopt || state().iDeepestProbe->source < result.sourceParsed)
@@ -235,31 +235,32 @@ namespace neos::language
                     else if (state().iDeepestProbe->source == result.sourceParsed)
                         state().iDeepestProbe->stacks.push_back(state().iStackTrace);
                 }
-                return parse_result{ aSource, parse_result::NoMatch };
+                return parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch };
             }
             else
-                return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom, expected{}, aSource);
+                return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom, expected{}, aSourceStart, aSourceParsed);
         }
         else
-            return expectingToken ? parse_result{ aSource, parse_result::NoMatch } : parse_result{ aSource };
+            return expectingToken ? parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch } : parse_result{ aSourceStart, aSourceParsed };
         //auto loop = emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::u64{ 10 });
         //emit(aProgram.text, bytecode::opcode::ADD, bytecode::registers::R1, bytecode::i8{ -1 });
         //emit(aProgram.text, bytecode::opcode::B, loop);
     }
 
-    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource)
+    compiler::parse_result compiler::parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSourceStart, source_iterator aSourceParsed)
     {
         _limit_recursion_to_(compiler, aUnit.schema->meta().parserRecursionLimit);
         if (aPass == compiler_pass::Emit)
         {
-            auto probeResult = parse_tokens(compiler_pass::Probe, aProgram, aUnit, aFragment, aAtom, aExpected, aSource);
+            auto probeResult = parse_tokens(compiler_pass::Probe, aProgram, aUnit, aFragment, aAtom, aExpected, aSourceStart, aSourceParsed);
             if (probeResult.action == parse_result::NoMatch)
                 return probeResult;
         }
         if (trace() >= 4)
             iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "parse_tokens(" << aAtom.symbol() << ")" << std::endl;
         scoped_concept_folder scs{ *this, aPass };
-        auto currentSource = aSource;
+        auto sourceStart = aSourceStart;
+        auto currentSource = aSourceParsed;
         bool defaultOk = aAtom.expect_none();
         auto expectedAtom = aExpected.what;
         auto expectedConsumed = aExpected.consumed;
@@ -268,7 +269,7 @@ namespace neos::language
         if (expectedAtom && expectedAtom->is_schema_atom() && expectedAtom->as_schema_atom().is_schema_node_atom() &&
             expectedAtom->as_schema_atom().as_schema_node_atom().as())
         {
-            auto result = parse(aPass, aProgram, aUnit, aFragment, expectedAtom->as_schema_atom().as_schema_node_atom(), currentSource);
+            auto result = parse(aPass, aProgram, aUnit, aFragment, expectedAtom->as_schema_atom().as_schema_node_atom(), sourceStart, currentSource);
             if (is_finished(result))
             {
                 currentSource = result.sourceParsed;
@@ -296,8 +297,8 @@ namespace neos::language
         if (expectedAtom && iterToken == aAtom.tokens().end())
         {
             if (aAtom.has_parent())
-                return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSource);
-            return parse_result{ aSource, parse_result::NoMatch };
+                return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSourceStart, aSourceParsed);
+            return parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch };
         }
         bool skipConsume = (expectedAtom && expectedConsumed);
         for (; currentSource != aFragment.cend() && iterToken != aAtom.tokens().end();)
@@ -306,7 +307,7 @@ namespace neos::language
             auto const& tokenValue = *iterToken->second();
             if (aAtom.is_token_node() && aAtom.token() == token)
                 defaultOk = true;
-            parse_result result{ currentSource };
+            parse_result result{ sourceStart, currentSource };
             if (!skipConsume)
                 result = parse_token(aPass, aProgram, aUnit, aFragment, aAtom, token, result);
             skipConsume = false;
@@ -387,18 +388,19 @@ namespace neos::language
                     case parse_result::Ignored:
                     case parse_result::Continue:
                         currentSource = result.sourceParsed;
+                        sourceStart = currentSource;
                         iterToken = aAtom.tokens().begin();
                         break;
                     case parse_result::Recurse:
                         if (aAtom.has_parent())
-                            return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSource);
-                        return parse_result{ aSource, parse_result::NoMatch };
+                            return parse_tokens(aPass, aProgram, aUnit, aFragment, aAtom.parent().as_schema_atom().as_schema_node_atom(), aExpected, aSourceStart, aSourceParsed);
+                        return parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch };
                     case parse_result::NoMatch:
                         if (token.is_schema_atom() && token.as_schema_atom().is_schema_terminal_atom() && token.as_schema_atom().as_schema_terminal_atom().type() == schema_terminal::String)
                             result.sourceParsed = std::prev(result.sourceParsed, token.symbol().size());
                         return result;
                     case parse_result::Error:
-                        return parse_result{ result.sourceParsed, parse_result::NoMatch };
+                        return parse_result{ aSourceStart, result.sourceParsed, parse_result::NoMatch };
                     default:
                         /* do nothing */
                         break;
@@ -410,7 +412,7 @@ namespace neos::language
             else
             {
                 if (!handledExpect && aExpected.what)
-                    return parse_result{ aSource, parse_result::NoMatch };
+                    return parse_result{ aSourceStart, aSourceParsed, parse_result::NoMatch };
                 ++iterToken;
             }
             handledExpect = true;
@@ -419,7 +421,7 @@ namespace neos::language
                 if (token.is_schema_atom() && token.as_schema_atom().is_schema_terminal_atom() &&
                     token.as_schema_atom().as_schema_terminal_atom().type() == schema_terminal::Default)
                 {
-                    auto result = parse_token(aPass, aProgram, aUnit, aFragment, aAtom, tokenValue, parse_result{ currentSource });
+                    auto result = parse_token(aPass, aProgram, aUnit, aFragment, aAtom, tokenValue, parse_result{ sourceStart, currentSource });
                     switch (result.action)
                     {
                     case parse_result::Drain:
@@ -442,7 +444,7 @@ namespace neos::language
                 }
             }
         }
-        return parse_result{ currentSource, currentSource == aFragment.cend() || aAtom.tokens().empty() ? parse_result::Consumed : parse_result::NoMatch };
+        return parse_result{ aSourceStart, currentSource, currentSource == aFragment.cend() || aAtom.tokens().empty() ? parse_result::Consumed : parse_result::NoMatch };
     }
 
     compiler::parse_result compiler::parse_token_match(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult, bool aSelf)
@@ -508,7 +510,9 @@ namespace neos::language
         if (aToken.is_schema_atom())
         {
             if (aToken.as_schema_atom().is_schema_node_atom())
-                return parse(aPass, aProgram, aUnit, aFragment, aToken.as_schema_atom().as_schema_node_atom(), aResult.sourceParsed).with_if(aResult.atom);
+                return parse(aPass, aProgram, aUnit, aFragment, aToken.as_schema_atom().as_schema_node_atom(), 
+                    std::next(aResult.sourceStart, aAtom.is_string_token_node() ? aAtom.token().symbol().size() : 0), 
+                    aResult.sourceParsed).with_if(aResult.atom);
             else if (aToken.as_schema_atom().is_schema_terminal_atom())
             {
                 auto const& terminal = aToken.as_schema_atom().as_schema_terminal_atom();
@@ -601,7 +605,7 @@ namespace neos::language
         {
             if (trace() >= 5)
                 iContext.cout() << std::string(_compiler_recursion_limiter_.depth(), ' ') << "push(atom): " << aConcept.name().to_std_string() << " (" << std::string(aResult.sourceParsed, consumeResult.sourceParsed) << ")" << std::endl;
-            aConceptStack.push_back(concept_stack_entry{ &aUnit, &aFragment, state().iLevel, &aConcept, aResult.sourceParsed, consumeResult.sourceParsed });
+            aConceptStack.push_back(concept_stack_entry{ &aUnit, &aFragment, state().iLevel, &aConcept, aResult.sourceStart, consumeResult.sourceParsed });
         }
         return aResult.with(consumeResult.sourceParsed, consumeResult.consumed ? aResult.action : parse_result::NoMatch);
     }

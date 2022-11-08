@@ -83,6 +83,7 @@ namespace neos::language
         virtual source_iterator consume_atom(compiler_pass aPass, const i_atom& aAtom, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const = 0;
         virtual source_iterator source() const = 0;
         virtual source_iterator source_end() const = 0;
+        virtual void update_source(source_iterator aSource, source_iterator aSourceEnd) = 0;
         virtual const neolib::i_string& trace() const = 0;
         // emit
     public:

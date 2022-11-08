@@ -26,6 +26,7 @@
 #include <neolib/core/reference_counted.hpp>
 #include <neos/language/i_concept_atom.hpp>
 #include <neos/language/i_schema_node_atom.hpp>
+#include <neos/language/i_schema_terminal_atom.hpp>
 #include <neos/language/atom.hpp>
 #include <neos/language/concept.hpp>
 
@@ -74,6 +75,12 @@ namespace neos::language
 		{
 			return iToken != nullptr;
 		}
+        bool is_string_token_node() const override
+        {
+            return is_token_node() && token().is_schema_atom() &&
+                token().as_schema_atom().is_schema_terminal_atom() &&
+                token().as_schema_atom().as_schema_terminal_atom().type() == schema_terminal::String;
+        }
 		const i_atom& token() const override
 		{
 			if (is_token_node())

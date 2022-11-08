@@ -201,8 +201,11 @@ namespace neos::concepts::core
         }
     };
 
-    class language_function : public neos_concept<>
+    class language_function : public neos_concept<language_function>
     {
+        // types
+    public:
+        typedef void representation_type;
         // construction
     public:
         language_function() :
@@ -222,11 +225,19 @@ namespace neos::concepts::core
         {
             return false;
         }
+        i_concept* do_fold(i_context& aContext) override
+        {
+            return nullptr;
+        }
         bool can_fold(const i_concept& aRhs) const override
         {
             if (aRhs.name() == "language.function.scope")
                 return true;
             return false;
+        }
+        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        {
+            return this;
         }
     };
 
@@ -608,7 +619,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.type.u64" }] = neolib::make_ref<language_type_integer<uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
 // bignum
 //        concepts()[neolib::string{ "language.type.integer" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.integer");
-//        concepts()[neolib::string{ "language.type.float" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.float");
+//        concepts()[neolib::string{ "language.type.real" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.real");
 //        concepts()[neolib::string{ "language.type.rational" }] = neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.rational");
         concepts()[neolib::string{ "language.type.string" }] = neolib::make_ref<language_type_string<char>>(*concepts()[neolib::string{ "language.type" }], "language.type.string");
         concepts()[neolib::string{ "language.type.custom" }] = neolib::make_ref<language_type_custom>(*concepts()[neolib::string{ "language.type" }]);

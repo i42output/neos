@@ -41,6 +41,7 @@
     <ClInclude Include="..\..\..\include\neos\language\concept_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\concept_library.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\concept_library_plugin.hpp" />
+    <ClInclude Include="..\..\..\include\neos\language\data.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_atom.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_compiler.hpp" />
     <ClInclude Include="..\..\..\include\neos\language\i_concept.hpp" />
@@ -62,6 +63,7 @@
     <None Include="..\..\..\languages\examples\Ada\ExitCode.adb" />
     <None Include="..\..\..\languages\examples\Ada\gem_7.ada" />
     <None Include="..\..\..\languages\examples\Ada\HelloWorld.ada" />
+    <None Include="..\..\..\languages\examples\neoscript\add.neo" />
     <None Include="..\..\..\languages\examples\neoscript\fibonacci.neo" />
     <None Include="..\..\..\languages\neoscript.neos" />
     <None Include="..\..\..\languages\packages\neoscript\neos.stream.neo" />

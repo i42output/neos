@@ -176,6 +176,7 @@ namespace neos::language
         typedef std::optional<source_iterator> optional_source_iterator;
         struct parse_result
         {
+            source_iterator sourceStart;
             source_iterator sourceParsed;
             enum action_e
             {
@@ -190,25 +191,33 @@ namespace neos::language
                 Error
             } action;
             const i_atom* atom;
+            parse_result(source_iterator aSourceParsed, action_e aAction = Consumed, const i_atom* aAtom = nullptr) :
+                sourceStart{ aSourceParsed }, sourceParsed{ aSourceParsed }, action{ aAction }, atom{ aAtom }
+            {
+            }
+            parse_result(source_iterator aSourceStart, source_iterator aSourceParsed, action_e aAction = Consumed, const i_atom* aAtom = nullptr) :
+                sourceStart{ aSourceStart }, sourceParsed{ aSourceParsed }, action{ aAction }, atom{ aAtom }
+            {
+            }
             parse_result with(source_iterator aSourceParsed, action_e aAction = Consumed) const
             {
-                return parse_result{ aSourceParsed, aAction, atom };
+                return parse_result{ sourceStart, aSourceParsed, aAction, atom };
             }
             parse_result with(action_e aAction) const
             {
-                return parse_result{ sourceParsed, aAction, atom };
+                return parse_result{ sourceStart, sourceParsed, aAction, atom };
             }
             parse_result with(const i_atom& aAtom) const
             {
-                return parse_result{ sourceParsed, action, &aAtom };
+                return parse_result{ sourceStart, sourceParsed, action, &aAtom };
             }
             parse_result with_if(const i_atom& aAtom) const
             {
-                return parse_result{ sourceParsed, action, atom == nullptr ? &aAtom : atom};
+                return parse_result{ sourceStart, sourceParsed, action, atom == nullptr ? &aAtom : atom};
             }
             parse_result with_if(const i_atom* aAtom) const
             {
-                return parse_result{ sourceParsed, action, atom == nullptr ? aAtom : atom };
+                return parse_result{ sourceStart, sourceParsed, action, atom == nullptr ? aAtom : atom };
             }
         };
         struct expected
@@ -226,6 +235,22 @@ namespace neos::language
             source_iterator sourceStart;
             source_iterator sourceEnd;
             neolib::ref_ptr<i_concept> foldedConcept;
+            concept_stack_entry(
+                translation_unit* unit,
+                i_source_fragment const* fragment,
+                uint32_t level,
+                const i_concept* concept_,
+                source_iterator sourceStart,
+                source_iterator sourceEnd
+            ) :
+                unit{ unit },
+                fragment{ fragment },
+                level{ level },
+                concept_{ concept_ },
+                sourceStart{ sourceStart },
+                sourceEnd{ sourceEnd }
+            {
+            }
             bool can_fold() const
             {
                 return foldedConcept ? foldedConcept->can_fold() : concept_->can_fold();
@@ -255,6 +280,12 @@ namespace neos::language
                     foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
                 else
                     foldedConcept = foldedConcept->fold(aContext, concept_instance_proxy{ *rhs.concept_, rhs.sourceStart, rhs.sourceEnd });
+                if (fragment == rhs.fragment)
+                {
+                    sourceStart = std::min(sourceStart, rhs.sourceStart);
+                    sourceEnd = std::max(sourceEnd, rhs.sourceEnd);
+                    foldedConcept->update_source(sourceStart, sourceEnd);
+                }
             }
             std::string trace() const
             {
@@ -368,8 +399,8 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
-        parse_result parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSource);
-        parse_result parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSource);
+        parse_result parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSourceStart, source_iterator aSourceParsed);
+        parse_result parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSourceStart, source_iterator aSourceParsed);
         parse_result parse_token_match(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
         parse_result parse_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
         parse_result consume_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult);

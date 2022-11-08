@@ -146,17 +146,17 @@ namespace neos::concepts::core
         }
         i_concept* do_fold(i_context& aContext) override
         {
-            std::reverse(base_type::as_instance().data<representation_type>().begin(), base_type::as_instance().data<representation_type>().end());
+            std::reverse(as_instance().data<representation_type>().begin(), as_instance().data<representation_type>().end());
             iFolded = true;
             return this;
         }
         bool can_fold(const i_concept& aRhs) const override
         {
-            return aRhs.name().to_std_string_view().find(base_type::name().to_std_string_view()) == 0;
+            return aRhs.name().to_std_string_view().find(name().to_std_string_view()) == 0;
         }
         i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
         {
-            if (can_fold(aRhs) && base_type::as_instance().can_fold(aRhs))
+            if (can_fold(aRhs) && as_instance().can_fold(aRhs))
             {
                 if (aRhs.is_instance() || aRhs.has_constant_data())
                     as_instance().data<representation_type>().push_back(aRhs.data<character_type>());

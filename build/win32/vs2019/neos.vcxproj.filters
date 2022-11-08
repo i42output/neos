@@ -137,6 +137,9 @@
     <ClInclude Include="..\..\..\include\neos\language\i_compiler.hpp">
       <Filter>Header Files\language</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\include\neos\language\data.hpp">
+      <Filter>Header Files\language</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\languages\Ada.neos">
@@ -171,6 +174,9 @@
     </None>
     <None Include="..\..\..\languages\Python.neos">
       <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\languages\examples\neoscript\add.neo">
+      <Filter>Example Scripts</Filter>
     </None>
   </ItemGroup>
 </Project>
