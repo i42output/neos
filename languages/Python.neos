@@ -69,6 +69,18 @@
         }
     }
 
+    ASYNC: {
+        @: {
+            expect: "async"
+        }
+    }
+
+    AWAIT: {
+        @: {
+            expect: "await"
+        }
+    }
+
     keyword: {
         as: language.keyword
         @: {
@@ -158,21 +170,21 @@
         simple_stmt: {
             @: {
                 expression_stmt : done
-     //           assert_stmt : done
-     //           assignment_stmt : done
-     //           augmented_assignment_stmt : done
-     //           annotated_assignment_stmt : done
-     //           pass_stmt : done
-     //           del_stmt : done
-     //           return_stmt : done
-     //           yield_stmt : done
-     //           raise_stmt : done
-     //           break_stmt : done
-     //           continue_stmt : done
-     //           import_stmt : done
-     //           future_stmt : done
-     //           global_stmt : done
-     //           nonlocal_stmt : done
+                assert_stmt : done
+                assignment_stmt : done
+                augmented_assignment_stmt : done
+                annotated_assignment_stmt : done
+                pass_stmt : done
+                del_stmt : done
+                return_stmt : done
+                yield_stmt : done
+                raise_stmt : done
+                break_stmt : done
+                continue_stmt : done
+                import_stmt : done
+                future_stmt : done
+                global_stmt : done
+                nonlocal_stmt : done
             }
             expression_stmt : {
                 @: {
@@ -727,8 +739,8 @@
 
     slices: {
         @: {
-            expect: slice
             expect: list
+            expect: slice
             whitespace: ignore
         }
         list: {
@@ -884,39 +896,225 @@
         }
     }
 
-/*
-    strings: STRING+ 
-list:
-    | '[' [star_named_expressions] ']' 
-listcomp:
-    | '[' named_expression ~ for_if_clauses ']' 
-tuple:
-    | '(' [star_named_expression ',' [star_named_expressions]  ] ')' 
-group:
-    | '(' (yield_expr | named_expression) ')' 
-genexp:
-    | '(' named_expression ~ for_if_clauses ')' 
-set: '{' star_named_expressions '}' 
-setcomp:
-    | '{' named_expression ~ for_if_clauses '}' 
-dict:
-    | '{' [double_starred_kvpairs] '}' 
-dictcomp:
-    | '{' kvpair for_if_clauses '}' 
-double_starred_kvpairs: ','.double_starred_kvpair+ [','] 
-double_starred_kvpair:
-    | '**' bitwise_or 
-    | kvpair
-kvpair: expression ':' expression 
-for_if_clauses:
-    | for_if_clause+
-for_if_clause:
-    | ASYNC 'for' star_targets 'in' ~ disjunction ('if' disjunction )* 
-    | 'for' star_targets 'in' ~ disjunction ('if' disjunction )* 
-yield_expr:
-    | 'yield' 'from' expression 
-    | 'yield' [star_expressions] 
-    */
+    group: {
+        @: {
+            expect: '('
+            '(': {
+                expect: yield_expr
+                expect: named_expression
+                yield_expr: done
+                named_expression: done
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    genexp: {
+        @: {
+            expect: '('
+            '(': {
+                expect: named_expression
+                named_expression: {
+                    expect: for_if_clauses
+                    for_if_clauses: {
+                        expect: ')'
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    set: {
+        @: {
+            expect: '{'
+            '{': {
+                expect: star_named_expressions
+                star_named_expressions: {
+                    expect: '}'
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    setcomp: {
+        @: {
+            expect: '{'
+            '{': {
+                expect: named_expression
+                named_expression: {
+                    expect: for_if_clauses
+                    for_if_clauses: {
+                        expect: '}'
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    dict: {
+        @: {
+            expect: '{'
+            '{': {
+                expect: double_starred_kvpairs
+                expect: '}'
+                double_starred_kvpairs: {
+                    expect: '}'
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    dictcomp: {
+        @: {
+            expect: '{'
+            '{': {
+                expect: kvpair
+                kvpair: {
+                    expect: for_if_clauses
+                    for_if_clauses: {
+                        expect: '}'
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+            whitespace: ignore
+        }
+    }
+
+    double_starred_kvpairs: {
+        @: {
+            expect: list
+            expect: double_starred_kvpair
+            double_starred_kvpair: {
+                ',': done
+                whitespace: ignore
+                default: next
+            }
+            whitespace: ignore
+        }
+        list: {
+            @: {
+                expect: double_starred_kvpair
+                expect: ','
+                double_starred_kvpair: {
+                    expect: ','
+                    ',': {
+                        list: recurse
+                    }
+                    whitespace: ignore
+                }
+                ',': done
+                whitespace: ignore
+                default: next
+            }
+        }
+    }
+
+    double_starred_kvpair: {
+        @: {
+            expect: "**"
+            expect: kvpair
+            "**": {
+                expect: bitwise_or
+            }
+        }
+    }
+
+    kvpair: {
+        @: {
+            expect: expression
+            expression: {
+                expect: ':'
+                ':': {
+                    expect: expression
+                }
+            }
+        }
+    }
+
+    for_if_clauses: {
+        @: {
+            expect: for_if_clause
+            for_if_clause: continue
+            default: next
+        }
+    }
+
+    for_if_clause: {
+        @: {
+            expect: ASYNC
+            expect: for
+            ASYNC: {
+                expect: for
+            }
+        }
+        for: {
+            @: {
+                expect: star_targets
+                star_targets: {
+                    expect: "in"
+                    "in": {
+                        expect: disjunction
+                        disjunction: {
+                            expect: disjunction_list
+                            whitespace: ignore
+                            default: next
+                        }
+                        whitespace: ignore
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+        disjunction_list: {
+            @: {
+                expect: "if"
+                "if": {
+                    expect: disjunction
+                    disjunction: {
+                        disjnuction_list: recurse
+                        whitespace: ignore
+                        default: next
+                    }
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+    }
+
+    yield_expr: {
+        @: {
+            "yield" : {
+                expect: "from"
+                expect: star_expression
+                "from": {
+                    expect: expression
+                    whitespace: ignore
+                }
+                whitespace: ignore
+            }
+        }
+    }
+
     assignment_expression: {
     }
 
