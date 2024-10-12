@@ -5,7 +5,7 @@
         source.file.extension: ".neo"
         source.package.specification.file.extension: ".neo"
         source.package.implementation.file.extension: ".neo"
-        copyright: "Copyright (C) 2019 Leigh Johnston"
+        copyright: "Copyright (C) 2024 Leigh Johnston"
         version: "1.0.0"
     }
 
