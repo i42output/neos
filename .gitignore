@@ -58,3 +58,9 @@
 /build/win32/vs2022/x64
 /build/win32/vs2022/.vs
 /build/win32/vs2022/neos.vcxproj.user
+/build/win32/vs2022
+/build/win32/vs2017
+/build/win32/vs/x64/Release
+/build/win32/vs/x64/Debug
+/build/win32/vs/.vs/neos/v16
+/build/win32/vs

@@ -230,7 +230,7 @@ namespace neos::language
         {
             translation_unit* unit;
             i_source_fragment const* fragment;
-            uint32_t level;
+            std::uint32_t level;
             const i_concept* concept_;
             source_iterator sourceStart;
             source_iterator sourceEnd;
@@ -238,7 +238,7 @@ namespace neos::language
             concept_stack_entry(
                 translation_unit* unit,
                 i_source_fragment const* fragment,
-                uint32_t level,
+                std::uint32_t level,
                 const i_concept* concept_,
                 source_iterator sourceStart,
                 source_iterator sourceEnd
@@ -381,7 +381,7 @@ namespace neos::language
             concept_stack_t iParseStack;
             concept_stack_t iPostfixOperationStack;
             concept_stack_t iFoldStack;
-            uint32_t iLevel;
+            std::uint32_t iLevel;
         };
         typedef std::vector<std::unique_ptr<compilation_state>> compilation_state_stack_t;
     public:
@@ -391,9 +391,9 @@ namespace neos::language
         void compile(program& aProgram, translation_unit& aUnit);
         void compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         void compile(const i_source_fragment& aFragment) override;
-        uint32_t trace() const;
+        std::uint32_t trace() const;
         const std::optional<std::string>& trace_filter() const;
-        void set_trace(uint32_t aTrace, const std::optional<std::string>& aFilter = {});
+        void set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter = {});
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
     private:
@@ -420,7 +420,7 @@ namespace neos::language
         static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
         i_context& iContext;
-        uint32_t iTrace;
+        std::uint32_t iTrace;
         std::optional<std::string> iTraceFilter;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;

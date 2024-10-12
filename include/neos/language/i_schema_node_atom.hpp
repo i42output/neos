@@ -76,6 +76,6 @@ namespace neos::language
         virtual const i_atom& context() const = 0;
         virtual i_atom& context() = 0;
         virtual const i_atom* find_token(const i_atom& aToken) const = 0;
-        virtual uint32_t recursive_token(const i_atom& aToken) const = 0;
+        virtual std::uint32_t recursive_token(const i_atom& aToken) const = 0;
     };
 }

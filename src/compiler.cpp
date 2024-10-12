@@ -18,7 +18,10 @@
 */
 
 #include <neolib/neolib.hpp>
+
 #include <iostream>
+#include <boost/lexical_cast.hpp>
+
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
 #include <neolib/core/string_utf.hpp>
@@ -82,7 +85,7 @@ namespace neos::language
     {
     }
 
-    uint32_t compiler::trace() const
+    std::uint32_t compiler::trace() const
     {
         return iTrace;
     }
@@ -92,7 +95,7 @@ namespace neos::language
         return iTraceFilter;
     }
 
-    void compiler::set_trace(uint32_t aTrace, const std::optional<std::string>& aFilter)
+    void compiler::set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter)
     {
         iTrace = aTrace;
         iTraceFilter = aFilter;
@@ -812,8 +815,8 @@ namespace neos::language
 
     std::string compiler::location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath)
     {
-        uint32_t line = 1;
-        uint32_t col = 1;
+        std::uint32_t line = 1;
+        std::uint32_t col = 1;
         for (auto pos = aFragment.begin(); pos != aSourcePos; ++pos)
         {
             if (*pos == '\n')

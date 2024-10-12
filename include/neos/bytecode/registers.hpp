@@ -61,7 +61,7 @@ namespace neos
         };
 
         /// @brief registers
-        enum class registers : uint8_t
+        enum class registers : std::uint8_t
         {
             // R0 to R15 are 64-bit registers
             R0  = 0x00,
@@ -140,7 +140,7 @@ namespace neos
         };
 
         /// @brief Flag register
-        enum class flag : uint64_t
+        enum class flag : std::uint64_t
         {
             CF = 0x0000000000000001ull, // Carry flag
             PF = 0x0000000000000002ull, // Parity flag
@@ -153,9 +153,9 @@ namespace neos
             P3 = 0x1100000000000000ull, // Ring-3 privilege
         };
 
-        inline uint8_t operator-(registers lhs, registers rhs)
+        inline std::uint8_t operator-(registers lhs, registers rhs)
         {
-            return static_cast<uint8_t>(lhs) - static_cast<uint8_t>(rhs);
+            return static_cast<std::uint8_t>(lhs) - static_cast<std::uint8_t>(rhs);
         }
     }
 }

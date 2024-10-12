@@ -65,9 +65,9 @@ namespace neos
             virtual const neolib::i_string& copyright() const = 0;
             // helpers
         public:
-            uint32_t depth() const
+            std::uint32_t depth() const
             {
-                uint32_t result = 0;
+                std::uint32_t result = 0;
                 i_concept_library const* l = this;
                 while (l->has_parent())
                 {

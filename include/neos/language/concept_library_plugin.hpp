@@ -25,6 +25,7 @@
 #include <neolib/core/reference_counted.hpp>
 #include <neolib/app/version.hpp>
 #include <neolib/app/i_application.hpp>
+#include <neolib/plugin/plugin.hpp>
 #include <neos/language/i_concept_library.hpp>
 
 namespace neos
@@ -32,7 +33,7 @@ namespace neos
     namespace language
     {
         template <typename ConceptLibrary>
-        class concept_library_plugin : public neolib::reference_counted<neolib::i_plugin>
+        class concept_library_plugin : public neolib::plugin<>
         {
         public:
             typedef ConceptLibrary concept_library_type;
@@ -47,8 +48,7 @@ namespace neos
                 iName{ aName },
                 iDescription{ aDescription },
                 iVersion{ aVersion },
-                iCopyright{ aCopyright },
-                iLoaded{ false }
+                iCopyright{ aCopyright }
             {
             }
         public:
@@ -82,31 +82,12 @@ namespace neos
             {
                 return iCopyright;
             }
-            bool load() override
-            {
-                iLoaded = true;
-                return true;
-            }
-            bool unload() override
-            {
-                iLoaded = false;
-                return true;
-            }
-            bool loaded() const override
-            {
-                return iLoaded;
-            }
-            bool open_uri(const neolib::i_string& aUri) override
-            {
-                return false;
-            }
         private:
             neolib::uuid iId;
             neolib::string iName;
             neolib::string iDescription;
             neolib::version iVersion;
             neolib::string iCopyright;
-            bool iLoaded;
         };
     }
 }

@@ -1,4 +1,4 @@
-{
+%{
     meta: {
         language: "neoscript"
         description: "Default neoGFX scripting language"
@@ -13,861 +13,155 @@
         neos.core
         neos.math.universal
     ]
+}%
 
-    @: {
-        expect: whitespace
-        expect: comment
-        expect: root_keyword
-        whitespace: ignore
-        comment: ignore
-    }
+program $ language.program ::= whitespace , { comment | using directive | import directive | function | procedure } , whitespace ;
+using directive $ source.package.import ::= ( using , whitespace , package name ) ;
+import directive $ language.function.import ::= ( import , whitespace , fn , whitespace , fn sig ) ;
+import directive $ language.function.import ::= ( import , whitespace , proc , whitespace , proc sig ) ;
 
-    whitespace: {
-        is: language.whitespace
-        @: {
-            ' ': ignore
-            '\n': ignore
-            '\r': ignore
-            '\t': ignore
-            default: next
-        }
-    }
+function $ language.function ::= ( fn , whitespace , fn sig , whitespace , fn body ) ;
+procedure $ language.function ::= ( proc , whitespace , proc sig , whitespace , proc locals , whitespace , proc body ) ;
+fn sig $ language.function.signature ::= ( identifier , whitespace , '(' , whitespace , fn parameters , whitespace , ')' , whitespace , "->", whitespace , type ) ;
+proc sig $ language.function.signature ::= ( identifier , whitespace , '(' , whitespace , proc parameters , whitespace , ')' ) ;
+fn parameters $ language.function.parameters ::= ( fn parameter block , { whitespace , ';' , whitespace , fn parameter block } ) ;
+proc parameters $ language.function.parameters ::= ( proc parameter block , { whitespace , ';' , whitespace , proc parameter block } ) ;
+fn parameter block ::= [ parameter , { whitespace , ',' , whitespace , parameter } , whitespace , ':' , whitespace , type ];
+proc parameter block ::= [ parameter , { whitespace , ',' , whitespace , parameter } , whitespace , ':' , whitespace , ( in | out | inout ) , whitespace , type ];
+parameter $ language.function.parameter :: = identifier ;
+proc locals ::= ( proc local block , { whitespace , ';' , whitespace , proc local block } ) ;
+proc local block ::= [ local , { whitespace , ',' , whitespace , local } , whitespace , ':' , whitespace , type ] ;
+local $ language.function.local ::= identifier ;
+fn body $ language.function.body ::= scope ;
+proc body $ language.function.body ::= scope ;
+scope $ langauge.function.scope = ( '{' , whitespace , { statement } , whitespace , '}' ) ; 
 
-    comment: {
-        is: language.comment
-        @: {
-            "--": {
-                '\n': drain
-                default: ignore
-            }
-        }
-    }
+statement $ language.statement ::= 
+    expression | assignment | return statement | if statement | for loop | while loop | do while loop;
 
-    character: {
-        is: string.utf8.character
-    }
+assignment $ language.assignment ::= 
+    ( object , whitespace , ":=" , whitespace , expression );
 
-    package: {
-        name: {
-            is: string.utf8
-            is: source.package.name
-            @: {
-                character.alpha: rest
-                rest: done
-            }
-            rest: {
-                @: {
-                    expect: none
-                    character.alpha: continue
-                    character.period: need_alpha
-                    default: next
-                }
-            }
-            need_alpha: {
-                @: {
-                    character.alpha: rest
-                }
-            }
-        }
-    }
+expression $ language.expression ::= 
+    function call | boolean expression | numeric expression ;
 
-    keyword: {
-        as: language.keyword
-        @: {
-            "using": using
-            "import": import
-            "def": def
-            "fn": fn
-            "proc": proc
-            "in": in
-            "out": out
-            "if": if
-            "else": else
-            "return": return
-            language.keyword: {
-                expect: none
-                character.alpha: error
-                character.underscore: error
-                character.digit: error
-                default: next
-            }
-            whitespace: ignore
-        }
-        using: { is: language.keyword }
-        import: { is: language.keyword }
-        def: { is: language.keyword }
-        fn: { is: language.keyword }
-        proc: { is: language.keyword }
-        in: { is: language.keyword }
-        out: { is: language.keyword }
-        if: { is: language.keyword }
-        else: { is: language.keyword }
-        return: { is: language.keyword }
-    }
+function call $ language.expression.call ::= 
+    identifier , whitespace , '(' , whitespace , arguments , whitespace , ')' ;
 
-    root_keyword:
-    {
-        @: {
-            expect: keyword
-            keyword.using: using
-            keyword.import: import
-            keyword.def: def
-            using: done
-            import: done
-            def: done
-            default: next
-        }
-        using: {
-            @: {
-                expect: whitespace
-                package.name: source.package.import
-                source.package.import: {
-                    expect: end
-                    end: drain
-                }
-                whitespace: ignore
-            }
-        }
-        import: {
-            @: {
-                expect: keyword
-                keyword.fn: fn_sig
-                keyword.proc: proc_sig
-                fn_sig: {
-                    expect: end
-                    end: language.function.import
-                    language.function.import: done
-                }
-                proc_sig: {
-                    expect: end
-                    end: language.function.import
-                    language.function.import: done
-                }
-                whitespace: ignore
-            }
-        }
-        def: {
-            @: {
-                expect: keyword
-                keyword.fn: fn_sig
-                keyword.proc: proc_sig
-                fn_sig: {
-                    expect: fn_scope
-                    fn_scope: language.function
-                    language.function: done
-                }
-                proc_sig: {
-                    expect: proc_locals
-                    expect: proc_scope
-                    proc_locals: {
-                        expect: proc_scope
-                        proc_scope: language.function
-                        language.function: done
-                    }
-                    proc_scope: language.function
-                    language.function: done
-                }
-                whitespace: ignore
-            }
-        }
-        end: {
-            @: {
-                ';': done
-                whitespace: ignore
-            }
-        }
-    }
+boolean expression $ language.expression.boolean ::= 
+      boolean term , { whitespace , ( "or" | "||" ) , whitespace , boolean term, whitespace } $ boolean.logic.operator.or ;
+boolean term ::= 
+      boolean factor , { whitespace , ( "and" | "&&" ) , whitespace , boolean factor , whitespace } $ boolean.logic.operator.and ;
+boolean factor ::= 
+      true 
+    | false 
+    | ( ( "not" | "!" ) , whitespace , boolean factor ) $ boolean.logic.operator.not
+    | '(' , whitespace , boolean expression , whitespace , ')' 
+    | comparison expression ;
+comparison expression ::= 
+      numeric expression , whitespace , comparison operator , whitespace , numeric expression ;
+comparison operator ::= 
+      "=" $ boolean.operator.relational.equal 
+    | "!=" $ boolean.operator.relational.notequal 
+    | "<" $ boolean.operator.relational.lessthan
+    | ">" $ boolean.operator.relational.greaterthan
+    | "<=" $ boolean.operator.relational.lessthanorequal
+    | ">=" $ boolean.operator.relational.greaterthanorequal ;
 
-    identifier: {
-        is: string.utf8
-        is: language.identifier
-        @: {
-            character.alpha: rest
-            character.underscore: rest
-        }
-        rest: {
-            @: {
-                expect: none
-                character.alpha: continue
-                character.underscore: continue
-                character.digit: continue
-                default: next
-            }
-        }
-        end: {
-            @: {
-                expect: none
-                character.alpha: error
-                character.underscore: error
-                character.digit: error
-                default: next
-            }
-        }
-    }
+numeric expression $ math.expression ::= 
+    term , whitespace, { ( "+" $ math.operator.add | "-" $ math.operator.subtract ) , whitespace , term } ;
+term ::= 
+    factor , whitespace, { ( "*" $ math.operator.multiply | "/" $ math.operator.divide ) , whitespace, factor } ;
+factor ::= 
+    [ "-" $ math.operator.negate ] , whitespace , primary ;
+primary ::= 
+    "(" , whitespace , expression , whitespace , ")" | number ;
+number $ math.universal.number ::= 
+    digit sequence , [ '.' , digit sequence , [ exponent ] ]
+exponent ::= 
+    ("e" | "E") , [ "+" | "-" ] , digit sequence ;
+digit sequence ::= 
+    digit , { digit } ;
+digit ::= 
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
-    fn_sig: {
-        is: language.function.signature
-        @: {
-            expect: whitespace
-            identifier: {
-                '(': {
-                    fn_parameters: {
-                        ')': {
-                            "->": {
-                                expect: type
-                                type: language.function.return
-                                language.function.return: done
-                                whitespace: ignore
-                            }
-                            whitespace: ignore
-                            default: next
-                        }
-                    }
-                }
-                whitespace: ignore
-            }
-            whitespace: ignore
-        }
-    }
+return statement $ language.statement.return ::= 
+    ( return , whitespace , expression ) ;
 
-    proc_sig: {
-        is: language.function.signature
-        @: {
-            expect: whitespace
-            identifier: {
-                '(': {
-                    proc_parameters: {
-                        ')': done
-                    }
-                    ')': done
-                    whitespace: ignore
-                }
-                whitespace: ignore
-            }
-            whitespace: ignore
-        }
-    }
+if statement $ language.statement.if ::= 
+    if , whitespace , '(' , whitespace , boolean expression , whitespace , ')' , whitespace , 
+    ( scope | statement ) $ logic.operator.if , [ whitespace , else statement ] ;
+else statement $ language.statement.else ::= 
+    else , whitespace, ( scope | statement ) $ logic.operator.else , whitespace ;
 
-    fn_parameters: {
-        is: language.function.parameters
-        @: {
-            parameter_block: {
-                expect: none
-                ';': {
-                    expect: parameter_block
-                    parameter_block: recurse
-                    whitespace: ignore
-                }
-                whitespace: ignore
-                default: next
-            }
-            whitespace: ignore
-            default: next
-        }
-        parameter_block: {
-            @: {
-                parameter: {
-                    ',': {
-                        expect: parameter
-                        parameter: recurse
-                        whitespace: ignore
-                    }
-                    ':': {
-                        expect: type
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        parameter: {
-            is: language.function.parameter
-            @: {
-                identifier: done
-                whitespace: ignore
-            }
-        }
-    }
+for loop $ language.statement.loop ::= 
+    for clause , scope
+for clause :=
+    for , whitespace , '(' , whitespace , 
+        [ local , whitespace , ':' , whitespace , type , whitespace , ":= , whitespace , expression , whitespace ] $ language.assignment ,
+        ';' , whitespace, boolean expression , whitespace , ';' , whitespace , ( expression | assignment ) , whitespace , ')' ;
 
-    proc_parameters: {
-        is: language.function.parameters
-        @: {
-            parameter_block: {
-                expect: none
-                ';': {
-                    expect: parameter_block
-                    parameter_block: recurse
-                    whitespace: ignore
-                }
-                whitespace: ignore
-                default: next
-            }   
-            whitespace: ignore
-            default: next
-        }
-        parameter_block: {
-            @: {
-                parameter: {
-                    ',': {
-                        expect: parameter
-                        parameter: recurse
-                        whitespace: ignore
-                    }
-                    ':': {
-                        expect: keyword
-                        expect: type
-                        keyword.in : language.function.parameter.direction.in
-                        language.function.parameter.direction.in : {
-                            expect: type
-                        }
-                        keyword.out : language.function.parameter.direction.out
-                        language.function.parameter.direction.out : {
-                            expect: type
-                        }
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        parameter: {
-            is: language.function.parameter
-            @: {
-                identifier: done
-                whitespace: ignore
-            }
-        }
-    }
+while loop $ language.statement.loop ::= 
+    while clause , scope
+while clause :=
+    while , whitespace , '(' , whitespace , boolean expression , whitespace , ')' ;
 
-    proc_locals: {
-        is: language.function.locals
-        @: {
-            local_block: continue
-            whitespace: ignore
-            default: next
-        }
-        local_block: {
-            @: {
-                local: {
-                    ',': {
-                        expect: local
-                    }
-                    ':': {
-                        expect: type
-                        type: {
-                            expect: end
-                        }
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        local: {
-            is: language.function.local
-            @: {
-                identifier: done
-                whitespace: ignore
-            }
-        }
-        end: {
-            @: {
-                ';': done
-                whitespace: ignore
-            }
-        }    
-    }
+do while loop $ language.statement.loop ::= 
+    do, scope, while clause
 
-    fn_scope: {
-        is: language.function.scope
-        @: {
-            '{': {
-                fn_statement: continue
-                whitespace: ignore
-                '}': done
-            }
-            whitespace: ignore
-        }
-    }
+type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 
-    proc_scope: {
-        is: language.function.scope
-        @: {
-            '{': {
-                proc_statement: continue
-                whitespace: ignore
-                '}': done
-            }
-            whitespace: ignore
-        }
-    }
+using $ language.keyword ::= "using" ;
+import $ language.keyword ::= "import" ;
+def $ language.keyword ::= "def" ;
+fn $ language.keyword ::= "fn" ;
+proc $ language.keyword ::= "proc" ;
+in $ language.keyword $ language.function.parameter.in ::= "in" ;
+out $ language.keyword $ language.function.parameter.out ::= "out" ;
+inout $ language.keyword $ language.function.parameter.inout ::= "inout" ;
+if $ language.keyword ::= "if" ;
+else $ language.keyword ::= "else" ;
+for $ language.keyword ::= "for" ;
+while $ language.keyword ::= "while" ;
+do $ language.keyword ::= "do" ;
+return $ language.keyword ::= "return" ;
 
-    fn_statement: {
-        is: language.statement
-        @: {
-            expect: keyword
-            expect: expression
-            expect: assignment
-            expect: end
-            keyword.return: {
-                expect: whitespace
-                expect: expression
-                expression: {
-                    expect: end
-                    end: language.function.return
-                    language.function.return: done
-                }
-                whitespace: ignore
-            }
-            expression: {
-                expect: end
-            }
-            assignment: {
-                expect: end
-            }
-            keyword.if: if
-            whitespace: ignore
-        }
-        if: {
-            @: {
-                '(': {
-                    expect: boolean_expression
-                    boolean_expression: {
-                        expect: ')'
-                        ')': {
-                            fn_scope: logic.operator.if
-                            fn_statement: logic.operator.if
-                            logic.operator.if : {
-                                expect: else
-                                default: next
-                            }
-                        }
-                        whitespace: ignore
-                    }
-                }
-                whitespace: ignore
-            }
-        }
-        else: {
-            @: {
-                expect: keyword
-                keyword.else: 
-                {
-                    expect: keyword
-                    expect: fn_scope
-                    expect: fn_statement
-                    keyword.if: {
-                        expect: fn_scope
-                        expect: fn_statement
-                        fn_scope: logic.operator.elseif
-                        fn_statement: logic.operator.elseif
-                        logic.operator.elseif: {
-                            expect: else
-                            default: next
-                        }
-                    }
-                    fn_scope: logic.operator.else
-                    fn_statement: logic.operator.else
-                    logic.operator.else: done
-                }
-            }
-        }
-        end: {
-            @: {
-                ';': done
-                whitespace: ignore
-            }
-        }
-    }
+package name $ source.package.name ::= alpha , { alpha | "." , alpha } ; 
 
-    proc_statement: {
-        is: language.statement
-        @: {
-            expect: keyword
-            expect: expression
-            expect: assignment
-            expect: end
-            keyword.return: {
-                expect: end
-                end: language.function.return
-                language.function.return: done
-            }
-            expression: {
-                expect: end
-            }
-            assignment: {
-                expect: end
-            }
-            keyword.if: if
-            whitespace: ignore
-        }
-        if: {
-            @: {
-                '(': {
-                    expect: boolean_expression
-                    boolean_expression: {
-                        expect: ')'
-                        ')': {
-                            proc_scope: logic.operator.if
-                            proc_statement: logic.operator.if
-                            logic.operator.if : {
-                                expect: else
-                                default: next
-                            }
-                        }
-                        whitespace: ignore
-                    }
-                }
-                whitespace: ignore
-            }
-        }
-        else: {
-            @: {
-                expect: keyword
-                keyword.else: 
-                {
-                    expect: keyword
-                    expect: proc_scope
-                    expect: proc_statement
-                    keyword.if: {
-                        expect: proc_scope
-                        expect: proc_statement
-                        proc_scope: logic.operator.elseif
-                        proc_statement: logic.operator.elseif
-                        logic.operator.elseif: {
-                            expect: else
-                            default: next
-                        }
-                    }
-                    proc_scope: logic.operator.else
-                    proc_statement: logic.operator.else
-                    logic.operator.else: done
-                }
-            }
-        }
-        end: {
-            @: {
-                ';': done
-                whitespace: ignore
-            }
-        }
-    }
+identifier ::= ( alpha ) , { alphanumeric | '_' } ;
 
-    assignment: {
-        @: {
-            identifier: {
-                ":=": {
-                    expect: expression
-                    expression: object.assign
-                    object.assign: done
-                }
-                whitespace: ignore
-            }
-        }
-    }
-    
-    type: {
-        @: {
-            "i8": language.type.i8
-            "u8": language.type.u8
-            "i16": language.type.i16
-            "u16": language.type.u16
-            "i32": language.type.i32
-            "u32": language.type.u32
-            "i64": language.type.i64
-            "u64": language.type.u64
-            "string": language.type.string
-            identifier: language.type.custom
-            language.type.custom: done
-            language.type: {
-                identifier.end: done
-            }
-            whitespace: ignore
-        }
-    }
+keyword ::= { alpha } + ;
 
-    expression: {
-        is: language.expression
-        @: {
-            expect: boolean_expression
-            expect: math_expression
-            expect: whitespace
-            boolean_expression: done
-            math_expression: done
-            whitespace: ignore
-        }
-        function_call: {
-            @: {
-                expect: identifier
-                identifier: {
-                    expect: whitespace
-                    expect: '('
-                    '(': {
-                        ')': language.function.call
-                        language.function.call: done
-                        function_call_arguments: {
-                            ')': language.function.call
-                            language.function.call: done
-                            whitespace: ignore
-                        }
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-            }
-        }
-        function_call_arguments: {
-            @: {
-                expect: function_call_argument
-                function_call_argument: {
-                    expect: none
-                    ',': {
-                        expect: function_call_arguments
-                        function_call_arguments: done
-                    }
-                    whitespace: ignore
-                    default: next
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        function_call_argument: {
-            @: {
-                expect: math_expression
-                expect: boolean_expression
-                boolean_expression: language.function.argument
-                math_expression: language.function.argument
-                language.function.argument: done
-            }
-        }    
-    }
+comment $ language.comment ::= "--" , { character - '\n' }, ( '\n' | ? eof ? ) ;
+whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } ;
 
-    boolean_expression: {
-        is: boolean.expression
-        @: {
-            relation: done
-            '!': {
-                expect: boolean_expression
-                boolean_expression: boolean.operator.logical.not
-                boolean.operator.logical.not: done
-            }
-            whitespace: ignore
-        }
-        relation: {
-            @: {
-                expect: term1
-                term1: {
-                    '=': boolean.operator.relational.equal
-                    "/=": boolean.operator.relational.notequal
-                    "!=": boolean.operator.relational.notequal
-                    '<': boolean.operator.relational.lessthan
-                    '>': boolean.operator.relational.greaterthan
-                    "<=": boolean.operator.relational.lessthanorequal
-                    "<=": boolean.operator.relational.greaterthanorequal
-                    boolean.operator.relational: {
-                        expect: term2
-                    }
-                }
-            }
-            term1: {
-                is: boolean.expression.operand
-                @: {
-                    expect: math_expression
-                }
-            
-            }
-            term2: {
-                is: boolean.expression.operand
-                @: {
-                    expect: math_expression
-                }
-            
-            }
-        }
-    }
+alpha ::= "A" .. "Z" | "a" .. "z" ;
+alphanumeric ::= alpha | "0" .. "9" ;
 
-    math_expression: {
-        is: math.expression
-        @: {
-            expect: term
-            term: {
-                expect: none
-                '+': math.operator.add
-                '-': math.operator.subtract
-                math.operator.addition: {
-                    expect: term
-                    term: recurse
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        term: {
-            @: {
-                expect: term2
-                term2: {
-                    expect: none
-                    '*': math.operator.multiply
-                    '/': math.operator.divide
-                    math.operator.multiplication: {
-                        expect: term2
-                        term2: recurse
-                    }
-                    whitespace: ignore
-                    default: next
-                }
-            }
-        }
-        term2: {
-            @: {
-                expect: primary
-                primary: {
-                    expect: none
-                    '**': math.operator.power
-                    '^': math.operator.power
-                    math.operator: {
-                        expect: primary
-                        primary: recurse
-                    }
-                    whitespace: ignore
-                    default: next
-                }
-            }
-        }
-        primary: {
-            is: math.expression.operand
-            @: {
-                string_literal: done
-                math.universal.number.digit: universal_number
-                universal_number: done
-                expression.function_call: done
-                identifier: done
-                '-': math.operator.negate
-                math.operator.negate: {
-                    expect: primary
-                    whitespace: ignore
-                }
-                '(': {
-                    expect: math_expression
-                    math_expression: {
-                        expect: ')'
-                        ')': done
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-            }
-        }
-    }
+bool $ language.type.boolean ::= "bool" ;
+i8 $ language.type.i8 ::= "i8" ;
+u8 $ language.type.u8 ::= "u8" ;
+i16 $ language.type.i16 ::= "i16" ;
+u16 $ language.type.u16 ::= "u16" ;
+i32 $ language.type.i32 ::= "i32" ;
+u32 $ language.type.u32 ::= "u32" ;
+i64 $ language.type.i64 ::= "i64" ;
+u64 $ language.type.u64 ::= "u64" ;
+float $ language.type.float ::= "float" ;
+double $ language.type.double ::= "double" ;
+character $ language.type.character ::= "char" ;
+string $ language.type.string ::= "string" ;
+object $ language.type.object ::= identifier ;
 
-    string_literal: {
-        is: string.utf8
-        @: {
-            '\"': start
-        }
-        start: {
-            @: {                
-                '\"': {
-                    whitespace: ignore
-                    end: next
-                }
-                escape: continue
-                '\\': error
-                '\n': ignore
-                '\r': ignore
-                character: continue
-            }
-        }
-        end: {
-            @: {
-                expect: none
-                '\"': start
-                default: next
-            }
-        }
-        escape: {
-            @: {
-                '\\': {
-                    'n': character.LF
-                    character.LF: done
-                    'r': character.CR
-                    character.CR: done
-                    't': character.tab
-                    character.tab: done
-                    '\\': character.backslash
-                    character.backslash: done
-                }
-            }
-        }
-    }
+true $ language.object.boolean.true ::= "true" ;
+false $ language.object.boolean.false ::= "false" ;
 
-    universal_number: {
-        is: math.universal.number
-        @: {
-            digit: {
-                digit: continue
-                '.': point
-                point: {
-                    '.': error
-                    digit: continue
-                    'e': exponent
-                    'E': exponent
-                    default: next
-                }
-                default: next
-            }
-            '#': base
-            base: {
-                hexdigit: continue
-                '.': point
-                point: {
-                    '.': error
-                    hexdigit: continue
-                    '#': {
-                        'e': exponent
-                        'E': exponent
-                        default: next
-                    }
-                    default: next
-                }
-                '#': {
-                    'e': exponent
-                    'E': exponent
-                    default: next
-                }
-            }
-            exponent: {
-                expect: '+'
-                expect: '-'
-                '+': exponent.positive
-                exponent.positive: {
-                    expect: digit
-                    digit: exponent.digit
-                    exponent.digit: {
-                        digit: exponent.digit
-                        exponent.digit: continue
-                        default: next
-                    }
-                }
-                '-': exponent.negative
-                exponent.negative: {
-                    expect: digit
-                    digit: exponent.digit
-                    exponent.digit: {
-                        digit: exponent.digit
-                        exponent.digit: continue
-                        default: next
-                    }
-                }
-            }
-        }
-    }
-}
+raw character $ string.utf8.character ::= ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) | escaped character ) ;
+escaped character $ string.utf8.character.LF ::= ( "\\n" ) ;
+escaped character $ string.utf8.character.CR ::= ( "\\r" ) ;
+escaped character $ string.utf8.character.tab ::= ( "\\t" ) ;
+escaped character $ string.utf8.character.doublequote ::= ( "\\\"" ) ;
+escaped character $ string.utf8.character.singlequote::= ( "\\\'" ) ;
+escaped character $ string.utf8.character.backslash ::= ( "\\\\" ) ;
+character literatal ::= ( '\'' , raw character , '\'' ) ;
+string literal ::= ( '\"' , { raw character } , '\"' ) ;

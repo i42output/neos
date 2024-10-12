@@ -18,7 +18,10 @@
 */
 
 #include <neolib/neolib.hpp>
+
 #include <iostream>
+#include <filesystem>
+
 #include <neolib/core/string_utf.hpp>
 #include <neolib/app/application.hpp>
 #include <neos/context.hpp>
@@ -80,9 +83,9 @@ namespace neos
         cout() << "Loading schema '" + schemaPath + "'..." << std::endl;
         iSchemaSource.reset();
         iSchema.reset();
-        if (boost::filesystem::exists(schemaPath))
+        if (std::filesystem::exists(schemaPath))
             iSchemaSource.emplace(schemaPath);
-        else if (boost::filesystem::exists(schemaPath + ".neos"))
+        else if (std::filesystem::exists(schemaPath + ".neos"))
             iSchemaSource.emplace(schemaPath + ".neos");
         iSchema = std::make_shared<language::schema>(schemaPath, *iSchemaSource, concept_libraries());
 

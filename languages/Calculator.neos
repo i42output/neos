@@ -1,9 +1,12 @@
-{
+(* a simple program schema in neosBNF *)
+(* neosBNF describes both the syntax and the semantics of a programming language *)
+(* semantic concepts are tagged in the schema using the $ construct *)
+%{
     meta: {
         language: "Calculator"
         description: "A simple expression evaluator language (for neos testing purposes)"
         language.file.extension: [ ".calc" ]
-        copyright: "Copyright (C) 2019 Leigh Johnston"
+        copyright: "Copyright (C) 2024 Leigh Johnston"
         version: "1.0.0"
     }
 
@@ -11,179 +14,17 @@
         neos.core
         neos.math.universal
     ]
+}%
 
-    expect: statement
-    expect: whitespace
-
-    @: {
-        statement: done
-        whitespace: done
-    }
-
-    character: {
-        is: string.utf8.character
-    }
-
-    whitespace: {
-        is: language.whitespace
-        @: {
-            ' ': done
-            '\n': done
-            '\r': done
-            '\t': done
-            default: error
-        }
-    }
-
-    statement: {
-        is: language.statement
-        expect: end
-        expect: expression
-        @: {
-            expression: {
-                expect: end
-                end: done
-            }
-            end: done
-            whitespace: ignore
-        }
-        end: {
-            @: {
-                ';': done
-                whitespace: ignore
-            }
-        }
-    }
-
-    expression: {
-        is: math.expression
-        expect: term
-        @: {
-            term: {
-                expect: none
-                '+': math.operator.add
-                '-': math.operator.subtract
-                math.operator.addition: {
-                    expect: term
-                }
-                whitespace: ignore
-                default: next
-            }
-        }
-        term: {
-            expect: term2
-            @: {
-                term2: {
-                    expect: none
-                    '*': math.operator.multiply
-                    '/': math.operator.divide
-                    math.operator.multiplication: {
-                        expect: term2
-                    }
-                    whitespace: ignore
-                    default: next
-                }
-            }
-        }
-        term2: {
-            expect: primary
-            @: {
-                primary: {
-                    expect: none
-                    '**': math.operator.power
-                    '^': math.operator.power
-                    math.operator: {
-                        expect: primary
-                    }
-                    whitespace: ignore
-                    default: next
-                }
-            }
-        }
-        primary: {
-            is: math.expression.operand
-            @: {
-                math.universal.number.digit: universal_number
-                universal_number: done
-                '-': math.operator.negate
-                math.operator.negate: {
-                    expect: primary
-                    primary: done
-                    whitespace: ignore
-                }
-                '(': {
-                    expect: expression
-                    expression: {
-                        expect: ')'
-                        ')': done
-                        whitespace: ignore
-                    }
-                    whitespace: ignore
-                }
-                whitespace: ignore
-            }
-        }
-    }
-
-    universal_number: {
-        is: math.universal.number
-        @: {
-            digit: {
-                digit: continue
-                '.': point
-                point: {
-                    '.': error
-                    digit: continue
-                    'e': exponent
-                    'E': exponent
-                    default: next
-                }
-                default: next
-            }
-            '#': base
-            base: {
-                hexdigit: continue
-                '.': point
-                point: {
-                    '.': error
-                    hexdigit: continue
-                    '#': {
-                        'e': exponent
-                        'E': exponent
-                        default: next
-                    }
-                    default: next
-                }
-                '#': {
-                    'e': exponent
-                    'E': exponent
-                    default: next
-                }
-            }
-            exponent: {
-                expect: '+'
-                expect: '-'
-                '+': exponent.positive
-                exponent.positive: {
-                    expect: digit
-                    digit: exponent.digit
-                    exponent.digit: {
-                        digit: exponent.digit
-                        exponent.digit: continue
-                        default: next
-                    }
-                }
-                '-': exponent.negative
-                exponent.negative: {
-                    expect: digit
-                    digit: exponent.digit
-                    exponent.digit: {
-                        digit: exponent.digit
-                        exponent.digit: continue
-                        default: next
-                    }
-                }
-            }
-        }
-    }
-}
+program $ language.program ::= whitespace , statement , whitespace ;
+whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' } ;
+character ::= U+000000 .. U+10FFFF ;
+statement $ language.statement ::= { expression , whitespace , ";" } ;
+expression $ math.expression ::= term , whitespace, { ( "+" $ math.operator.add | "-" $ math.operator.subtract ) , whitespace , term } ;
+term ::= factor , whitespace, { ( "*" $ math.operator.multiply | "/" $ math.operator.divide ) , whitespace, factor } ;
+factor ::= [ "-" $ math.operator.negate ] , whitespace , primary ;
+primary ::= "(" , whitespace , expression , whitespace , ")" | number ;
+number $ math.universal.number ::= digit sequence , [ '.' , digit sequence , [ exponent ] ]
+exponent ::= ("e" | "E") , [ "+" | "-" ] , digit sequence ;
+digit sequence ::= digit , { digit } ;
+digit ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;

@@ -119,7 +119,7 @@ namespace neos
                     // todo: update flags based on result of arithmetic
                     aRegister += aData;
                 }
-                inline uint32_t ADD(opcode aOpcode, const std::byte* aText)
+                inline std::uint32_t ADD(opcode aOpcode, const std::byte* aText)
                 {
                     if ((static_cast<opcode_type>(aOpcode & opcode_type::Immediate)) == opcode_type::Immediate)
                     {
@@ -194,7 +194,7 @@ namespace neos
                 return iStartTime;
             }
 
-            uint64_t thread::count() const
+            std::uint64_t thread::count() const
             {
                 return iCountSample;
             }

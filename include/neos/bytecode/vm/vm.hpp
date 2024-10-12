@@ -238,7 +238,7 @@ namespace neos
                 void join();
                 void terminate();
                 const std::chrono::steady_clock::time_point& start_time() const;
-                uint64_t count() const;
+                std::uint64_t count() const;
                 std::string metrics() const;
                 reg_64 result() const;
             private:
@@ -246,10 +246,10 @@ namespace neos
             private:
                 const text_t& iText;
                 std::optional<std::thread> iNativeThread;
-                uint64_t iCount;
+                std::uint64_t iCount;
                 std::atomic<bool> iTerminate;
                 std::chrono::steady_clock::time_point iStartTime;
-                std::atomic<uint64_t> iCountSample;
+                std::atomic<std::uint64_t> iCountSample;
                 reg_64 iResult;
             };
         }

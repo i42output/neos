@@ -185,7 +185,7 @@ namespace neos::language
             }
             return iterCacheToken->second;
         }
-        uint32_t recursive_token(const i_atom& aToken) const override
+        std::uint32_t recursive_token(const i_atom& aToken) const override
         {
             if (is_token_node() && token() == aToken)
                 return 1u;

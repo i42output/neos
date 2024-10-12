@@ -27,7 +27,7 @@ namespace neos
 {
     namespace language
     {
-        enum class symbol_type : uint32_t
+        enum class symbol_type : std::uint32_t
         {
             Function,
             Data

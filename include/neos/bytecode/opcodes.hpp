@@ -26,7 +26,7 @@ namespace neos
 {
     namespace bytecode
     {
-        typedef uint32_t opcode_base_t;
+        typedef std::uint32_t opcode_base_t;
 
         /// @brief Opcode types
         enum class opcode_type : opcode_base_t
@@ -131,7 +131,7 @@ namespace neos
             LPRIV   = 0b00000000000011000000000000000000 | opcode_type::Privileged
         };
 
-        inline constexpr opcode operator|(opcode lhs, uint8_t rhs)
+        inline constexpr opcode operator|(opcode lhs, std::uint8_t rhs)
         {
             return static_cast<opcode>(static_cast<opcode_base_t>(lhs) | static_cast<opcode_base_t>(rhs));
         }
