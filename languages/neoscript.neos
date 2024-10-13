@@ -28,13 +28,13 @@ fn parameters $ language.function.parameters ::= ( fn parameter block , { whites
 proc parameters $ language.function.parameters ::= ( proc parameter block , { whitespace , ';' , whitespace , proc parameter block } ) ;
 fn parameter block ::= [ parameter , { whitespace , ',' , whitespace , parameter } , whitespace , ':' , whitespace , type ];
 proc parameter block ::= [ parameter , { whitespace , ',' , whitespace , parameter } , whitespace , ':' , whitespace , ( in | out | inout ) , whitespace , type ];
-parameter $ language.function.parameter :: = identifier ;
+parameter $ language.function.parameter ::= identifier ;
 proc locals ::= ( proc local block , { whitespace , ';' , whitespace , proc local block } ) ;
 proc local block ::= [ local , { whitespace , ',' , whitespace , local } , whitespace , ':' , whitespace , type ] ;
 local $ language.function.local ::= identifier ;
 fn body $ language.function.body ::= scope ;
 proc body $ language.function.body ::= scope ;
-scope $ langauge.function.scope = ( '{' , whitespace , { statement } , whitespace , '}' ) ; 
+scope $ language.function.scope ::= ( '{' , whitespace , { statement } , whitespace , '}' ) ; 
 
 statement $ language.statement ::= 
     expression | assignment | return statement | if statement | for loop | while loop | do while loop;
@@ -47,6 +47,8 @@ expression $ language.expression ::=
 
 function call $ language.expression.call ::= 
     identifier , whitespace , '(' , whitespace , arguments , whitespace , ')' ;
+
+arguments ::= [ expression , { whitespace , ',' , whitespace , expression } ] ;
 
 boolean expression $ language.expression.boolean ::= 
       boolean term , { whitespace , ( "or" | "||" ) , whitespace , boolean term, whitespace } $ boolean.logic.operator.or ;
@@ -96,14 +98,14 @@ else statement $ language.statement.else ::=
 
 for loop $ language.statement.loop ::= 
     for clause , scope
-for clause :=
+for clause ::=
     for , whitespace , '(' , whitespace , 
-        [ local , whitespace , ':' , whitespace , type , whitespace , ":= , whitespace , expression , whitespace ] $ language.assignment ,
+        [ local , whitespace , ':' , whitespace , type , whitespace , ":=" , whitespace , expression , whitespace ] $ language.assignment ,
         ';' , whitespace, boolean expression , whitespace , ';' , whitespace , ( expression | assignment ) , whitespace , ')' ;
 
 while loop $ language.statement.loop ::= 
     while clause , scope
-while clause :=
+while clause ::=
     while , whitespace , '(' , whitespace , boolean expression , whitespace , ')' ;
 
 do while loop $ language.statement.loop ::= 
@@ -163,5 +165,5 @@ escaped character $ string.utf8.character.tab ::= ( "\\t" ) ;
 escaped character $ string.utf8.character.doublequote ::= ( "\\\"" ) ;
 escaped character $ string.utf8.character.singlequote::= ( "\\\'" ) ;
 escaped character $ string.utf8.character.backslash ::= ( "\\\\" ) ;
-character literatal ::= ( '\'' , raw character , '\'' ) ;
+character literal ::= ( '\'' , raw character , '\'' ) ;
 string literal ::= ( '\"' , { raw character } , '\"' ) ;
