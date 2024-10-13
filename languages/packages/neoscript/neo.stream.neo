@@ -1,0 +1,7 @@
+-- neoscript package: stream
+
+namespace neo
+{
+    import proc input(s : out string);
+    import proc print(s : in string);
+}

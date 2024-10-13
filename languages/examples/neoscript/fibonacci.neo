@@ -1,19 +1,14 @@
 -- neoscript example: Fibonacci
 
-using neos.string;
-using neos.stream;
-
-import fn to_string(x : i32) -> string;
-import fn to_integer(s : string) -> i32;
-import proc input(s : out string);
-import proc print(s : in string);
+using neo.string;
+using neo.stream;
 
 -- functions are pure
-def fn add(x, y : i32) -> i32
+fn add(x, y : i32) -> i32
 {
     return x + y;
 }
-def fn fib(x : i32) -> i32 
+fn fib(x : i32) -> i32 
 {
     if (x < 2) 
         return 1; 
@@ -22,12 +17,12 @@ def fn fib(x : i32) -> i32
 }
 
 -- procedures are impure
-def proc main()
+proc main()
     s : string;
 {
-    print("Enter a positive "
+    neo::print("Enter a positive "
             "integer: ");
-    input(s);
-    print("Fibonacci(" + s + ") = " + to_string(fib(to_integer(s))) + "\n");
+    neo::input(s);
+    neo::print("Fibonacci(" + s + ") = " + neo::to_string(fib(neo::to_integer(s))) + "\n");
 }
 

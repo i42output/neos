@@ -1,4 +1,0 @@
--- neoscript package: stream
-
-import proc input(s : out string);
-import proc print(s : in string);

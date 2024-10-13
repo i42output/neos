@@ -15,13 +15,18 @@
     ]
 }%
 
-program $ language.program ::= whitespace , { comment | using directive | import directive | function | procedure } , whitespace ;
-using directive $ source.package.import ::= ( using , whitespace , package name ) ;
-import directive $ language.function.import ::= ( import , whitespace , fn , whitespace , fn sig ) ;
-import directive $ language.function.import ::= ( import , whitespace , proc , whitespace , proc sig ) ;
+program $ language.program ::= { using directive | import directive | namespace scope } ;
+using directive $ source.package.import ::= ( whitespace , using , whitespace , package name , whitespace ) ;
+import directive $ language.function.import ::= ( whitespace , import , whitespace , fn , whitespace , fn sig , whitespace ) ;
+import directive $ language.function.import ::= ( whitespace , import , whitespace , proc , whitespace , proc sig , whitespace ) ;
 
-function $ language.function ::= ( fn , whitespace , fn sig , whitespace , fn body ) ;
-procedure $ language.function ::= ( proc , whitespace , proc sig , whitespace , proc locals , whitespace , proc body ) ;
+namespace scope $ language.namespace.scope ::= 
+    { comment | function | procedure | namespace def }
+namespace def $ language.namespace ::= 
+    whitespace , identifier $ language.namespace.name , whitespace , "{" , whitespace , namespace scope , whitespace , "}" , whitespace ;
+
+function $ language.function ::= ( whitespace , fn , whitespace , fn sig , whitespace , fn body , whitespace ) ;
+procedure $ language.function ::= ( whitespace , proc , whitespace , proc sig , whitespace , proc locals , whitespace , proc body , whitespace ) ;
 fn sig $ language.function.signature ::= ( identifier , whitespace , '(' , whitespace , fn parameters , whitespace , ')' , whitespace , "->", whitespace , type ) ;
 proc sig $ language.function.signature ::= ( identifier , whitespace , '(' , whitespace , proc parameters , whitespace , ')' ) ;
 fn parameters $ language.function.parameters ::= ( fn parameter block , { whitespace , ';' , whitespace , fn parameter block } ) ;
@@ -40,7 +45,7 @@ statement $ language.statement ::=
     expression | assignment | return statement | if statement | for loop | while loop | do while loop;
 
 assignment $ language.assignment ::= 
-    ( object , whitespace , ":=" , whitespace , expression );
+    ( object , whitespace , "=" , whitespace , expression );
 
 expression $ language.expression ::= 
     function call | boolean expression | numeric expression ;
@@ -63,7 +68,7 @@ boolean factor ::=
 comparison expression ::= 
       numeric expression , whitespace , comparison operator , whitespace , numeric expression ;
 comparison operator ::= 
-      "=" $ boolean.operator.relational.equal 
+      "==" $ boolean.operator.relational.equal 
     | "!=" $ boolean.operator.relational.notequal 
     | "<" $ boolean.operator.relational.lessthan
     | ">" $ boolean.operator.relational.greaterthan
@@ -115,6 +120,20 @@ type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | c
 
 using $ language.keyword ::= "using" ;
 import $ language.keyword ::= "import" ;
+namespace $ language.keyword ::= "namespace" ;
+public $ language.keyowrd ::= "public" ;
+protected $ language.keyowrd ::= "protected" ;
+private $ language.keyowrd ::= "private" ;
+override $ lanugage.keyword ::= "override" ;
+final $ language.keyword ::= "final" ;
+mutable $ language.keyword ::= "mutable" ;
+is $ language.keyword ::= "is" ;
+extends $ language.keyword ::= "extends" ;
+implements $ language.keyword ::= "implements" ;
+struct $ language.keyword ::= "struct" ;
+class $ language.keyword ::= "class" ;
+interface $ language.keyword ::= "interface" ;
+auto $ language.type.auto ::= "auto" ;
 def $ language.keyword ::= "def" ;
 fn $ language.keyword ::= "fn" ;
 proc $ language.keyword ::= "proc" ;
@@ -134,12 +153,14 @@ identifier ::= ( alpha ) , { alphanumeric | '_' } ;
 
 keyword ::= { alpha } + ;
 
-comment $ language.comment ::= "--" , { character - '\n' }, ( '\n' | ? eof ? ) ;
+comment $ language.comment $ language.whitespace ::= whitespace , "--" , { character - '\n' }, ( '\n' | ? eof ? ) ;
 whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } ;
 
 alpha ::= "A" .. "Z" | "a" .. "z" ;
 alphanumeric ::= alpha | "0" .. "9" ;
 
+isize $ language.type.object.size.signed ::= "isize" ;
+usize $ language.type.object.size.unsigned ::= "usize" ;
 bool $ language.type.boolean ::= "bool" ;
 i8 $ language.type.i8 ::= "i8" ;
 u8 $ language.type.u8 ::= "u8" ;
@@ -152,8 +173,7 @@ u64 $ language.type.u64 ::= "u64" ;
 float $ language.type.float ::= "float" ;
 double $ language.type.double ::= "double" ;
 character $ language.type.character ::= "char" ;
-string $ language.type.string ::= "string" ;
-object $ language.type.object ::= identifier ;
+object $ language.gc.type.object ::= identifier ;
 
 true $ language.object.boolean.true ::= "true" ;
 false $ language.object.boolean.false ::= "false" ;
@@ -166,4 +186,5 @@ escaped character $ string.utf8.character.doublequote ::= ( "\\\"" ) ;
 escaped character $ string.utf8.character.singlequote::= ( "\\\'" ) ;
 escaped character $ string.utf8.character.backslash ::= ( "\\\\" ) ;
 character literal ::= ( '\'' , raw character , '\'' ) ;
-string literal ::= ( '\"' , { raw character } , '\"' ) ;
+raw string $ string.utf8 ::= { raw character } ;
+string literal ::= ( '\"' , raw string  , '\"' ) ;
