@@ -18,6 +18,13 @@
         language.whitespace 
         language.comment
     ]
+
+    infix: [
+        math.operator.add
+        math.operator.subtract
+        math.operator.multiply
+        math.operator.divide
+    ]
 }%
 
 @{
@@ -95,8 +102,8 @@
 
     open expression ::= "(" ;
     close expression ::= ")" ;
-    open scope ::= "{" ;
-    close scope ::= "}" ;
+    open scope $ language.scope.open ::= "{" ;
+    close scope $ language.scope.close ::= "}" ;
     comma ::= "," ;
     colon ::= ":" ;
     semicolon ::= ";" ;

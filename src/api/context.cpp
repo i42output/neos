@@ -72,7 +72,7 @@ namespace neos
 
     bool context::schema_loaded() const
     {
-        return iSchemaSource != std::nullopt && iSchema != nullptr;
+        return iSchema != nullptr;
     }
 
     void context::load_schema(const std::string& aSchemaPath)
@@ -81,23 +81,10 @@ namespace neos
         if (schemaPath.empty())
             throw no_schema_path_specified();
         cout() << "Loading schema '" + schemaPath + "'..." << std::endl;
-        iSchemaSource.reset();
         iSchema.reset();
-        if (std::filesystem::exists(schemaPath))
-            iSchemaSource.emplace(schemaPath);
-        else if (std::filesystem::exists(schemaPath + ".neos"))
-            iSchemaSource.emplace(schemaPath + ".neos");
-        iSchema = std::make_shared<language::schema>(schemaPath, *iSchemaSource, concept_libraries());
-
+        iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries());
         for (auto& unit : program().translationUnits)
             unit.schema = iSchema;
-    }
-
-    const neolib::rjson& context::schema_source() const
-    {
-        if (iSchemaSource == std::nullopt)
-            throw no_schema_source();
-        return *iSchemaSource;
     }
 
     const language::schema& context::schema() const

@@ -1,7 +1,7 @@
 /*
   module.cpp
 
-  Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
+  Copyright (c) 2024 Leigh Johnston.  All Rights Reserved.
 
   This program is free software: you can redistribute it and / or modify
   it under the terms of the GNU General Public License as published by
@@ -17,155 +17,127 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <neos/language/concept.hpp>
+#include <neos/language/semantic_concept.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/i_context.hpp>
 #include "module.hpp"
 
 namespace neos::concepts::core
 {   
-    class source_package_name : public neos_concept<source_package_name>
+    class source_package_name : public semantic_concept<source_package_name>
     {
         // types
     public:
-        typedef neolib::string representation_type;
+        using data_type = neolib::string;
         // construction
     public:
         source_package_name() :
-            neos_concept{ "source.package.name", neos::language::emit_type::Infix }
+            semantic_concept{ "source.package.name", neos::language::emit_type::Infix }
         {
-        }
-        // parse
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
-        {
-            aConsumed = false;
-            return std::next(aSource);
         }
         // emit
-    protected:
-        bool can_fold(const i_concept& aRhs) const override
+    public:
+        bool can_fold(const i_semantic_concept& aRhs) const override
         {
             return aRhs.name() == "string.utf8";
         }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        // emit
+    protected:
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
-            return this;
+            data<neolib::string>() = aRhs.data<neolib::i_string>();
+            aResult.reset(this);
         }
     };
 
-    class source_package_import : public neos_concept<source_package_import>
+    class source_package_import : public semantic_concept<source_package_import>
     {
         // types
     public:
-        typedef neolib::string representation_type;
+        using data_type = neolib::string;
         // construction
     public:
         source_package_import() :
-            neos_concept{ "source.package.import", neos::language::emit_type::Infix }
+            semantic_concept{ "source.package.import", neos::language::emit_type::Infix }
         {
         }
-        // parse
+        // emit
     public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
+        bool can_fold() const override
         {
-            aConsumed = false;
-            return aSource;
+            return holds_data();
+        }
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            return aRhs.name() == "source.package.name";
         }
         // emit
     protected:
-        bool can_fold() const override
-        {
-            return !as_instance().data<representation_type>().empty();
-        }
-        i_concept* do_fold(i_context& aContext) override
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             language::source_fragment file{ neolib::string{data<neolib::string>()} };
             file.set_imported();
             aContext.load_fragment(file);
             aContext.compiler().compile(std::move(file));
-            return nullptr;
         }
-        bool can_fold(const i_concept& aRhs) const override
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            return aRhs.name() == "source.package.name";
-        }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
-        {
-            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
-            return this;
+            data<neolib::string>() = aRhs.data<neolib::i_string>();
+            aResult.reset(this);
         }
     };
 
-    class module_package_name : public neos_concept<module_package_name>
+    class module_package_name : public semantic_concept<module_package_name>
     {
         // types
     public:
-        typedef neolib::string representation_type;
+        using data_type = neolib::string;
         // construction
     public:
         module_package_name() :
-            neos_concept{ "module.package.name", neos::language::emit_type::Infix }
+            semantic_concept{ "module.package.name", neos::language::emit_type::Infix }
         {
-        }
-        // parse
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
-        {
-            aConsumed = false;
-            return std::next(aSource);
         }
         // emit
-    protected:
-        bool can_fold(const i_concept& aRhs) const override
+    public:
+        bool can_fold(const i_semantic_concept& aRhs) const override
         {
             return aRhs.name() == "string.utf8";
         }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        // emit
+    protected:
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
-            return this;
+            data<neolib::string>() = aRhs.data<neolib::i_string>();
+            aResult.reset(this);
         }
     };
 
-    class module_package_import : public neos_concept<module_package_import>
+    class module_package_import : public semantic_concept<module_package_import>
     {
         // types
     public:
-        typedef neolib::string representation_type;
+        using data_type = neolib::string;
         // construction
     public:
         module_package_import() :
-            neos_concept{ "module.package.import", neos::language::emit_type::Infix }
+            semantic_concept{ "module.package.import", neos::language::emit_type::Infix }
         {
-        }
-        // parse
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
-        {
-            aConsumed = false;
-            return aSource;
         }
         // emit
     protected:
         bool can_fold() const override
         {
-            return !as_instance().data<representation_type>().empty();
+            return holds_data();
         }
-        i_concept* do_fold(i_context& aContext) override
-        {
-            // todo
-            return nullptr;
-        }
-        bool can_fold(const i_concept& aRhs) const override
+        bool can_fold(const i_semantic_concept& aRhs) const override
         {
             return aRhs.name() == "module.package.name";
         }
-        i_concept* do_fold(i_context& aContext, const i_concept& aRhs) override
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
-            return this;
+            data<neolib::string>() = aRhs.data<neolib::i_string>();
+            aResult.reset(this);
         }
     };
 

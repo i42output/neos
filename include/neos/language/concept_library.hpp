@@ -27,7 +27,7 @@
 #include <neolib/app/version.hpp>
 #include <neolib/app/i_application.hpp>
 #include <neos/language/i_concept_library.hpp>
-#include <neos/language/concept.hpp>
+#include <neos/language/semantic_concept.hpp>
 
 namespace neos::language
 {
@@ -35,7 +35,7 @@ namespace neos::language
     {
     public:
         typedef neolib::map<neolib::string, neolib::ref_ptr<i_concept_library>> sublibraries_t;
-        typedef neolib::map<neolib::string, neolib::ref_ptr<i_concept>> concepts_t;
+        typedef neolib::map<neolib::string, neolib::ref_ptr<i_semantic_concept>> concepts_t;
     public:
         static constexpr std::size_t RecursionLimit = 16u;
     public:
@@ -113,7 +113,7 @@ namespace neos::language
         {
             return iConcepts;
         }
-        bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const override
+        bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const override
         {
             _limit_recursion_(concept_library);
             auto concept_ = concepts().find(aSymbol);

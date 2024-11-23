@@ -26,7 +26,7 @@
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
-#include <neos/language/concept.hpp>
+#include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
 
@@ -174,213 +174,54 @@ namespace neos::language
     private:
         typedef neos::language::const_source_iterator source_iterator;
         typedef std::optional<source_iterator> optional_source_iterator;
-        struct parse_result
-        {
-            source_iterator sourceStart;
-            source_iterator sourceParsed;
-            enum action_e
-            {
-                Consumed,
-                Drain,
-                Done,
-                ForNext,
-                Continue,
-                Recurse,
-                Ignored,
-                NoMatch,
-                Error
-            } action;
-            const i_atom* atom;
-            parse_result(source_iterator aSourceParsed, action_e aAction = Consumed, const i_atom* aAtom = nullptr) :
-                sourceStart{ aSourceParsed }, sourceParsed{ aSourceParsed }, action{ aAction }, atom{ aAtom }
-            {
-            }
-            parse_result(source_iterator aSourceStart, source_iterator aSourceParsed, action_e aAction = Consumed, const i_atom* aAtom = nullptr) :
-                sourceStart{ aSourceStart }, sourceParsed{ aSourceParsed }, action{ aAction }, atom{ aAtom }
-            {
-            }
-            parse_result with(source_iterator aSourceParsed, action_e aAction = Consumed) const
-            {
-                return parse_result{ sourceStart, aSourceParsed, aAction, atom };
-            }
-            parse_result with(action_e aAction) const
-            {
-                return parse_result{ sourceStart, sourceParsed, aAction, atom };
-            }
-            parse_result with(const i_atom& aAtom) const
-            {
-                return parse_result{ sourceStart, sourceParsed, action, &aAtom };
-            }
-            parse_result with_if(const i_atom& aAtom) const
-            {
-                return parse_result{ sourceStart, sourceParsed, action, atom == nullptr ? &aAtom : atom};
-            }
-            parse_result with_if(const i_atom* aAtom) const
-            {
-                return parse_result{ sourceStart, sourceParsed, action, atom == nullptr ? aAtom : atom };
-            }
-        };
-        struct expected
-        {
-            const i_atom* what;
-            const i_atom* context;
-            bool consumed;
-        };
-        struct concept_stack_entry
+        struct semantic_concept_stack_entry
         {
             translation_unit* unit;
             i_source_fragment const* fragment;
             std::uint32_t level;
-            const i_concept* concept_;
+            const i_semantic_concept* semanticConcept;
             source_iterator sourceStart;
             source_iterator sourceEnd;
-            neolib::ref_ptr<i_concept> foldedConcept;
-            concept_stack_entry(
+            neolib::ref_ptr<i_semantic_concept> foldedConcept;
+
+            semantic_concept_stack_entry(
                 translation_unit* unit,
                 i_source_fragment const* fragment,
                 std::uint32_t level,
-                const i_concept* concept_,
+                const i_semantic_concept* semanticConcept,
                 source_iterator sourceStart,
-                source_iterator sourceEnd
-            ) :
-                unit{ unit },
-                fragment{ fragment },
-                level{ level },
-                concept_{ concept_ },
-                sourceStart{ sourceStart },
-                sourceEnd{ sourceEnd }
-            {
-            }
-            bool can_fold() const
-            {
-                return foldedConcept ? foldedConcept->can_fold() : concept_->can_fold();
-            }
-            bool can_fold(const concept_stack_entry& rhs) const
-            {
-                return foldedConcept ?
-                    foldedConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept_) :
-                    concept_->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.concept_);
-            }
-            void instantiate_if_needed()
-            {
-                if (!foldedConcept)
-                    foldedConcept = concept_->instantiate(sourceStart, sourceEnd);
-            }
-            void fold(i_context& aContext)
-            {
-                instantiate_if_needed();
-                foldedConcept = foldedConcept->fold(aContext);
-            }
-            void fold(i_context& aContext, concept_stack_entry& rhs)
-            {
-                if (rhs.can_fold())
-                    rhs.fold(aContext);
-                instantiate_if_needed();
-                if (rhs.foldedConcept)
-                    foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
-                else
-                    foldedConcept = foldedConcept->fold(aContext, concept_instance_proxy{ *rhs.concept_, rhs.sourceStart, rhs.sourceEnd });
-                if (fragment == rhs.fragment)
-                {
-                    sourceStart = std::min(sourceStart, rhs.sourceStart);
-                    sourceEnd = std::max(sourceEnd, rhs.sourceEnd);
-                    foldedConcept->update_source(sourceStart, sourceEnd);
-                }
-            }
-            std::string trace() const
-            {
-                return foldedConcept ? foldedConcept->trace() : concept_->trace();
-            }
+                source_iterator sourceEnd);
+            bool can_fold() const;
+            bool can_fold(const semantic_concept_stack_entry& rhs) const;
+            void instantiate_if_needed(i_context& aContext);
+            void fold(i_context& aContext);
+            void fold(i_context& aContext, semantic_concept_stack_entry& rhs);
+            std::string trace() const;
         };
-        typedef std::vector<concept_stack_entry> concept_stack_t;
-        class scoped_concept_folder
+        typedef std::vector<semantic_concept_stack_entry> semantic_concept_stack_t;
+        class scoped_semantic_concept_folder
         {
         public:
-            scoped_concept_folder(compiler& aCompiler, compiler_pass aPass);
-            scoped_concept_folder(compiler& aCompiler, compiler_pass aPass, concept_stack_t& aStack);
-            ~scoped_concept_folder();
+            scoped_semantic_concept_folder(compiler& aCompiler);
+            scoped_semantic_concept_folder(compiler& aCompiler, semantic_concept_stack_t& aStack);
+            ~scoped_semantic_concept_folder();
         public:
             void fold();
-            void move_to(concept_stack_t& aOtherStack);
+            void move_to(semantic_concept_stack_t& aOtherStack);
         private:
-            concept_stack_t& stack();
+            semantic_concept_stack_t& stack();
         private:
             compiler& iCompiler;
-            compiler_pass iPass;
-            concept_stack_t& iStack;
-            concept_stack_t::size_type iScopeStart;
-        };
-        struct stack_trace_entry
-        {
-            source_iterator source;
-            const i_atom* atom;
-            std::vector<std::string> operations;
-            bool operator==(const stack_trace_entry& rhs) const 
-            { 
-                return atom == rhs.atom && operations == rhs.operations; 
-            }
-            template <typename Char, typename CharT>
-            void trace(const translation_unit& aUnit, bool aTraceOperators, const std::optional<std::string>& aFilter, std::basic_ostream<Char, CharT>& aOutput) const
-            {
-                std::ostringstream result;
-                result << "'";
-                auto const count = std::min<std::ptrdiff_t>(20, std::distance(source, aUnit.fragment(source).end()));
-                for (auto c : std::string_view(&*source, count))
-                    if (c >= 32)
-                        result << c;
-                    else
-                        result << ' ';
-                result << "' " << std::string(20 - count, ' ');
-                result << "[" << atom->symbol() << "]    ";
-                if (aTraceOperators)
-                    for (auto const& o : operations)
-                        result << " (" << o << ")";
-                result << std::endl;
-                if (!aFilter || result.str().find(*aFilter) != std::string::npos)
-                    aOutput << result.str();
-            }
-        };
-        typedef std::deque<stack_trace_entry> stack_trace_t;
-        class scoped_stack_trace
-        {
-        public:
-            scoped_stack_trace(compiler& aParent, const i_atom& aAtom, source_iterator aSource, const std::string& aWhat)
-                : iParent{aParent}
-            {
-                if (iParent.trace() >= 3)
-                {
-                    if (iParent.state().iStackTrace.empty() || iParent.state().iStackTrace.back().atom != &aAtom || iParent.state().iStackTrace.back().source != aSource)
-                        iParent.state().iStackTrace.push_back(stack_trace_entry{ aSource, &aAtom, { aWhat } });
-                    else
-                        iParent.state().iStackTrace.back().operations.push_back(aWhat);
-                }
-            }
-            ~scoped_stack_trace()
-            {
-                if (iParent.trace() >= 3)
-                {
-                    iParent.state().iStackTrace.back().operations.pop_back();
-                    if (iParent.state().iStackTrace.back().operations.empty())
-                        iParent.state().iStackTrace.pop_back();
-                }
-            }
-        private:
-            compiler& iParent;
-        };
-        struct deepest_probe
-        {
-            source_iterator source;
-            std::vector<stack_trace_t> stacks;
+            semantic_concept_stack_t& iStack;
+            semantic_concept_stack_t::size_type iScopeStart;
         };
         struct compilation_state
         {
             program* program;
             translation_unit* unit;
-            std::optional<deepest_probe> iDeepestProbe;
-            stack_trace_t iStackTrace;
-            concept_stack_t iParseStack;
-            concept_stack_t iPostfixOperationStack;
-            concept_stack_t iFoldStack;
+            semantic_concept_stack_t iParseStack;
+            semantic_concept_stack_t iPostfixOperationStack;
+            semantic_concept_stack_t iFoldStack;
             std::uint32_t iLevel;
         };
         typedef std::vector<std::unique_ptr<compilation_state>> compilation_state_stack_t;
@@ -399,23 +240,13 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
-        parse_result parse(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, source_iterator aSourceStart, source_iterator aSourceParsed);
-        parse_result parse_tokens(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const expected& aExpected, source_iterator aSourceStart, source_iterator aSourceParsed);
-        parse_result parse_token_match(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aMatchResult, const parse_result& aResult, bool aConsumeMatchResult = true, bool aSelf = false);
-        parse_result parse_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_schema_node_atom& aAtom, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aToken, const parse_result& aResult);
-        parse_result consume_concept_token(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult);
-        parse_result consume_concept_atom(compiler_pass aPass, program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment, const i_atom& aAtom, const i_concept& aConcept, const parse_result& aResult, concept_stack_t& aConceptStack);
         bool fold();
         bool fold1();
         bool fold2();
-        concept_stack_t& parse_stack();
-        concept_stack_t& postfix_operation_stack();
-        concept_stack_t& fold_stack();
+        semantic_concept_stack_t& parse_stack();
+        semantic_concept_stack_t& postfix_operation_stack();
+        semantic_concept_stack_t& fold_stack();
         void display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment);
-        static bool is_finished(const compiler::parse_result& aResult);
-        static bool finished(compiler::parse_result& aResult, bool aConsumeErrors = false);
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
         static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:

@@ -21,7 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neos/language/symbols.hpp>
-#include <neos/language/i_concept.hpp>
+#include <neos/language/i_semantic_concept.hpp>
 
 namespace neos
 {
@@ -30,7 +30,7 @@ namespace neos
         class ast
         {
         public:
-            class node : public std::variant<i_concept const*, symbol_table_t::iterator>
+            class node : public std::variant<i_semantic_concept const*, symbol_table_t::iterator>
             {
             public:
                 typedef std::vector<std::unique_ptr<node>> children_t;

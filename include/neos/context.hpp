@@ -26,7 +26,6 @@
 #include <memory>
 #include <neolib/file/json.hpp>
 #include <neolib/app/i_application.hpp>
-#include <neos/language/schema.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/i_context.hpp>
 
@@ -50,7 +49,6 @@ namespace neos
     public:
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
-        const neolib::rjson& schema_source() const;
         const language::schema& schema() const;
         void load_program(const std::string& aPath);
         void load_program(std::istream& aStream);
@@ -75,7 +73,6 @@ namespace neos
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;
         concept_libraries_t iConceptLibraries;
-        std::optional<neolib::rjson> iSchemaSource;
         std::shared_ptr<language::schema> iSchema;
         language::compiler iCompiler;
         program_t iProgram;

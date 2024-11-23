@@ -22,40 +22,16 @@
 
 namespace neos::concepts::core
 {   
-    class math_universal_number_digit : public neos_concept<>
+    class math_universal_number_digit : public semantic_concept<math_universal_number_digit>
     {
     public:
-        using neos_concept::neos_concept;
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
-        {
-            if (*aSource >= '0' && *aSource <= '9')
-            {
-                aConsumed = true;
-                return std::next(aSource);
-            }
-            aConsumed = false;
-            return aSource;
-        }
-    private:
+        using semantic_concept::semantic_concept;
     };
 
-    class math_universal_number_hexdigit : public neos_concept<>
+    class math_universal_number_hexdigit : public semantic_concept<math_universal_number_hexdigit>
     {
     public:
-        using neos_concept::neos_concept;
-    public:
-        source_iterator consume_token(neos::language::compiler_pass aPass, source_iterator aSource, source_iterator aSourceEnd, bool& aConsumed) const override
-        {
-            if ((*aSource >= '0' && *aSource <= '9') || (*aSource >= 'a' && *aSource <= 'f') || (*aSource >= 'A' && *aSource <= 'F'))
-            {
-                aConsumed = true;
-                return std::next(aSource);
-            }
-            aConsumed = false;
-            return aSource;
-        }
-    private:
+        using semantic_concept::semantic_concept;
     };
 
     math_universal::math_universal(const std::string& aLibraryUri) :
@@ -70,15 +46,15 @@ namespace neos::concepts::core
         }
     {
         /* todo */
-        concepts()[neolib::string{ "math.universal.number" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.digit" }] = neolib::make_ref<math_universal_number_digit>("math.universal.number.digit", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.point" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.point", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.exponent" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.exponent", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.base" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.base", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.point" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.point", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.exponent" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.base" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.base", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.hexdigit" }] = neolib::make_ref<math_universal_number_hexdigit>("math.universal.number.hexdigit", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.exponent.positive" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.exponent.positive", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.exponent.negative" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.exponent.negative", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.number.exponent.digit" }] = neolib::make_ref<language::unimplemented_concept>("math.universal.number.exponent.digit", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.exponent.positive" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent.positive", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.exponent.negative" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent.negative", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number.exponent.digit" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent.digit", language::emit_type::Infix);
     }
 
     const std::string& math_universal::library_name()

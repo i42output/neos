@@ -24,7 +24,7 @@
 #include <neolib/core/i_map.hpp>
 #include <neolib/core/i_string.hpp>
 #include <neolib/app/i_version.hpp>
-#include <neos/language/i_concept.hpp>
+#include <neos/language/i_semantic_concept.hpp>
 
 namespace neos
 {
@@ -42,7 +42,7 @@ namespace neos
         public:
             typedef i_concept_library abstract_type;
             typedef concept_libraries_t sublibraries_t;
-            typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_concept>> concepts_t;
+            typedef neolib::i_map<neolib::i_string, neolib::i_ref_ptr<i_semantic_concept>> concepts_t;
             // sublibrary
         public:
             virtual bool has_parent() const = 0;
@@ -54,7 +54,7 @@ namespace neos
         public:
             virtual const concepts_t& concepts() const = 0;
             virtual concepts_t& concepts() = 0;
-            virtual bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_concept>& aConcept) const = 0;
+            virtual bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const = 0;
             // meta
         public:
             virtual const neolib::uuid& id() const = 0;
