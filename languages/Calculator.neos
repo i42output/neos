@@ -1,4 +1,4 @@
-(* a simple program schema in neosBNF *)
+(* a simple expression evaluator (calculator) language schema in neosBNF *)
 (* neosBNF describes both the syntax and the semantics of a programming language *)
 (* semantic concepts are tagged in the schema using the $ construct *)
 %{
