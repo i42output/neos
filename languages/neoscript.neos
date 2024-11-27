@@ -131,7 +131,7 @@
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } +;
 }#
 
-${
+*{
     program $ language.program ::= { using directive | import directive | namespace scope } ;
     using directive $ source.package.import ::= ( using , ( identifier | package name ) $ source.package.name );
     import directive $ language.function.import ::= ( import , fn , fn sig ) ;
@@ -224,4 +224,4 @@ ${
         do, scope, while clause
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
-}$
+}*

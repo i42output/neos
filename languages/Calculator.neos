@@ -28,7 +28,7 @@
 }#
 
 (* parsing stage *)
-${
+*{
     program $ language.program ::= whitespace , statement , whitespace ;
     statement $ language.statement ::= { expression , whitespace , ";" } ;
     expression $ math.expression ::= term , whitespace, { ( "+" $ math.operator.add | "-" $ math.operator.subtract ) , whitespace , term } ;
@@ -36,4 +36,4 @@ ${
     factor ::= [ "-" $ math.operator.negate ] , whitespace , primary ;
     primary ::= "(" , whitespace , expression , whitespace , ")" | number ;
     number $ math.universal.number ::= digit sequence , [ '.' , digit sequence , [ exponent ] ]
-}$
+}*
