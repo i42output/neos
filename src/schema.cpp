@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
+#include <neolib/file/parser.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos::language
@@ -31,6 +32,22 @@ namespace neos::language
     {
         if (!std::filesystem::exists(iPath) && std::filesystem::exists(iPath + ".neos"))
             iPath += ".neos";
+
+        std::ifstream sourceFile(iPath);
+        std::stringstream sourceBuffer;
+        sourceBuffer << sourceFile.rdbuf();
+        std::string source = sourceBuffer.str();
+        auto part = [&source](char specialChar)
+        {
+            auto range = std::make_pair(source.find(std::string{ specialChar } + "{"), source.find("}" + std::string{ specialChar }));
+            if (range.first == range.second || range.first == std::string::npos || range.second == std::string::npos)
+                throw std::runtime_error("Error reading schema");
+            range.first += (specialChar == '%' ? 1 : 2);
+            range.second += (specialChar == '%' ? 1 : 0);
+            return std::string{ std::next(source.begin(), range.first), std::next(source.begin(), range.second) };
+        };
+        std::istringstream partContents{ part('%') };
+        parse_meta(neolib::rjson{ partContents }.root().as<neolib::rjson_object>().at("meta"));
     }
 
     std::string const& schema::path() const
