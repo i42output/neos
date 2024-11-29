@@ -39,15 +39,26 @@ namespace neos::language
         std::string source = sourceBuffer.str();
         auto part = [&source](std::string_view const& keyStart, std::string_view const& keyEnd)
         {
-            auto range = std::make_pair(source.find(keyStart), source.find(keyEnd));
+            auto range = keyStart == "%{" ? 
+                std::make_pair(source.find(keyStart), source.find(keyEnd)) : 
+                std::make_pair(source.rfind(keyStart), source.rfind(keyEnd));
             if (range.first == range.second || range.first == std::string::npos || range.second == std::string::npos)
                 throw std::runtime_error("Error reading schema");
             range.first += (keyStart == "%{" ? 1 : keyStart.size());
             range.second += (keyEnd == "}%" ? 1 : 0);
             return std::string{ std::next(source.begin(), range.first), std::next(source.begin(), range.second) };
         };
-        std::istringstream partContents{ part("%{", "}%")};
-        parse_meta(neolib::rjson{ partContents }.root().as<neolib::rjson_object>().at("meta"));
+
+        std::istringstream metaSource{ part("%{", "}%") };
+        neolib::rjson metaContents{ metaSource };
+        auto const& meta = metaContents.root().as<neolib::rjson_object>().at("meta");
+        parse_meta(meta);
+
+        auto const& tokenizer = metaContents.root().as<neolib::rjson_object>().at("stages").as<neolib::rjson_object>().at("tokenizer").as<neolib::rjson_array>();
+        auto const tokenizerGrammar = part(tokenizer[0].as<neolib::rjson_string>(), tokenizer[1].as<neolib::rjson_string>());
+
+        auto const& parser = metaContents.root().as<neolib::rjson_object>().at("stages").as<neolib::rjson_object>().at("parser").as<neolib::rjson_array>();
+        auto const parserGrammar = part(parser[0].as<neolib::rjson_string>(), parser[1].as<neolib::rjson_string>());
     }
 
     std::string const& schema::path() const
