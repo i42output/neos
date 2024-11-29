@@ -9,6 +9,11 @@
         version: "1.0.0"
     }
 
+    stages: {
+        tokenizer : [ "#{" "}#" ]
+        parser : [ "*{" "}*" ]
+    }
+
     libraries: [
         neos.core
         neos.math.universal

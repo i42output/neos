@@ -12,13 +12,18 @@
         version: "1.0.0"
     }
 
+    stages: {
+        tokenizer : [ "#{" "}#" ]
+        parser : [ "*{" "}*" ]
+    }
+
     libraries: [
         neos.core
         neos.math.universal
     ]
 }%
 
-(* tokenisation stage *)
+(* tokenization stage *)
 #{
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' } ;
     character ::= U+000000 .. U+10FFFF ;
