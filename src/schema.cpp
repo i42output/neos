@@ -37,16 +37,16 @@ namespace neos::language
         std::stringstream sourceBuffer;
         sourceBuffer << sourceFile.rdbuf();
         std::string source = sourceBuffer.str();
-        auto part = [&source](char specialChar)
+        auto part = [&source](std::string_view const& keyStart, std::string_view const& keyEnd)
         {
-            auto range = std::make_pair(source.find(std::string{ specialChar } + "{"), source.find("}" + std::string{ specialChar }));
+            auto range = std::make_pair(source.find(keyStart), source.find(keyEnd));
             if (range.first == range.second || range.first == std::string::npos || range.second == std::string::npos)
                 throw std::runtime_error("Error reading schema");
-            range.first += (specialChar == '%' ? 1 : 2);
-            range.second += (specialChar == '%' ? 1 : 0);
+            range.first += (keyStart == "%{" ? 1 : keyStart.size());
+            range.second += (keyEnd == "}%" ? 1 : 0);
             return std::string{ std::next(source.begin(), range.first), std::next(source.begin(), range.second) };
         };
-        std::istringstream partContents{ part('%') };
+        std::istringstream partContents{ part("%{", "}%")};
         parse_meta(neolib::rjson{ partContents }.root().as<neolib::rjson_object>().at("meta"));
     }
 
