@@ -39,7 +39,7 @@
     escaped character $ string.utf8.character.CR ::= ( "\\r" ) ;
     escaped character $ string.utf8.character.tab ::= ( "\\t" ) ;
     escaped character $ string.utf8.character.doublequote ::= ( "\\\"" ) ;
-    escaped character $ string.utf8.character.singlequote::= ( "\\\'" ) ;
+    escaped character $ string.utf8.character.singlequote ::= ( "\\\'" ) ;
     escaped character $ string.utf8.character.backslash ::= ( "\\\\" ) ;
     string literal ::= 
         ( '\"' , { ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' ) ;
@@ -94,6 +94,7 @@
     float $ language.type.float ::= sep , "float" , sep ;
     double $ language.type.double ::= sep , "double" , sep ;
     character $ language.type.character ::= sep , "char" , sep ;
+    string $ language.type.string ::= sep , "string" , sep ;
     object $ language.gc.type.object ::= identifier ;
 
     true $ language.object.boolean.true ::= sep , "true" , sep ;

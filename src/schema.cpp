@@ -24,6 +24,88 @@
 #include <neolib/file/parser.hpp>
 #include <neos/language/schema.hpp>
 
+namespace neos::language::schema_parser
+{
+    enum class symbol
+    {
+        Grammar,
+        Rule,
+        RuleName,
+        RuleExpression,
+        Argument,
+        Identifier,
+        SemanticConcept,
+        Concatenation,
+        Alternation,
+        Terminal,
+        NonTerminal,
+        Optional,
+        Repetition,
+        Grouping,
+        Alpha,
+        AlphaNumeric,
+        Eof,
+        Comment,
+        Whitespace
+    };
+}
+
+declare_symbols(neos::language::schema_parser::symbol)
+declare_symbol(neos::language::schema_parser::symbol, Grammar)
+declare_symbol(neos::language::schema_parser::symbol, Rule)
+declare_symbol(neos::language::schema_parser::symbol, RuleName)
+declare_symbol(neos::language::schema_parser::symbol, RuleExpression)
+declare_symbol(neos::language::schema_parser::symbol, Argument)
+declare_symbol(neos::language::schema_parser::symbol, Identifier)
+declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
+declare_symbol(neos::language::schema_parser::symbol, Concatenation)
+declare_symbol(neos::language::schema_parser::symbol, Alternation)
+declare_symbol(neos::language::schema_parser::symbol, Terminal)
+declare_symbol(neos::language::schema_parser::symbol, NonTerminal)
+declare_symbol(neos::language::schema_parser::symbol, Optional)
+declare_symbol(neos::language::schema_parser::symbol, Repetition)
+declare_symbol(neos::language::schema_parser::symbol, Grouping)
+declare_symbol(neos::language::schema_parser::symbol, Alpha)
+declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
+declare_symbol(neos::language::schema_parser::symbol, Eof)
+declare_symbol(neos::language::schema_parser::symbol, Comment)
+declare_symbol(neos::language::schema_parser::symbol, Whitespace)
+end_declare_symbols(neos::language::schema_parser::symbol);
+
+namespace neos::language::schema_parser
+{
+    enable_neolib_parser(symbol)
+#if 0        
+    neolib::parser_rule<symbol> parserRules[] =
+    {
+        ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
+        ( symbol::Rule >> symbol::RuleName , optional(( "$" , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , ";" ),
+        ( symbol::RuleName >> symbol::Identifier , repeat((" " , symbol::Identifier)) ),
+        ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
+        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("." , symbol::Alpha)) ) ),
+        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Argument) ),
+        ( symbol::Concatenation >> (symbol::Argument , +repeat(("," , symbol::Argument))) ),
+        ( symbol::Alternation >> (symbol::Argument , +repeat(("|" , symbol::Argument))) ),
+        ( symbol::Argument >> symbol::Terminal | symbol::NonTerminal | symbol::Optional | symbol::Repetition | symbol::Grouping ),
+
+        ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
+        ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
+         
+        ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
+        ( symbol::Whitespace >> +(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
+        ( symbol::Comment >> sequence("(*"_ , repeat(range('\0', '\xFF')) , "*)"_) ),
+
+        ( symbol::Rule >> discard(optional(symbol::Whitespace)), symbol::Rule, discard(optional(symbol::Whitespace)) ),
+        ( symbol::RuleName >> discard(optional(symbol::Whitespace)), symbol::RuleName, discard(optional(symbol::Whitespace)) ),
+        ( symbol::RuleExpression >> discard(optional(symbol::Whitespace)), symbol::RuleExpression, discard(optional(symbol::Whitespace)) ),
+        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ,
+        ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) ),
+        ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
+        ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )
+    };
+#endif
+}
+
 namespace neos::language
 {
     schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
