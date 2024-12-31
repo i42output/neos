@@ -14,6 +14,11 @@
         parser : [ "*{" "}*" ]
     }
 
+    pipeline: [
+        tokenizer
+        parser
+    ]
+
     libraries: [
         neos.core
         neos.math.universal
@@ -133,7 +138,7 @@
     divide ::= "/" ;
 
     sep ::= ? ! alphanumeric : delimiter ? ;
-    comment $ language.comment ::= "//" , { ? ! '\n' ? }, ( '\n' | ? eof ? ) ;
+    comment $ language.comment ::= "--" , { ? ! '\n' ? }, ( '\n' | ? eof ? ) ;
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } +;
 }#
 
@@ -211,7 +216,9 @@
         ( return , expression ) ;
 
     if statement $ language.statement.if ::= 
-        if , open expression , boolean expression , close expression , ( scope | statement ) $ logic.operator.if , [ else statement ] ;
+        if , ( open expression , boolean expression , close expression , ( scope | statement ) ) $ logic.operator.if , { else if statement } , [ else statement ] ;
+    else if statement $ language.statement.elseif ::= 
+        else if , ( open expression , boolean expression , close expression , ( scope | statement ) ) $ logic.operator.elseif ;
     else statement $ language.statement.else ::= 
         else, ( scope | statement ) $ logic.operator.else ;
 
