@@ -17,6 +17,11 @@
         parser : [ "*{" "}*" ]
     }
 
+    pipeline: [
+        tokenizer
+        parser
+    ]
+
     libraries: [
         neos.core
         neos.math.universal

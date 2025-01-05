@@ -40,6 +40,12 @@ namespace neos::language
         std::size_t parserRecursionLimit = 256u;
     };
 
+    struct schema_stage
+    {
+        std::string name;
+        std::string_view grammar;
+    };
+
     class schema
     {
     public:
@@ -55,8 +61,10 @@ namespace neos::language
         void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText) const;
     private:
         std::string iPath;
+        std::string iSource;
         neolib::rjson iMetaSource;
         language::meta iMeta;
+        std::vector<schema_stage> iPipeline;
         const concept_libraries_t& iConceptLibraries;
     };
 }
