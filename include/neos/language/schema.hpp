@@ -46,6 +46,8 @@ namespace neos::language
         std::string_view grammar;
     };
 
+    using pipeline = std::vector<schema_stage>;
+
     class schema
     {
     public:
@@ -64,7 +66,7 @@ namespace neos::language
         std::string iSource;
         neolib::rjson iMetaSource;
         language::meta iMeta;
-        std::vector<schema_stage> iPipeline;
+        pipeline iPipeline;
         const concept_libraries_t& iConceptLibraries;
     };
 }

@@ -75,7 +75,7 @@ end_declare_symbols(neos::language::schema_parser::symbol);
 namespace neos::language::schema_parser
 {
     enable_neolib_parser(symbol)
-#if 0        
+        
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
@@ -83,7 +83,8 @@ namespace neos::language::schema_parser
         ( symbol::RuleName >> symbol::Identifier , repeat((" " , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
         ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("." , symbol::Alpha)) ) ),
-        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Argument) ),
+        ( symbol::RuleExpression >> (symbol::Grouping | symbol::Concatenation | symbol::Alternation | symbol::Argument) ),
+        ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
         ( symbol::Concatenation >> (symbol::Argument , +repeat(("," , symbol::Argument))) ),
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|" , symbol::Argument))) ),
         ( symbol::Argument >> symbol::Terminal | symbol::NonTerminal | symbol::Optional | symbol::Repetition | symbol::Grouping ),
@@ -98,12 +99,12 @@ namespace neos::language::schema_parser
         ( symbol::Rule >> discard(optional(symbol::Whitespace)), symbol::Rule, discard(optional(symbol::Whitespace)) ),
         ( symbol::RuleName >> discard(optional(symbol::Whitespace)), symbol::RuleName, discard(optional(symbol::Whitespace)) ),
         ( symbol::RuleExpression >> discard(optional(symbol::Whitespace)), symbol::RuleExpression, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ,
+        ( symbol::Grouping >> discard(optional(symbol::Whitespace)), symbol::Grouping, discard(optional(symbol::Whitespace)) ),
+        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ),
         ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) ),
         ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
         ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )
     };
-#endif
 }
 
 namespace neos::language
@@ -148,6 +149,18 @@ namespace neos::language
         {
             auto const& stageName = stage->text();
             iPipeline.push_back(schema_stage{ stageName, stages.at(stageName)});
+        }
+
+        std::shared_ptr<neolib::parser<schema_parser::symbol>::ast_node const> previousAst;
+
+        for (auto const& stage : iPipeline)
+        {
+            neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
+            parser.set_debug_output(std::cerr);
+            parser.set_debug_scan(false);
+            parser.parse(schema_parser::symbol::Grammar, stage.grammar);
+            parser.create_ast();
+            previousAst = parser.ast().shared_from_this();
         }
     }
 
