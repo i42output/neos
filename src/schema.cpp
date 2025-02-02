@@ -38,6 +38,7 @@ namespace neos::language::schema_parser
         Concatenation,
         Alternation,
         Range,
+        RangeExcluding,
         Terminal,
         Optional,
         Repetition,
@@ -63,6 +64,7 @@ declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
 declare_symbol(neos::language::schema_parser::symbol, Range)
+declare_symbol(neos::language::schema_parser::symbol, RangeExcluding)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
 declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
@@ -86,23 +88,25 @@ namespace neos::language::schema_parser
         ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , optional(("$"_ , symbol::SemanticConcept)), ";" ),
         ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
-        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("."_ , symbol::Alpha)) ) ),
-        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | symbol::Repetition | symbol::Optional | symbol::Argument) ),
+        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric)) ) ),
+        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | 
+            symbol::Repetition | symbol::Optional | symbol::Argument ) ),
         ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
         ( symbol::Repetition >> "{" , symbol::RuleExpression , "}" ),
         ( symbol::Optional >> "[" , symbol::RuleExpression , "]" ),
         ( symbol::Concatenation >> (symbol::Argument , +repeat((","_ , symbol::Argument))) ),
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
+        ( symbol::RangeExcluding >> (symbol::Range , "-"_ , symbol::Argument) ),
         ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
-        ( symbol::Argument >> (symbol::Terminal | symbol::Range | symbol::RuleExpression ) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Terminal >> (symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral) ),
+        ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Terminal >> (symbol::RuleName | symbol::RangeExcluding | symbol::Range | symbol::Identifier | symbol::CharacterLiteral) ),
 
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
         ( symbol::HexDigit >> (range('A', 'F') | range('a', 'f' ) | range('0', '9')) ),
         ( symbol::CharacterLiteral >> (
             sequence("'"_ , range('\x20', '\x26') , "'") | sequence("'"_ , range('\x28', '\x5B') , "'") | sequence("'"_ , range('\x5D', '\xFF') , "'") |
-             "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ | sequence("'\\x"_ , symbol::HexDigit , symbol::HexDigit, "'")) ),
+             "'\\\\'"_ | "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ | sequence("'\\x"_ , symbol::HexDigit , symbol::HexDigit, "'")) ),
 
         ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
         ( symbol::Whitespace >> +(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
@@ -116,6 +120,8 @@ namespace neos::language::schema_parser
         ( symbol::Optional >> discard(optional(symbol::Whitespace)), symbol::Optional, discard(optional(symbol::Whitespace)) ),
         ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ),
         ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) ),
+        ( symbol::Range >> discard(optional(symbol::Whitespace)), symbol::Range, discard(optional(symbol::Whitespace)) ),
+        ( symbol::RangeExcluding >> discard(optional(symbol::Whitespace)), symbol::RangeExcluding, discard(optional(symbol::Whitespace)) ),
         ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
         ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) ),
         ( symbol::CharacterLiteral >> discard(optional(symbol::Whitespace)), symbol::CharacterLiteral, discard(optional(symbol::Whitespace)) ),
