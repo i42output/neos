@@ -38,7 +38,6 @@ namespace neos::language::schema_parser
         Concatenation,
         Alternation,
         Terminal,
-        NonTerminal,
         Optional,
         Repetition,
         Grouping,
@@ -61,7 +60,6 @@ declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
-declare_symbol(neos::language::schema_parser::symbol, NonTerminal)
 declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
@@ -79,15 +77,15 @@ namespace neos::language::schema_parser
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
-        ( symbol::Rule >> symbol::RuleName , optional(( "$" , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , ";" ),
-        ( symbol::RuleName >> symbol::Identifier , repeat((" " , symbol::Identifier)) ),
+        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , ";" ),
+        ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
-        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("." , symbol::Alpha)) ) ),
-        ( symbol::RuleExpression >> (symbol::Grouping | symbol::Concatenation | symbol::Alternation | symbol::Argument) ),
+        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("."_ , symbol::Alpha)) ) ),
+        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | symbol::Argument) ),
         ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
         ( symbol::Concatenation >> (symbol::Argument , +repeat(("," , symbol::Argument))) ),
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|" , symbol::Argument))) ),
-        ( symbol::Argument >> symbol::Terminal | symbol::NonTerminal | symbol::Optional | symbol::Repetition | symbol::Grouping ),
+        ( symbol::Argument >> symbol::Terminal | symbol::Optional | symbol::Repetition ),
 
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
