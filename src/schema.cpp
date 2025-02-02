@@ -43,6 +43,7 @@ namespace neos::language::schema_parser
         Grouping,
         Alpha,
         AlphaNumeric,
+        CharacterLiteral,
         Eof,
         Comment,
         Whitespace
@@ -65,6 +66,7 @@ declare_symbol(neos::language::schema_parser::symbol, Repetition)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
 declare_symbol(neos::language::schema_parser::symbol, Alpha)
 declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
+declare_symbol(neos::language::schema_parser::symbol, CharacterLiteral)
 declare_symbol(neos::language::schema_parser::symbol, Eof)
 declare_symbol(neos::language::schema_parser::symbol, Comment)
 declare_symbol(neos::language::schema_parser::symbol, Whitespace)
@@ -83,13 +85,17 @@ namespace neos::language::schema_parser
         ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("."_ , symbol::Alpha)) ) ),
         ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | symbol::Argument) ),
         ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
-        ( symbol::Concatenation >> (symbol::Argument , +repeat(("," , symbol::Argument))) ),
-        ( symbol::Alternation >> (symbol::Argument , +repeat(("|" , symbol::Argument))) ),
-        ( symbol::Argument >> symbol::Terminal | symbol::Optional | symbol::Repetition ),
+        ( symbol::Concatenation >> (symbol::Argument , +repeat((","_ , symbol::Argument))) ),
+        ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
+        ( symbol::Argument >> (symbol::Terminal | symbol::Optional | symbol::Repetition) ),
+        ( symbol::Terminal >> symbol::CharacterLiteral ),
 
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
-         
+        ( symbol::CharacterLiteral >> (
+            sequence("'"_ , range('\x20', '\x26') , "'") | sequence("'"_ , range('\x28', '\x5B') , "'") | sequence("'"_ , range('\x5D', '\xFF') , "'") |
+             "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ ) ),
+
         ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
         ( symbol::Whitespace >> +(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
         ( symbol::Comment >> sequence("(*"_ , repeat(range('\0', '\xFF')) , "*)"_) ),
@@ -101,6 +107,8 @@ namespace neos::language::schema_parser
         ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ),
         ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) ),
         ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
+        ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) ),
+        ( symbol::CharacterLiteral >> discard(optional(symbol::Whitespace)), symbol::CharacterLiteral, discard(optional(symbol::Whitespace)) ),
         ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )
     };
 }
