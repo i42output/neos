@@ -37,12 +37,14 @@ namespace neos::language::schema_parser
         SemanticConcept,
         Concatenation,
         Alternation,
+        Range,
         Terminal,
         Optional,
         Repetition,
         Grouping,
         Alpha,
         AlphaNumeric,
+        HexDigit,
         CharacterLiteral,
         Eof,
         Comment,
@@ -60,12 +62,14 @@ declare_symbol(neos::language::schema_parser::symbol, Identifier)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
+declare_symbol(neos::language::schema_parser::symbol, Range)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
 declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
 declare_symbol(neos::language::schema_parser::symbol, Alpha)
 declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
+declare_symbol(neos::language::schema_parser::symbol, HexDigit)
 declare_symbol(neos::language::schema_parser::symbol, CharacterLiteral)
 declare_symbol(neos::language::schema_parser::symbol, Eof)
 declare_symbol(neos::language::schema_parser::symbol, Comment)
@@ -87,14 +91,16 @@ namespace neos::language::schema_parser
         ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
         ( symbol::Concatenation >> (symbol::Argument , +repeat((","_ , symbol::Argument))) ),
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
-        ( symbol::Argument >> (symbol::Terminal | symbol::Optional | symbol::Repetition) ),
+        ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
+        ( symbol::Argument >> (symbol::Terminal | symbol::Optional | symbol::Repetition | symbol::Range) ),
         ( symbol::Terminal >> symbol::CharacterLiteral ),
 
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
+        ( symbol::HexDigit >> (range('A', 'F') | range('a', 'f' ) | range('0', '9')) ),
         ( symbol::CharacterLiteral >> (
             sequence("'"_ , range('\x20', '\x26') , "'") | sequence("'"_ , range('\x28', '\x5B') , "'") | sequence("'"_ , range('\x5D', '\xFF') , "'") |
-             "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ ) ),
+             "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ | sequence("'\\x"_ , symbol::HexDigit , symbol::HexDigit, "'")) ),
 
         ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
         ( symbol::Whitespace >> +(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
