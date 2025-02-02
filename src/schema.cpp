@@ -83,7 +83,7 @@ namespace neos::language::schema_parser
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
-        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , ";" ),
+        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , optional(("$"_ , symbol::SemanticConcept)), ";" ),
         ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
         ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::Alpha | ("."_ , symbol::Alpha)) ) ),
@@ -94,7 +94,7 @@ namespace neos::language::schema_parser
         ( symbol::Concatenation >> (symbol::Argument , +repeat((","_ , symbol::Argument))) ),
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
         ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
-        ( symbol::Argument >> (symbol::Terminal | symbol::Range | symbol::RuleExpression ) ),
+        ( symbol::Argument >> (symbol::Terminal | symbol::Range | symbol::RuleExpression ) , optional(("$"_ , symbol::SemanticConcept)) ),
         ( symbol::Terminal >> (symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral) ),
 
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),

@@ -149,7 +149,7 @@
     import directive $ language.function.import ::= ( import , proc , proc sig ) ;
 
     namespace scope $ language.namespace.scope ::= 
-        { comment | function | procedure | namespace def }
+        { comment | function | procedure | namespace def } ;
     namespace def $ language.namespace ::= 
         identifier $ language.namespace.name , open scope , namespace scope , close scope ;
 
