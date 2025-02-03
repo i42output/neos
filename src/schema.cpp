@@ -46,7 +46,10 @@ namespace neos::language::schema_parser
         Alpha,
         AlphaNumeric,
         HexDigit,
+        Character,
+        EscapedCharacter,
         CharacterLiteral,
+        StringLiteral,
         Eof,
         Comment,
         Whitespace
@@ -72,7 +75,10 @@ declare_symbol(neos::language::schema_parser::symbol, Grouping)
 declare_symbol(neos::language::schema_parser::symbol, Alpha)
 declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
 declare_symbol(neos::language::schema_parser::symbol, HexDigit)
+declare_symbol(neos::language::schema_parser::symbol, Character)
+declare_symbol(neos::language::schema_parser::symbol, EscapedCharacter)
 declare_symbol(neos::language::schema_parser::symbol, CharacterLiteral)
+declare_symbol(neos::language::schema_parser::symbol, StringLiteral)
 declare_symbol(neos::language::schema_parser::symbol, Eof)
 declare_symbol(neos::language::schema_parser::symbol, Comment)
 declare_symbol(neos::language::schema_parser::symbol, Whitespace)
@@ -85,10 +91,11 @@ namespace neos::language::schema_parser
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
-        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , symbol::RuleExpression , optional(("$"_ , symbol::SemanticConcept)), ";" ),
+        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , 
+            symbol::RuleExpression , optional(("$"_ , symbol::SemanticConcept)), ";" ),
         ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
-        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric)) ) ),
+        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
         ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | 
             symbol::Repetition | symbol::Optional | symbol::Argument ) ),
         ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
@@ -98,18 +105,22 @@ namespace neos::language::schema_parser
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
         ( symbol::RangeExcluding >> (symbol::Range , "-"_ , symbol::Argument) ),
         ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
-        ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Terminal >> (symbol::RuleName | symbol::RangeExcluding | symbol::Range | symbol::Identifier | symbol::CharacterLiteral) ),
+        ( symbol::Argument >> (symbol::RangeExcluding | symbol::Range | symbol::Terminal | symbol::RuleExpression) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Terminal >> (symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral ) ),
 
+        ( symbol::CharacterLiteral >> ("'"_ , (symbol::Character | symbol::EscapedCharacter) , "'"_) ),
+        ( symbol::StringLiteral >> ("\""_ , repeat(symbol::Character | symbol::EscapedCharacter) , "\""_) ),
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
         ( symbol::HexDigit >> (range('A', 'F') | range('a', 'f' ) | range('0', '9')) ),
-        ( symbol::CharacterLiteral >> (
-            sequence("'"_ , range('\x20', '\x26') , "'") | sequence("'"_ , range('\x28', '\x5B') , "'") | sequence("'"_ , range('\x5D', '\xFF') , "'") |
-             "'\\\\'"_ | "'\\''"_ | "'\\\"'"_ | "'\\n'"_ | "'\\r'"_ | "'\\t'"_ | sequence("'\\x"_ , symbol::HexDigit , symbol::HexDigit, "'")) ),
+        ( symbol::Character >> (
+            range('\x20', '\x21') | range('\x23', '\x26') | range('\x28', '\x5B') | range('\x5D', '\xFF')) ),
+        ( symbol::EscapedCharacter >> (
+            "\\\\"_ | "\\'"_ | "\\\""_ | "\\n"_ | "\\r"_ | "\\t"_ |
+            sequence("\\x"_ , symbol::HexDigit , symbol::HexDigit)) ),
 
         ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
-        ( symbol::Whitespace >> +(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
+        ( symbol::Whitespace >> +repeat(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
         ( symbol::Comment >> sequence("(*"_ , repeat(range('\0', '\xFF')) , "*)"_) ),
 
         ( symbol::Rule >> discard(optional(symbol::Whitespace)), symbol::Rule, discard(optional(symbol::Whitespace)) ),
@@ -125,6 +136,7 @@ namespace neos::language::schema_parser
         ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
         ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) ),
         ( symbol::CharacterLiteral >> discard(optional(symbol::Whitespace)), symbol::CharacterLiteral, discard(optional(symbol::Whitespace)) ),
+        ( symbol::StringLiteral >> discard(optional(symbol::Whitespace)), symbol::StringLiteral, discard(optional(symbol::Whitespace)) ),
         ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )
     };
 }
@@ -181,8 +193,8 @@ namespace neos::language
             parser.set_debug_output(std::cerr);
             parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
-            parser.create_ast();
-            previousAst = parser.ast().shared_from_this();
+            //parser.create_ast();
+            //previousAst = parser.ast().shared_from_this();
         }
     }
 

@@ -191,16 +191,16 @@
           true 
         | false 
         | ( not , boolean factor ) $ boolean.logic.operator.not
-        | open expression , boolean expression , close expression 
+        | ( open expression , boolean expression , close expression )
         | comparison expression ;
     comparison expression ::= 
           numeric expression , comparison operator , numeric expression ;
     comparison operator ::= 
-          equal $ boolean.operator.relational.equal ;
-        | notequal $ boolean.operator.relational.notequal ;
-        | lessthan $ boolean.operator.relational.lessthan ;
-        | greaterthan $ boolean.operator.relational.greaterthan ;
-        | lessthanorequal $ boolean.operator.relational.lessthanorequal ;
+          equal $ boolean.operator.relational.equal
+        | notequal $ boolean.operator.relational.notequal
+        | lessthan $ boolean.operator.relational.lessthan
+        | greaterthan $ boolean.operator.relational.greaterthan
+        | lessthanorequal $ boolean.operator.relational.lessthanorequal
         | greaterthanorequal $ boolean.operator.relational.greaterthanorequal ;
 
     numeric expression $ math.expression ::= 
@@ -210,7 +210,7 @@
     factor ::= 
         [ minus $ math.operator.negate ] , primary ;
     primary ::= 
-        open expression , expression , close expression | number ;
+        ( open expression , expression , close expression ) | number ;
 
     return statement $ language.statement.return ::= 
         ( return , expression ) ;
@@ -223,18 +223,18 @@
         else, ( scope | statement ) $ logic.operator.else ;
 
     for loop $ language.statement.loop ::= 
-        for clause , scope
+        for clause , scope ;
     for clause ::=
         for , open expression , [ local , colon , type , assign , expression ] $ language.assignment ,
         semicolon, boolean expression , semicolon , ( expression | assignment ) , close expression ;
 
     while loop $ language.statement.loop ::= 
-        while clause , scope
+        while clause , scope ;
     while clause ::=
         while , open expression , boolean expression , close expression ;
 
     do while loop $ language.statement.loop ::= 
-        do, scope, while clause
+        do, scope, while clause ;
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 }*
