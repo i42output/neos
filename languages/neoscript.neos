@@ -49,34 +49,34 @@
     string literal ::= 
         ( '\"' , { ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' ) ;
 
-    using $ language.keyword ::= sep , "using" , sep ;
-    import $ language.keyword ::= sep , "import" , sep ;
-    namespace $ language.keyword ::= sep , "namespace" , sep ;
-    public $ language.keyword ::= sep , "public" , sep ;
-    protected $ language.keyword ::= sep , "protected" , sep ;
-    private $ language.keyword ::= sep , "private" , sep ;
-    override $ language.keyword ::= sep , "override" , sep ;
-    final $ language.keyword ::= sep , "final" , sep ;
-    mutable $ language.keyword ::= sep , "mutable" , sep ;
-    is $ language.keyword ::= sep , "is" , sep ;
-    extends $ language.keyword ::= sep , "extends" , sep ;
-    implements $ language.keyword ::= sep , "implements" , sep ;
-    struct $ language.keyword ::= sep , "struct" , sep ;
-    class $ language.keyword ::= sep , "class" , sep ;
-    interface $ language.keyword ::= sep , "interface" , sep ;
-    auto $ language.type.auto ::= sep , "auto" , sep ;
-    def $ language.keyword ::= sep , "def" , sep ;
-    fn $ language.keyword ::= sep , "fn" , sep ;
-    proc $ language.keyword ::= sep , "proc" , sep ;
-    in $ language.keyword $ language.function.parameter.in ::= sep , "in" , sep ;
-    out $ language.keyword $ language.function.parameter.out ::= sep , "out" , sep ;
-    inout $ language.keyword $ language.function.parameter.inout ::= sep , "inout" , sep ;
-    if $ language.keyword ::= sep , "if" , sep ;
-    else $ language.keyword ::= sep , "else" , sep ;
-    for $ language.keyword ::= sep , "for" , sep ;
-    while $ language.keyword ::= sep , "while" , sep ;
-    do $ language.keyword ::= sep , "do" , sep ;
-    return $ language.keyword ::= sep , "return", sep ;
+    using $ language.keyword ::= potential keyword ::= "using" ;
+    import $ language.keyword ::= potential keyword ::= "import" ;
+    namespace $ language.keyword ::= potential keyword ::= "namespace" ;
+    public $ language.keyword ::= potential keyword ::= "public" ;
+    protected $ language.keyword ::= potential keyword ::= "protected" ;
+    private $ language.keyword ::= potential keyword ::= "private" ;
+    override $ language.keyword ::= potential keyword ::= "override" ;
+    final $ language.keyword ::= potential keyword ::= "final" ;
+    mutable $ language.keyword ::= potential keyword ::= "mutable" ;
+    is $ language.keyword ::= potential keyword ::= "is" ;
+    extends $ language.keyword ::= potential keyword ::= "extends" ;
+    implements $ language.keyword ::= potential keyword ::= "implements" ;
+    struct $ language.keyword ::= potential keyword ::= "struct" ;
+    class $ language.keyword ::= potential keyword ::= "class" ;
+    interface $ language.keyword ::= potential keyword ::= "interface" ;
+    auto $ language.type.auto ::= potential keyword ::= "auto" ;
+    def $ language.keyword ::= potential keyword ::= "def" ;
+    fn $ language.keyword ::= potential keyword ::= "fn" ;
+    proc $ language.keyword ::= potential keyword ::= "proc" ;
+    in $ language.keyword $ language.function.parameter.in ::= potential keyword ::= "in" ;
+    out $ language.keyword $ language.function.parameter.out ::= potential keyword ::= "out" ;
+    inout $ language.keyword $ language.function.parameter.inout ::= potential keyword ::= "inout" ;
+    if $ language.keyword ::= potential keyword ::= "if" ;
+    else $ language.keyword ::= potential keyword ::= "else" ;
+    for $ language.keyword ::= potential keyword ::= "for" ;
+    while $ language.keyword ::= potential keyword ::= "while" ;
+    do $ language.keyword ::= potential keyword ::= "do" ;
+    return $ language.keyword ::= potential keyword ::= "return" ;
 
     number $ math.universal.number ::= 
         digit sequence , [ '.' , digit sequence , [ ("e" | "E") , [ "+" | "-" ] , digit sequence ] ] ;
@@ -85,26 +85,27 @@
     digit ::= 
         "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
-    isize $ language.type.object.size.signed ::= sep , "isize" , sep ;
-    usize $ language.type.object.size.unsigned ::= sep , "usize" , sep ;
-    bool $ language.type.boolean ::= sep , "bool" , sep ;
-    i8 $ language.type.i8 ::= sep , "i8" , sep ;
-    u8 $ language.type.u8 ::= sep , "u8" , sep ;
-    i16 $ language.type.i16 ::= sep , "i16" , sep ;
-    u16 $ language.type.u16 ::= sep , "u16" , sep ;
-    i32 $ language.type.i32 ::= sep , "i32" , sep ;
-    u32 $ language.type.u32 ::= sep , "u32" , sep ;
-    i64 $ language.type.i64 ::= sep , "i64" , sep ;
-    u64 $ language.type.u64 ::= sep , "u64" , sep ;
-    float $ language.type.float ::= sep , "float" , sep ;
-    double $ language.type.double ::= sep , "double" , sep ;
-    character $ language.type.character ::= sep , "char" , sep ;
-    string $ language.type.string ::= sep , "string" , sep ;
+    isize $ language.type.object.size.signed ::= potential keyword ::= "isize" ;
+    usize $ language.type.object.size.unsigned ::= potential keyword ::= "usize" ;
+    bool $ language.type.boolean ::= potential keyword ::= "bool" ;
+    i8 $ language.type.i8 ::= potential keyword ::= "i8" ;
+    u8 $ language.type.u8 ::= potential keyword ::= "u8" ;
+    i16 $ language.type.i16 ::= potential keyword ::= "i16" ;
+    u16 $ language.type.u16 ::= potential keyword ::= "u16" ;
+    i32 $ language.type.i32 ::= potential keyword ::= "i32" ;
+    u32 $ language.type.u32 ::= potential keyword ::= "u32" ;
+    i64 $ language.type.i64 ::= potential keyword ::= "i64" ;
+    u64 $ language.type.u64 ::= potential keyword ::= "u64" ;
+    float $ language.type.float ::= potential keyword ::= "float" ;
+    double $ language.type.double ::= potential keyword ::= "double" ;
+    character $ language.type.character ::= potential keyword ::= "char" ;
+    string $ language.type.string ::= potential keyword ::= "string" ;
     object $ language.gc.type.object ::= identifier ;
 
-    true $ language.object.boolean.true ::= sep , "true" , sep ;
-    false $ language.object.boolean.false ::= sep , "false" , sep ;
+    true $ language.object.boolean.true ::= potential keyword ::= "true" ;
+    false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
+    potential keyword ::= { alphanumeric } + ;
     identifier ::= alpha , { alphanumeric | '_' } ;
     package name ::= alpha , { ( alpha | "." ) , alpha } ; 
 
@@ -137,8 +138,7 @@
     multiply ::= "*" ;
     divide ::= "/" ;
 
-    sep ::= ? ! alphanumeric : delimiter ? ;
-    comment $ language.comment ::= "--" , { ? ! '\n' ? }, ( '\n' | ? eof ? ) ;
+    comment $ language.comment ::= "--" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } +;
 }#
 
