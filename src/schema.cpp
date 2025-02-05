@@ -91,8 +91,7 @@ namespace neos::language::schema_parser
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
-        ( symbol::Rule >> symbol::RuleName , optional(( "$"_ , symbol::SemanticConcept)) , "::=" , 
-            symbol::RuleExpression , optional(("$"_ , symbol::SemanticConcept)), ";" ),
+        ( symbol::Rule >> symbol::RuleName, "::=" , symbol::RuleExpression, ";" ),
         ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
         ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
@@ -105,7 +104,7 @@ namespace neos::language::schema_parser
         ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
         ( symbol::RangeExcluding >> (symbol::Range , "-"_ , symbol::Argument) ),
         ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
-        ( symbol::Argument >> (symbol::RangeExcluding | symbol::Range | symbol::Terminal | symbol::RuleExpression) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Argument >> (symbol::RangeExcluding | symbol::Range | symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Terminal >> (symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral ) ),
 
         ( symbol::CharacterLiteral >> ("'"_ , (symbol::Character | symbol::EscapedCharacter) , "'"_) ),
@@ -116,7 +115,7 @@ namespace neos::language::schema_parser
         ( symbol::Character >> (
             range('\x20', '\x21') | range('\x23', '\x26') | range('\x28', '\x5B') | range('\x5D', '\xFF')) ),
         ( symbol::EscapedCharacter >> (
-            "\\\\"_ | "\\'"_ | "\\\""_ | "\\n"_ | "\\r"_ | "\\t"_ |
+            "\\\\"_ | "\\\""_ | "\\'"_ | "\\n"_ | "\\r"_ | "\\t"_ |
             sequence("\\x"_ , symbol::HexDigit , symbol::HexDigit)) ),
 
         ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
@@ -124,17 +123,17 @@ namespace neos::language::schema_parser
         ( symbol::Comment >> sequence("(*"_ , repeat(range('\0', '\xFF')) , "*)"_) ),
 
         ( symbol::Rule >> discard(optional(symbol::Whitespace)), symbol::Rule, discard(optional(symbol::Whitespace)) ),
-        ( symbol::RuleName >> discard(optional(symbol::Whitespace)), symbol::RuleName, discard(optional(symbol::Whitespace)) ),
-        ( symbol::RuleExpression >> discard(optional(symbol::Whitespace)), symbol::RuleExpression, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Grouping >> discard(optional(symbol::Whitespace)), symbol::Grouping, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Repetition >> discard(optional(symbol::Whitespace)), symbol::Repetition, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Optional >> discard(optional(symbol::Whitespace)), symbol::Optional, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Range >> discard(optional(symbol::Whitespace)), symbol::Range, discard(optional(symbol::Whitespace)) ),
-        ( symbol::RangeExcluding >> discard(optional(symbol::Whitespace)), symbol::RangeExcluding, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) ),
-        ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) ),
+        ( symbol::RuleName >> discard(optional(symbol::Whitespace)), symbol::RuleName, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::RuleExpression >> discard(optional(symbol::Whitespace)), symbol::RuleExpression, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Grouping >> discard(optional(symbol::Whitespace)), symbol::Grouping, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Repetition >> discard(optional(symbol::Whitespace)), symbol::Repetition, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Optional >> discard(optional(symbol::Whitespace)), symbol::Optional, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Range >> discard(optional(symbol::Whitespace)), symbol::Range, discard(optional(symbol::Whitespace))  , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::RangeExcluding >> discard(optional(symbol::Whitespace)), symbol::RangeExcluding, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
+        ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
         ( symbol::CharacterLiteral >> discard(optional(symbol::Whitespace)), symbol::CharacterLiteral, discard(optional(symbol::Whitespace)) ),
         ( symbol::StringLiteral >> discard(optional(symbol::Whitespace)), symbol::StringLiteral, discard(optional(symbol::Whitespace)) ),
         ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )

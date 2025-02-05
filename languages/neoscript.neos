@@ -40,12 +40,12 @@
 #{
     character literal ::= 
         ( '\'' , ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) | escaped character ) $ string.utf8.character, '\'' ) ;
-    escaped character $ string.utf8.character.LF ::= ( "\\n" ) ;
-    escaped character $ string.utf8.character.CR ::= ( "\\r" ) ;
-    escaped character $ string.utf8.character.tab ::= ( "\\t" ) ;
-    escaped character $ string.utf8.character.doublequote ::= ( "\\\"" ) ;
-    escaped character $ string.utf8.character.singlequote ::= ( "\\\'" ) ;
-    escaped character $ string.utf8.character.backslash ::= ( "\\\\" ) ;
+    escaped character $ string.utf8.character.LF ::= "\\n" ;
+    escaped character $ string.utf8.character.CR ::= "\\r" ;
+    escaped character $ string.utf8.character.tab ::= "\\t" ;
+    escaped character $ string.utf8.character.singlequote ::= "\\\'" ;
+    escaped character $ string.utf8.character.doublequote ::= "\\\"" ;
+    escaped character $ string.utf8.character.backslash ::= "\\\\" ;
     string literal ::= 
         ( '\"' , { ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' ) ;
 
@@ -79,7 +79,7 @@
     return $ language.keyword ::= sep , "return", sep ;
 
     number $ math.universal.number ::= 
-        digit sequence , [ '.' , digit sequence , [ ("e" | "E") , [ "+" | "-" ] , digit sequence ] ]
+        digit sequence , [ '.' , digit sequence , [ ("e" | "E") , [ "+" | "-" ] , digit sequence ] ] ;
     digit sequence ::= 
         digit , { digit } ;
     digit ::= 
@@ -105,11 +105,11 @@
     true $ language.object.boolean.true ::= sep , "true" , sep ;
     false $ language.object.boolean.false ::= sep , "false" , sep ;
 
-    identifier ::= ( alpha ) , { alphanumeric | '_' } ;
-    package name ::= alpha , { alpha | "." , alpha } ; 
+    identifier ::= alpha , { alphanumeric | '_' } ;
+    package name ::= alpha , { ( alpha | "." ) , alpha } ; 
 
-    alpha ::= "A" .. "Z" | "a" .. "z" ;
-    alphanumeric ::= alpha | "0" .. "9" ;
+    alpha ::= 'A' .. 'Z' | 'a' .. 'z' ;
+    alphanumeric ::= alpha | '0' .. '9' ;
 
     open expression ::= "(" ;
     close expression ::= ")" ;
