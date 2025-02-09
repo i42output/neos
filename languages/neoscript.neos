@@ -79,7 +79,7 @@
     return $ language.keyword ::= potential keyword ::= "return" ;
 
     number $ math.universal.number ::= 
-        digit sequence , [ '.' , digit sequence , [ ("e" | "E") , [ "+" | "-" ] , digit sequence ] ] ;
+        digit sequence , [ '.' , digit sequence , [ ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ] ] ;
     digit sequence ::= 
         digit , { digit } ;
     digit ::= 
@@ -144,7 +144,7 @@
 
 *{
     program $ language.program ::= { using directive | import directive | namespace scope } ;
-    using directive $ source.package.import ::= ( using , ( identifier | package name ) $ source.package.name );
+    using directive $ source.package.import ::= ( using , ( identifier | package name ) $ source.package.name ) ;
     import directive $ language.function.import ::= ( import , fn , fn sig ) ;
     import directive $ language.function.import ::= ( import , proc , proc sig ) ;
 

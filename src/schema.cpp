@@ -32,8 +32,14 @@ namespace neos::language::schema_parser
         Rule,
         RuleName,
         RuleExpression,
+        RuleExpression2,
+        RuleExpression3,
         Argument,
+        Argument2,
+        Argument3,
         Identifier,
+        SemanticConceptTag,
+        SemanticConceptName,
         SemanticConcept,
         Concatenation,
         Alternation,
@@ -64,8 +70,14 @@ declare_symbol(neos::language::schema_parser::symbol, Grammar)
 declare_symbol(neos::language::schema_parser::symbol, Rule)
 declare_symbol(neos::language::schema_parser::symbol, RuleName)
 declare_symbol(neos::language::schema_parser::symbol, RuleExpression)
+declare_symbol(neos::language::schema_parser::symbol, RuleExpression2)
+declare_symbol(neos::language::schema_parser::symbol, RuleExpression3)
 declare_symbol(neos::language::schema_parser::symbol, Argument)
+declare_symbol(neos::language::schema_parser::symbol, Argument2)
+declare_symbol(neos::language::schema_parser::symbol, Argument3)
 declare_symbol(neos::language::schema_parser::symbol, Identifier)
+declare_symbol(neos::language::schema_parser::symbol, SemanticConceptTag)
+declare_symbol(neos::language::schema_parser::symbol, SemanticConceptName)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
@@ -93,28 +105,43 @@ end_declare_symbols(neos::language::schema_parser::symbol);
 namespace neos::language::schema_parser
 {
     enable_neolib_parser(symbol)
+
+    auto const SC = repeat(symbol::SemanticConcept);
+    auto const WS = symbol::Whitespace;
         
     neolib::parser_rule<symbol> parserRules[] =
     {
-        ( symbol::Grammar >> +repeat(symbol::Rule), discard(symbol::Eof) ),
-        ( symbol::Rule >> symbol::RuleName, "::=" , symbol::RuleExpression, optional(("::="_ , symbol::RuleExpression )) , ";" ),
-        ( symbol::RuleName >> symbol::Identifier , repeat((" "_ , symbol::Identifier)) ),
+        ( symbol::Grammar >> +repeat((WS , symbol::Rule <=> "rule"_concept , WS)) ),
+        ( symbol::Rule >> WS , symbol::RuleName , SC , WS , "::=" , WS , 
+            symbol::RuleExpression <=> "rule_expression"_concept , SC , WS , optional(("::="_ , WS , symbol::RuleExpression <=> "rule_constraint"_concept , SC)) , WS , ";" ),
+        ( symbol::RuleName >> ((symbol::Identifier , repeat((" "_ , symbol::Identifier))) <=> "rule_name"_concept) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
-        ( symbol::SemanticConcept >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
-        ( symbol::RuleExpression >> (symbol::Concatenation | symbol::Alternation | symbol::Grouping | 
-            symbol::Repetition | symbol::Optional | symbol::Argument ) ),
-        ( symbol::Grouping >> "(" , symbol::RuleExpression , ")" ),
-        ( symbol::Repetition >> "{" , symbol::RuleExpression , "}" , optional(symbol::RepetitionAtLeastOne) ),
+        ( symbol::SemanticConcept >> (WS , symbol::SemanticConceptTag , WS , symbol::SemanticConceptName <=> "semantic_concept"_concept , WS) ),
+        ( symbol::RuleExpression >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
+            symbol::Concatenation | symbol::Alternation | symbol::Argument) , SC ),
+        ( symbol::RuleExpression2 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
+            symbol::Alternation | symbol::Argument) , SC ),
+        ( symbol::RuleExpression3 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
+            symbol::Concatenation | symbol::Argument) , SC ),
+        ( symbol::Grouping >> "(" , WS , symbol::Argument , SC , WS , ")" ),
+        ( symbol::Repetition >> "{" , WS , symbol::Argument , SC , WS , "}" , optional((WS , symbol::RepetitionAtLeastOne)) ),
         ( symbol::RepetitionAtLeastOne >> "+"_ ) ,
-        ( symbol::Optional >> "[" , symbol::RuleExpression , "]" ),
-        ( symbol::Concatenation >> (symbol::Argument , +repeat((","_ , symbol::Argument))) ),
-        ( symbol::Alternation >> (symbol::Argument , +repeat(("|"_ , symbol::Argument))) ),
-        ( symbol::RangeSubtract >> (symbol::Range , "-"_ , symbol::Argument) ),
-        ( symbol::RangeNot >> ("!"_ , symbol::Range) ),
-        ( symbol::Range >> (symbol::CharacterLiteral , ".."_ , symbol::CharacterLiteral) ),
-        ( symbol::Argument >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::Terminal | symbol::SpecialSequence | symbol::RuleExpression ) ),
-        ( symbol::Terminal >> (symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral ) ),
-        ( symbol::SpecialSequence >> ("?"_ , repeat(symbol::Terminal) , "?"_) ),
+        ( symbol::Optional >> "[" , WS , symbol::Argument , SC , WS , "]" ),
+        ( symbol::Concatenation >> (symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) ),
+        ( symbol::Alternation >> (symbol::Argument3 , SC , +repeat((WS , "|"_ , WS , symbol::Argument3 , SC)) ) ),
+        ( symbol::RangeSubtract >> (symbol::Range , WS , "-"_ , WS , symbol::Argument) ),
+        ( symbol::RangeNot >> ("!"_ , WS , symbol::Range) ),
+        ( symbol::Range >> (symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) ),
+        ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
+        ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
+        ( symbol::Argument3 >> (symbol::Terminal | symbol::RuleExpression3) ),
+        ( symbol::Terminal >> ( symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::SpecialSequence |
+            symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral ) ),
+        
+        ( symbol::SemanticConceptTag >> "$"_ ),
+        ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
+
+        ( symbol::SpecialSequence >> ("?"_ , WS , repeat(symbol::Terminal) , WS , "?"_) ),
 
         ( symbol::CharacterLiteral >> ("'"_ , (symbol::Character | symbol::EscapedCharacter) , "'"_) ),
         ( symbol::StringLiteral >> ("\""_ , repeat(symbol::Character | symbol::EscapedCharacter) , "\""_) ),
@@ -127,28 +154,9 @@ namespace neos::language::schema_parser
             "\\\\"_ | "\\\""_ | "\\'"_ | "\\n"_ | "\\r"_ | "\\t"_ |
             sequence("\\x"_ , symbol::HexDigit , symbol::HexDigit)) ),
 
-        ( symbol::Eof >> discard(optional(symbol::Whitespace)) , "" ),
-        ( symbol::Whitespace >> +repeat(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
-        ( symbol::Comment >> sequence("(*"_ , repeat(range('\0', '\xFF')) , "*)"_) ),
-
-        ( symbol::Rule >> discard(optional(symbol::Whitespace)), symbol::Rule, discard(optional(symbol::Whitespace)) ),
-        ( symbol::RuleName >> discard(optional(symbol::Whitespace)), symbol::RuleName, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::RuleExpression >> discard(optional(symbol::Whitespace)), symbol::RuleExpression, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Grouping >> discard(optional(symbol::Whitespace)), symbol::Grouping, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Repetition >> discard(optional(symbol::Whitespace)), symbol::Repetition, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::RepetitionAtLeastOne >> discard(optional(symbol::Whitespace)), symbol::RepetitionAtLeastOne, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Optional >> discard(optional(symbol::Whitespace)), symbol::Optional, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Concatenation >> discard(optional(symbol::Whitespace)), symbol::Concatenation, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Alternation >> discard(optional(symbol::Whitespace)), symbol::Alternation, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Range >> discard(optional(symbol::Whitespace)), symbol::Range, discard(optional(symbol::Whitespace))  , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::RangeNot >> discard(optional(symbol::Whitespace)), symbol::RangeNot, discard(optional(symbol::Whitespace))  , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::RangeSubtract >> discard(optional(symbol::Whitespace)), symbol::RangeSubtract, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Argument >> discard(optional(symbol::Whitespace)), symbol::Argument, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::Terminal >> discard(optional(symbol::Whitespace)), symbol::Terminal, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::SpecialSequence >> discard(optional(symbol::Whitespace)), symbol::SpecialSequence, discard(optional(symbol::Whitespace)) , optional(("$"_ , symbol::SemanticConcept)) ),
-        ( symbol::CharacterLiteral >> discard(optional(symbol::Whitespace)), symbol::CharacterLiteral, discard(optional(symbol::Whitespace)) ),
-        ( symbol::StringLiteral >> discard(optional(symbol::Whitespace)), symbol::StringLiteral, discard(optional(symbol::Whitespace)) ),
-        ( symbol::SemanticConcept >> discard(optional(symbol::Whitespace)), symbol::SemanticConcept, discard(optional(symbol::Whitespace)) )
+        ( symbol::Whitespace >> repeat(' '_ | '\r' | '\n' | '\t' | symbol::Comment ) ),
+        ( symbol::Comment >> sequence("(*"_ , repeat(
+            range('\x00', '\x29') | range('\x2B', '\xFF') | ("*"_ , (range('\x00', '\x28') | range('\x2A', '\xFF')))) , "*)"_) ),
     };
 }
 
@@ -196,16 +204,14 @@ namespace neos::language
             iPipeline.push_back(schema_stage{ stageName, stages.at(stageName)});
         }
 
-        std::shared_ptr<neolib::parser<schema_parser::symbol>::ast_node const> previousAst;
-
         for (auto const& stage : iPipeline)
         {
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
-            parser.set_debug_output(std::cerr);
+            parser.ignore(schema_parser::symbol::Whitespace);
+            parser.set_debug_output(std::cerr, false, true);
             parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
-            //parser.create_ast();
-            //previousAst = parser.ast().shared_from_this();
+            parser.create_ast();
         }
     }
 
