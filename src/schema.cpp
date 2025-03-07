@@ -33,10 +33,8 @@ namespace neos::language::schema_parser
         RuleName,
         RuleExpression,
         RuleExpression2,
-        RuleExpression3,
         Argument,
         Argument2,
-        Argument3,
         Identifier,
         SemanticConceptTag,
         SemanticConceptName,
@@ -71,10 +69,8 @@ declare_symbol(neos::language::schema_parser::symbol, Rule)
 declare_symbol(neos::language::schema_parser::symbol, RuleName)
 declare_symbol(neos::language::schema_parser::symbol, RuleExpression)
 declare_symbol(neos::language::schema_parser::symbol, RuleExpression2)
-declare_symbol(neos::language::schema_parser::symbol, RuleExpression3)
 declare_symbol(neos::language::schema_parser::symbol, Argument)
 declare_symbol(neos::language::schema_parser::symbol, Argument2)
-declare_symbol(neos::language::schema_parser::symbol, Argument3)
 declare_symbol(neos::language::schema_parser::symbol, Identifier)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptTag)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptName)
@@ -120,21 +116,18 @@ namespace neos::language::schema_parser
         ( symbol::RuleExpression >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
             symbol::Concatenation | symbol::Alternation | symbol::Argument) , SC ),
         ( symbol::RuleExpression2 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
-            symbol::Alternation | symbol::Argument) , SC ),
-        ( symbol::RuleExpression3 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
-            symbol::Concatenation | symbol::Argument) , SC ),
-        ( symbol::Grouping >> "(" , WS , symbol::Argument , SC , WS , ")" ),
-        ( symbol::Repetition >> "{" , WS , symbol::Argument , SC , WS , "}" , optional((WS , symbol::RepetitionAtLeastOne)) ),
+            symbol::Concatenation | symbol::Alternation) , SC ),
+        ( symbol::Grouping >> "(" , WS , symbol::Argument <=> "grouping"_concept , SC , WS , ")" ),
+        ( symbol::Repetition >> "{" , WS , symbol::Argument <=> "repetition"_concept , SC , WS , "}" , optional((WS , symbol::RepetitionAtLeastOne)) ),
         ( symbol::RepetitionAtLeastOne >> "+"_ ) ,
-        ( symbol::Optional >> "[" , WS , symbol::Argument , SC , WS , "]" ),
-        ( symbol::Concatenation >> (symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) ),
-        ( symbol::Alternation >> (symbol::Argument3 , SC , +repeat((WS , "|"_ , WS , symbol::Argument3 , SC)) ) ),
+        ( symbol::Optional >> "[" , WS , symbol::Argument <=> "optional"_concept , SC , WS , "]" ),
+        ( symbol::Concatenation >> ((symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) <=> "concatenation"_concept) ),
+        ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "|"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation"_concept) ),
         ( symbol::RangeSubtract >> (symbol::Range , WS , "-"_ , WS , symbol::Argument) ),
         ( symbol::RangeNot >> ("!"_ , WS , symbol::Range) ),
         ( symbol::Range >> (symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
-        ( symbol::Argument3 >> (symbol::Terminal | symbol::RuleExpression3) ),
         ( symbol::Terminal >> ( symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::SpecialSequence |
             symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral ) ),
         
