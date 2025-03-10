@@ -47,7 +47,7 @@ namespace neos::language::schema_parser
         Terminal,
         Optional,
         Repetition,
-        RepetitionAtLeastOne,
+        AtLeastOne,
         Grouping,
         Alpha,
         AlphaNumeric,
@@ -83,7 +83,7 @@ declare_symbol(neos::language::schema_parser::symbol, RangeSubtract)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
 declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
-declare_symbol(neos::language::schema_parser::symbol, RepetitionAtLeastOne)
+declare_symbol(neos::language::schema_parser::symbol, AtLeastOne)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
 declare_symbol(neos::language::schema_parser::symbol, Alpha)
 declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
@@ -118,13 +118,13 @@ namespace neos::language::schema_parser
         ( symbol::RuleExpression2 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
             symbol::Concatenation | symbol::Alternation) , SC ),
         ( symbol::Grouping >> "(" , WS , symbol::Argument <=> "grouping"_concept , SC , WS , ")" ),
-        ( symbol::Repetition >> "{" , WS , symbol::Argument <=> "repetition"_concept , SC , WS , "}" , optional((WS , symbol::RepetitionAtLeastOne)) ),
-        ( symbol::RepetitionAtLeastOne >> "+"_ ) ,
+        ( symbol::Repetition >> "{" , WS , symbol::Argument <=> "repetition"_concept , SC , WS , "}" , optional((WS , symbol::AtLeastOne <=> "at_least_one"_concept)) ),
+        ( symbol::AtLeastOne >> "+"_ ) ,
         ( symbol::Optional >> "[" , WS , symbol::Argument <=> "optional"_concept , SC , WS , "]" ),
         ( symbol::Concatenation >> ((symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) <=> "concatenation"_concept) ),
         ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "|"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation"_concept) ),
-        ( symbol::RangeSubtract >> (symbol::Range , WS , "-"_ , WS , symbol::Argument) ),
-        ( symbol::RangeNot >> ("!"_ , WS , symbol::Range) ),
+        ( symbol::RangeSubtract >> ((symbol::Range , WS , "-"_ , WS , symbol::Argument) <=> "subtract"_concept) ),
+        ( symbol::RangeNot >> (("!"_ , WS , symbol::Range) <=> "not"_concept) ),
         ( symbol::Range >> ((symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) <=> "range"_concept) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
