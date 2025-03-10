@@ -21,7 +21,6 @@
 #include <filesystem>
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
-#include <neolib/file/parser.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos::language::schema_parser
@@ -155,6 +154,14 @@ namespace neos::language::schema_parser
 
 namespace neos::language
 {
+    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage)
+    {
+        if (aNode.c == "rule_name" && aNode.parent->c == "rule")
+            aStage.symbolMap[aNode.value] = static_cast<symbol>(aStage.symbolMap.size());
+        for (auto const& child : aNode.children)
+            walk_ast(aParser, *child, aStage);
+    }
+
     schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
         iPath{ aPath },
         iConceptLibraries{ aConceptLibraries }
@@ -194,17 +201,19 @@ namespace neos::language
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("pipeline").as<neolib::rjson_array>())
         {
             auto const& stageName = stage->text();
-            iPipeline.push_back(schema_stage{ stageName, stages.at(stageName)});
+            iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName)));
         }
 
-        for (auto const& stage : iPipeline)
+        for (auto const& stagePtr : iPipeline)
         {
+            auto& stage = *stagePtr;
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
             parser.set_debug_output(std::cerr, false, true);
             parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
             parser.create_ast();
+            walk_ast(parser, parser.ast(), stage);
         }
     }
 

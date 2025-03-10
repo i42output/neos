@@ -24,6 +24,7 @@
 #include <neolib/core/i_map.hpp>
 #include <neolib/core/i_string.hpp>
 #include <neolib/file/json.hpp>
+#include <neolib/file/parser.hpp>
 #include <neos/language/i_concept_library.hpp>
 
 namespace neos::language
@@ -40,13 +41,17 @@ namespace neos::language
         std::size_t parserRecursionLimit = 256u;
     };
 
+    enum class symbol : std::uint32_t {};
+
     struct schema_stage
     {
         std::string name;
         std::string_view grammar;
+        std::unordered_map<std::string_view, symbol> symbolMap = {};
+        neolib::parser<symbol> parser = {};
     };
 
-    using pipeline = std::vector<schema_stage>;
+    using pipeline = std::vector<std::unique_ptr<schema_stage>>;
 
     class schema
     {
