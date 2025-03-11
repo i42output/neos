@@ -162,10 +162,29 @@ namespace neos::language
         return existing->second;
     }
 
-    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage)
+    using atom = neolib::parser<symbol>::atom;
+    using primitive = neolib::parser<symbol>::primitive_atom;
+
+    bool is_parent(neolib::parser<schema_parser::symbol>::ast_node const& aNode, std::string_view const& aConcept)
     {
+        return aNode.parent && aNode.parent->c == aConcept;
+    }
+
+    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, atom* aParentAtom = nullptr)
+    {
+        std::optional<atom> atom;
+
         if (aNode.c == "rule_name")
-            (void)lookup_symbol(aStage, aNode.value);
+            atom.emplace(primitive{ lookup_symbol(aStage, aNode.value) });
+        
+        if (atom.has_value())
+        {
+            if (is_parent(aNode, "rule"))
+                aStage.parser.rules().emplace_back(atom.value());
+            else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
+                aStage.parser.rules().back().rhs = atom.value();
+        }
+
         for (auto const& child : aNode.children)
             walk_ast(aParser, *child, aStage);
     }
