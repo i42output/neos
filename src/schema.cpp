@@ -162,31 +162,75 @@ namespace neos::language
         return existing->second;
     }
 
-    using atom = neolib::parser<symbol>::atom;
-    using primitive = neolib::parser<symbol>::primitive_atom;
+    using parser = neolib::parser<symbol>;
+    using atom = parser::atom;
+    using primitive = parser::primitive_atom;
 
     bool is_parent(neolib::parser<schema_parser::symbol>::ast_node const& aNode, std::string_view const& aConcept)
     {
         return aNode.parent && aNode.parent->c == aConcept;
     }
 
-    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, atom* aParentAtom = nullptr)
+    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, primitive* aParentAtom = nullptr)
     {
-        std::optional<atom> atom;
+        std::optional<primitive> primitive;
+
+        thread_local std::int32_t depth = 0;
+        neolib::scoped_counter sc{ depth };
 
         if (aNode.c == "rule_name")
-            atom.emplace(primitive{ lookup_symbol(aStage, aNode.value) });
-        
-        if (atom.has_value())
+            primitive.emplace(lookup_symbol(aStage, aNode.value));
+        else if (aNode.c == "concatenation")
+            primitive.emplace(parser::concatenation{});
+        else if (aNode.c == "alternation")
+            primitive.emplace(parser::alternation{});
+        else if (aNode.c == "repetition")
+            primitive.emplace(parser::repetition{});
+        else if (aNode.c == "optional")
+            primitive.emplace(parser::optional{});
+        else if (aNode.c == "range")
+            primitive.emplace(parser::range{});
+        else if (aNode.c == "string")
+            primitive.emplace(parser::terminal{ aNode.value });
+        else if (aNode.c == "character")
+            primitive.emplace(parser::terminal{ aNode.value });
+
+        if (primitive.has_value())
         {
+            if (aStage.parser.has_debug_output())
+                aStage.parser.debug_output() << std::string((depth - 1) * 2, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
+
             if (is_parent(aNode, "rule"))
-                aStage.parser.rules().emplace_back(atom.value());
+                aStage.parser.rules().emplace_back(primitive.value());
             else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
-                aStage.parser.rules().back().rhs = atom.value();
+                aStage.parser.rules().back().rhs = primitive.value();
+            else if (aParentAtom)
+            {
+                std::visit([&](auto& aPrimitive)
+                {
+                    using type = std::decay_t<decltype(aPrimitive)>;
+                    if constexpr (std::is_same_v<type, parser::concatenation>)
+                    {
+                        aPrimitive.value.push_back(primitive.value());
+                    }
+                    else if constexpr (std::is_same_v<type, parser::alternation>)
+                    {
+                        aPrimitive.value.push_back(primitive.value());
+                    }
+                    else if constexpr (std::is_same_v<type, parser::repetition>)
+                    {
+                        aPrimitive.value.push_back(primitive.value());
+                    }
+                    else if constexpr (std::is_same_v<type, parser::optional>)
+                    {
+                        aPrimitive.value.push_back(primitive.value());
+                    }
+                }, *aParentAtom);
+            }
         }
 
         for (auto const& child : aNode.children)
-            walk_ast(aParser, *child, aStage);
+            walk_ast(aParser, *child, aStage, primitive.has_value() ? &primitive.value() : nullptr);
     }
 
     schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
@@ -236,10 +280,11 @@ namespace neos::language
             auto& stage = *stagePtr;
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
-            parser.set_debug_output(std::cerr, false, true);
+            parser.set_debug_output(std::cerr);
             parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
             parser.create_ast();
+            stage.parser.set_debug_output(std::cerr);
             walk_ast(parser, parser.ast(), stage);
         }
     }
