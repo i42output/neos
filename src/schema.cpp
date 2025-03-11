@@ -154,10 +154,18 @@ namespace neos::language::schema_parser
 
 namespace neos::language
 {
+    symbol lookup_symbol(schema_stage& aStage, std::string_view const& aSymbolLexeme)
+    {
+        auto existing = aStage.symbolMap.find(aSymbolLexeme);
+        if (existing == aStage.symbolMap.end())
+            existing = aStage.symbolMap.emplace(aSymbolLexeme, static_cast<symbol>(aStage.symbolMap.size())).first;
+        return existing->second;
+    }
+
     void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage)
     {
-        if (aNode.c == "rule_name" && aNode.parent->c == "rule")
-            aStage.symbolMap[aNode.value] = static_cast<symbol>(aStage.symbolMap.size());
+        if (aNode.c == "rule_name")
+            (void)lookup_symbol(aStage, aNode.value);
         for (auto const& child : aNode.children)
             walk_ast(aParser, *child, aStage);
     }
