@@ -44,6 +44,7 @@ namespace neos::language::schema_parser
         RangeNot,
         RangeSubtract,
         Terminal,
+        Subtract,
         Optional,
         Repetition,
         AtLeastOne,
@@ -74,13 +75,14 @@ declare_symbol(neos::language::schema_parser::symbol, Identifier)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptTag)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptName)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
+declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
 declare_symbol(neos::language::schema_parser::symbol, Range)
 declare_symbol(neos::language::schema_parser::symbol, RangeNot)
 declare_symbol(neos::language::schema_parser::symbol, RangeSubtract)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
-declare_symbol(neos::language::schema_parser::symbol, Optional)
+declare_symbol(neos::language::schema_parser::symbol, Subtract)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
 declare_symbol(neos::language::schema_parser::symbol, AtLeastOne)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
@@ -116,19 +118,20 @@ namespace neos::language::schema_parser
             symbol::Concatenation | symbol::Alternation | symbol::Argument) , SC ),
         ( symbol::RuleExpression2 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
             symbol::Concatenation | symbol::Alternation) , SC ),
-        ( symbol::Grouping >> "(" , WS , symbol::Argument <=> "grouping"_concept , SC , WS , ")" ),
+        ( symbol::Grouping >> "(" , WS , symbol::Argument , SC , WS , ")" ),
         ( symbol::Repetition >> "{" , WS , symbol::Argument <=> "repetition"_concept , SC , WS , "}" , optional((WS , symbol::AtLeastOne <=> "at_least_one"_concept)) ),
         ( symbol::AtLeastOne >> "+"_ ) ,
         ( symbol::Optional >> "[" , WS , symbol::Argument <=> "optional"_concept , SC , WS , "]" ),
         ( symbol::Concatenation >> ((symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) <=> "concatenation"_concept) ),
         ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "|"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation"_concept) ),
-        ( symbol::RangeSubtract >> ((symbol::Range , WS , "-"_ , WS , symbol::Argument) <=> "subtract"_concept) ),
+        ( symbol::RangeSubtract >> (symbol::Range , WS , (symbol::Subtract <=> "subtract"_infix_concept) , WS , symbol::Argument) ),
         ( symbol::RangeNot >> (("!"_ , WS , symbol::Range) <=> "not"_concept) ),
         ( symbol::Range >> ((symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) <=> "range"_concept) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
         ( symbol::Terminal >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::SpecialSequence |
             symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral) ),
+        ( symbol::Subtract >> "-"_ ),
         
         ( symbol::SemanticConceptTag >> "$"_ ),
         ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
@@ -173,10 +176,12 @@ namespace neos::language
 
     void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, primitive* aParentAtom = nullptr)
     {
+        primitive* newParent = aParentAtom;
+
         std::optional<primitive> primitive;
 
         thread_local std::int32_t depth = 0;
-        neolib::scoped_counter sc{ depth };
+        std::optional<neolib::scoped_counter<std::int32_t>> scopedDepth;
 
         if (aNode.c == "rule_name")
             primitive.emplace(lookup_symbol(aStage, aNode.value));
@@ -197,40 +202,57 @@ namespace neos::language
 
         if (primitive.has_value())
         {
-            if (aStage.parser.has_debug_output())
-                aStage.parser.debug_output() << std::string((depth - 1) * 2, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
-
             if (is_parent(aNode, "rule"))
+            {
                 aStage.parser.rules().emplace_back(primitive.value());
+                newParent = &aStage.parser.rules().back().lhs.back();
+            }
             else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
+            {
                 aStage.parser.rules().back().rhs = primitive.value();
+                newParent = &aStage.parser.rules().back().rhs.back();
+            }
             else if (aParentAtom)
             {
                 std::visit([&](auto& aPrimitive)
                 {
                     using type = std::decay_t<decltype(aPrimitive)>;
-                    if constexpr (std::is_same_v<type, parser::concatenation>)
+                    if constexpr (
+                        std::is_same_v<type, parser::concatenation> ||
+                        std::is_same_v<type, parser::alternation> ||
+                        std::is_same_v<type, parser::repetition> ||
+                        std::is_same_v<type, parser::optional> ||
+                        std::is_same_v<type, parser::range>)
                     {
                         aPrimitive.value.push_back(primitive.value());
-                    }
-                    else if constexpr (std::is_same_v<type, parser::alternation>)
-                    {
-                        aPrimitive.value.push_back(primitive.value());
-                    }
-                    else if constexpr (std::is_same_v<type, parser::repetition>)
-                    {
-                        aPrimitive.value.push_back(primitive.value());
-                    }
-                    else if constexpr (std::is_same_v<type, parser::optional>)
-                    {
-                        aPrimitive.value.push_back(primitive.value());
+                        newParent = &aPrimitive.value.back();
                     }
                 }, *aParentAtom);
             }
         }
+        else if (is_parent(aNode, "rule") && aNode.c == "rule_expression")
+            newParent = &aStage.parser.rules().back().lhs.back();
 
+        if (newParent != aParentAtom)
+            scopedDepth.emplace(depth);
+
+        if (primitive.has_value() && aStage.parser.has_debug_output())
+            aStage.parser.debug_output() << std::string(depth, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
+            
         for (auto const& child : aNode.children)
-            walk_ast(aParser, *child, aStage, primitive.has_value() ? &primitive.value() : nullptr);
+            walk_ast(aParser, *child, aStage, newParent);
+
+        if (aParentAtom)
+        {
+            if (aNode.c == "subtract")
+            {
+                std::visit([&](auto& aPrimitive)
+                    {
+                        using type = std::decay_t<decltype(aPrimitive)>;
+                        // todo
+                    }, *aParentAtom);
+            }
+        }
     }
 
     schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
@@ -280,7 +302,7 @@ namespace neos::language
             auto& stage = *stagePtr;
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
-            parser.set_debug_output(std::cerr);
+            parser.set_debug_output(std::cerr, false, false);
             parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
             parser.create_ast();
