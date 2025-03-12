@@ -277,6 +277,7 @@ namespace neos::language
                                         // todo
                                     }
                                 }, aParentPrimitive.value[1]);
+                            aParentPrimitive.value.erase(std::next(aParentPrimitive.value.begin()));
                         }
                     }, *aParentAtom);
             }
