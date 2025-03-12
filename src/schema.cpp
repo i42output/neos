@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
+#include <neolib/core/string_utils.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos::language::schema_parser
@@ -196,9 +197,9 @@ namespace neos::language
         else if (aNode.c == "range")
             primitive.emplace(parser::range{});
         else if (aNode.c == "string")
-            primitive.emplace(parser::terminal{ aNode.value });
+            primitive.emplace(parser::terminal{ neolib::unescape(aNode.value) });
         else if (aNode.c == "character")
-            primitive.emplace(parser::terminal{ aNode.value });
+            primitive.emplace(parser::terminal{ neolib::unescape(aNode.value) });
 
         if (primitive.has_value())
         {
@@ -214,9 +215,9 @@ namespace neos::language
             }
             else if (aParentAtom)
             {
-                std::visit([&](auto& aPrimitive)
+                std::visit([&](auto& aParentPrimitive)
                 {
-                    using type = std::decay_t<decltype(aPrimitive)>;
+                    using type = std::decay_t<decltype(aParentPrimitive)>;
                     if constexpr (
                         std::is_same_v<type, parser::concatenation> ||
                         std::is_same_v<type, parser::alternation> ||
@@ -224,8 +225,8 @@ namespace neos::language
                         std::is_same_v<type, parser::optional> ||
                         std::is_same_v<type, parser::range>)
                     {
-                        aPrimitive.value.push_back(primitive.value());
-                        newParent = &aPrimitive.value.back();
+                        aParentPrimitive.value.push_back(primitive.value());
+                        newParent = &aParentPrimitive.value.back();
                     }
                 }, *aParentAtom);
             }
@@ -246,10 +247,37 @@ namespace neos::language
         {
             if (aNode.c == "subtract")
             {
-                std::visit([&](auto& aPrimitive)
+                std::visit([&](auto& aParentPrimitive)
                     {
-                        using type = std::decay_t<decltype(aPrimitive)>;
-                        // todo
+                        using type = std::decay_t<decltype(aParentPrimitive)>;
+                        if constexpr (
+                            std::is_same_v<type, parser::concatenation> ||
+                            std::is_same_v<type, parser::alternation> ||
+                            std::is_same_v<type, parser::repetition> ||
+                            std::is_same_v<type, parser::optional>)
+                        {
+                            auto& ran = std::get<parser::range>(aParentPrimitive.value[0]);
+                            std::visit([&](auto& aRhs)
+                                {
+                                    using type = std::decay_t<decltype(aRhs)>;
+                                    if constexpr (
+                                        std::is_same_v<type, parser::concatenation> ||
+                                        std::is_same_v<type, parser::alternation> ||
+                                        std::is_same_v<type, parser::repetition> ||
+                                        std::is_same_v<type, parser::optional>)
+                                    {
+                                        for (auto const& e : aRhs.value)
+                                        {
+                                            auto const& t = std::get<parser::terminal>(e);
+                                            ran.exclusions.insert(static_cast<unsigned char>(t[0]));
+                                        }
+                                    }
+                                    else if constexpr (std::is_same_v<type, parser::range>)
+                                    {
+                                        // todo
+                                    }
+                                }, aParentPrimitive.value[1]);
+                        }
                     }, *aParentAtom);
             }
         }
