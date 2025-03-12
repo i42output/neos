@@ -177,7 +177,32 @@ namespace neos::language
 
     void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, primitive* aParentAtom = nullptr)
     {
-        primitive* newParent = aParentAtom;
+        primitive* currentParent = aParentAtom;
+        primitive* newParent = currentParent;
+        primitive* previous = nullptr;
+        if (!aStage.parser.rules().empty() && 
+            !aStage.parser.rules().back().lhs.empty() &&
+            !aStage.parser.rules().back().rhs.empty() &&
+            currentParent == &aStage.parser.rules().back().lhs.back())
+        {
+            previous = &aStage.parser.rules().back().rhs.back();
+        }
+        else if (currentParent)
+        {
+            std::visit([&](auto& aParentPrimitive)
+                {
+                    using type = std::decay_t<decltype(aParentPrimitive)>;
+                    if constexpr (
+                        std::is_same_v<type, parser::concatenation> ||
+                        std::is_same_v<type, parser::alternation> ||
+                        std::is_same_v<type, parser::repetition> ||
+                        std::is_same_v<type, parser::optional>)
+                    {
+                        if (!aParentPrimitive.value.empty())
+                            previous = &aParentPrimitive.value.back();
+                    }
+                }, *currentParent);
+        }
 
         std::optional<primitive> primitive;
 
@@ -210,10 +235,10 @@ namespace neos::language
             }
             else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
             {
-                aStage.parser.rules().back().rhs = primitive.value();
+                aStage.parser.rules().back().rhs.push_back(primitive.value());
                 newParent = &aStage.parser.rules().back().rhs.back();
             }
-            else if (aParentAtom)
+            else if (currentParent)
             {
                 std::visit([&](auto& aParentPrimitive)
                 {
@@ -228,13 +253,13 @@ namespace neos::language
                         aParentPrimitive.value.push_back(primitive.value());
                         newParent = &aParentPrimitive.value.back();
                     }
-                }, *aParentAtom);
+                }, *currentParent);
             }
         }
         else if (is_parent(aNode, "rule") && aNode.c == "rule_expression")
             newParent = &aStage.parser.rules().back().lhs.back();
 
-        if (newParent != aParentAtom)
+        if (newParent != currentParent)
             scopedDepth.emplace(depth);
 
         if (primitive.has_value() && aStage.parser.has_debug_output())
@@ -243,9 +268,11 @@ namespace neos::language
         for (auto const& child : aNode.children)
             walk_ast(aParser, *child, aStage, newParent);
 
-        if (aParentAtom)
+        if (currentParent)
         {
-            if (aNode.c == "subtract")
+            if (aNode.c == "at_least_one")
+                std::get<parser::repetition>(*previous).atLeastOne = true;
+            else if (aNode.c == "subtract")
             {
                 std::visit([&](auto& aParentPrimitive)
                     {
@@ -279,7 +306,7 @@ namespace neos::language
                                 }, aParentPrimitive.value[1]);
                             aParentPrimitive.value.erase(std::next(aParentPrimitive.value.begin()));
                         }
-                    }, *aParentAtom);
+                    }, *currentParent);
             }
         }
     }
