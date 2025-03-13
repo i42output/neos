@@ -270,7 +270,9 @@ namespace neos::language
 
         if (currentParent)
         {
-            if (aNode.c == "at_least_one")
+            if (aNode.c == "semantic_concept")
+                previous->c.emplace(aNode.value);
+            else if (aNode.c == "at_least_one")
                 std::get<parser::repetition>(*previous).atLeastOne = true;
             else if (aNode.c == "subtract")
             {
@@ -308,6 +310,11 @@ namespace neos::language
                         }
                     }, *currentParent);
             }
+        }
+        else
+        {
+            if (aNode.c == "semantic_concept")
+                aStage.parser.rules().back().lhs.back().c.emplace(aNode.value);
         }
     }
 
