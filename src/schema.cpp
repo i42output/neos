@@ -49,6 +49,7 @@ namespace neos::language::schema_parser
         Optional,
         Repetition,
         AtLeastOne,
+        Not,
         Grouping,
         Alpha,
         AlphaNumeric,
@@ -86,6 +87,7 @@ declare_symbol(neos::language::schema_parser::symbol, Terminal)
 declare_symbol(neos::language::schema_parser::symbol, Subtract)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
 declare_symbol(neos::language::schema_parser::symbol, AtLeastOne)
+declare_symbol(neos::language::schema_parser::symbol, Not)
 declare_symbol(neos::language::schema_parser::symbol, Grouping)
 declare_symbol(neos::language::schema_parser::symbol, Alpha)
 declare_symbol(neos::language::schema_parser::symbol, AlphaNumeric)
@@ -121,19 +123,20 @@ namespace neos::language::schema_parser
             symbol::Concatenation | symbol::Alternation) , SC ),
         ( symbol::Grouping >> "(" , WS , symbol::Argument , SC , WS , ")" ),
         ( symbol::Repetition >> "{" , WS , symbol::Argument <=> "repetition"_concept , SC , WS , "}" , optional((WS , symbol::AtLeastOne <=> "at_least_one"_concept)) ),
-        ( symbol::AtLeastOne >> "+"_ ) ,
         ( symbol::Optional >> "[" , WS , symbol::Argument <=> "optional"_concept , SC , WS , "]" ),
         ( symbol::Concatenation >> ((symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) <=> "concatenation"_concept) ),
         ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "|"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation"_concept) ),
         ( symbol::RangeSubtract >> (symbol::Range , WS , (symbol::Subtract <=> "subtract"_infix_concept) , WS , symbol::Argument) ),
-        ( symbol::RangeNot >> (("!"_ , WS , symbol::Range) <=> "not"_concept) ),
+        ( symbol::RangeNot >> ((symbol::Not , WS , symbol::Range) <=> "not"_concept) ),
         ( symbol::Range >> ((symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) <=> "range"_concept) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
         ( symbol::Terminal >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::SpecialSequence |
             symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral) ),
         ( symbol::Subtract >> "-"_ ),
-        
+        ( symbol::AtLeastOne >> "+"_ ) ,
+        ( symbol::Not >> "!"_ ) ,
+
         ( symbol::SemanticConceptTag >> "$"_ ),
         ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
 
@@ -179,8 +182,75 @@ namespace neos::language
     {
         primitive* currentParent = aParentAtom;
         primitive* newParent = currentParent;
+
+        std::optional<primitive> value;
+
+        thread_local std::int32_t depth = 0;
+        std::optional<neolib::scoped_counter<std::int32_t>> scopedDepth;
+
+        if (aNode.c == "rule_name")
+            value.emplace(lookup_symbol(aStage, aNode.value));
+        else if (aNode.c == "rule_constraint")
+            aStage.parser.rules().back().rhs.back().constraint.emplace(aNode.children.front()->value);
+        else if (aNode.c == "concatenation")
+            value.emplace(parser::concatenation{});
+        else if (aNode.c == "alternation")
+            value.emplace(parser::alternation{});
+        else if (aNode.c == "repetition")
+            value.emplace(parser::repetition{});
+        else if (aNode.c == "optional")
+            value.emplace(parser::optional{});
+        else if (aNode.c == "range")
+            value.emplace(parser::range{});
+        else if (aNode.c == "string")
+            value.emplace(parser::terminal{ neolib::unescape(aNode.value) });
+        else if (aNode.c == "character")
+            value.emplace(parser::terminal{ neolib::unescape(aNode.value) });
+
+        if (value.has_value())
+        {
+            if (is_parent(aNode, "rule"))
+            {
+                aStage.parser.rules().emplace_back(value.value());
+                newParent = &aStage.parser.rules().back().lhs.back();
+            }
+            else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
+            {
+                aStage.parser.rules().back().rhs.push_back(value.value());
+                newParent = &aStage.parser.rules().back().rhs.back();
+            }
+            else if (currentParent)
+            {
+                std::visit([&](auto& aParentPrimitive)
+                {
+                    using type = std::decay_t<decltype(aParentPrimitive)>;
+                    if constexpr (
+                        std::is_same_v<type, parser::concatenation> ||
+                        std::is_same_v<type, parser::alternation> ||
+                        std::is_same_v<type, parser::repetition> ||
+                        std::is_same_v<type, parser::optional> ||
+                        std::is_same_v<type, parser::range>)
+                    {
+                        aParentPrimitive.value.push_back(value.value());
+                        newParent = &aParentPrimitive.value.back();
+                    }
+                }, *currentParent);
+            }
+        }
+        else if (is_parent(aNode, "rule") && aNode.c == "rule_expression")
+            newParent = &aStage.parser.rules().back().lhs.back();
+
+        if (newParent != currentParent)
+            scopedDepth.emplace(depth);
+
+        if (value.has_value() && aStage.parser.has_debug_output())
+            aStage.parser.debug_output() << std::string(depth, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
+            
+        for (auto const& child : aNode.children)
+            walk_ast(aParser, *child, aStage, newParent);
+
         primitive* previous = nullptr;
-        if (!aStage.parser.rules().empty() && 
+        if (!aStage.parser.rules().empty() &&
             !aStage.parser.rules().back().lhs.empty() &&
             !aStage.parser.rules().back().rhs.empty() &&
             currentParent == &aStage.parser.rules().back().lhs.back())
@@ -204,76 +274,16 @@ namespace neos::language
                 }, *currentParent);
         }
 
-        std::optional<primitive> primitive;
-
-        thread_local std::int32_t depth = 0;
-        std::optional<neolib::scoped_counter<std::int32_t>> scopedDepth;
-
-        if (aNode.c == "rule_name")
-            primitive.emplace(lookup_symbol(aStage, aNode.value));
-        else if (aNode.c == "concatenation")
-            primitive.emplace(parser::concatenation{});
-        else if (aNode.c == "alternation")
-            primitive.emplace(parser::alternation{});
-        else if (aNode.c == "repetition")
-            primitive.emplace(parser::repetition{});
-        else if (aNode.c == "optional")
-            primitive.emplace(parser::optional{});
-        else if (aNode.c == "range")
-            primitive.emplace(parser::range{});
-        else if (aNode.c == "string")
-            primitive.emplace(parser::terminal{ neolib::unescape(aNode.value) });
-        else if (aNode.c == "character")
-            primitive.emplace(parser::terminal{ neolib::unescape(aNode.value) });
-
-        if (primitive.has_value())
-        {
-            if (is_parent(aNode, "rule"))
-            {
-                aStage.parser.rules().emplace_back(primitive.value());
-                newParent = &aStage.parser.rules().back().lhs.back();
-            }
-            else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
-            {
-                aStage.parser.rules().back().rhs.push_back(primitive.value());
-                newParent = &aStage.parser.rules().back().rhs.back();
-            }
-            else if (currentParent)
-            {
-                std::visit([&](auto& aParentPrimitive)
-                {
-                    using type = std::decay_t<decltype(aParentPrimitive)>;
-                    if constexpr (
-                        std::is_same_v<type, parser::concatenation> ||
-                        std::is_same_v<type, parser::alternation> ||
-                        std::is_same_v<type, parser::repetition> ||
-                        std::is_same_v<type, parser::optional> ||
-                        std::is_same_v<type, parser::range>)
-                    {
-                        aParentPrimitive.value.push_back(primitive.value());
-                        newParent = &aParentPrimitive.value.back();
-                    }
-                }, *currentParent);
-            }
-        }
-        else if (is_parent(aNode, "rule") && aNode.c == "rule_expression")
-            newParent = &aStage.parser.rules().back().lhs.back();
-
-        if (newParent != currentParent)
-            scopedDepth.emplace(depth);
-
-        if (primitive.has_value() && aStage.parser.has_debug_output())
-            aStage.parser.debug_output() << std::string(depth, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
-            
-        for (auto const& child : aNode.children)
-            walk_ast(aParser, *child, aStage, newParent);
-
         if (currentParent)
         {
             if (aNode.c == "semantic_concept")
                 previous->c.emplace(aNode.value);
+            else if (aNode.c == "rule_constraint")
+                previous->constraint.emplace(aNode.value);
             else if (aNode.c == "at_least_one")
                 std::get<parser::repetition>(*previous).atLeastOne = true;
+            else if (aNode.c == "not")
+                std::get<parser::range>(*previous).negate = true;
             else if (aNode.c == "subtract")
             {
                 std::visit([&](auto& aParentPrimitive)
