@@ -47,6 +47,7 @@ namespace neos::language
     {
         std::string name;
         std::string_view grammar;
+        std::optional<std::string_view> root;
         std::unordered_map<std::string_view, symbol> symbolMap = {};
         neolib::parser<symbol> parser = {};
     };

@@ -13,8 +13,13 @@
     }
 
     stages: {
-        tokenizer : [ "#{" "}#" ]
-        parser : [ "*{" "}*" ]
+        tokenizer : {
+            text : [ "#{" "}#" ]
+        }
+        parser : {
+            text : [ "*{" "}*" ]
+            root : program
+        }
     }
 
     pipeline: [
