@@ -353,13 +353,13 @@ namespace neos::language
         auto const& meta = metaContents.root().as<neolib::rjson_object>().at("meta");
         parse_meta(meta);
 
-        std::map<std::string, std::pair<std::string_view, std::optional<std::string_view>>> stages;
+        std::map<std::string, std::pair<std::string_view, std::optional<std::string>>> stages;
 
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("stages").as<neolib::rjson_object>().contents())
         {
             auto const& partParams = stage.as<neolib::rjson_object>();
             auto const& text = partParams.at("text").as<neolib::rjson_array>();
-            std::optional<std::string_view> root;
+            std::optional<std::string> root;
             if (partParams.has("root"))
                 root = partParams.at("root").as<neolib::rjson_keyword>().text;
             stages[stage.name()] = std::make_pair(part(text[0].as<neolib::rjson_string>(), text[1].as<neolib::rjson_string>()), root);
