@@ -163,9 +163,9 @@ namespace neos::language
 {
     symbol lookup_symbol(schema_stage& aStage, std::string_view const& aSymbolLexeme)
     {
-        auto existing = aStage.symbolMap.find(aSymbolLexeme);
-        if (existing == aStage.symbolMap.end())
-            existing = aStage.symbolMap.emplace(aSymbolLexeme, static_cast<symbol>(aStage.symbolMap.size())).first;
+        auto existing = aStage.symbolMap->find(aSymbolLexeme);
+        if (existing == aStage.symbolMap->end())
+            existing = aStage.symbolMap->emplace(aSymbolLexeme, static_cast<symbol>(aStage.symbolMap->size())).first;
         return existing->second;
     }
 
@@ -368,7 +368,8 @@ namespace neos::language
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("pipeline").as<neolib::rjson_array>())
         {
             auto const& stageName = stage->text();
-            iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second));
+            auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, symbol>>() : iPipeline.back()->symbolMap;
+            iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, symbolMap));
         }
 
         for (auto const& stagePtr : iPipeline)
