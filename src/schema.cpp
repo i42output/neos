@@ -243,9 +243,6 @@ namespace neos::language
         if (newParent != currentParent)
             scopedDepth.emplace(depth);
 
-        if (value.has_value() && aStage.parser.has_debug_output())
-            aStage.parser.debug_output() << std::string(depth, ' ') << aNode.c.value_or("?") << ": [" << aNode.value << "]" << std::endl;
-            
         for (auto const& child : aNode.children)
             walk_ast(aParser, *child, aStage, newParent);
 

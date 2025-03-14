@@ -144,27 +144,29 @@
     divide ::= "/" ;
 
     comment $ language.comment ::= "--" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
-    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | ? eof ? } +;
+    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? };
+
+    WS ::= whitespace ;
 }#
 
 *{
-    program $ language.program ::= { using directive | import directive | namespace scope } ;
-    using directive $ source.package.import ::= ( using , ( identifier | package name ) $ source.package.name ) ;
-    import directive $ language.function.import ::= ( import , fn , fn sig ) ;
-    import directive $ language.function.import ::= ( import , proc , proc sig ) ;
+    program $ language.program ::= { WS , (using directive | import directive | namespace scope) , WS } ;
+    using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name ) ;
+    import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig ) ;
+    import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig ) ;
 
     namespace scope $ language.namespace.scope ::= 
         { comment | function | procedure | namespace def } ;
     namespace def $ language.namespace ::= 
-        identifier $ language.namespace.name , open scope , namespace scope , close scope ;
+        identifier $ language.namespace.name , WS , open scope , WS , namespace scope , WS , close scope ;
 
-    function $ language.function ::= ( fn , fn sig , fn body ) ;
-    procedure $ language.function ::= ( proc , proc sig , proc locals , proc body ) ;
-    fn sig $ language.function.signature ::= ( identifier , open expression , fn parameters , close expression , "->", type ) ;
-    proc sig $ language.function.signature ::= ( identifier , open expression , proc parameters , close expression ) ;
-    fn parameters $ language.function.parameters ::= [ fn parameter block , { semicolon , fn parameter block } ] ;
-    proc parameters $ language.function.parameters ::= [ proc parameter block , { semicolon , proc parameter block } ] ;
-    fn parameter block ::= [ parameter , { comma , parameter } , colon , type ];
+    function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
+    procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
+    fn sig $ language.function.signature ::= ( identifier , WS , open expression , WS , fn parameters , WS , close expression , WS , "->", WS , type ) ;
+    proc sig $ language.function.signature ::= ( identifier , WS , open expression , WS , proc parameters , WS , close expression ) ;
+    fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
+    proc parameters $ language.function.parameters ::= [ proc parameter block , { WS , semicolon , WS , proc parameter block } ] ;
+    fn parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , type ];
     proc parameter block ::= [ parameter , { comma , parameter } , colon , ( in | out | inout ) , type ];
     parameter $ language.function.parameter ::= identifier ;
     proc locals ::= ( proc local block , { semicolon , proc local block } ) ;
