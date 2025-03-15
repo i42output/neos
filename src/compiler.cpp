@@ -208,8 +208,10 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
-        // todo
+        aUnit.schema->pipeline().front()->parser.parse(aFragment.source().to_std_string_view());
             
+        // todo 
+
         aFragment.set_status(compilation_status::Compiled);
     }
 

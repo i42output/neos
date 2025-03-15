@@ -38,7 +38,6 @@ namespace neos::language
     typedef source_t::const_iterator const_source_iterator;
     typedef source_t::iterator source_iterator;
 
-
     class source_fragment : public i_source_fragment
     {
     public:

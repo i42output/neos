@@ -105,14 +105,13 @@
     double $ language.type.double ::= potential keyword ::= "double" ;
     character $ language.type.character ::= potential keyword ::= "char" ;
     string $ language.type.string ::= potential keyword ::= "string" ;
-    object $ language.gc.type.object ::= identifier ;
 
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
-    potential keyword ::= { alphanumeric } + ;
     identifier ::= alpha , { alphanumeric | '_' } ;
-    package name ::= alpha , { ( alpha | "." ) , alpha } ; 
+    package name ::= alpha , { alpha | ( "." , alpha ) } ; 
+    potential keyword ::= { alphanumeric } + ;
 
     alpha ::= 'A' .. 'Z' | 'a' .. 'z' ;
     alphanumeric ::= alpha | '0' .. '9' ;
@@ -144,9 +143,7 @@
     divide ::= "/" ;
 
     comment $ language.comment ::= "--" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
-    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? };
-
-    WS ::= whitespace ;
+    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } +;
 }#
 
 *{
@@ -244,4 +241,6 @@
         do, WS , scope, WS , while clause ;
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
+
+    WS ::= [ whitespace ] ;
 }*

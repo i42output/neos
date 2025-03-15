@@ -41,15 +41,29 @@ namespace neos::language
         std::size_t parserRecursionLimit = 256u;
     };
 
-    enum class symbol : std::uint32_t {};
+    namespace code_parser
+    {
+        enum class symbol : std::uint32_t {};
+    }
+}
+
+declare_symbols(neos::language::code_parser::symbol)
+end_declare_symbols(neos::language::code_parser::symbol);
+
+namespace neos::language
+{
+    namespace code_parser
+    {
+        enable_neolib_parser(symbol)
+    }
 
     struct schema_stage
     {
         std::string name;
         std::string_view grammar;
         std::optional<std::string> root;
-        std::shared_ptr<std::unordered_map<std::string_view, symbol>> symbolMap = {};
-        neolib::parser<symbol> parser = {};
+        std::shared_ptr<std::unordered_map<std::string_view, code_parser::symbol>> symbolMap = {};
+        mutable neolib::parser<code_parser::symbol> parser = {};
     };
 
     using pipeline = std::vector<std::unique_ptr<schema_stage>>;
@@ -63,6 +77,7 @@ namespace neos::language
     public:
         std::string const& path() const;
         language::meta const& meta() const;
+        language::pipeline const& pipeline() const;
         neolib::ref_ptr<i_semantic_concept> find_concept(const std::string& aSymbol) const;
     private:
         void parse_meta(neolib::rjson_value const& aNode);
@@ -72,7 +87,7 @@ namespace neos::language
         std::string iSource;
         neolib::rjson iMetaSource;
         language::meta iMeta;
-        pipeline iPipeline;
+        language::pipeline iPipeline;
         const concept_libraries_t& iConceptLibraries;
     };
 }

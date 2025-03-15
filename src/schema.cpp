@@ -161,15 +161,15 @@ namespace neos::language::schema_parser
 
 namespace neos::language
 {
-    symbol lookup_symbol(schema_stage& aStage, std::string_view const& aSymbolLexeme)
+    code_parser::symbol lookup_symbol(schema_stage& aStage, std::string_view const& aSymbolLexeme)
     {
         auto existing = aStage.symbolMap->find(aSymbolLexeme);
         if (existing == aStage.symbolMap->end())
-            existing = aStage.symbolMap->emplace(aSymbolLexeme, static_cast<symbol>(aStage.symbolMap->size())).first;
+            existing = aStage.symbolMap->emplace(aSymbolLexeme, static_cast<code_parser::symbol>(aStage.symbolMap->size())).first;
         return existing->second;
     }
 
-    using parser = neolib::parser<symbol>;
+    using parser = neolib::parser<code_parser::symbol>;
     using atom = parser::atom;
     using primitive = parser::primitive_atom;
 
@@ -368,7 +368,7 @@ namespace neos::language
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("pipeline").as<neolib::rjson_array>())
         {
             auto const& stageName = stage->text();
-            auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, symbol>>() : iPipeline.back()->symbolMap;
+            auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, code_parser::symbol>>() : iPipeline.back()->symbolMap;
             iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, symbolMap));
         }
 
@@ -394,6 +394,11 @@ namespace neos::language
     language::meta const& schema::meta() const
     {
         return iMeta;
+    }
+
+    language::pipeline const& schema::pipeline() const
+    {
+        return iPipeline;
     }
 
     void schema::parse_meta(neolib::rjson_value const& aNode)
