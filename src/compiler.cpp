@@ -212,6 +212,8 @@ namespace neos::language
         {
             bool const last = (stage == aUnit.schema->pipeline().back());
             auto& parser = *stage->parser;
+            for (auto const& discard : *stage->discard)
+                parser.ignore(stage->symbolMap->at(discard));
             parser.set_debug_output(std::cerr, false, last);
             if (stage->root)
                 parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());

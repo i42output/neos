@@ -30,8 +30,9 @@
     ]
 
     discard: [ 
-        language.whitespace 
-        language.comment
+        whitespace
+        comment
+        WS
     ]
 
     infix: [
