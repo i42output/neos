@@ -20,9 +20,9 @@ fn fib(x : i32) -> i32
 proc main()
     s : string;
 {
-    neo::print("Enter a positive "
-            "integer: ");
-    neo::input(s);
-    neo::print("Fibonacci(" + s + ") = " + neo::to_string(fib(neo::to_integer(s))) + "\n");
+   neo::print("Enter a positive "
+           "integer: ");
+   neo::input(s);
+   neo::print("Fibonacci(" + s + ") = " + neo::to_string(fib(neo::to_integer(s))) + "\n");
 }
 

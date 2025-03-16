@@ -46,7 +46,7 @@
     character literal ::= 
         ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character, '\'' ) ;
     string literal ::= 
-        ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' ) ;
+        { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' , [ whitespace ] } ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
     escaped character $ string.utf8.character.CR ::= "\\r" ;
     escaped character $ string.utf8.character.tab ::= "\\t" ;
@@ -109,7 +109,8 @@
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
-    identifier ::= alpha , { alphanumeric | '_' } ;
+    identifier ::= { namespace $ language.namespace , namespace separator } , alpha , { alphanumeric | '_' } ;
+    namespace ::= alpha , { alphanumeric | '_' } ;
     package name ::= alpha , { alpha | ( "." , alpha ) } ; 
     potential keyword ::= { alphanumeric } + ;
 
@@ -123,6 +124,8 @@
     comma ::= "," ;
     colon ::= ":" ;
     semicolon ::= ";" ;
+    arrow ::= "->" ; 
+    namespace separator ::= "::" ;
     
     assign ::= "=" ;
 
@@ -147,10 +150,10 @@
 }#
 
 *{
-    program $ language.program ::= { WS , (using directive | import directive | namespace scope) , WS } ;
-    using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name ) ;
-    import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig ) ;
-    import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig ) ;
+    program $ language.program ::= { WS , ( using directive | import directive | namespace scope ) , WS } ;
+    using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name , WS , semicolon ) ;
+    import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
+    import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
 
     namespace scope $ language.namespace.scope ::= 
         { comment | function | procedure | namespace def } ;
@@ -159,7 +162,7 @@
 
     function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
     procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
-    fn sig $ language.function.signature ::= ( identifier , WS , open expression , WS , fn parameters , WS , close expression , WS , "->", WS , type ) ;
+    fn sig $ language.function.signature ::= ( identifier , WS , open expression , WS , fn parameters , WS , close expression , WS , arrow , WS , type ) ;
     proc sig $ language.function.signature ::= ( identifier , WS , open expression , WS , proc parameters , WS , close expression ) ;
     fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
     proc parameters $ language.function.parameters ::= [ proc parameter block , { WS , semicolon , WS , proc parameter block } ] ;
@@ -174,13 +177,13 @@
     scope $ language.function.scope ::= ( open scope , { WS , statement } , WS , close scope ) ; 
 
     statement $ language.statement ::= 
-        expression | assignment | return statement | if statement | for loop | while loop | do while loop;
+        ( expression , WS , semicolon ) | ( assignment , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
 
     assignment $ language.assignment ::= 
         ( object , WS , assign , WS , expression );
 
     expression $ language.expression ::= 
-        function call | boolean expression | numeric expression ;
+        function call | numeric expression | boolean expression ;
 
     function call $ language.expression.call ::= 
         identifier , WS , open expression , WS , arguments , WS , close expression ;
@@ -208,19 +211,19 @@
         | greaterthanorequal $ boolean.operator.relational.greaterthanorequal ;
 
     numeric expression $ math.expression ::= 
-        term, { WS , ( plus $ math.operator.add | minus $ math.operator.subtract ) , WS , term } ;
+        term , { WS , ( plus $ math.operator.add | minus $ math.operator.subtract ) , WS , term } ;
     term ::= 
-        factor, { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ), WS , factor } ;
+        factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
         [ minus $ math.operator.negate ] , WS , primary ;
     primary ::= 
-        ( open expression , WS , expression , WS , close expression ) | number ;
+        ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 
     return statement $ language.statement.return ::= 
-        ( return , WS , expression ) ;
+        ( return , WS , expression , WS , semicolon ) ;
 
     if statement $ language.statement.if ::= 
-        if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.if , { else if statement } , [ else statement ] ;
+        if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.if , { WS , else if statement } , [ WS , else statement ] ;
     else if statement $ language.statement.elseif ::= 
         else if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.elseif ;
     else statement $ language.statement.else ::= 

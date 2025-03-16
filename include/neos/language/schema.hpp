@@ -63,7 +63,7 @@ namespace neos::language
         std::string_view grammar;
         std::optional<std::string> root;
         std::shared_ptr<std::unordered_map<std::string_view, code_parser::symbol>> symbolMap = {};
-        mutable neolib::parser<code_parser::symbol> parser = {};
+        std::shared_ptr<neolib::parser<code_parser::symbol>> parser = {};
     };
 
     using pipeline = std::vector<std::unique_ptr<schema_stage>>;

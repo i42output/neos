@@ -178,8 +178,10 @@ namespace neos::language
         return aNode.parent && aNode.parent->c == aConcept;
     }
 
-    void walk_ast(neolib::parser<schema_parser::symbol> const& aParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, primitive* aParentAtom = nullptr)
+    void walk_ast(neolib::parser<schema_parser::symbol> const& aSchemaParser, neolib::parser<schema_parser::symbol>::ast_node const& aNode, schema_stage& aStage, primitive* aParentAtom = nullptr)
     {
+        auto& codeParser = *aStage.parser;
+
         primitive* currentParent = aParentAtom;
         primitive* newParent = currentParent;
 
@@ -191,7 +193,7 @@ namespace neos::language
         if (aNode.c == "rule_name")
             value.emplace(lookup_symbol(aStage, aNode.value));
         else if (aNode.c == "rule_constraint")
-            aStage.parser.rules().back().rhs.back().constraint.emplace(aNode.children.front()->value);
+            codeParser.rules().back().rhs.back().constraint.emplace(aNode.children.front()->value);
         else if (aNode.c == "concatenation")
             value.emplace(parser::concatenation{});
         else if (aNode.c == "alternation")
@@ -211,13 +213,13 @@ namespace neos::language
         {
             if (is_parent(aNode, "rule"))
             {
-                aStage.parser.rules().emplace_back(value.value());
-                newParent = &aStage.parser.rules().back().lhs.back();
+                codeParser.rules().emplace_back(value.value());
+                newParent = &codeParser.rules().back().lhs.back();
             }
             else if (is_parent(aNode, "rule_expression") && is_parent(*aNode.parent, "rule"))
             {
-                aStage.parser.rules().back().rhs.push_back(value.value());
-                newParent = &aStage.parser.rules().back().rhs.back();
+                codeParser.rules().back().rhs.push_back(value.value());
+                newParent = &codeParser.rules().back().rhs.back();
             }
             else if (currentParent)
             {
@@ -238,21 +240,21 @@ namespace neos::language
             }
         }
         else if (is_parent(aNode, "rule") && aNode.c == "rule_expression")
-            newParent = &aStage.parser.rules().back().lhs.back();
+            newParent = &codeParser.rules().back().lhs.back();
 
         if (newParent != currentParent)
             scopedDepth.emplace(depth);
 
         for (auto const& child : aNode.children)
-            walk_ast(aParser, *child, aStage, newParent);
+            walk_ast(aSchemaParser, *child, aStage, newParent);
 
         primitive* previous = nullptr;
-        if (!aStage.parser.rules().empty() &&
-            !aStage.parser.rules().back().lhs.empty() &&
-            !aStage.parser.rules().back().rhs.empty() &&
-            currentParent == &aStage.parser.rules().back().lhs.back())
+        if (!codeParser.rules().empty() &&
+            !codeParser.rules().back().lhs.empty() &&
+            !codeParser.rules().back().rhs.empty() &&
+            currentParent == &codeParser.rules().back().lhs.back())
         {
-            previous = &aStage.parser.rules().back().rhs.back();
+            previous = &codeParser.rules().back().rhs.back();
         }
         else if (currentParent)
         {
@@ -321,7 +323,7 @@ namespace neos::language
         else
         {
             if (aNode.c == "semantic_concept")
-                aStage.parser.rules().back().lhs.back().c.emplace(aNode.value);
+                codeParser.rules().back().lhs.back().c.emplace(aNode.value);
         }
     }
 
@@ -369,7 +371,10 @@ namespace neos::language
         {
             auto const& stageName = stage->text();
             auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, code_parser::symbol>>() : iPipeline.back()->symbolMap;
-            iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, symbolMap));
+            if (iPipeline.empty())
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, symbolMap, std::make_shared<parser>()));
+            else
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
         }
 
         for (auto const& stagePtr : iPipeline)
@@ -378,10 +383,8 @@ namespace neos::language
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
             parser.set_debug_output(std::cerr, false, false);
-            parser.set_debug_scan(false);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
             parser.create_ast();
-            stage.parser.set_debug_output(std::cerr);
             walk_ast(parser, parser.ast(), stage);
         }
     }

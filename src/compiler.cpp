@@ -208,9 +208,20 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
-        aUnit.schema->pipeline().front()->parser.parse(aFragment.source().to_std_string_view());
+        for (auto const& stage : aUnit.schema->pipeline())
+        {
+            bool const last = (stage == aUnit.schema->pipeline().back());
+            auto& parser = *stage->parser;
+            parser.set_debug_output(std::cerr, false, last);
+            if (stage->root)
+                parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
+            else
+                parser.parse(aFragment.source().to_std_string_view());
+            if (last)
+                parser.create_ast();
+        }
             
-        // todo 
+        // todo - fold semantic concepts
 
         aFragment.set_status(compilation_status::Compiled);
     }
