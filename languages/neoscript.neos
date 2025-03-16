@@ -46,7 +46,7 @@
     character literal ::= 
         ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character, '\'' ) ;
     string literal ::= 
-        { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' , [ whitespace ] } ;
+        { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character } $ string.utf8 , '\"' , [ whitespace ] } + ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
     escaped character $ string.utf8.character.CR ::= "\\r" ;
     escaped character $ string.utf8.character.tab ::= "\\t" ;
@@ -109,8 +109,8 @@
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
-    identifier ::= { namespace $ language.namespace , namespace separator } , alpha , { alphanumeric | '_' } ;
-    namespace ::= alpha , { alphanumeric | '_' } ;
+    identifier ::= { namespace , namespace separator } , ( alpha , { alphanumeric | '_' } ) $ language.identifier ;
+    namespace $ language.namespace ::= alpha , { alphanumeric | '_' } ;
     package name ::= alpha , { alpha | ( "." , alpha ) } ; 
     potential keyword ::= { alphanumeric } + ;
 
@@ -186,7 +186,7 @@
         function call | numeric expression | boolean expression ;
 
     function call $ language.expression.call ::= 
-        identifier , WS , open expression , WS , arguments , WS , close expression ;
+        identifier $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
 
     arguments ::= [ expression , { WS , comma , WS , expression } ] ;
 
@@ -215,7 +215,7 @@
     term ::= 
         factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
-        [ minus $ math.operator.negate ] , WS , primary ;
+        [ minus $ math.operator.negate , WS ] , primary ;
     primary ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 
