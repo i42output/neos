@@ -228,13 +228,13 @@
     else if statement $ language.statement.elseif ::= 
         else if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.elseif ;
     else statement $ language.statement.else ::= 
-        else, WS , ( scope | statement ) $ logic.operator.else ;
+        else , WS , ( scope | statement ) $ logic.operator.else ;
 
     for loop $ language.statement.loop ::= 
         for clause , WS , scope ;
     for clause ::=
         for , WS , open expression , WS , [ local , WS , colon , WS , type , WS , assign , WS , expression ] $ language.assignment , WS ,
-        semicolon, WS , boolean expression , WS , semicolon , WS , ( expression | assignment ) , WS , close expression ;
+        semicolon , WS , boolean expression , WS , semicolon , WS , ( expression | assignment ) , WS , close expression ;
 
     while loop $ language.statement.loop ::= 
         while clause , WS , scope ;
@@ -242,7 +242,7 @@
         while , WS , open expression , WS , boolean expression , WS , close expression ;
 
     do while loop $ language.statement.loop ::= 
-        do, WS , scope, WS , while clause ;
+        do , WS , scope, WS , while clause ;
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 
