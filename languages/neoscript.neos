@@ -147,7 +147,7 @@
     divide ::= "/" ;
 
     comment $ language.comment ::= "--" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
-    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } +;
+    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } + ;
 }#
 
 *{
@@ -167,8 +167,8 @@
     proc sig $ language.function.signature ::= ( identifier , WS , open expression , WS , proc parameters , WS , close expression ) ;
     fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
     proc parameters $ language.function.parameters ::= [ proc parameter block , { WS , semicolon , WS , proc parameter block } ] ;
-    fn parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , type ];
-    proc parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , ( in | out | inout ) , WS , type ];
+    fn parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , type ] ;
+    proc parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , ( in | out | inout ) , WS , type ] ;
     parameter $ language.function.parameter ::= identifier ;
     proc locals ::= ( proc local block , { WS , semicolon , WS , proc local block } ) ;
     proc local block ::= [ local , { WS , comma , WS , local } , WS , colon , WS , type ] ;
@@ -181,7 +181,7 @@
         ( expression , WS , semicolon ) | ( assignment , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
 
     assignment $ language.assignment ::= 
-        ( object , WS , assign , WS , expression );
+        ( object , WS , assign , WS , expression ) ;
 
     expression $ language.expression ::= 
         function call | numeric expression | boolean expression ;
