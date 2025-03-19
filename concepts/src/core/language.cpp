@@ -75,6 +75,16 @@ namespace neos::concepts::core
         }
     };
 
+    class language_namespace_scope : public semantic_concept<language_namespace_scope>
+    {
+        // construction
+    public:
+        language_namespace_scope(i_semantic_concept& aParent) :
+            semantic_concept{ aParent, "language.namespace.scope", neos::language::emit_type::Infix }
+        {
+        }
+    };
+
     class language_scope_open : public semantic_concept<language_scope_open>
     {
         // construction
@@ -137,12 +147,32 @@ namespace neos::concepts::core
         }
     };
 
+    class language_function_name : public semantic_concept<language_function_name>
+    {
+        // construction
+    public:
+        language_function_name() :
+            semantic_concept{ "language.function.name", neos::language::emit_type::Infix }
+        {
+        }
+    };
+
     class language_function_scope : public semantic_concept<language_function_scope>
     {
         // construction
     public:
         language_function_scope(i_semantic_concept& aParent) :
             semantic_concept{ aParent, "language.function.scope", neos::language::emit_type::Infix }
+        {
+        }
+    };
+
+    class language_function_body : public semantic_concept<language_function_body>
+    {
+        // construction
+    public:
+        language_function_body(i_semantic_concept& aParent) :
+            semantic_concept{ aParent, "language.function.body", neos::language::emit_type::Infix }
         {
         }
     };
@@ -267,12 +297,12 @@ namespace neos::concepts::core
         }
     };
 
-    class language_statement_return : public semantic_concept<language_statement_return>
+    class language_function_return : public semantic_concept<language_function_return>
     {
         // construction
     public:
-        language_statement_return() :
-            semantic_concept{ "language.statement.return", neos::language::emit_type::Infix }
+        language_function_return() :
+            semantic_concept{ "language.function.return", neos::language::emit_type::Infix }
         {
         }
     };
@@ -355,19 +385,33 @@ namespace neos::concepts::core
         /* todo */
         concepts()[neolib::string{ "concept.unrealized" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("concept.unimplemented");
-        concepts()[neolib::string{ "language.expression" }] = 
+        concepts()[neolib::string{ "language.program" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.program");
+        concepts()[neolib::string{ "language.namespace" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.namespace");
+        concepts()[neolib::string{ "language.expression" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression");
         concepts()[neolib::string{ "language.expression.operand" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression.operand");
         concepts()[neolib::string{ "language.statement" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement");
-        concepts()[neolib::string{ "language.keyword" }] = 
+        concepts()[neolib::string{ "language.statement.if" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.if");
+        concepts()[neolib::string{ "language.statement.elseif" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.elseif");
+        concepts()[neolib::string{ "language.statement.else" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.else");
+        concepts()[neolib::string{ "language.statement.loop" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.else");
+        concepts()[neolib::string{ "language.keyword" }] =
             neolib::make_ref<language_keyword>();
         concepts()[neolib::string{ "language.identifier" }] = 
             neolib::make_ref<language_identifier>();
-        concepts()[neolib::string{ "language.scope" }] = 
+        concepts()[neolib::string{ "language.scope" }] =
             neolib::make_ref<language_scope>();
-        concepts()[neolib::string{ "language.scope.open" }] = 
+        concepts()[neolib::string{ "language.namespace.scope" }] =
+            neolib::make_ref<language_namespace_scope>(*concepts()[neolib::string{ "language.scope" }]);
+        concepts()[neolib::string{ "language.scope.open" }] =
             neolib::make_ref<language_scope_open>();
         concepts()[neolib::string{ "language.scope.open.by_indentation" }] = 
             neolib::make_ref<language_scope_open_by_indentation>();
@@ -377,9 +421,13 @@ namespace neos::concepts::core
             neolib::make_ref<language_scope_add_package>();
         concepts()[neolib::string{ "language.function" }] = 
             neolib::make_ref<language_function>();
-        concepts()[neolib::string{ "language.function.scope" }] = 
+        concepts()[neolib::string{ "language.function.name" }] =
+            neolib::make_ref<language_function_name>();
+        concepts()[neolib::string{ "language.function.scope" }] =
             neolib::make_ref<language_function_scope>(*concepts()[neolib::string{ "language.scope" }]);
-        concepts()[neolib::string{ "language.function.parameters" }] = 
+        concepts()[neolib::string{ "language.function.body" }] =
+            neolib::make_ref<language_function_body>(*concepts()[neolib::string{ "language.function.scope" }]);
+        concepts()[neolib::string{ "language.function.parameters" }] =
             neolib::make_ref<language_function_parameters>();
         concepts()[neolib::string{ "language.function.parameter" }] = 
             neolib::make_ref<language_function_parameter>();
@@ -402,7 +450,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.function.call" }] = 
             neolib::make_ref<language_function_call>();
         concepts()[neolib::string{ "language.function.return" }] = 
-            neolib::make_ref<language_statement_return>();
+            neolib::make_ref<language_function_return>();
         concepts()[neolib::string{ "language.type" }] = 
             neolib::make_ref<language_type>();
         concepts()[neolib::string{ "language.type.tuple" }] = 

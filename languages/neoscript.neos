@@ -186,12 +186,12 @@
     expression $ language.expression ::= 
         function call | numeric expression | boolean expression ;
 
-    function call $ language.expression.call ::= 
+    function call $ language.function.call ::= 
         identifier $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
 
     arguments ::= [ expression , { WS , comma , WS , expression } ] ;
 
-    boolean expression $ language.expression.boolean ::= 
+    boolean expression $ boolean.expression ::= 
           boolean term , { WS , or , WS , boolean term } $ boolean.logic.operator.or ;
     boolean term ::= 
           boolean factor , { WS , and , WS , boolean factor } $ boolean.logic.operator.and ;
@@ -220,7 +220,7 @@
     primary ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 
-    return statement $ language.statement.return ::= 
+    return statement $ language.function.return ::= 
         ( return , WS , expression , WS , semicolon ) ;
 
     if statement $ language.statement.if ::= 
