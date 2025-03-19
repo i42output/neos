@@ -146,7 +146,7 @@
     multiply ::= "*" ;
     divide ::= "/" ;
 
-    comment $ language.comment ::= "--" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
+    comment $ language.comment ::= "//" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } + ;
 }#
 

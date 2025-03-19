@@ -1,9 +1,9 @@
--- neoscript example: Fibonacci
+// neoscript example: Fibonacci
 
 using neo.string;
 using neo.stream;
 
--- functions are pure
+// functions are pure
 fn add(x, y : i32) -> i32
 {
     return x + y;
@@ -16,7 +16,7 @@ fn fib(x : i32) -> i32
         return add(fib(x-1), fib(x-2));
 }
 
--- procedures are impure
+// procedures are impure
 proc main()
     s : string;
 {
