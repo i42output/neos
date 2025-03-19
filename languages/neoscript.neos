@@ -84,7 +84,7 @@
     do $ language.keyword ::= potential keyword ::= "do" ;
     return $ language.keyword ::= potential keyword ::= "return" ;
 
-    number $ math.universal.number ::= 
+    positive number ::= 
         digit sequence , [ '.' , digit sequence , [ ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ] ] ;
     digit sequence ::= 
         digit , { digit } ;
@@ -216,7 +216,7 @@
     term ::= 
         factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
-        [ minus $ math.operator.negate , WS ] , primary ;
+        primary | ( minus $ math.operator.negate , WS , primary ) ;
     primary ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 
@@ -243,6 +243,8 @@
 
     do while loop $ language.statement.loop ::= 
         do , WS , scope, WS , while clause ;
+
+    number $ math.universal.number ::= ( minus , positive number ) | positive number ;
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 

@@ -229,6 +229,8 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
+        ast_stack astStack;
+
         for (auto const& stage : aUnit.schema->pipeline())
         {
             bool const last = (stage == aUnit.schema->pipeline().back());
@@ -243,7 +245,6 @@ namespace neos::language
             if (last)
             {
                 parser.create_ast();
-                ast_stack astStack;
                 walk_ast(iContext, astStack, parser.ast());
             }
         }
