@@ -10,8 +10,6 @@ fn add(x, y : i32) -> i32
 }
 fn fib(x : i32) -> i32 
 {
-    -1;
-    -x;
     if (x < 2) 
         return 1; 
     else
