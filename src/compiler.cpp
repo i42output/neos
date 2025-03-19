@@ -213,9 +213,10 @@ namespace neos::language
             }
 
             neolib::string_view const conceptName{ node.c.value() };
+            neolib::string_view const conceptValue{ node.value };
             auto c = context.find_concept(conceptName.to_std_string_view());
             if (c)
-                stack.push_back(c->instantiate(context, conceptName.begin(), conceptName.end()));
+                stack.push_back(c->instantiate(context, conceptValue.begin(), conceptValue.end()));
             else
                 throw concept_not_found(node.c.value());
         };
