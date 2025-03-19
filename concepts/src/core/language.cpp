@@ -402,7 +402,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.statement.else" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.else");
         concepts()[neolib::string{ "language.statement.loop" }] =
-            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.else");
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.loop");
         concepts()[neolib::string{ "language.keyword" }] =
             neolib::make_ref<language_keyword>();
         concepts()[neolib::string{ "language.identifier" }] = 
