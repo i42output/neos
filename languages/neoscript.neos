@@ -216,7 +216,7 @@
     term ::= 
         factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
-        primary | ( minus $ math.operator.negate , WS , primary ) ;
+        primary | ( minus $ math.operator.negate , WS , expression ) ;
     primary ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 

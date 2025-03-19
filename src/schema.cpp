@@ -126,6 +126,7 @@ namespace neos::language::schema_parser
         ( symbol::Optional >> "[" , WS , symbol::Argument <=> "optional"_concept , SC , WS , "]" ),
         ( symbol::Concatenation >> ((symbol::Argument2 , SC , +repeat((WS , ","_ , WS , symbol::Argument2 , SC)) ) <=> "concatenation"_concept) ),
         ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "|"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation"_concept) ),
+        ( symbol::Alternation >> ((symbol::Argument2 , SC , +repeat((WS , "/"_ , WS , symbol::Argument2 , SC)) ) <=> "alternation_match_first"_concept) ),
         ( symbol::RangeSubtract >> (symbol::Range , WS , (symbol::Subtract <=> "subtract"_infix_concept) , WS , symbol::Argument) ),
         ( symbol::RangeNot >> ((symbol::Not , WS , symbol::Range) <=> "not"_concept) ),
         ( symbol::Range >> ((symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) <=> "range"_concept) ),
@@ -197,6 +198,8 @@ namespace neos::language
             value.emplace(parser::concatenation{});
         else if (aNode.c == "alternation")
             value.emplace(parser::alternation{});
+        else if (aNode.c == "alternation_match_first")
+            std::get<parser::alternation>(value.emplace(parser::alternation{})).matchFirst = true;
         else if (aNode.c == "repetition")
             value.emplace(parser::repetition{});
         else if (aNode.c == "optional")

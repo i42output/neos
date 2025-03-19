@@ -238,11 +238,12 @@ namespace neos::language
             for (auto const& discard : *stage->discard)
                 parser.ignore(stage->symbolMap->at(discard));
             parser.set_debug_output(std::cerr, false, last);
+            bool ok;
             if (stage->root)
-                parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
+                ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
             else
-                parser.parse(aFragment.source().to_std_string_view());
-            if (last)
+                ok = parser.parse(aFragment.source().to_std_string_view());
+            if (last && ok)
             {
                 parser.create_ast();
                 walk_ast(iContext, astStack, parser.ast());
