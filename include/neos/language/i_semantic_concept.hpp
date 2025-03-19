@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/core/i_reference_counted.hpp>
 #include <neolib/core/i_string.hpp>
+#include <neolib/core/i_string_view.hpp>
 #include <neos/fwd.hpp>
 
 namespace neos::language
@@ -42,7 +43,7 @@ namespace neos::language
         using data_type = void;
     public:
         typedef i_semantic_concept abstract_type;
-        typedef neolib::i_string::const_iterator source_iterator;
+        typedef neolib::i_string_view::const_iterator source_iterator;
     public:
         virtual bool has_parent() const = 0;
         virtual const i_semantic_concept& parent() const = 0;

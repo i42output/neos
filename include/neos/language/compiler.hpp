@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/core/optional.hpp>
 #include <neolib/core/string.hpp>
+#include <neolib/core/string_view.hpp>
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/symbols.hpp>
@@ -34,7 +35,7 @@ namespace neos::language
 {
     typedef neolib::string source_file_path_t;
     typedef neolib::optional<source_file_path_t> optional_source_file_path_t;
-    typedef neolib::string source_t;
+    typedef neolib::string_view source_t;
     typedef source_t::const_iterator const_source_iterator;
     typedef source_t::iterator source_iterator;
 
@@ -49,71 +50,69 @@ namespace neos::language
             iSourceFilePath{ aFragment.source_file_path() }, iSource{ aFragment.source() }, iImported{ aFragment.imported() }, iStatus{ aFragment.status() }
         {
         }
-        source_fragment(i_source_fragment&& aFragment) :
-            iSourceFilePath{ std::move(aFragment.source_file_path()) }, iSource{ std::move(aFragment.source()) }, iImported{ aFragment.imported() }, iStatus{ aFragment.status() }
-        {
-        }
     public:
-        const i_optional_source_file_path_t& source_file_path() const override 
+        const i_optional_source_file_path_t& source_file_path() const final
         { 
             return iSourceFilePath;
         }
-        i_optional_source_file_path_t& source_file_path() override 
+        i_optional_source_file_path_t& source_file_path() final
         { 
             return iSourceFilePath;
         }
-        const i_source_t& source() const override 
+        const i_source_t& source() const final
         { 
-            return iSource; 
+            iSourceView = iSource;
+            return iSourceView;
         }
-        i_source_t& source() override 
-        { 
-            return iSource; 
+        void set_source(i_source_t const& aSource) final
+        {
+            iSource = neolib::string{ aSource };
         }
-        bool imported() const override
+        bool imported() const final
         {
             return iImported;
         }
-        void set_imported() override
+        void set_imported() final
         {
             iImported = true;
         }
-        compilation_status status() const override 
+        compilation_status status() const final
         { 
             return iStatus; 
         }
-        void set_status(compilation_status aStatus) override
+        void set_status(compilation_status aStatus) final
         {
             iStatus = aStatus;
         }
     public:
-        const_source_iterator cbegin() const override
+        const_source_iterator cbegin() const final
         { 
             return source().cbegin(); 
         }
-        const_source_iterator cend() const override
+        const_source_iterator cend() const final
         { 
             return source().cend(); 
         }
-        const_source_iterator begin() const override
+        const_source_iterator begin() const final
         { 
             return source().begin();
         }
-        const_source_iterator end() const override
+        const_source_iterator end() const final
         { 
             return source().end();
         }
-        source_iterator begin() override
+        source_iterator begin() final
         { 
             return source().begin();
         }
-        source_iterator end() override
+        source_iterator end() final
         { 
             return source().end();
         }
     private:
         optional_source_file_path_t iSourceFilePath;
-        source_t iSource;
+        neolib::string iSource;
+        mutable source_t iSourceView;
         bool iImported;
         mutable compilation_status iStatus;
     };

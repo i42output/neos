@@ -22,7 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/core/i_discoverable.hpp>
 #include <neolib/core/i_map.hpp>
-#include <neolib/core/i_string.hpp>
+#include <neolib/core/string_view.hpp>
 #include <neolib/app/i_version.hpp>
 #include <neos/language/i_semantic_concept.hpp>
 
@@ -54,7 +54,7 @@ namespace neos
         public:
             virtual const concepts_t& concepts() const = 0;
             virtual concepts_t& concepts() = 0;
-            virtual bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const = 0;
+            virtual bool find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const = 0;
             // meta
         public:
             virtual const neolib::uuid& id() const = 0;
@@ -75,6 +75,10 @@ namespace neos
                     l = &l->parent();
                 }
                 return result;
+            }
+            bool find_concept(neolib::string const& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const
+            {
+                return find_concept(neolib::string_view{ aSymbol }, aConcept);
             }
             // interface
         public:

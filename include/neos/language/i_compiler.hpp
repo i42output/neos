@@ -21,13 +21,14 @@
 
 #include <neos/neos.hpp>
 #include <neolib/core/i_string.hpp>
+#include <neolib/core/i_string_view.hpp>
 #include <neolib/core/i_optional.hpp>
 
 namespace neos::language
 {
     typedef neolib::i_string i_source_file_path_t;
     typedef neolib::i_optional<i_source_file_path_t> i_optional_source_file_path_t;
-    typedef neolib::i_string i_source_t;
+    typedef neolib::i_string_view i_source_t;
 
     enum class compilation_status
     {
@@ -44,10 +45,10 @@ namespace neos::language
     public:
         virtual ~i_source_fragment() {}
     public:
-        virtual const i_optional_source_file_path_t& source_file_path() const = 0;
+        virtual i_optional_source_file_path_t const& source_file_path() const = 0;
         virtual i_optional_source_file_path_t& source_file_path() = 0;
-        virtual const i_source_t& source() const = 0;
-        virtual i_source_t& source() = 0;
+        virtual i_source_t const& source() const = 0;
+        virtual void set_source(i_source_t const& aSource) = 0;
         virtual bool imported() const = 0;
         virtual void set_imported() = 0;
         virtual compilation_status status() const = 0;
@@ -59,6 +60,11 @@ namespace neos::language
         virtual const_iterator end() const = 0;
         virtual iterator begin() = 0;
         virtual iterator end() = 0;
+    };
+
+    struct concept_not_found : std::runtime_error
+    {
+        concept_not_found(std::string_view const& aConceptName) : std::runtime_error{ std::string{ "Concept '" } + std::string{ aConceptName } + "' not found" } {}
     };
 
     class i_compiler

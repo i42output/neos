@@ -169,7 +169,6 @@ namespace neos::language
         return existing->second;
     }
 
-    using parser = neolib::parser<code_parser::symbol>;
     using atom = parser::atom;
     using primitive = parser::primitive_atom;
 
@@ -455,17 +454,6 @@ namespace neos::language
                 if (iConceptLibraries.find(neolib::string{ library.as<neolib::rjson_keyword>().text }) == iConceptLibraries.end())
                     throw_error(aNode, "concept library '" + library.as<neolib::rjson_keyword>().text + "' not found");
         }
-    }
-
-    neolib::ref_ptr<i_semantic_concept> schema::find_concept(const std::string& aSymbol) const
-    {
-        neolib::ref_ptr<i_semantic_concept> semanticConcept;
-        for (auto const& cl : iConceptLibraries)
-        {
-            if (cl.second()->find_concept(neolib::string{ aSymbol }, semanticConcept))
-                return semanticConcept;
-        }
-        return nullptr;
     }
 
     void schema::throw_error(neolib::rjson_value const& aNode, const std::string aErrorText) const

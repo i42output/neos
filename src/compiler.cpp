@@ -201,6 +201,26 @@ namespace neos::language
             compile(aProgram, aUnit, fragment);
     }
 
+    namespace
+    {
+        using ast_stack = std::vector<neolib::ref_ptr<i_semantic_concept>>;
+
+        void walk_ast(i_context& context, ast_stack& stack, language::parser::ast_node const& node)
+        {
+            for (auto const& childNode : node.children)
+            {
+                walk_ast(context, stack, *childNode);
+            }
+
+            neolib::string_view const conceptName{ node.c.value() };
+            auto c = context.find_concept(conceptName.to_std_string_view());
+            if (c)
+                stack.push_back(c->instantiate(context, conceptName.begin(), conceptName.end()));
+            else
+                throw concept_not_found(node.c.value());
+        };
+    }
+
     void compiler::compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment)
     {
         if (aFragment.status() != compilation_status::Pending)
@@ -220,7 +240,11 @@ namespace neos::language
             else
                 parser.parse(aFragment.source().to_std_string_view());
             if (last)
+            {
                 parser.create_ast();
+                ast_stack astStack;
+                walk_ast(iContext, astStack, parser.ast());
+            }
         }
             
         // todo - fold semantic concepts

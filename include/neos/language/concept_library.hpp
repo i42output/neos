@@ -76,7 +76,7 @@ namespace neos::language
         {
         }
     public:
-        bool discover(const neolib::uuid& aId, void*& aObject) override
+        bool discover(neolib::uuid const& aId, void*& aObject) override
         {
             return false;
         }
@@ -113,10 +113,11 @@ namespace neos::language
         {
             return iConcepts;
         }
-        bool find_concept(const neolib::i_string& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const override
+        using i_concept_library::find_concept;
+        bool find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<i_semantic_concept>& aConcept) const override
         {
             _limit_recursion_(concept_library);
-            auto concept_ = concepts().find(aSymbol);
+            auto concept_ = concepts().find(neolib::string{ aSymbol });
             if (concept_ != concepts().end())
             {
                 aConcept = concept_->second();

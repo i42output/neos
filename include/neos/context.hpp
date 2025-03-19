@@ -46,11 +46,12 @@ namespace neos
         std::ostream& cout() final;
     public:
         const concept_libraries_t& concept_libraries() const final;
+        void find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const final;
     public:
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
         const language::schema& schema() const;
-        void load_program(const std::string& aPath);
+        void load_program(std::string const& aPath);
         void load_program(std::istream& aStream);
         language::compiler& compiler() final;
         void compile_program();
@@ -60,7 +61,7 @@ namespace neos
     public:
         bool running() const final;
         void run() final;
-        bytecode::reg_64 evaluate(const std::string& aExpression) final;
+        bytecode::reg_64 evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
     private:
         void init();

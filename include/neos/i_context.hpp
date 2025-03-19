@@ -21,8 +21,10 @@
 
 #include <neos/neos.hpp>
 #include <neolib/core/map.hpp>
-#include <neolib/core/string.hpp>
+#include <neolib/core/string_view.hpp>
+#include <neolib/core/reference_counted.hpp>
 #include <neos/language/i_concept_library.hpp>
+#include <neos/language/i_semantic_concept.hpp>
 #include <neos/language/i_compiler.hpp>
 #include <neos/bytecode/registers.hpp>
 #include <neos/bytecode/vm/vm.hpp>
@@ -41,19 +43,29 @@ namespace neos
         struct no_schema_path_specified : warning { no_schema_path_specified() : warning("neos::i_context::no_schema_path_specified") {} };
         struct no_schema_loaded : error { no_schema_loaded() : error("no schema loaded") {} };
         struct no_text : warning { no_text() : warning("no text") {} };
-        struct compiler_error : error { compiler_error(const std::string& aReason) : error(aReason) {} };
+        struct compiler_error : error { compiler_error(std::string const& aReason) : error(aReason) {} };
     public:
         virtual std::ostream& cout() = 0;
     public:
         virtual const concept_libraries_t& concept_libraries() const = 0;
+        virtual void find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const = 0;
     public:
         virtual language::i_compiler& compiler() = 0;
     public:
         virtual bool running() const = 0;
         virtual void run() = 0;
-        virtual bytecode::reg_64 evaluate(const std::string& aExpression) = 0;
+        virtual bytecode::reg_64 evaluate(std::string const& aExpression) = 0;
         virtual const neolib::i_string& metrics() const = 0;
     public:
         virtual void load_fragment(language::i_source_fragment& aFragment) = 0;
+
+        // helpers
+    public:
+        neolib::ref_ptr<language::i_semantic_concept> find_concept(std::string_view const& aSymbol) const
+        {
+            neolib::ref_ptr<language::i_semantic_concept> result;
+            find_concept(neolib::string_view{ aSymbol }, result);
+            return result;
+        }
     };
 }

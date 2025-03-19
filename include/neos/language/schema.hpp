@@ -57,6 +57,8 @@ namespace neos::language
         enable_neolib_parser(symbol)
     }
 
+    using parser = neolib::parser<code_parser::symbol>;
+
     struct schema_stage
     {
         std::string name;
@@ -64,7 +66,7 @@ namespace neos::language
         std::optional<std::string> root;
         std::shared_ptr<std::unordered_set<std::string>> discard;
         std::shared_ptr<std::unordered_map<std::string_view, code_parser::symbol>> symbolMap = {};
-        std::shared_ptr<neolib::parser<code_parser::symbol>> parser = {};
+        std::shared_ptr<parser> parser = {};
     };
 
     using pipeline = std::vector<std::unique_ptr<schema_stage>>;
@@ -79,7 +81,6 @@ namespace neos::language
         std::string const& path() const;
         language::meta const& meta() const;
         language::pipeline const& pipeline() const;
-        neolib::ref_ptr<i_semantic_concept> find_concept(const std::string& aSymbol) const;
     private:
         void parse_meta(neolib::rjson_value const& aNode);
         void throw_error(neolib::rjson_value const& aNode, const std::string aErrorText) const;

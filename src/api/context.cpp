@@ -70,12 +70,21 @@ namespace neos
         return iConceptLibraries;
     }
 
+    void context::find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const
+    {
+        for (auto const& cl : iConceptLibraries)
+        {
+            if (cl.second()->find_concept(aSymbol, aResult))
+                return;
+        }
+    }
+
     bool context::schema_loaded() const
     {
         return iSchema != nullptr;
     }
 
-    void context::load_schema(const std::string& aSchemaPath)
+    void context::load_schema(std::string const& aSchemaPath)
     {
         std::string const schemaPath = (aSchemaPath.empty() && iSchema ? schema().path() : aSchemaPath);
         if (schemaPath.empty())
@@ -94,7 +103,7 @@ namespace neos
         return *iSchema;
     }
 
-    void context::load_program(const std::string& aPath)
+    void context::load_program(std::string const& aPath)
     {
         std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? *iProgram.translationUnits.front().fragments.front().source_file_path() : aPath);
         iProgram = decltype(iProgram){};
@@ -255,18 +264,24 @@ namespace neos
 
         if (count != std::istream::pos_type(0))
         {
-            aFragment.source().reserve(static_cast<language::source_t::size_type>(count) + 1);
-            aFragment.source().resize(static_cast<language::source_t::size_type>(count));
-            aStream.read(&aFragment.source()[0], count);
-            aFragment.source().resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            thread_local neolib::string source;
+            source.clear();
+            source.reserve(static_cast<language::source_t::size_type>(count) + 1);
+            source.resize(static_cast<language::source_t::size_type>(count));
+            aStream.read(&source[0], count);
+            source.resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            aFragment.set_source(source.to_string_view());
         }
         else
         {
             char buffer[1024];
+            thread_local neolib::string source;
+            source.clear();
             while (aStream.read(buffer, sizeof(buffer)))
-                aFragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
-                aFragment.source().append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+                source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+            aFragment.set_source(source.to_string_view());
         }
 
         if (aFragment.source().empty())
