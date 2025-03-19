@@ -64,6 +64,7 @@ namespace neos::language
         std::string name;
         std::string_view grammar;
         std::optional<std::string> root;
+        std::shared_ptr<std::unordered_set<std::string>> infix;
         std::shared_ptr<std::unordered_set<std::string>> discard;
         std::shared_ptr<std::unordered_map<std::string_view, code_parser::symbol>> symbolMap = {};
         std::shared_ptr<parser> parser = {};
