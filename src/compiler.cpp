@@ -203,22 +203,22 @@ namespace neos::language
 
     namespace
     {
-        using ast_stack = std::vector<neolib::ref_ptr<i_semantic_concept>>;
-
-        void walk_ast(i_context& context, ast_stack& stack, language::parser::ast_node const& node)
+        void walk_ast(i_context& context, ast& ast, language::parser::ast_node const& parserAstNode, ast::node& astNode)
         {
-            for (auto const& childNode : node.children)
+            for (auto const& childParserNode : parserAstNode.children)
             {
-                walk_ast(context, stack, *childNode);
+                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
+                auto& childNode = *astNode.children().back();
+                walk_ast(context, ast, *childParserNode, childNode);
             }
 
-            neolib::string_view const conceptName{ node.c.value() };
-            neolib::string_view const conceptValue{ node.value };
+            neolib::string_view const conceptName{ parserAstNode.c.value() };
+            neolib::string_view const conceptValue{ parserAstNode.value };
             auto c = context.find_concept(conceptName.to_std_string_view());
             if (c)
-                stack.push_back(c->instantiate(context, conceptValue.begin(), conceptValue.end()));
+                astNode = c->instantiate(context, conceptValue.begin(), conceptValue.end());
             else
-                throw concept_not_found(node.c.value());
+                throw concept_not_found(parserAstNode.c.value());
         };
     }
 
@@ -228,8 +228,6 @@ namespace neos::language
             return;
 
         aFragment.set_status(compilation_status::Compiling);
-
-        ast_stack astStack;
 
         for (auto const& stage : aUnit.schema->pipeline())
         {
@@ -246,7 +244,7 @@ namespace neos::language
             if (last && ok)
             {
                 parser.create_ast();
-                walk_ast(iContext, astStack, parser.ast());
+                walk_ast(iContext, aUnit.ast, parser.ast(), aUnit.ast.root());
             }
         }
             

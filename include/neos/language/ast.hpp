@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <neolib/core/reference_counted.hpp>
 #include <neos/language/symbols.hpp>
 #include <neos/language/i_semantic_concept.hpp>
 
@@ -30,17 +31,32 @@ namespace neos
         class ast
         {
         public:
-            class node : public std::variant<i_semantic_concept const*, symbol_table_t::iterator>
+            class node : public std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table_t::iterator>
             {
             public:
-                typedef std::vector<std::unique_ptr<node>> children_t;
+                using value_type = std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table_t::iterator>;
+                using children_t = std::vector<std::unique_ptr<node>>;
             public:
-                node() : iParent{ nullptr }
+                node()
                 {
                 }
-                node(node& aParent) : iParent{ &aParent }
+                node(node const& aOther) :
+                    value_type{ aOther },
+                    iParent{ aOther.iParent }
                 {
                 }
+                node(node&& aOther) :
+                    value_type{ std::move(aOther) },
+                    iParent{ aOther.iParent }
+                {
+                }
+                node(value_type const& aValue, node& aParent) :
+                    value_type{ aValue },
+                    iParent{ &aParent } 
+                {
+                }
+            public:
+                using value_type::operator=;
             public:
                 children_t const& children() const
                 {
@@ -51,7 +67,7 @@ namespace neos
                     return iChildren;
                 }
             private:
-                node* iParent;
+                node* iParent = nullptr;
                 children_t iChildren;
             };
         public:
@@ -64,13 +80,24 @@ namespace neos
         public:
             ast& operator=(ast const& aOther)
             {
+                if (&aOther == this)
+                    return *this;
                 this->~ast();
                 new (this) ast{ aOther };
                 return *this;
             }
+        public:
+            node const& root() const
+            {
+                return iRoot;
+            }
+            node& root()
+            {
+                return iRoot;
+            }
         private:
             symbol_table_t& iSymbolTable;
-            std::optional<node> iRoot;
+            node iRoot;
         };
     }
 }
