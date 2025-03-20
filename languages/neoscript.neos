@@ -110,7 +110,8 @@
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
-    identifier ::= { namespace , namespace separator } , ( alpha , { alphanumeric | '_' } ) $ language.identifier ;
+    qualified identifier ::= { namespace , namespace separator } + , identifier ;
+    identifier $ language.identifier ::= alpha , { alphanumeric | '_' } ;
     namespace $ language.namespace ::= alpha , { alphanumeric | '_' } ;
     package name ::= alpha , { alpha | ( "." , alpha ) } ; 
     potential keyword ::= { alphanumeric } + ;
@@ -187,7 +188,7 @@
         function call | numeric expression | boolean expression ;
 
     function call $ language.function.call ::= 
-        identifier $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
+        ( identifier | qualified identifier ) $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
 
     arguments ::= [ expression , { WS , comma , WS , expression } ] ;
 
