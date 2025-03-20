@@ -151,7 +151,7 @@
 }#
 
 *{
-    program $ language.program ::= { WS , ( using directive | import directive | namespace scope ) , WS } ;
+    program $ language.program ::= { WS , ( statement | using directive | import directive | namespace scope ) , WS } ;
     using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
@@ -216,7 +216,7 @@
     term ::= 
         factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
-        primary | ( minus $ math.operator.negate , WS , expression ) ;
+        primary / ( minus $ math.operator.negate , WS , ( function call | numeric expression ) ) ;
     primary ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
 
