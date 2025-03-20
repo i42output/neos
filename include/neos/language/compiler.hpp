@@ -126,7 +126,7 @@ namespace neos::language
     {
         schema_pointer_t schema;
         source_fragments_t fragments;
-        language::ast ast;
+        ast ast;
         const source_fragment& fragment(const_source_iterator aSource) const
         {
             for (auto const& f : fragments)
