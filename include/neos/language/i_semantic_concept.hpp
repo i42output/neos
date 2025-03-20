@@ -63,8 +63,7 @@ namespace neos::language
     public:
         std::string trace() const
         {
-            // todo
-            return {};
+            return name().to_std_string();
         }
         // family
     public:
@@ -107,7 +106,8 @@ namespace neos::language
         }
         // emit
     public:
-        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext)         {
+        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext)
+        {
             neolib::ref_ptr<i_semantic_concept> result;
             if (can_fold())
                 do_fold(aContext, result);

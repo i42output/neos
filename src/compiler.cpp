@@ -32,113 +32,6 @@
 
 namespace neos::language
 {
-    compiler::semantic_concept_stack_entry::semantic_concept_stack_entry(
-        translation_unit* unit,
-        i_source_fragment const* fragment,
-        std::uint32_t level,
-        const i_semantic_concept* semanticConcept,
-        source_iterator sourceStart,
-        source_iterator sourceEnd
-    ) :
-        unit{ unit },
-        fragment{ fragment },
-        level{ level },
-        semanticConcept{ semanticConcept },
-        sourceStart{ sourceStart },
-        sourceEnd{ sourceEnd }
-    {
-    }
-
-    bool compiler::semantic_concept_stack_entry::can_fold() const
-    {
-        return foldedConcept ? foldedConcept->can_fold() : semanticConcept->can_fold();
-    }
-
-    bool compiler::semantic_concept_stack_entry::can_fold(const semantic_concept_stack_entry& rhs) const
-    {
-        return foldedConcept ?
-            foldedConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.semanticConcept) :
-            semanticConcept->can_fold(rhs.foldedConcept ? *rhs.foldedConcept : *rhs.semanticConcept);
-    }
-
-    void compiler::semantic_concept_stack_entry::instantiate_if_needed(i_context& aContext)
-    {
-        if (!foldedConcept)
-            foldedConcept = semanticConcept->instantiate(aContext, sourceStart, sourceEnd);
-    }
-
-    void compiler::semantic_concept_stack_entry::fold(i_context& aContext)
-    {
-        instantiate_if_needed(aContext);
-        foldedConcept = foldedConcept->fold(aContext);
-    }
-
-    void compiler::semantic_concept_stack_entry::fold(i_context& aContext, semantic_concept_stack_entry& rhs)
-    {
-        if (rhs.can_fold())
-            rhs.fold(aContext);
-        instantiate_if_needed(aContext);
-        if (rhs.foldedConcept)
-            foldedConcept = foldedConcept->fold(aContext, *rhs.foldedConcept);
-        else
-            foldedConcept = foldedConcept->fold(aContext, *rhs.semanticConcept);
-        if (fragment == rhs.fragment)
-        {
-            sourceStart = std::min(sourceStart, rhs.sourceStart);
-            sourceEnd = std::max(sourceEnd, rhs.sourceEnd);
-            foldedConcept->update_source(sourceStart, sourceEnd);
-        }
-    }
-
-    std::string compiler::semantic_concept_stack_entry::trace() const
-    {
-        return foldedConcept ? foldedConcept->trace() : semanticConcept->trace();
-    }
-
-    compiler::scoped_semantic_concept_folder::scoped_semantic_concept_folder(compiler& aCompiler) :
-        scoped_semantic_concept_folder{ aCompiler, aCompiler.parse_stack() }
-    {
-    }
-
-    compiler::scoped_semantic_concept_folder::scoped_semantic_concept_folder(compiler& aCompiler, semantic_concept_stack_t& aStack) :
-        iCompiler{ aCompiler }, iStack{ aStack }, iScopeStart{ aStack.size() }
-    {
-    }
-
-    compiler::scoped_semantic_concept_folder::~scoped_semantic_concept_folder()
-    {
-        if (std::uncaught_exceptions() == 0)
-            fold();
-    }
-
-    void compiler::scoped_semantic_concept_folder::fold()
-    {
-        std::for_each(stack().begin() + iScopeStart, stack().end(), 
-            [this](const semantic_concept_stack_entry& aEntry)
-            {
-                if (aEntry.semanticConcept != nullptr)
-                {
-                    iCompiler.fold_stack().push_back(aEntry);
-                    if (iCompiler.trace() >= 2)
-                        iCompiler.iContext.cout() << "prefold: " << "<" << aEntry.level << ": " << location(*aEntry.unit, *aEntry.fragment, aEntry.sourceStart, false) << "> "
-                            << aEntry.semanticConcept->name() << " (" << std::string(aEntry.sourceStart, aEntry.sourceEnd) << ")" << std::endl;
-                }
-            });
-        iCompiler.fold();
-        stack().erase(stack().begin() + iScopeStart, stack().end());
-    }
-
-    void compiler::scoped_semantic_concept_folder::move_to(semantic_concept_stack_t& aOtherStack)
-    {
-        aOtherStack.insert(aOtherStack.end(), stack().begin() + iScopeStart, stack().end());
-        stack().erase(stack().begin() + iScopeStart, stack().end());
-    }
-
-    compiler::semantic_concept_stack_t& compiler::scoped_semantic_concept_folder::stack()
-    {
-        return iStack;
-    }
-
     compiler::compiler(i_context& aContext) :
         iContext{ aContext }, iTrace { 0u }, iStartTime{ std::chrono::steady_clock::now() }, iEndTime{ std::chrono::steady_clock::now() }
     {
@@ -227,6 +120,8 @@ namespace neos::language
         if (aFragment.status() != compilation_status::Pending)
             return;
 
+        iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit));
+
         aFragment.set_status(compilation_status::Compiling);
 
         for (auto const& stage : aUnit.schema->pipeline())
@@ -251,6 +146,8 @@ namespace neos::language
         // todo - fold semantic concepts
 
         aFragment.set_status(compilation_status::Compiled);
+
+        iCompilationStateStack.pop_back();
     }
 
     void compiler::compile(const i_source_fragment& aFragment)
@@ -300,7 +197,7 @@ namespace neos::language
         std::ostringstream traceOutput;
         for (auto isingle = fold_stack().begin(); isingle != fold_stack().end();)
         {
-            auto& single = *isingle;
+            auto& single = **isingle;
             if (single.can_fold())
             {
                 std::string traceBefore = single.trace();
@@ -309,11 +206,11 @@ namespace neos::language
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
                     iContext.cout() << traceOutput.str();
                 traceOutput.str({});
-                single.fold(iContext);
-                if (single.foldedConcept != nullptr)
+                auto result = single.fold(iContext);
+                if (result != nullptr)
                 {
                     if (trace() >= 1)
-                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = " << single.trace() << std::endl;
+                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = " << result->trace() << std::endl;
                 }
                 else
                 {
@@ -340,8 +237,8 @@ namespace neos::language
         std::ostringstream traceOutput;
         for (auto irhs = fold_stack().begin(), ilhs = std::next(irhs); ilhs != fold_stack().end();)
         {
-            auto& rhs = *irhs;
-            auto& lhs = *ilhs;
+            auto& rhs = **irhs;
+            auto& lhs = **ilhs;
             if (lhs.can_fold(rhs))
             {
                 std::string lhsTraceBefore = lhs.trace();
@@ -369,17 +266,7 @@ namespace neos::language
         return didSome;
     }
 
-    compiler::semantic_concept_stack_t& compiler::parse_stack()
-    {
-        return state().iParseStack;
-    }
-
-    compiler::semantic_concept_stack_t& compiler::postfix_operation_stack()
-    {
-        return state().iPostfixOperationStack;
-    }
-
-    compiler::semantic_concept_stack_t& compiler::fold_stack()
+    compiler::fold_stack_t& compiler::fold_stack()
     {
         return state().iFoldStack;
     }

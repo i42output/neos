@@ -146,7 +146,7 @@ namespace neos::language
     public:
         void update_source(source_iterator aBegin, source_iterator aEnd) override
         {
-            // do nothing
+            throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         bool holds_data() const override
         {

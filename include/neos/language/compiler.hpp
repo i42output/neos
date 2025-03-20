@@ -170,59 +170,16 @@ namespace neos::language
     class compiler : public i_compiler
     {
     private:
-        typedef neos::language::const_source_iterator source_iterator;
-        typedef std::optional<source_iterator> optional_source_iterator;
-        struct semantic_concept_stack_entry
-        {
-            translation_unit* unit;
-            i_source_fragment const* fragment;
-            std::uint32_t level;
-            const i_semantic_concept* semanticConcept;
-            source_iterator sourceStart;
-            source_iterator sourceEnd;
-            neolib::ref_ptr<i_semantic_concept> foldedConcept;
-
-            semantic_concept_stack_entry(
-                translation_unit* unit,
-                i_source_fragment const* fragment,
-                std::uint32_t level,
-                const i_semantic_concept* semanticConcept,
-                source_iterator sourceStart,
-                source_iterator sourceEnd);
-            bool can_fold() const;
-            bool can_fold(const semantic_concept_stack_entry& rhs) const;
-            void instantiate_if_needed(i_context& aContext);
-            void fold(i_context& aContext);
-            void fold(i_context& aContext, semantic_concept_stack_entry& rhs);
-            std::string trace() const;
-        };
-        typedef std::vector<semantic_concept_stack_entry> semantic_concept_stack_t;
-        class scoped_semantic_concept_folder
-        {
-        public:
-            scoped_semantic_concept_folder(compiler& aCompiler);
-            scoped_semantic_concept_folder(compiler& aCompiler, semantic_concept_stack_t& aStack);
-            ~scoped_semantic_concept_folder();
-        public:
-            void fold();
-            void move_to(semantic_concept_stack_t& aOtherStack);
-        private:
-            semantic_concept_stack_t& stack();
-        private:
-            compiler& iCompiler;
-            semantic_concept_stack_t& iStack;
-            semantic_concept_stack_t::size_type iScopeStart;
-        };
+        using source_iterator = const_source_iterator;
+        using fold_stack_t = std::vector<neolib::ref_ptr<i_semantic_concept>>;
         struct compilation_state
         {
             program* program;
             translation_unit* unit;
-            semantic_concept_stack_t iParseStack;
-            semantic_concept_stack_t iPostfixOperationStack;
-            semantic_concept_stack_t iFoldStack;
-            std::uint32_t iLevel;
+            std::uint32_t iLevel = 0u;
+            fold_stack_t iFoldStack = {};
         };
-        typedef std::vector<std::unique_ptr<compilation_state>> compilation_state_stack_t;
+        using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
         compiler(i_context& aContext);
     public:
@@ -238,13 +195,10 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
+        fold_stack_t& fold_stack();
         bool fold();
         bool fold1();
         bool fold2();
-        semantic_concept_stack_t& parse_stack();
-        semantic_concept_stack_t& postfix_operation_stack();
-        semantic_concept_stack_t& fold_stack();
-        void display_probe_trace(translation_unit& aUnit, const i_source_fragment& aFragment);
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
         static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
