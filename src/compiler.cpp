@@ -143,7 +143,8 @@ namespace neos::language
             }
         }
             
-        // todo - fold semantic concepts
+        if (!fold())
+            throw std::runtime_error("Failed to fold semantic concepts");
 
         aFragment.set_status(compilation_status::Compiled);
 
