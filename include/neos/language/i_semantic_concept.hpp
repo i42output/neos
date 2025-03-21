@@ -36,6 +36,8 @@ namespace neos::language
 
     class i_semantic_concept : public neolib::i_reference_counted
     {
+        template <typename Concept>
+        friend class semanteme;
     public:
         struct no_parent : std::logic_error { no_parent() : std::logic_error("neos::language::i_semantic_concept::no_parent") {} };
         struct invalid_fold : std::logic_error { invalid_fold() : std::logic_error("neos::language::i_semantic_concept::invalid_fold") {} };
@@ -44,6 +46,8 @@ namespace neos::language
     public:
         typedef i_semantic_concept abstract_type;
         typedef neolib::i_string_view::const_iterator source_iterator;
+    public:
+        virtual void clone(i_semantic_concept& aDataStore, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const = 0;
     public:
         virtual bool has_parent() const = 0;
         virtual const i_semantic_concept& parent() const = 0;
@@ -61,6 +65,12 @@ namespace neos::language
         virtual bool can_fold(const i_semantic_concept& aRhs) const = 0;
         // helpers
     public:
+        neolib::ref_ptr<i_semantic_concept> clone(i_semantic_concept& aDataStore) const
+        {
+            neolib::ref_ptr<i_semantic_concept> copy;
+            clone(aDataStore, copy);
+            return copy;
+        }
         std::string trace() const
         {
             return name().to_std_string();
@@ -113,7 +123,7 @@ namespace neos::language
                 do_fold(aContext, result);
             return result;
         }
-        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext, const i_semantic_concept& aRhs) 
+        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext, const i_semantic_concept& aRhs)
         {
             neolib::ref_ptr<i_semantic_concept> result;
             if (can_fold(aRhs))

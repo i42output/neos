@@ -167,17 +167,18 @@ namespace neos::language
         text_t text;
     };
 
+    using fold_stack = std::vector<neolib::ref_ptr<i_semantic_concept>>;
+
     class compiler : public i_compiler
     {
     private:
         using source_iterator = const_source_iterator;
-        using fold_stack_t = std::vector<neolib::ref_ptr<i_semantic_concept>>;
         struct compilation_state
         {
             program* program;
             translation_unit* unit;
             std::uint32_t iLevel = 0u;
-            fold_stack_t iFoldStack = {};
+            fold_stack iFoldStack = {};
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -195,7 +196,7 @@ namespace neos::language
     private:
         const compilation_state& state() const;
         compilation_state& state();
-        fold_stack_t& fold_stack();
+        fold_stack& fold_stack();
         bool fold();
         bool fold1();
         bool fold2();
