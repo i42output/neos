@@ -1,117 +1,14 @@
--- neoscript package: string
-
-using neo.array
-using neo.variant
+// neoscript package: string
 
 namespace neo
 {
-    def interface i_generic_string<character_type>
+    fn to_integer(s : string) -> i32
     {
-        fn length() -> usize ;
-        fn operator[] (offset : usize) -> character_type;
-        fn operator[] (offset : usize) mutable -> &character_type;
-        fn i_generic_string operator [] (slice : range<usize>);
-        fn i_generic_string operator + (rhs : i_generic_string);
-        fn i_generic_string substr(offset : usize , count : usize);
+        // todo
     }
-
-    i_string is i_generic_string<char>;
-
-    class generic_string<character_type> implements i_generic_string<character_type>
+    fn to_string(n : i32) -> string
     {
-        fn this()
-        {
-        }
-
-        fn this(other : generic_string)
-        {
-            value = other.value;
-        }
-
-        fn this(otherValue : character_type[])
-        {
-            value = otherValue;
-        }
-
-        fn length() -> usize final
-        {
-            return value.length();
-        }
-
-        fn operator [] (offset : usize) -> character_type final
-        {
-            return value[offset];
-        }
-
-        fn operator [] (offset : usize) mutable -> &character_type final
-        {
-            return value[offset];
-        }
-
-        fn operator [] (slice : range<usize>) -> generic_string final
-        {
-            return generic_string(value[slice]);
-        }
-
-        fn operator + (rhs : generic_string) -> generic_string final
-        {
-            generic_string result;
-            result.value.append(value);
-            result.value.append(rhs.value);
-            return result;
-        }
-
-        fn substr(offset, count : usize) -> generic_string final
-        {
-            return generic_string(value[offset..offset+count]);
-        }
-
-        private character_type[]<16> value;
-    }
-
-    string is generic_string<char>;
-
-    fn to_string<character_type = char>(x : i32) -> generic_string<character_type>;
-    {
-        -- todo
-        return "";
-    }
-
-    fn to_integer(s : generic_string) -> i32
-    {
-        i32 result = 0;
-        bool isNegative = false;
-
-        if (s.length() == 0)
-            return 0;
-
-        usize i = 0;
-
-        if (s[0] == '-') 
-        {
-            isNegative = true;
-            i = 1;
-        }
-
-        for (; i < s.length(); i++) 
-        {
-            auto ch = s[i];
-
-            if (ch >= '0' && ch <= '9') 
-            {
-                result = result * 10 + (ch - '0');
-            }
-            else 
-            {
-                -- Invalid character for an integer, handle as an error or return 0
-                return 0;
-            }
-        }
-
-        if (isNegative)
-            return -result;
-
-        return result;
+        // todo
     }
 }
 

@@ -75,6 +75,16 @@ namespace neos::concepts::core
         }
     };
 
+    class language_namespace_name : public semantic_concept<language_namespace_name>
+    {
+        // construction
+    public:
+        language_namespace_name() :
+            semantic_concept{ "language.namespace.name", neos::language::emit_type::Infix }
+        {
+        }
+    };
+
     class language_namespace_scope : public semantic_concept<language_namespace_scope>
     {
         // construction
@@ -409,6 +419,8 @@ namespace neos::concepts::core
             neolib::make_ref<language_identifier>();
         concepts()[neolib::string{ "language.scope" }] =
             neolib::make_ref<language_scope>();
+        concepts()[neolib::string{ "language.namespace.name" }] =
+            neolib::make_ref<language_namespace_name>();
         concepts()[neolib::string{ "language.namespace.scope" }] =
             neolib::make_ref<language_namespace_scope>(*concepts()[neolib::string{ "language.scope" }]);
         concepts()[neolib::string{ "language.scope.open" }] =

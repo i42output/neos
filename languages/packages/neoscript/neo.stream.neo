@@ -1,4 +1,4 @@
--- neoscript package: stream
+// neoscript package: stream
 
 namespace neo
 {

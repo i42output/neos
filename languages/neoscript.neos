@@ -110,9 +110,9 @@
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
 
-    qualified identifier ::= { namespace , namespace separator } + , identifier ;
+    qualified identifier ::= { namespace name , namespace separator } + , identifier ;
     identifier $ language.identifier ::= alpha , { alphanumeric | '_' } ;
-    namespace $ language.namespace ::= alpha , { alphanumeric | '_' } ;
+    namespace name $ language.namespace.name ::= alpha , { alphanumeric | '_' } ;
     package name ::= alpha , { alpha | ( "." , alpha ) } ; 
     potential keyword ::= { alphanumeric } + ;
 
@@ -152,15 +152,15 @@
 }#
 
 *{
-    program $ language.program ::= { WS , ( statement | using directive | import directive | namespace scope ) , WS } ;
+    program $ language.program ::= { WS , ( using directive | import directive | namespace scope ) , WS } ;
     using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
 
     namespace scope $ language.namespace.scope ::= 
-        { comment | function | procedure | namespace def } ;
+        { ( comment | function | procedure | namespace def ) , WS } ;
     namespace def $ language.namespace ::= 
-        identifier $ language.namespace.name , WS , open scope , WS , namespace scope , WS , close scope ;
+        namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope , WS , namespace scope , WS , close scope ;
 
     function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
     procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;

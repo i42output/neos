@@ -128,6 +128,8 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
+        bool ok = false;
+
         for (auto const& stage : aUnit.schema->pipeline())
         {
             bool const last = (stage == aUnit.schema->pipeline().back());
@@ -135,20 +137,24 @@ namespace neos::language
             for (auto const& discard : *stage->discard)
                 parser.ignore(stage->symbolMap->at(discard));
             parser.set_debug_output(std::cerr, false, last);
-            bool ok;
             if (stage->root)
                 ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
             else
                 ok = parser.parse(aFragment.source().to_std_string_view());
-            if (last && ok)
+            if (!ok)
+                break;
+            if (last)
             {
                 parser.create_ast();
                 walk_ast(iContext, aUnit.ast, fold_stack(), parser.ast(), aUnit.ast.root());
             }
         }
             
-        if (!fold())
-            throw std::runtime_error("Failed to fold semantic concepts");
+        if (ok)
+        {
+            if (!fold())
+                throw std::runtime_error("Failed to fold semantic concepts");
+        }
 
         aFragment.set_status(compilation_status::Compiled);
 
