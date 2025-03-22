@@ -43,9 +43,6 @@ namespace neos::concepts::core
         }
         // emit
     protected:
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-        }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();
@@ -78,7 +75,7 @@ namespace neos::concepts::core
     protected:
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            language::source_fragment file{ neolib::string{data<neolib::string>()} };
+            language::source_fragment file{ data<neolib::string>() };
             file.set_imported();
             aContext.load_fragment(file);
             aContext.compiler().compile(std::move(file));
