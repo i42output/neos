@@ -73,7 +73,12 @@ namespace neos::language
             if constexpr (!std::is_same_v<typename Concept::data_type, void>)
             {
                 if (!iData.has_value())
-                    iData = typename Concept::data_type{};
+                {
+                    if constexpr (std::is_same_v<typename Concept::data_type, neolib::string>)
+                        iData = typename Concept::data_type{ neolib::string_view{ iBegin, iEnd } };
+                    else
+                        iData = typename Concept::data_type{};
+                }
                 return &std::any_cast<typename Concept::data_type&>(iData);
             }
             else

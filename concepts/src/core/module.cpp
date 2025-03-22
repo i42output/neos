@@ -43,6 +43,9 @@ namespace neos::concepts::core
         }
         // emit
     protected:
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+        }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();

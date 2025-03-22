@@ -31,7 +31,7 @@ namespace neos::language
 {
     struct meta
     {
-        std::string name;
+        std::string language;
         std::string description;
         std::string copyright;
         std::string version;

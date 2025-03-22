@@ -230,7 +230,7 @@ namespace neos
         if (!*fragmentStream)
             for (auto const& ext : schema().meta().sourcecodeFileExtension)
             {
-                std::string tryPath = "packages/" + schema().meta().name + "/" + *aFragment.source_file_path() + ext;
+                std::string tryPath = "packages/" + schema().meta().language + "/" + *aFragment.source_file_path() + ext;
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {

@@ -432,7 +432,9 @@ namespace neos::language
         {
             for (auto const& meta : aNode)
             {
-                if (meta.name() == "description")
+                if (meta.name() == "language")
+                    iMeta.language = meta.as<neolib::rjson_string>();
+                else if (meta.name() == "description")
                     iMeta.description = meta.as<neolib::rjson_string>();
                 else if (meta.name() == "copyright")
                     iMeta.copyright = meta.as<neolib::rjson_string>();
