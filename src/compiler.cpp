@@ -101,13 +101,6 @@ namespace neos::language
             neolib::string_view const conceptName{ parserAstNode.c.value() };
             neolib::string_view const conceptValue{ parserAstNode.value };
 
-            for (auto const& childParserNode : parserAstNode.children)
-            {
-                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
-                auto& childNode = *astNode.children().back();
-                walk_ast(context, ast, foldStack, *childParserNode, childNode);
-            }
-
             auto c = context.find_concept(conceptName.to_std_string_view());
             if (c)
             {
@@ -118,6 +111,13 @@ namespace neos::language
             }
             else
                 throw concept_not_found(parserAstNode.c.value());
+
+            for (auto const& childParserNode : parserAstNode.children)
+            {
+                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
+                auto& childNode = *astNode.children().back();
+                walk_ast(context, ast, foldStack, *childParserNode, childNode);
+            }
         };
     }
 
@@ -183,7 +183,6 @@ namespace neos::language
 
     bool compiler::fold()
     {
-        bool didSome = false;
         bool finished = false;
         while (!finished)
         {
@@ -191,14 +190,16 @@ namespace neos::language
             while (fold2())
             {
                 finished = false;
-                didSome = true;
             }
         }
-        return didSome;
+        return fold_stack().empty();
     }
 
     bool compiler::fold2()
     {
+        if (fold_stack().empty())
+            return false;
+
         auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<neolib::ref_ptr<i_semantic_concept>> result = {})
             {
                 std::ostringstream traceOutput;
@@ -217,8 +218,6 @@ namespace neos::language
                     iContext.cout() << traceOutput.str() << std::flush;
             };
 
-        if (fold_stack().empty())
-            return false;
         bool didSome = false;
         for (auto ilhs = fold_stack().begin(); ilhs != fold_stack().end();)
         {
@@ -252,16 +251,17 @@ namespace neos::language
                     didSome = true;
                 }
                 else
-                {
-                    trace_out("cannot fold", ilhs, irhs);
                     ++ilhs;
-                }
             }
             else
-            {
-                trace_out("cannot fold", ilhs, ilhs);
                 ++ilhs;
-            }
+        }
+        if (!didSome)
+        {
+            if (fold_stack().size() == 1)
+                trace_out("cannot fold", fold_stack().begin());
+            else
+                trace_out("cannot fold", fold_stack().begin(), std::next(fold_stack().begin()));
         }
         return didSome;
     }

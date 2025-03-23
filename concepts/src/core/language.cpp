@@ -65,6 +65,25 @@ namespace neos::concepts::core
         }
     };
 
+    class language_program : public semantic_concept<language_program>
+    {
+        // construction
+    public:
+        language_program() :
+            semantic_concept{ "language.program", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+        }
+    };
+
     class language_scope : public semantic_concept<language_scope>
     {
         // construction
@@ -91,6 +110,15 @@ namespace neos::concepts::core
     public:
         language_namespace_scope(i_semantic_concept& aParent) :
             semantic_concept{ aParent, "language.namespace.scope", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
         }
     };
@@ -151,7 +179,7 @@ namespace neos::concepts::core
                 return true;
             return false;
         }
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             aResult.reset(this);
         }
@@ -396,7 +424,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "concept.unrealized" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("concept.unimplemented");
         concepts()[neolib::string{ "language.program" }] =
-            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.program");
+            neolib::make_ref<language_program>();
         concepts()[neolib::string{ "language.namespace" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.namespace");
         concepts()[neolib::string{ "language.expression" }] =
