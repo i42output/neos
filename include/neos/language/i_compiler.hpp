@@ -34,7 +34,8 @@ namespace neos::language
     {
         Pending,
         Compiling,
-        Compiled
+        Compiled,
+        Error
     };
 
     class i_source_fragment

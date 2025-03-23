@@ -155,7 +155,13 @@ namespace neos::language
         if (ok)
         {
             if (!fold())
+            {
+                aFragment.set_status(compilation_status::Error);
+
+                iCompilationStateStack.pop_back();
+
                 throw std::runtime_error("Failed to fold semantic concepts");
+            }
         }
 
         aFragment.set_status(compilation_status::Compiled);
@@ -183,15 +189,8 @@ namespace neos::language
 
     bool compiler::fold()
     {
-        bool finished = false;
-        while (!finished)
-        {
-            finished = true;
-            while (fold2())
-            {
-                finished = false;
-            }
-        }
+        while (fold2())
+            ;
         return fold_stack().empty();
     }
 
