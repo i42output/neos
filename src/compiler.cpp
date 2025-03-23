@@ -111,7 +111,7 @@ namespace neos::language
             auto c = context.find_concept(conceptName.to_std_string_view());
             if (c)
             {
-                auto const semanticConcept = c->instantiate(context, conceptValue.begin(), conceptValue.end());
+                auto const semanticConcept = c->instantiate(context, conceptValue);
                 astNode = semanticConcept;
                 if (conceptName != "language.keyword")
                     foldStack.push_back(semanticConcept);
@@ -199,13 +199,20 @@ namespace neos::language
 
     bool compiler::fold2()
     {
-        auto trace_out = [&](std::string const& op, std::string const& lhs, std::string const& rhs, const std::optional<neolib::ref_ptr<i_semantic_concept>> result = {})
+        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<neolib::ref_ptr<i_semantic_concept>> result = {})
             {
                 std::ostringstream traceOutput;
                 if (trace() >= 1)
-                    traceOutput << op << ": " << lhs << " <- " << rhs << 
+                {
+                    if (rhs)
+                        traceOutput << op << ": " << (**lhs).trace() << " <- " << (***rhs).trace() <<
+                            (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
+                            std::endl;
+                    else
+                        traceOutput << op << ": " << (**lhs).trace() << " <-|" <<
                         (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
                         std::endl;
+                }
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
                     iContext.cout() << traceOutput.str() << std::flush;
             };
@@ -216,12 +223,11 @@ namespace neos::language
         for (auto ilhs = fold_stack().begin(); ilhs != fold_stack().end();)
         {
             auto& lhs = **ilhs;
-            std::string const lhsTraceBefore = lhs.trace();
             if (lhs.can_fold())
             {
-                trace_out("folding", lhsTraceBefore, lhsTraceBefore);
+                trace_out("folding", ilhs);
                 auto result = lhs.fold(iContext);
-                trace_out("folded", lhsTraceBefore, lhsTraceBefore, result);
+                trace_out("folded", ilhs, {}, result);
                 ilhs = fold_stack().erase(ilhs);
                 didSome = true;
             }
@@ -229,32 +235,31 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
-                std::string const rhsTraceBefore = rhs.trace();
                 if (rhs.can_fold(lhs))
                 {
-                    trace_out("folding", rhsTraceBefore, lhsTraceBefore);
+                    trace_out("folding", irhs, ilhs);
                     auto result = rhs.fold(iContext, lhs);
-                    trace_out("folded", rhsTraceBefore, lhsTraceBefore, result);
+                    trace_out("folded", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     didSome = true;
                 }
                 else if (lhs.can_fold(rhs))
                 {
-                    trace_out("folding", lhsTraceBefore, rhsTraceBefore);
+                    trace_out("folding", ilhs, irhs);
                     auto result = lhs.fold(iContext, rhs);
-                    trace_out("folded", lhsTraceBefore, rhsTraceBefore, result);
+                    trace_out("folded", ilhs, irhs, result);
                     fold_stack().erase(irhs);
                     didSome = true;
                 }
                 else
                 {
-                    trace_out("cannot fold", lhsTraceBefore, rhsTraceBefore);
+                    trace_out("cannot fold", ilhs, irhs);
                     ++ilhs;
                 }
             }
             else
             {
-                trace_out("cannot fold", lhsTraceBefore, lhsTraceBefore);
+                trace_out("cannot fold", ilhs, ilhs);
                 ++ilhs;
             }
         }

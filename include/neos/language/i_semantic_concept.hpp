@@ -54,7 +54,8 @@ namespace neos::language
         virtual const neolib::i_string& name() const = 0;
         // parse
     public:
-        virtual void update_source(source_iterator aBegin, source_iterator aEnd) = 0;
+        virtual neolib::i_string_view const& source() const = 0;
+        virtual void update_source(neolib::i_string_view const& aSource) = 0;
         virtual bool holds_data() const = 0;
         virtual void const* data() const = 0;
         virtual void* data() = 0;
@@ -63,6 +64,9 @@ namespace neos::language
         virtual emit_type emit_as() const = 0;
         virtual bool can_fold() const = 0;
         virtual bool can_fold(const i_semantic_concept& aRhs) const = 0;
+        // debug
+    public:
+        virtual void trace(neolib::i_string& aResult) const = 0;
         // helpers
     public:
         neolib::ref_ptr<i_semantic_concept> clone(i_semantic_concept& aDataStore) const
@@ -73,7 +77,9 @@ namespace neos::language
         }
         std::string trace() const
         {
-            return name().to_std_string();
+            neolib::string result;
+            trace(result);
+            return result.to_std_string();
         }
         // family
     public:
@@ -98,10 +104,10 @@ namespace neos::language
         }
         // parse
     public:
-        neolib::ref_ptr<i_semantic_concept> instantiate(i_context& aContext, source_iterator aBegin, source_iterator aEnd) const
+        neolib::ref_ptr<i_semantic_concept> instantiate(i_context& aContext, neolib::i_string_view const& aSource) const
         {
             neolib::ref_ptr<i_semantic_concept> result;
-            do_instantiate(aContext, aBegin, aEnd, result);
+            do_instantiate(aContext, aSource, result);
             return result;
         }
         template <typename T>
@@ -132,7 +138,7 @@ namespace neos::language
         }
         // parse
     protected:
-        virtual void do_instantiate(i_context& aContext, source_iterator aBegin, source_iterator aEnd, neolib::i_ref_ptr<i_semantic_concept>& aResult) const = 0;
+        virtual void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const = 0;
         // emit
     protected:
         virtual void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) = 0;

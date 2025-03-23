@@ -23,6 +23,8 @@
 #include <any>
 #include <neolib/core/reference_counted.hpp>
 #include <neolib/core/string.hpp>
+#include <neolib/core/string_view.hpp>
+#include <neolib/core/string_utils.hpp>
 #include <neos/language/i_semantic_concept.hpp>
 
 namespace neos::language
@@ -34,8 +36,8 @@ namespace neos::language
         using concept_type = Concept;
         using data_type = typename concept_type::data_type;
     public:
-        semanteme(i_semantic_concept const& aConcept, i_context& aContext, source_iterator aBegin, source_iterator aEnd) :
-            iConcept{ aConcept.clone(*this) }, iBegin{aBegin}, iEnd{aEnd}
+        semanteme(i_semantic_concept const& aConcept, i_context& aContext, neolib::i_string_view const& aSource) :
+            iConcept{ aConcept.clone(*this) }, iSource{ aSource }
         {
         }
         bool has_parent() const override
@@ -58,10 +60,13 @@ namespace neos::language
         }
         // parse
     public:
-        void update_source(source_iterator aBegin, source_iterator aEnd) override
+        neolib::i_string_view const& source() const override
         {
-            iBegin = aBegin;
-            iEnd = aEnd;
+            return iSource;
+        }
+        void update_source(neolib::i_string_view const& aSource) override
+        {
+            iSource = aSource;
         }
         bool holds_data() const override
         {
@@ -75,7 +80,7 @@ namespace neos::language
                 if (!iData.has_value())
                 {
                     if constexpr (std::is_same_v<typename Concept::data_type, neolib::string>)
-                        iData = typename Concept::data_type{ neolib::string_view{ iBegin, iEnd } };
+                        iData = typename Concept::data_type{ iSource };
                     else
                         iData = typename Concept::data_type{};
                 }
@@ -102,9 +107,28 @@ namespace neos::language
         {
             return iConcept->can_fold(aRhs);
         }
+        // debug
+    public:
+        void trace(neolib::i_string& aResult) const override
+        {
+            std::ostringstream oss;
+            oss << name();
+            if (iData.has_value())
+            {
+                oss << "[";
+                if constexpr (std::is_same_v<typename Concept::data_type, neolib::string>)
+                    oss << neolib::to_escaped_string(data<neolib::string>().to_std_string_view(), 32u, true);
+                else
+                    oss << "*";
+                oss << "]";
+            }
+            else
+                oss << "[" << neolib::to_escaped_string(source().to_std_string_view(), 32u, true) << "]";
+            aResult = neolib::string{ oss.str()};
+        }
         // parse
     protected:
-        void do_instantiate(i_context& aContext, source_iterator aBegin, source_iterator aEnd, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
+        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
         {
             throw std::logic_error("neos::language::semanteme: already instantiated!");
         }
@@ -120,8 +144,7 @@ namespace neos::language
         }
     private:
         neolib::ref_ptr<i_semantic_concept> iConcept;
-        source_iterator iBegin;
-        source_iterator iEnd;
+        neolib::string_view iSource;
         mutable std::any iData;
     };
 
@@ -172,7 +195,11 @@ namespace neos::language
         }
         // parse
     public:
-        void update_source(source_iterator aBegin, source_iterator aEnd) override
+        neolib::i_string_view const& source() const override
+        {
+            throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
+        }
+        void update_source(neolib::i_string_view const& aSource) override
         {
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
@@ -203,11 +230,20 @@ namespace neos::language
         {
             return false;
         }
+        // debug
+    public:
+        void trace(neolib::i_string& aResult) const override
+        {
+            if (iDataStore)
+                iDataStore->trace(aResult);
+            else
+                aResult = name();
+        }
         // parse
     protected:
-        void do_instantiate(i_context& aContext, source_iterator aBegin, source_iterator aEnd, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
+        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
         {
-            aResult = neolib::make_ref<semanteme<Concept>>(*this, aContext, aBegin, aEnd);
+            aResult = neolib::make_ref<semanteme<Concept>>(*this, aContext, aSource);
         }
         // emit
     protected:
