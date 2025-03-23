@@ -230,20 +230,20 @@ namespace neos::language
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
                 std::string const rhsTraceBefore = rhs.trace();
-                if (lhs.can_fold(rhs))
-                {
-                    trace_out("folding", lhsTraceBefore, rhsTraceBefore);
-                    auto result = lhs.fold(iContext, rhs);
-                    trace_out("folded", lhsTraceBefore, rhsTraceBefore, result);
-                    fold_stack().erase(irhs);
-                    didSome = true;
-                }
-                else if (rhs.can_fold(lhs))
+                if (rhs.can_fold(lhs))
                 {
                     trace_out("folding", rhsTraceBefore, lhsTraceBefore);
                     auto result = rhs.fold(iContext, lhs);
                     trace_out("folded", rhsTraceBefore, lhsTraceBefore, result);
                     ilhs = fold_stack().erase(ilhs);
+                    didSome = true;
+                }
+                else if (lhs.can_fold(rhs))
+                {
+                    trace_out("folding", lhsTraceBefore, rhsTraceBefore);
+                    auto result = lhs.fold(iContext, rhs);
+                    trace_out("folded", lhsTraceBefore, rhsTraceBefore, result);
+                    fold_stack().erase(irhs);
                     didSome = true;
                 }
                 else
