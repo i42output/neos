@@ -198,7 +198,6 @@ namespace neos::language
         compilation_state& state();
         fold_stack& fold_stack();
         bool fold();
-        bool fold1();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
         static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);

@@ -98,6 +98,9 @@ namespace neos::language
     {
         void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, language::parser::ast_node const& parserAstNode, ast::node& astNode)
         {
+            neolib::string_view const conceptName{ parserAstNode.c.value() };
+            neolib::string_view const conceptValue{ parserAstNode.value };
+
             for (auto const& childParserNode : parserAstNode.children)
             {
                 astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
@@ -105,14 +108,13 @@ namespace neos::language
                 walk_ast(context, ast, foldStack, *childParserNode, childNode);
             }
 
-            neolib::string_view const conceptName{ parserAstNode.c.value() };
-            neolib::string_view const conceptValue{ parserAstNode.value };
             auto c = context.find_concept(conceptName.to_std_string_view());
             if (c)
             {
                 auto const semanticConcept = c->instantiate(context, conceptValue.begin(), conceptValue.end());
                 astNode = semanticConcept;
-                foldStack.push_back(semanticConcept);
+                if (conceptName != "language.keyword")
+                    foldStack.push_back(semanticConcept);
             }
             else
                 throw concept_not_found(parserAstNode.c.value());
@@ -191,88 +193,70 @@ namespace neos::language
                 finished = false;
                 didSome = true;
             }
-            while (fold1())
-            {
-                finished = false;
-                didSome = true;
-            }
-        }
-        return didSome;
-    }
-
-    bool compiler::fold1()
-    {
-        if (fold_stack().size() < 1)
-            return false;
-        bool didSome = false;
-        std::ostringstream traceOutput;
-        for (auto isingle = fold_stack().begin(); isingle != fold_stack().end();)
-        {
-            auto& single = **isingle;
-            if (single.can_fold())
-            {
-                std::string traceBefore = single.trace();
-                if (trace() >= 1)
-                    traceOutput << "folding: " << traceBefore << " <- " << traceBefore << std::endl;
-                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    iContext.cout() << traceOutput.str();
-                traceOutput.str({});
-                auto result = single.fold(iContext);
-                if (result != nullptr)
-                {
-                    if (trace() >= 1)
-                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = " << result->trace() << std::endl;
-                }
-                else
-                {
-                    if (trace() >= 1)
-                        traceOutput << "folded: " << traceBefore << " <- " << traceBefore << " = ()" << std::endl;
-                    isingle = fold_stack().erase(isingle);
-                }
-                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    iContext.cout() << traceOutput.str();
-                traceOutput.str({});
-                didSome = true;
-            }
-            else
-                ++isingle;
         }
         return didSome;
     }
 
     bool compiler::fold2()
     {
-        if (fold_stack().size() < 2)
+        auto trace_out = [&](std::string const& op, std::string const& lhs, std::string const& rhs, const std::optional<neolib::ref_ptr<i_semantic_concept>> result = {})
+            {
+                std::ostringstream traceOutput;
+                if (trace() >= 1)
+                    traceOutput << op << ": " << lhs << " <- " << rhs << 
+                        (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
+                        std::endl;
+                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
+                    iContext.cout() << traceOutput.str() << std::flush;
+            };
+
+        if (fold_stack().empty())
             return false;
         bool didSome = false;
-        std::ostringstream traceOutput;
-        for (auto irhs = fold_stack().begin(), ilhs = std::next(irhs); ilhs != fold_stack().end();)
+        for (auto ilhs = fold_stack().begin(); ilhs != fold_stack().end();)
         {
-            auto& rhs = **irhs;
             auto& lhs = **ilhs;
-            if (lhs.can_fold(rhs))
+            std::string const lhsTraceBefore = lhs.trace();
+            if (lhs.can_fold())
             {
-                std::string lhsTraceBefore = lhs.trace();
-                std::string rhsTraceBefore = rhs.trace();
-                if (trace() >= 1)
-                    traceOutput << "folding: " << lhsTraceBefore << " <- " << rhsTraceBefore << std::endl;
-                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    iContext.cout() << traceOutput.str();
-                traceOutput.str({});
-                lhs.fold(iContext, rhs);
-                if (trace() >= 1)
-                    traceOutput << "folded: " << lhsTraceBefore << " <- " << rhsTraceBefore << " = " << lhs.trace() << std::endl;
-                if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
-                    iContext.cout() << traceOutput.str();
-                traceOutput.str({});
-                irhs = fold_stack().erase(irhs);
-                if (irhs != fold_stack().begin())
-                    --irhs;
-                ilhs = std::next(irhs);
+                trace_out("folding", lhsTraceBefore, lhsTraceBefore);
+                auto result = lhs.fold(iContext);
+                trace_out("folded", lhsTraceBefore, lhsTraceBefore, result);
+                ilhs = fold_stack().erase(ilhs);
                 didSome = true;
             }
+            else if (std::next(ilhs) != fold_stack().end())
+            {
+                auto irhs = std::next(ilhs);
+                auto& rhs = **irhs;
+                std::string const rhsTraceBefore = rhs.trace();
+                if (lhs.can_fold(rhs))
+                {
+                    trace_out("folding", lhsTraceBefore, rhsTraceBefore);
+                    auto result = lhs.fold(iContext, rhs);
+                    trace_out("folded", lhsTraceBefore, rhsTraceBefore, result);
+                    fold_stack().erase(irhs);
+                    didSome = true;
+                }
+                else if (rhs.can_fold(lhs))
+                {
+                    trace_out("folding", rhsTraceBefore, lhsTraceBefore);
+                    auto result = rhs.fold(iContext, lhs);
+                    trace_out("folded", rhsTraceBefore, lhsTraceBefore, result);
+                    ilhs = fold_stack().erase(ilhs);
+                    didSome = true;
+                }
+                else
+                {
+                    trace_out("cannot fold", lhsTraceBefore, rhsTraceBefore);
+                    ++ilhs;
+                }
+            }
             else
-                ++irhs, ++ilhs;
+            {
+                trace_out("cannot fold", lhsTraceBefore, lhsTraceBefore);
+                ++ilhs;
+            }
         }
         return didSome;
     }

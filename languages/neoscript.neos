@@ -158,7 +158,7 @@
     import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
 
     namespace scope $ language.namespace.scope ::= 
-        { ( comment | function | procedure | namespace def ) , WS } ;
+        { ( comment | function | procedure | namespace def | import directive ) , WS } ;
     namespace def $ language.namespace ::= 
         namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope , WS , namespace scope , WS , close scope ;
 
