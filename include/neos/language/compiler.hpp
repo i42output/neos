@@ -177,6 +177,7 @@ namespace neos::language
         {
             program* program;
             translation_unit* unit;
+            i_source_fragment* fragment;
             std::uint32_t iLevel = 0u;
             fold_stack iFoldStack = {};
         };

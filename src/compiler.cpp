@@ -126,7 +126,7 @@ namespace neos::language
         if (aFragment.status() != compilation_status::Pending)
             return;
 
-        iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit));
+        iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit, &aFragment));
 
         aFragment.set_status(compilation_status::Compiling);
 
@@ -223,9 +223,9 @@ namespace neos::language
             auto& lhs = **ilhs;
             if (lhs.can_fold())
             {
-                trace_out("folding", ilhs);
+                trace_out("Folding", ilhs);
                 auto result = lhs.fold(iContext);
-                trace_out("folded", ilhs, {}, result);
+                trace_out("Folded", ilhs, {}, result);
                 ilhs = fold_stack().erase(ilhs);
                 didSome = true;
             }
@@ -235,17 +235,17 @@ namespace neos::language
                 auto& rhs = **irhs;
                 if (rhs.can_fold(lhs))
                 {
-                    trace_out("folding", irhs, ilhs);
+                    trace_out("Folding", irhs, ilhs);
                     auto result = rhs.fold(iContext, lhs);
-                    trace_out("folded", irhs, ilhs, result);
+                    trace_out("Folded", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     didSome = true;
                 }
                 else if (lhs.can_fold(rhs))
                 {
-                    trace_out("folding", ilhs, irhs);
+                    trace_out("Folding", ilhs, irhs);
                     auto result = lhs.fold(iContext, rhs);
-                    trace_out("folded", ilhs, irhs, result);
+                    trace_out("Folded", ilhs, irhs, result);
                     fold_stack().erase(irhs);
                     didSome = true;
                 }
@@ -258,9 +258,13 @@ namespace neos::language
         if (!didSome)
         {
             if (fold_stack().size() == 1)
-                trace_out("cannot fold", fold_stack().begin());
+                throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
+                    "Failed to fold semantic concept: "s +
+                    fold_stack().front()->name());
             else
-                trace_out("cannot fold", fold_stack().begin(), std::next(fold_stack().begin()));
+                throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
+                    "Failed to fold semantic concepts: "s +
+                    (**fold_stack().begin()).name() + " <- " + (**std::next(fold_stack().begin())).name());
         }
         return didSome;
     }
