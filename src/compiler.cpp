@@ -179,14 +179,15 @@ namespace neos::language
 
     void compiler::enter_namespace(neolib::i_string const& aNamespace)
     {
-        // todo
-        iContext.cout() << "enter_namespace(" << aNamespace.to_std_string_view() << ")" << std::endl;
+        state().namespaceScope.push_back(aNamespace.to_std_string());
     }
 
     void compiler::leave_namespace()
     {
-        // todo
-        iContext.cout() << "leave_namespace()" << std::endl;
+        if (!state().namespaceScope.empty())
+            state().namespaceScope.pop_back();
+        else
+            throw std::runtime_error("Unmatched namespace scopes");
     }
 
     const compiler::compilation_state& compiler::state() const
@@ -283,7 +284,7 @@ namespace neos::language
 
     fold_stack& compiler::fold_stack()
     {
-        return state().iFoldStack;
+        return state().foldStack;
     }
 
     std::string compiler::location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath)

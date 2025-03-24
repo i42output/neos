@@ -178,8 +178,9 @@ namespace neos::language
             program* program;
             translation_unit* unit;
             i_source_fragment* fragment;
-            std::uint32_t iLevel = 0u;
-            fold_stack iFoldStack = {};
+            std::uint32_t level = 0u;
+            fold_stack foldStack = {};
+            std::vector<std::string> namespaceScope;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
