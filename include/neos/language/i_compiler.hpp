@@ -73,6 +73,8 @@ namespace neos::language
     public:
         virtual ~i_compiler() {}
     public:
-        virtual void compile(const i_source_fragment& aFragment) = 0;
+        virtual void compile(i_source_fragment const& aFragment) = 0;
+        virtual void enter_namespace(neolib::i_string const& aNamespace) = 0;
+        virtual void leave_namespace() = 0;
     };
 }

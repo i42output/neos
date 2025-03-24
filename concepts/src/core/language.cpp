@@ -17,6 +17,7 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <neos/i_context.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include "language.hpp"
 
@@ -56,7 +57,7 @@ namespace neos::concepts::core
     {
         // types
     public:
-        typedef neolib::string representation_type;
+        using data_type = neolib::string;
         // construction
     public:
         language_identifier() :
@@ -94,6 +95,31 @@ namespace neos::concepts::core
         }
     };
 
+    class language_namespace : public semantic_concept<language_namespace>
+    {
+        // types
+    public:
+        using data_type = neolib::string;
+        // construction
+    public:
+        language_namespace() :
+            semantic_concept{ "language.namespace", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.identifier")
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+        }
+    };
+
     class language_namespace_name : public semantic_concept<language_namespace_name>
     {
         // construction
@@ -104,12 +130,12 @@ namespace neos::concepts::core
         }
     };
 
-    class language_namespace_scope : public semantic_concept<language_namespace_scope>
+    class language_scope_open : public semantic_concept<language_scope_open>
     {
         // construction
     public:
-        language_namespace_scope(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.namespace.scope", neos::language::emit_type::Infix }
+        language_scope_open() :
+            semantic_concept{ "language.scope.open", neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -123,13 +149,32 @@ namespace neos::concepts::core
         }
     };
 
-    class language_scope_open : public semantic_concept<language_scope_open>
+    class language_namespace_scope_open : public semantic_concept<language_namespace_scope_open>
     {
         // construction
     public:
-        language_scope_open() :
-            semantic_concept{ "language.scope.open", neos::language::emit_type::Infix }
+        language_namespace_scope_open(i_semantic_concept& aParent) :
+            semantic_concept{ aParent, "language.namespace.scope.open", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.namespace")
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            aContext.compiler().enter_namespace(aRhs.data<neolib::i_string>());
         }
     };
 
@@ -150,6 +195,38 @@ namespace neos::concepts::core
         language_scope_close() :
             semantic_concept{ "language.scope.close", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.namespace.scope")
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            aContext.compiler().leave_namespace();
+        }
+    };
+
+    class language_namespace_scope_close : public semantic_concept<language_namespace_scope_close>
+    {
+        // construction
+    public:
+        language_namespace_scope_close(i_semantic_concept& aParent) :
+            semantic_concept{ aParent, "language.namespace.scope.close", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            aContext.compiler().leave_namespace();
         }
     };
 
@@ -426,7 +503,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.program" }] =
             neolib::make_ref<language_program>();
         concepts()[neolib::string{ "language.namespace" }] =
-            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.namespace");
+            neolib::make_ref<language_namespace>();
         concepts()[neolib::string{ "language.expression" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression");
         concepts()[neolib::string{ "language.expression.operand" }] = 
@@ -449,15 +526,17 @@ namespace neos::concepts::core
             neolib::make_ref<language_scope>();
         concepts()[neolib::string{ "language.namespace.name" }] =
             neolib::make_ref<language_namespace_name>();
-        concepts()[neolib::string{ "language.namespace.scope" }] =
-            neolib::make_ref<language_namespace_scope>(*concepts()[neolib::string{ "language.scope" }]);
         concepts()[neolib::string{ "language.scope.open" }] =
             neolib::make_ref<language_scope_open>();
-        concepts()[neolib::string{ "language.scope.open.by_indentation" }] = 
+        concepts()[neolib::string{ "language.namespace.scope.open" }] =
+            neolib::make_ref<language_namespace_scope_open>(*concepts()[neolib::string{ "language.scope.open" }]);
+        concepts()[neolib::string{ "language.scope.open.by_indentation" }] =
             neolib::make_ref<language_scope_open_by_indentation>();
         concepts()[neolib::string{ "language.scope.close" }] = 
             neolib::make_ref<language_scope_close>();
-        concepts()[neolib::string{ "language.scope.add.package" }] = 
+        concepts()[neolib::string{ "language.namespace.scope.close" }] =
+            neolib::make_ref<language_namespace_scope_close>(*concepts()[neolib::string{ "language.scope.close" }]);
+        concepts()[neolib::string{ "language.scope.add.package" }] =
             neolib::make_ref<language_scope_add_package>();
         concepts()[neolib::string{ "language.function" }] = 
             neolib::make_ref<language_function>();

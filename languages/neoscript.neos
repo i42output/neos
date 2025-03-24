@@ -121,8 +121,8 @@
 
     open expression ::= "(" ;
     close expression ::= ")" ;
-    open scope $ language.scope.open ::= "{" ;
-    close scope $ language.scope.close ::= "}" ;
+    open scope ::= "{" ;
+    close scope ::= "}" ;
     comma ::= "," ;
     colon ::= ":" ;
     semicolon ::= ";" ;
@@ -157,10 +157,10 @@
     import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
 
-    namespace scope $ language.namespace.scope ::= 
+    namespace scope ::= 
         { ( comment | function | procedure | namespace def | import directive ) , WS } ;
     namespace def $ language.namespace ::= 
-        namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope , WS , namespace scope , WS , close scope ;
+        namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope $ language.namespace.scope.open , WS , namespace scope , WS , close scope $ language.namespace.scope.close ;
 
     function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
     procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
@@ -176,7 +176,7 @@
     local $ language.function.local ::= identifier ;
     fn body $ language.function.body ::= scope ;
     proc body $ language.function.body ::= scope ;
-    scope $ language.function.scope ::= ( open scope , { WS , statement } , WS , close scope ) ; 
+    scope $ language.function.scope ::= ( open scope $ language.scope.open , { WS , statement } , WS , close scope  $ language.scope.close ) ; 
 
     statement $ language.statement ::= 
         ( expression , WS , semicolon ) | ( assignment , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;

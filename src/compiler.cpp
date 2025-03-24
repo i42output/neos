@@ -177,6 +177,18 @@ namespace neos::language
         compile(program, unit, fragment);
     }
 
+    void compiler::enter_namespace(neolib::i_string const& aNamespace)
+    {
+        // todo
+        iContext.cout() << "enter_namespace(" << aNamespace.to_std_string_view() << ")" << std::endl;
+    }
+
+    void compiler::leave_namespace()
+    {
+        // todo
+        iContext.cout() << "leave_namespace()" << std::endl;
+    }
+
     const compiler::compilation_state& compiler::state() const
     {
         return *iCompilationStateStack.back();

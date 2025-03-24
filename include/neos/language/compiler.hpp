@@ -188,7 +188,9 @@ namespace neos::language
         void compile(program& aProgram);
         void compile(program& aProgram, translation_unit& aUnit);
         void compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
-        void compile(const i_source_fragment& aFragment) override;
+        void compile(const i_source_fragment& aFragment) final;
+        void enter_namespace(neolib::i_string const& aNamespace) final;
+        void leave_namespace() final;
         std::uint32_t trace() const;
         const std::optional<std::string>& trace_filter() const;
         void set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter = {});
