@@ -81,6 +81,8 @@ namespace neos::language
                 {
                     if constexpr (std::is_same_v<typename Concept::data_type, neolib::string>)
                         iData = typename Concept::data_type{ iSource };
+                    else if constexpr (std::is_constructible_v<typename Concept::data_type, std::string_view>)
+                        iData = typename Concept::data_type{ iSource.to_std_string_view() };
                     else
                         iData = typename Concept::data_type{};
                 }

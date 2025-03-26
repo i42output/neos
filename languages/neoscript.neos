@@ -84,8 +84,10 @@
     do $ language.keyword ::= potential keyword ::= "do" ;
     return $ language.keyword ::= potential keyword ::= "return" ;
 
-    positive number ::= 
-        digit sequence , [ '.' , digit sequence , [ ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ] ] ;
+    positive integer ::= 
+        digit sequence ;
+    positive real ::= 
+        digit sequence , '.' , digit sequence , [ ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ] ;
     digit sequence ::= 
         digit , { digit } ;
     digit ::= 
@@ -245,7 +247,8 @@
     do while loop $ language.statement.loop ::= 
         do , WS , scope, WS , while clause ;
 
-    number $ math.universal.number ::= ( minus , positive number ) | positive number ;
+    number $ math.universal.integer ::= ( minus , positive integer ) | positive integer ;
+    number $ math.universal.real ::= ( minus , positive real ) | positive real ;
 
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 
