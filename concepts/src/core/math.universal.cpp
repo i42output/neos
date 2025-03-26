@@ -91,8 +91,8 @@ namespace neos::concepts::core
     {
         /* todo */
         concepts()[neolib::string{ "math.universal.number" }] = neolib::make_ref<math_universal_number>("math.universal.number", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.integer" }] = neolib::make_ref<math_universal_integer>("math.universal.integer", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.real" }] = neolib::make_ref<math_universal_real>("math.universal.real", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.integer" }] = neolib::make_ref<math_universal_integer>(*concepts()[neolib::string{ "math.universal.number" }], "math.universal.integer", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.real" }] = neolib::make_ref<math_universal_real>(*concepts()[neolib::string{ "math.universal.number" }], "math.universal.real", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.digit" }] = neolib::make_ref<math_universal_number_digit>("math.universal.number.digit", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.point" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.point", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.exponent" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent", language::emit_type::Infix);
