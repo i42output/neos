@@ -27,6 +27,7 @@
 #include <neolib/file/json.hpp>
 #include <neolib/app/i_application.hpp>
 #include <neos/language/compiler.hpp>
+#include <neos/bytecode/vm/vm.hpp>
 #include <neos/i_context.hpp>
 
 namespace neos
@@ -61,7 +62,7 @@ namespace neos
     public:
         bool running() const final;
         void run() final;
-        bytecode::reg_64 evaluate(std::string const& aExpression) final;
+        bytecode::data_type evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
     private:
         void init();

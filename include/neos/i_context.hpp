@@ -26,7 +26,6 @@
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_semantic_concept.hpp>
 #include <neos/language/i_compiler.hpp>
-#include <neos/bytecode/registers.hpp>
 #include <neos/bytecode/vm/vm.hpp>
 
 namespace neos
@@ -54,7 +53,7 @@ namespace neos
     public:
         virtual bool running() const = 0;
         virtual void run() = 0;
-        virtual bytecode::reg_64 evaluate(std::string const& aExpression) = 0;
+        virtual bytecode::data_type evaluate(std::string const& aExpression) = 0;
         virtual const neolib::i_string& metrics() const = 0;
     public:
         virtual void load_fragment(language::i_source_fragment& aFragment) = 0;
