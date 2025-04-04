@@ -20,13 +20,14 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <unordered_map>
 
 namespace neos
 {
     namespace bytecode
     {
         // Define the opcode enum (core + extended)
-        enum class opcode
+        enum class opcode : std::uint_fast32_t
         {
             // Core (WASM 1.0) opcodes (1 byte)
             Unreachable, Nop, Block, Loop, If, Else, End, Br, BrIf, BrTable,
@@ -119,12 +120,18 @@ namespace neos
 
         struct op1 { std::uint8_t b1; };
         struct op2 { std::uint8_t b1, b2; };
+        using encoding = std::variant<op1, op2>;
 
         // Use a variant type to hold any of the opcode byte wrappers
         struct opcode_entry
         {
             opcode opcode;
-            std::variant<op1, op2> encoding;
+            encoding encoding;
+
+            operator std::pair<const decltype(opcode), decltype(encoding)>() const
+            {
+                return std::make_pair(opcode, encoding);
+            }
         };
 
         // Now create the opcode table
@@ -467,5 +474,24 @@ namespace neos
             };
             return sOpCodes;
         };
+
+        inline std::unordered_map<opcode, encoding> const& opcode_dictionary()
+        {
+            static std::unordered_map<opcode, encoding> const sOpCodeDictionary{ opcodes().begin(), opcodes().end() };
+            return sOpCodeDictionary;
+        }
+                
+        inline text_t& operator<<(text_t& aText, opcode aOpcode)
+        {
+            auto const& encoding = opcode_dictionary().at(aOpcode);
+            if (std::holds_alternative<op1>(encoding))
+                aText.push_back(std::byte{ std::get<op1>(encoding).b1 });
+            else if (std::holds_alternative<op2>(encoding))
+            {
+                aText.push_back(std::byte{ std::get<op2>(encoding).b1 });
+                aText.push_back(std::byte{ std::get<op2>(encoding).b2 });
+            }
+            return aText;
+        }
     }
 }
