@@ -122,7 +122,6 @@ namespace neos
         struct op2 { std::uint8_t b1, b2; };
         using encoding = std::variant<op1, op2>;
 
-        // Use a variant type to hold any of the opcode byte wrappers
         struct opcode_entry
         {
             opcode opcode;
@@ -134,7 +133,6 @@ namespace neos
             }
         };
 
-        // Now create the opcode table
         inline std::vector<opcode_entry> const& opcodes()
         {
             static std::vector<opcode_entry> const sOpCodes = 
