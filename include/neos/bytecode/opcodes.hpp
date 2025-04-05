@@ -20,7 +20,9 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <variant>
 #include <unordered_map>
+#include <neos/bytecode/exceptions.hpp>
 
 namespace neos
 {
@@ -118,9 +120,21 @@ namespace neos
             V128Bitselect, V128AnyTrue
         };
 
-        struct op1 { std::uint8_t b1; };
-        struct op2 { std::uint8_t b1, b2; };
+        struct op1 { std::uint8_t b1; constexpr std::strong_ordering operator<=>(op1 const&) const noexcept = default; };
+        struct op2 { std::uint8_t b1, b2; constexpr std::strong_ordering operator<=>(op2 const&) const noexcept = default; };
         using encoding = std::variant<op1, op2>;
+
+        struct encoding_hash
+        {
+            std::uint32_t operator()(encoding const& encoding) const
+            {
+                if (std::holds_alternative<op1>(encoding))
+                    return static_cast<std::uint32_t>(std::get<op1>(encoding).b1);
+                else if (std::holds_alternative<op2>(encoding))
+                    return static_cast<std::uint32_t>(std::get<op2>(encoding).b1) +
+                        (static_cast<std::uint32_t>(std::get<op2>(encoding).b2) << 8u);
+            }
+        };
 
         struct opcode_entry
         {
@@ -130,6 +144,11 @@ namespace neos
             operator std::pair<const decltype(opcode), decltype(encoding)>() const
             {
                 return std::make_pair(opcode, encoding);
+            }
+
+            operator std::pair<const decltype(encoding), decltype(opcode)>() const
+            {
+                return std::make_pair(encoding, opcode);
             }
         };
 
@@ -475,10 +494,16 @@ namespace neos
 
         inline std::unordered_map<opcode, encoding> const& opcode_dictionary()
         {
-            static std::unordered_map<opcode, encoding> const sOpCodeDictionary{ opcodes().begin(), opcodes().end() };
-            return sOpCodeDictionary;
+            static std::unordered_map<opcode, encoding> const sOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            return sOpcodeDictionary;
         }
                 
+        inline std::unordered_map<encoding, opcode, encoding_hash> const& inverse_opcode_dictionary()
+        {
+            static std::unordered_map<encoding, opcode, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            return sInverseOpcodeDictionary;
+        }
+
         inline text_t& operator<<(text_t& aText, opcode aOpcode)
         {
             auto const& encoding = opcode_dictionary().at(aOpcode);
@@ -490,6 +515,27 @@ namespace neos
                 aText.push_back(std::byte{ std::get<op2>(encoding).b2 });
             }
             return aText;
+        }
+
+        inline text_t::const_iterator next_opcode(text_t::const_iterator aText, text_t::const_iterator aTextEnd, opcode& aOpcode)
+        {
+            if (aText == aTextEnd)
+                throw exceptions::out_of_text();
+            std::uint8_t b1 = static_cast<std::uint8_t>(*(aText++));
+            auto existing = inverse_opcode_dictionary().find(op1{ b1 });
+            if (existing == inverse_opcode_dictionary().end())
+            {
+                if (aText == aTextEnd)
+                    throw exceptions::out_of_text();
+                std::uint8_t b2 = static_cast<std::uint8_t>(*(aText++));
+                existing = inverse_opcode_dictionary().find(op2{ b1, b2 });
+            }
+            if (existing != inverse_opcode_dictionary().end())
+            {
+                aOpcode = existing->second;
+                return aText;
+            }
+            throw exceptions::invalid_instruction();
         }
     }
 }

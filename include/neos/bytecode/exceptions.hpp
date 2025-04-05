@@ -1,5 +1,5 @@
 /*
-  bytecode.hpp
+  exceptions.hpp
 
   Copyright (c) 2025 Leigh Johnston.  All Rights Reserved.
 
@@ -20,28 +20,17 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <variant>
 
 namespace neos
 {
     namespace bytecode
     {
-        using boolean = bool;
-        using u8 = std::uint8_t;
-        using u16 = std::uint16_t;
-        using u32 = std::uint32_t;
-        using u64 = std::uint64_t;
-        using i8 = std::int8_t;
-        using i16 = int16_t;
-        using i32 = std::int32_t;
-        using i64 = std::int64_t;
-        using f32 = float;
-        using f64 = double;
-        using reference = void*;
-
-        static_assert(sizeof(f32) == 4);
-        static_assert(sizeof(f64) == 8);
-
-        using data_type = std::variant<std::monostate, boolean, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, reference>;
-   }
+        namespace exceptions
+        {
+            struct no_text : std::runtime_error { no_text() : std::runtime_error("neos::bytecode: no text") {} };
+            struct out_of_text : std::runtime_error { out_of_text() : std::runtime_error("neos::bytecode: out of text") {} };
+            struct invalid_instruction : std::runtime_error { invalid_instruction() : std::runtime_error("neos::bytecode: invalid instruction") {} };
+            struct vm_logic_error : std::logic_error { vm_logic_error() : std::logic_error("neos::bytecode: vm logic error") {} };
+        }
+    }
 }

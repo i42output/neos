@@ -26,6 +26,7 @@
 #include <thread>
 #include <string>
 #include <neos/bytecode/bytecode.hpp>
+#include <neos/bytecode/exceptions.hpp>
 #include <neos/bytecode/opcodes.hpp>
 
 namespace neos
@@ -34,13 +35,6 @@ namespace neos
     {
         namespace vm
         {
-            namespace exceptions
-            {
-                struct no_text : std::runtime_error { no_text() : std::runtime_error("neos::bytecode::vm: no text") {} };
-                struct invalid_instruction : std::runtime_error { invalid_instruction() : std::runtime_error("neos::bytecode::vm: invalid instruction") {} };
-                struct vm_logic_error : std::logic_error { vm_logic_error() : std::logic_error("neos::bytecode::vm: vm logic error") {} };
-            }
-
             class thread : public std::thread
             {
             public:
