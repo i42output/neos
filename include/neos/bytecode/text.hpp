@@ -26,5 +26,7 @@ namespace neos
 {
     namespace bytecode
     {
+        text& operator<<(text& aText, opcode aOpcode);
+        text::const_iterator next_opcode(text::const_iterator aText, text::const_iterator aTextEnd, opcode& aOpcode);
     }
 }

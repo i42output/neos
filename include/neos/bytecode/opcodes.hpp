@@ -133,6 +133,7 @@ namespace neos
                 else if (std::holds_alternative<op2>(encoding))
                     return static_cast<std::uint32_t>(std::get<op2>(encoding).b1) +
                         (static_cast<std::uint32_t>(std::get<op2>(encoding).b2) << 8u);
+                throw exceptions::logic_error();
             }
         };
 
@@ -502,40 +503,6 @@ namespace neos
         {
             static std::unordered_map<encoding, opcode, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
             return sInverseOpcodeDictionary;
-        }
-
-        inline text& operator<<(text& aText, opcode aOpcode)
-        {
-            auto const& encoding = opcode_dictionary().at(aOpcode);
-            if (std::holds_alternative<op1>(encoding))
-                aText.push_back(std::byte{ std::get<op1>(encoding).b1 });
-            else if (std::holds_alternative<op2>(encoding))
-            {
-                aText.push_back(std::byte{ std::get<op2>(encoding).b1 });
-                aText.push_back(std::byte{ std::get<op2>(encoding).b2 });
-            }
-            return aText;
-        }
-
-        inline text::const_iterator next_opcode(text::const_iterator aText, text::const_iterator aTextEnd, opcode& aOpcode)
-        {
-            if (aText == aTextEnd)
-                throw exceptions::out_of_text();
-            std::uint8_t b1 = static_cast<std::uint8_t>(*(aText++));
-            auto existing = inverse_opcode_dictionary().find(op1{ b1 });
-            if (existing == inverse_opcode_dictionary().end())
-            {
-                if (aText == aTextEnd)
-                    throw exceptions::out_of_text();
-                std::uint8_t b2 = static_cast<std::uint8_t>(*(aText++));
-                existing = inverse_opcode_dictionary().find(op2{ b1, b2 });
-            }
-            if (existing != inverse_opcode_dictionary().end())
-            {
-                aOpcode = existing->second;
-                return aText;
-            }
-            throw exceptions::invalid_instruction();
         }
     }
 }
