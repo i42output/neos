@@ -504,7 +504,7 @@ namespace neos
             return sInverseOpcodeDictionary;
         }
 
-        inline text_t& operator<<(text_t& aText, opcode aOpcode)
+        inline text& operator<<(text& aText, opcode aOpcode)
         {
             auto const& encoding = opcode_dictionary().at(aOpcode);
             if (std::holds_alternative<op1>(encoding))
@@ -517,7 +517,7 @@ namespace neos
             return aText;
         }
 
-        inline text_t::const_iterator next_opcode(text_t::const_iterator aText, text_t::const_iterator aTextEnd, opcode& aOpcode)
+        inline text::const_iterator next_opcode(text::const_iterator aText, text::const_iterator aTextEnd, opcode& aOpcode)
         {
             if (aText == aTextEnd)
                 throw exceptions::out_of_text();

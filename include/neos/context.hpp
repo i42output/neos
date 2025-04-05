@@ -58,7 +58,7 @@ namespace neos
         void compile_program();
         const program_t& program() const;
         program_t& program();
-        const text_t& text() const;
+        const text& text() const;
     public:
         bool running() const final;
         void run() final;

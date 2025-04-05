@@ -38,12 +38,12 @@ namespace neos
             class thread : public std::thread
             {
             public:
-                thread(text_t const& aText) :
+                thread(text const& aText) :
                     std::thread{ [&](){ execute(aText); } }
                 {
                 }
             public:
-                void execute(text_t const& aText)
+                void execute(text const& aText)
                 {
                     /// todo
                 }

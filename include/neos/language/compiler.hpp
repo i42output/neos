@@ -164,7 +164,7 @@ namespace neos::language
     {
         translation_units_t translationUnits;
         symbol_table_t symbolTable;
-        text_t text;
+        text text;
     };
 
     using fold_stack = std::vector<neolib::ref_ptr<i_semantic_concept>>;

@@ -135,7 +135,7 @@ namespace neos
         return iProgram;
     }
 
-    const text_t& context::text() const
+    const text& context::text() const
     {
         return program().text;
     }
