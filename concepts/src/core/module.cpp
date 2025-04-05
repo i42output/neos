@@ -149,7 +149,7 @@ namespace neos::concepts::core
             library_name(), 
             "Core module concepts", 
             neolib::version{ 1, 0, 0 }, 
-            "Copyright (c) 2019 Leigh Johnston.  All Rights Reserved."
+            "Copyright (c) 2025 Leigh Johnston.  All Rights Reserved."
         }
     {
         /* todo */

@@ -1,7 +1,7 @@
 /*
   context.cpp
 
-  Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
+  Copyright (c) 2025 Leigh Johnston.  All Rights Reserved.
 
   This program is free software: you can redistribute it and / or modify
   it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ namespace neos
 {
     context::context(std::ostream& aCout) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -39,7 +39,7 @@ namespace neos
 
     context::context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2019 Leigh Johnston", {}, {}, {}, ".ncl" }, aServiceProvider) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }, aServiceProvider) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {

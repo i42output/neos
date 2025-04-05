@@ -1,7 +1,7 @@
 /*
   language.cpp
 
-  Copyright (c) 2019 Leigh Johnston.  All Rights Reserved.
+  Copyright (c) 2025 Leigh Johnston.  All Rights Reserved.
 
   This program is free software: you can redistribute it and / or modify
   it under the terms of the GNU General Public License as published by
@@ -494,7 +494,7 @@ namespace neos::concepts::core
             library_name(), 
             "Core language concepts", 
             neolib::version{ 1, 0, 0 }, 
-            "Copyright (c) 2019 Leigh Johnston.  All Rights Reserved."
+            "Copyright (c) 2025 Leigh Johnston.  All Rights Reserved."
         }
     {
         /* todo */
