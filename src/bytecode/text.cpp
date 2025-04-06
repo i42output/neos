@@ -29,11 +29,15 @@ namespace neos
         {
             auto const& encoding = opcode_dictionary().at(aOpcode);
             if (std::holds_alternative<op1>(encoding))
-                aText.push_back(std::byte{ std::get<op1>(encoding).b1 });
+                aText.push_back(std::byte{ std::get<op1>(encoding).b });
             else if (std::holds_alternative<op2>(encoding))
             {
-                aText.push_back(std::byte{ std::get<op2>(encoding).b1 });
-                aText.push_back(std::byte{ std::get<op2>(encoding).b2 });
+                aText.push_back(std::byte{ std::get<op2>(encoding).p });
+                std::visit([&](auto const& e)
+                    {
+                        for (auto const& b : e)
+                            aText.push_back(std::byte{ b });
+                    }, std::get<op2>(encoding).e);
             }
             return aText;
         }
@@ -48,8 +52,22 @@ namespace neos
             {
                 if (aText == aTextEnd)
                     throw exceptions::out_of_text();
-                std::uint8_t b2 = static_cast<std::uint8_t>(*(aText++));
-                existing = inverse_opcode_dictionary().find(op2{ b1, b2 });
+                leb128_1 rest1 = { static_cast<std::uint8_t>(*(aText++)) };
+                existing = inverse_opcode_dictionary().find(op2{ b1, rest1 });
+                if (existing == inverse_opcode_dictionary().end())
+                {
+                    if (aText == aTextEnd)
+                        throw exceptions::out_of_text();
+                    leb128_2 rest2 = { rest1[0], static_cast<std::uint8_t>(*(aText++)) };
+                    existing = inverse_opcode_dictionary().find(op2{ b1, rest2 });
+                    if (existing == inverse_opcode_dictionary().end())
+                    {
+                        if (aText == aTextEnd)
+                            throw exceptions::out_of_text();
+                        leb128_3 rest3 = { rest2[0], rest2[1], static_cast<std::uint8_t>(*(aText++)) };
+                        existing = inverse_opcode_dictionary().find(op2{ b1, rest3 });
+                    }
+                }
             }
             if (existing != inverse_opcode_dictionary().end())
             {
