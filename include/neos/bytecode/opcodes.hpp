@@ -427,7 +427,7 @@ namespace neos
         {
             static std::vector<opcode_entry> const sOpCodes = 
             {
-                // Control expressions and blocks.
+                /* Control expressions and blocks. */
                 { opcode::Unreachable, op1{ 0x00 }, _, "unreachable" },
                 { opcode::Nop, op1{ 0x01 }, _, "nop" },
                 { opcode::Block, op1{ 0x02 }, _, "block" },
@@ -450,7 +450,7 @@ namespace neos
                 { opcode::BrOnNull, op1{ 0xD5 }, _, "br_on_null" },
                 { opcode::BrOnNonNull, op1{ 0xD6 }, _, "br_on_non_null" },
                 { opcode::NopForTestingUnsupportedInLiftoff, op1{ 0x16 }, _, "nop_for_testing" },
-                // Constants, locals, globals, calls, etc.
+                /* Constants, locals, globals, calls, etc. */
                 { opcode::CallFunction, op1{ 0x10 }, _, "call" },
                 { opcode::CallIndirect, op1{ 0x11 }, _, "call_indirect" },
                 { opcode::ReturnCall, op1{ 0x12 }, _, "return_call" },
@@ -476,7 +476,7 @@ namespace neos
                 { opcode::RefFunc, op1{ 0xD2 }, _, "ref.func" },
                 { opcode::RefAsNonNull, op1{ 0xD4 }, _, "ref.as_non_null" },
                 { opcode::RefEq, op1{ 0xD3 }, _, "ref.eq" },
-                // Load memory expressions.
+                /* Load memory expressions. */
                 { opcode::I32LoadMem, op1{ 0x28 }, i_i, "i32.load" },
                 { opcode::I64LoadMem, op1{ 0x29 }, l_i, "i64.load" },
                 { opcode::F32LoadMem, op1{ 0x2A }, f_i, "f32.load" },
@@ -492,7 +492,7 @@ namespace neos
                 { opcode::I64LoadMem32S, op1{ 0x34 }, l_i, "i64.load32_s" },
                 { opcode::I64LoadMem32U, op1{ 0x35 }, l_i, "i64.load32_u" },
                 { opcode::F32LoadMemF16, op2{ 0xFC, LEB128(0x30) }, f_i, "f32.load_f16" },
-                // Store memory expressions.
+                /* Store memory expressions. */
                 { opcode::I32StoreMem, op1{ 0x36 }, v_ii, "i32.store" },
                 { opcode::I64StoreMem, op1{ 0x37 }, v_il, "i64.store" },
                 { opcode::F32StoreMem, op1{ 0x38 }, v_if, "f32.store" },
@@ -503,12 +503,12 @@ namespace neos
                 { opcode::I64StoreMem16, op1{ 0x3D }, v_il, "i64.store16" },
                 { opcode::I64StoreMem32, op1{ 0x3E }, v_il, "i64.store32" },
                 { opcode::F32StoreMemF16, op2{ 0xFC, LEB128(0x31) }, v_if, "f32.store_f16" },
-                // Miscellaneous memory expressions
+                /* Miscellaneous memory expressions. */
                 { opcode::MemorySize, op1{ 0x3F }, i_v, "memory.size" },
                 { opcode::MemoryGrow, op1{ 0x40 }, i_i, "memory.grow" },
-                // Expressions with signatures.
-                // Opcodes that can also be used in constant expressions (via the 'extended
-                // constant expressions' proposal.
+                /* Expressions with signatures.
+                   Opcodes that can also be used in constant expressions (via the 'extended
+                   constant expressions' proposal. */
                 { opcode::I32Add, op1{ 0x6A }, i_ii, "i32.add" },
                 { opcode::I32Sub, op1{ 0x6B }, i_ii, "i32.sub" },
                 { opcode::I32Mul, op1{ 0x6C }, i_ii, "i32.mul" },
@@ -643,6 +643,7 @@ namespace neos
                 { opcode::Resume, op1{ 0xE3 }, _, "resume" },
                 { opcode::ResumeThrow, op1{ 0xE4 }, _, "resume_throw" },
                 { opcode::Switch, op1{ 0xE5 }, _, "switch" },
+                /* SIMD opcodes (Vector instructions). */
                 { opcode::S128LoadMem, op2{ 0xFD, LEB128(0x00) }, s_i, "v128.load" },
                 { opcode::S128Load8x8S, op2{ 0xFD, LEB128(0x01) }, s_i, "v128.load8x8_s" },
                 { opcode::S128Load8x8U, op2{ 0xFD, LEB128(0x02) }, s_i, "v128.load8x8_u" },
@@ -932,6 +933,7 @@ namespace neos
                 { opcode::F32x4ReplaceLane, op2{ 0xFD, LEB128(0x20) }, _, "f32x4.replace_lane" },
                 { opcode::F64x2ReplaceLane, op2{ 0xFD, LEB128(0x22) }, _, "f64x2.replace_lane" },
                 { opcode::F16x8ReplaceLane, op2{ 0xFD, LEB128(0x122) }, _, "f16x8.replace_lane" },
+                /* FC extensions. */
                 { opcode::I32SConvertSatF32, op2{ 0xFC, LEB128(0x00) }, i_f, "i32.trunc_sat_f32_s" },
                 { opcode::I32UConvertSatF32, op2{ 0xFC, LEB128(0x01) }, i_f, "i32.trunc_sat_f32_u" },
                 { opcode::I32SConvertSatF64, op2{ 0xFC, LEB128(0x02) }, i_d, "i32.trunc_sat_f64_s" },
@@ -954,7 +956,7 @@ namespace neos
                 /* TableFill is polymorphic in the second parameter. */
                 /* It's whatever the table type is. */
                 { opcode::TableFill, op2{ 0xFC, LEB128(0x11) }, _, "table.fill" },
-                // kExprName, binary, signature for memory32, wat name, signature for memory64.
+                /* Threads. */
                 { opcode::AtomicNotify, op2{ 0xFE, LEB128(0x00) }, i_ii, "memory.atomic.notify", i_li },
                 { opcode::I32AtomicWait, op2{ 0xFE, LEB128(0x01) }, i_iil, "memory.atomic.wait32", i_lil },
                 { opcode::I64AtomicWait, op2{ 0xFE, LEB128(0x02) }, i_ill, "memory.atomic.wait64", i_lll },
@@ -1023,6 +1025,7 @@ namespace neos
                 { opcode::I64AtomicCompareExchange32U, op2{ 0xFE, LEB128(0x4E) }, l_ill, "i64.atomic.rmw32.cmpxchg_u", l_lll },
                 /* AtomicFence does not target a particular linear memory. */
                 { opcode::AtomicFence, op2{ 0xFE, LEB128(0x03) }, v_v, "atomic.fence", v_v },
+                /* GC Proposal. */
                 { opcode::StructNew, op2{ 0xFB, LEB128(0x00) }, _, "struct.new" },
                 { opcode::StructNewDefault, op2{ 0xFB, LEB128(0x01) }, _, "struct.new_default" },
                 { opcode::StructGet, op2{ 0xFB, LEB128(0x02) }, _, "struct.get" },
