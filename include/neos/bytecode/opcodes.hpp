@@ -84,17 +84,7 @@ namespace neos
             F32ReinterpretI32 = 0xbe, F64ReinterpretI64 = 0xbf, I32SExtendI8 = 0xc0, I32SExtendI16 = 0xc1, I64SExtendI8 = 0xc2,
             I64SExtendI16 = 0xc3, I64SExtendI32 = 0xc4, ContNew = 0xe0, ContBind = 0xe1, Suspend = 0xe2, Resume = 0xe3,
             ResumeThrow = 0xe4, Switch = 0xe5,
-            // For compatibility with Asm.js.
-            // These opcodes are not spec'ed (or visible externally; the idea is
-            // to use unused ranges for internal purposes.
-            F64Acos = 0xfa3c, F64Asin = 0xfa3d, F64Atan = 0xfa3e, F64Cos = 0xfa3f, F64Sin = 0xfa40, F64Tan = 0xfa41,
-            F64Exp = 0xfa42, F64Log = 0xfa43, F64Atan2 = 0xfa44, F64Pow = 0xfa45, F64Mod = 0xfa46, I32AsmjsDivS = 0xfa47,
-            I32AsmjsDivU = 0xfa48, I32AsmjsRemS = 0xfa49, I32AsmjsRemU = 0xfa4a, I32AsmjsLoadMem8S = 0xfa4b,
-            I32AsmjsLoadMem8U = 0xfa4c, I32AsmjsLoadMem16S = 0xfa4d, I32AsmjsLoadMem16U = 0xfa4e, I32AsmjsLoadMem = 0xfa4f,
-            F32AsmjsLoadMem = 0xfa50, F64AsmjsLoadMem = 0xfa51, I32AsmjsStoreMem8 = 0xfa52, I32AsmjsStoreMem16 = 0xfa53,
-            I32AsmjsStoreMem = 0xfa54, F32AsmjsStoreMem = 0xfa55, F64AsmjsStoreMem = 0xfa56, I32AsmjsSConvertF32 = 0xfa57,
-            I32AsmjsUConvertF32 = 0xfa58, I32AsmjsSConvertF64 = 0xfa59, I32AsmjsUConvertF64 = 0xfa5a, S128LoadMem = 0xfd00,
-            S128Load8x8S = 0xfd01, S128Load8x8U = 0xfd02, S128Load16x4S = 0xfd03, S128Load16x4U = 0xfd04,
+            S128LoadMem = 0xfd00, S128Load8x8S = 0xfd01, S128Load8x8U = 0xfd02, S128Load16x4S = 0xfd03, S128Load16x4U = 0xfd04,
             S128Load32x2S = 0xfd05, S128Load32x2U = 0xfd06, S128Load8Splat = 0xfd07, S128Load16Splat = 0xfd08,
             S128Load32Splat = 0xfd09, S128Load64Splat = 0xfd0a, S128StoreMem = 0xfd0b, S128Load32Zero = 0xfd5c,
             S128Load64Zero = 0xfd5d, S128Load8Lane = 0xfd54, S128Load16Lane = 0xfd55, S128Load32Lane = 0xfd56,
