@@ -39,29 +39,29 @@ namespace neos
         // Define the opcode enum (core + extended)
         enum class opcode 
         {
-            // Control expressions and blocks.
+            /* Control expressions and blocks. */
             Unreachable = 0x00, Nop = 0x01, Block = 0x02, Loop = 0x03, If = 0x04, Else = 0x05, Try = 0x06, Catch = 0x07,
             Throw = 0x08, Rethrow = 0x09, TryTable = 0x1f, ThrowRef = 0x0a, End = 0x0b, Br = 0x0c, BrIf = 0x0d, BrTable = 0x0e,
             Return = 0x0f, Delegate = 0x18, CatchAll = 0x19, BrOnNull = 0xd5, BrOnNonNull = 0xd6,
             NopForTestingUnsupportedInLiftoff = 0x16,
-            // Constants, locals, globals, calls, etc.
+            /* Constants, locals, globals, calls, etc. */
             CallFunction = 0x10, CallIndirect = 0x11, ReturnCall = 0x12, ReturnCallIndirect = 0x13, CallRef = 0x14,
             ReturnCallRef = 0x15, Drop = 0x1a, Select = 0x1b, SelectWithType = 0x1c, LocalGet = 0x20, LocalSet = 0x21,
             LocalTee = 0x22, GlobalGet = 0x23, GlobalSet = 0x24, TableGet = 0x25, TableSet = 0x26, I32Const = 0x41,
             I64Const = 0x42, F32Const = 0x43, F64Const = 0x44, RefNull = 0xd0, RefIsNull = 0xd1, RefFunc = 0xd2,
             RefAsNonNull = 0xd4, RefEq = 0xd3,
-            // Load memory expressions.
+            /* Load memory expressions. */
             I32LoadMem = 0x28, I64LoadMem = 0x29, F32LoadMem = 0x2a, F64LoadMem = 0x2b, I32LoadMem8S = 0x2c,
             I32LoadMem8U = 0x2d, I32LoadMem16S = 0x2e, I32LoadMem16U = 0x2f, I64LoadMem8S = 0x30, I64LoadMem8U = 0x31,
             I64LoadMem16S = 0x32, I64LoadMem16U = 0x33, I64LoadMem32S = 0x34, I64LoadMem32U = 0x35, F32LoadMemF16 = 0xfc30,
-            // Store memory expressions.
+            /* Store memory expressions. */
             I32StoreMem = 0x36, I64StoreMem = 0x37, F32StoreMem = 0x38, F64StoreMem = 0x39, I32StoreMem8 = 0x3a,
             I32StoreMem16 = 0x3b, I64StoreMem8 = 0x3c, I64StoreMem16 = 0x3d, I64StoreMem32 = 0x3e, F32StoreMemF16 = 0xfc31,
-            // Miscellaneous memory expressions
+            /* Miscellaneous memory expressions. */
             MemorySize = 0x3f, MemoryGrow = 0x40,
-            // Expressions with signatures.
-            // Opcodes that can also be used in constant expressions (via the 'extended
-            // constant expressions' proposal.
+            /* Expressions with signatures.
+               Opcodes that can also be used in constant expressions (via the 'extended
+               constant expressions' proposal. */
             I32Add = 0x6a, I32Sub = 0x6b, I32Mul = 0x6c, I64Add = 0x7c, I64Sub = 0x7d, I64Mul = 0x7e, I32Eqz = 0x45,
             I32Eq = 0x46, I32Ne = 0x47, I32LtS = 0x48, I32LtU = 0x49, I32GtS = 0x4a, I32GtU = 0x4b, I32LeS = 0x4c,
             I32LeU = 0x4d, I32GeS = 0x4e, I32GeU = 0x4f, I64Eqz = 0x50, I64Eq = 0x51, I64Ne = 0x52, I64LtS = 0x53,
@@ -84,6 +84,7 @@ namespace neos
             F32ReinterpretI32 = 0xbe, F64ReinterpretI64 = 0xbf, I32SExtendI8 = 0xc0, I32SExtendI16 = 0xc1, I64SExtendI8 = 0xc2,
             I64SExtendI16 = 0xc3, I64SExtendI32 = 0xc4, ContNew = 0xe0, ContBind = 0xe1, Suspend = 0xe2, Resume = 0xe3,
             ResumeThrow = 0xe4, Switch = 0xe5,
+            /* SIMD opcodes (Vector instructions). */
             S128LoadMem = 0xfd00, S128Load8x8S = 0xfd01, S128Load8x8U = 0xfd02, S128Load16x4S = 0xfd03, S128Load16x4U = 0xfd04,
             S128Load32x2S = 0xfd05, S128Load32x2U = 0xfd06, S128Load8Splat = 0xfd07, S128Load16Splat = 0xfd08,
             S128Load32Splat = 0xfd09, S128Load64Splat = 0xfd0a, S128StoreMem = 0xfd0b, S128Load32Zero = 0xfd5c,
@@ -147,7 +148,9 @@ namespace neos
             I8x16ExtractLaneU = 0xfd16, I16x8ExtractLaneS = 0xfd18, I16x8ExtractLaneU = 0xfd19, I32x4ExtractLane = 0xfd1b,
             I64x2ExtractLane = 0xfd1d, F32x4ExtractLane = 0xfd1f, F64x2ExtractLane = 0xfd21, F16x8ExtractLane = 0xfd121,
             I8x16ReplaceLane = 0xfd17, I16x8ReplaceLane = 0xfd1a, I32x4ReplaceLane = 0xfd1c, I64x2ReplaceLane = 0xfd1e,
-            F32x4ReplaceLane = 0xfd20, F64x2ReplaceLane = 0xfd22, F16x8ReplaceLane = 0xfd122, I32SConvertSatF32 = 0xfc00,
+            F32x4ReplaceLane = 0xfd20, F64x2ReplaceLane = 0xfd22, F16x8ReplaceLane = 0xfd122,
+            /* FC extensions. */
+            I32SConvertSatF32 = 0xfc00,
             I32UConvertSatF32 = 0xfc01, I32SConvertSatF64 = 0xfc02, I32UConvertSatF64 = 0xfc03, I64SConvertSatF32 = 0xfc04,
             I64UConvertSatF32 = 0xfc05, I64SConvertSatF64 = 0xfc06, I64UConvertSatF64 = 0xfc07, DataDrop = 0xfc09,
             TableInit = 0xfc0c, ElemDrop = 0xfc0d, TableCopy = 0xfc0e, TableSize = 0xfc10, MemoryInit = 0xfc08,
@@ -158,7 +161,7 @@ namespace neos
             /* TableFill is polymorphic in the second parameter. */
             /* It's whatever the table type is. */
             TableFill = 0xfc11,
-            // kExprName, binary, signature for memory32, wat name, signature for memory64.
+            /* Threads. */
             AtomicNotify = 0xfe00, I32AtomicWait = 0xfe01, I64AtomicWait = 0xfe02, I32AtomicLoad = 0xfe10,
             I64AtomicLoad = 0xfe11, I32AtomicLoad8U = 0xfe12, I32AtomicLoad16U = 0xfe13, I64AtomicLoad8U = 0xfe14,
             I64AtomicLoad16U = 0xfe15, I64AtomicLoad32U = 0xfe16, I32AtomicStore = 0xfe17, I64AtomicStore = 0xfe18,
@@ -178,7 +181,9 @@ namespace neos
             I32AtomicCompareExchange16U = 0xfe4b, I64AtomicCompareExchange8U = 0xfe4c, I64AtomicCompareExchange16U = 0xfe4d,
             I64AtomicCompareExchange32U = 0xfe4e,
             /* AtomicFence does not target a particular linear memory. */
-            AtomicFence = 0xfe03, StructNew = 0xfb00, StructNewDefault = 0xfb01, StructGet = 0xfb02, StructGetS = 0xfb03,
+            AtomicFence = 0xfe03,
+            /* GC Proposal. */
+            StructNew = 0xfb00, StructNewDefault = 0xfb01, StructGet = 0xfb02, StructGetS = 0xfb03,
             StructGetU = 0xfb04, StructSet = 0xfb05, ArrayNew = 0xfb06, ArrayNewDefault = 0xfb07, ArrayNewFixed = 0xfb08,
             ArrayNewData = 0xfb09, ArrayNewElem = 0xfb0a, ArrayGet = 0xfb0b, ArrayGetS = 0xfb0c, ArrayGetU = 0xfb0d,
             ArraySet = 0xfb0e, ArrayLen = 0xfb0f, ArrayFill = 0xfb10, ArrayCopy = 0xfb11, ArrayInitData = 0xfb12,
@@ -339,7 +344,7 @@ namespace neos
         }
 
         inline constexpr auto _ = sig::_{};
-        inline constexpr auto d_d = sig::d_dd{};
+        inline constexpr auto d_d = sig::d_d{};
         inline constexpr auto d_dd = sig::d_dd{};
         inline constexpr auto d_f = sig::d_f{};
         inline constexpr auto d_i = sig::d_i{};
