@@ -27,7 +27,7 @@ namespace neos
     {
         text& operator<<(text& aText, opcode aOpcode)
         {
-            auto const& encoding = opcode_dictionary().at(aOpcode);
+            auto const& encoding = opcode_dictionary().at(aOpcode).encoding;
             if (std::holds_alternative<op1>(encoding))
                 aText.push_back(std::byte{ std::get<op1>(encoding).b });
             else if (std::holds_alternative<op2>(encoding))
@@ -71,7 +71,7 @@ namespace neos
             }
             if (existing != inverse_opcode_dictionary().end())
             {
-                aOpcode = existing->second;
+                aOpcode = existing->second.opcode;
                 return aText;
             }
             throw exceptions::invalid_instruction();

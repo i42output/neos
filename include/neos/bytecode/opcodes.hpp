@@ -399,14 +399,14 @@ namespace neos
             std::string op;
             std::optional<sig::set> sig64 = {};
 
-            operator std::pair<const decltype(opcode), decltype(encoding)>() const
+            operator std::pair<const decltype(opcode), opcode_entry>() const
             {
-                return std::make_pair(opcode, encoding);
+                return std::make_pair(opcode, *this);
             }
 
-            operator std::pair<const decltype(encoding), decltype(opcode)>() const
+            operator std::pair<const decltype(encoding), opcode_entry>() const
             {
-                return std::make_pair(encoding, opcode);
+                return std::make_pair(encoding, *this);
             }
         };
 
@@ -1097,15 +1097,15 @@ namespace neos
             return sOpCodes;
         };
 
-        inline std::unordered_map<opcode, encoding> const& opcode_dictionary()
+        inline std::unordered_map<opcode, opcode_entry> const& opcode_dictionary()
         {
-            static std::unordered_map<opcode, encoding> const sOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            static std::unordered_map<opcode, opcode_entry> const sOpcodeDictionary{ opcodes().begin(), opcodes().end() };
             return sOpcodeDictionary;
         }
                 
-        inline std::unordered_map<encoding, opcode, encoding_hash> const& inverse_opcode_dictionary()
+        inline std::unordered_map<encoding, opcode_entry, encoding_hash> const& inverse_opcode_dictionary()
         {
-            static std::unordered_map<encoding, opcode, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            static std::unordered_map<encoding, opcode_entry, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
             return sInverseOpcodeDictionary;
         }
     }
