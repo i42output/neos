@@ -28,7 +28,7 @@
 
 #include <neos/neos.hpp>
 #include <variant>
-#include <unordered_map>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/container_hash/hash.hpp>
 #include <neos/bytecode/exceptions.hpp>
 
@@ -221,8 +221,26 @@ namespace neos
 
         inline leb128 LEB128(std::uint32_t aValue)
         {
-            // todo
-            return leb128{};
+            if (aValue <= 0x7F) { // Fits in 1 byte (7 bits)
+                return leb128_1{ static_cast<std::uint8_t>(aValue) };
+            }
+            else if (aValue <= 0x3FFF) { // Fits in 2 bytes (14 bits)
+                std::uint8_t byte1 = (aValue & 0x7F) | 0x80; // First 7 bits + continuation bit
+                std::uint8_t byte2 = (aValue >> 7) & 0x7F;  // Next 7 bits, no continuation
+                return leb128_2{ byte1, byte2 };
+            }
+            else if (aValue <= 0x1FFFFF) { // Fits in 3 bytes (21 bits)
+                std::uint8_t byte1 = (aValue & 0x7F) | 0x80;        // First 7 bits + continuation
+                std::uint8_t byte2 = ((aValue >> 7) & 0x7F) | 0x80; // Next 7 bits + continuation
+                std::uint8_t byte3 = (aValue >> 14) & 0x7F;         // Last 7 bits, no continuation
+                return leb128_3{ byte1, byte2, byte3 };
+            }
+            else {
+                // Value exceeds 21 bits, which is the max supported by leb128_3.
+                // For WebAssembly, some opcodes use larger LEB128 (e.g., 5 bytes for 32-bit),
+                // but the current type system limits us to 3 bytes.
+                throw exceptions::logic_error("LEB128 value exceeds 3-byte limit (max 2,097,151)");
+            }
         }
 
         struct op1 { std::uint8_t b; constexpr std::strong_ordering operator<=>(op1 const&) const noexcept = default; };
@@ -1097,15 +1115,15 @@ namespace neos
             return sOpCodes;
         };
 
-        inline std::unordered_map<opcode, opcode_entry> const& opcode_dictionary()
+        inline boost::unordered_flat_map<opcode, opcode_entry> const& opcode_dictionary()
         {
-            static std::unordered_map<opcode, opcode_entry> const sOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            static boost::unordered_flat_map<opcode, opcode_entry> const sOpcodeDictionary{ opcodes().begin(), opcodes().end() };
             return sOpcodeDictionary;
         }
                 
-        inline std::unordered_map<encoding, opcode_entry, encoding_hash> const& inverse_opcode_dictionary()
+        inline boost::unordered_flat_map<encoding, opcode_entry, encoding_hash> const& inverse_opcode_dictionary()
         {
-            static std::unordered_map<encoding, opcode_entry, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
+            static boost::unordered_flat_map<encoding, opcode_entry, encoding_hash> const sInverseOpcodeDictionary{ opcodes().begin(), opcodes().end() };
             return sInverseOpcodeDictionary;
         }
     }

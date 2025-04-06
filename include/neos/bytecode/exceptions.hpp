@@ -30,7 +30,11 @@ namespace neos
             struct no_text : std::runtime_error { no_text() : std::runtime_error("neos::bytecode: no text") {} };
             struct out_of_text : std::runtime_error { out_of_text() : std::runtime_error("neos::bytecode: out of text") {} };
             struct invalid_instruction : std::runtime_error { invalid_instruction() : std::runtime_error("neos::bytecode: invalid instruction") {} };
-            struct logic_error : std::logic_error { logic_error() : std::logic_error("neos::bytecode: logic error") {} };
+            struct logic_error : std::logic_error 
+            { 
+                logic_error() : std::logic_error("neos::bytecode: logic error") {} 
+                logic_error(std::string const& aReason) : std::logic_error("neos::bytecode: logic error (" + aReason + ")") {}
+            };
         }
     }
 }
