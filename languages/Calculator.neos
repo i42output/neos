@@ -50,7 +50,7 @@
     term ::= factor , WS , { ( "*" $ math.operator.multiply | "/" $ math.operator.divide ) , WS, factor } ;
     factor ::= [ "-" $ math.operator.negate ] , WS , primary ;
     primary ::= "(" , WS , expression , WS , ")" | number ;
-    number $ math.universal.number ::= digit sequence , [ '.' , digit sequence , [ exponent ] ]
+    number $ math.universal.number ::= digit sequence , [ '.' , digit sequence , [ exponent ] ] ;
 
     WS ::= [ whitespace ] ;
 }*
