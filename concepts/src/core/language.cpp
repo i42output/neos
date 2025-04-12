@@ -369,10 +369,16 @@ namespace neos::concepts::core
     {
         // data
     public:
-        /// @todo make plugin ABI compatible
-        struct data_type
+        struct i_data_type
+        {
+            virtual neolib::i_string const& function_name() const = 0;
+            virtual void set_function_name(neolib::i_string_view const& aFunctionName) = 0;
+        };
+        struct data_type : i_data_type
         {
             neolib::string functionName;
+            neolib::i_string const& function_name() const final { return functionName; }
+            void set_function_name(neolib::i_string_view const& aFunctionName) final { functionName = aFunctionName; }
         };
         // construction
     public:
@@ -392,7 +398,7 @@ namespace neos::concepts::core
         {
             if (aRhs.name() == "language.function.name")
             {
-                data<data_type>().functionName = aRhs.source();
+                data<i_data_type>().set_function_name(aRhs.source());
                 aResult.reset(this);
             }
         }
