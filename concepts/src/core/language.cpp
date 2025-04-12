@@ -110,7 +110,7 @@ namespace neos::concepts::core
     public:
         bool can_fold(const i_semantic_concept& aRhs) const override
         {
-            if (aRhs.name() == "language.identifier")
+            if (aRhs.name() == "language.namespace.name")
                 return true;
             return false;
         }
@@ -122,6 +122,9 @@ namespace neos::concepts::core
 
     class language_namespace_name : public semantic_concept<language_namespace_name>
     {
+        // types
+    public:
+        using data_type = neolib::string;
         // construction
     public:
         language_namespace_name() :
@@ -364,11 +367,34 @@ namespace neos::concepts::core
 
     class language_function_signature : public semantic_concept<language_function_signature>
     {
+        // data
+    public:
+        /// @todo make plugin ABI compatible
+        struct data_type
+        {
+            neolib::string functionName;
+        };
         // construction
     public:
         language_function_signature() :
             semantic_concept{ "language.function.signature", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.function.name")
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.name() == "language.function.name")
+            {
+                data<data_type>().functionName = aRhs.source();
+                aResult.reset(this);
+            }
         }
     };
 
