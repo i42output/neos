@@ -21,8 +21,8 @@
 
 #include <neos/neos.hpp>
 #include <neolib/core/reference_counted.hpp>
-#include <neos/language/symbols.hpp>
 #include <neos/language/i_semantic_concept.hpp>
+#include <neos/language/symbols.hpp>
 
 namespace neos
 {
@@ -31,10 +31,10 @@ namespace neos
         class ast
         {
         public:
-            class node : public std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table_t::iterator>
+            class node : public std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table::iterator>
             {
             public:
-                using value_type = std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table_t::iterator>;
+                using value_type = std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table::iterator>;
                 using children_t = std::vector<std::unique_ptr<node>>;
             public:
                 node()
@@ -71,7 +71,7 @@ namespace neos
                 children_t iChildren;
             };
         public:
-            ast(symbol_table_t& aSymbolTable) : iSymbolTable{ aSymbolTable }
+            ast(symbol_table& aSymbolTable) : iSymbolTable{ aSymbolTable }
             {
             }
             ast(ast const& aOther) : iSymbolTable{ aOther.iSymbolTable }
@@ -96,7 +96,7 @@ namespace neos
                 return iRoot;
             }
         private:
-            symbol_table_t& iSymbolTable;
+            symbol_table& iSymbolTable;
             node iRoot;
         };
     }

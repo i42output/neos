@@ -392,6 +392,8 @@ namespace neos::concepts::core
         {
             if (aRhs.name() == "language.function.name")
                 return true;
+            else if (aRhs.name() == "language.function.parameters")
+                return aRhs.holds_data();
             return false;
         }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override

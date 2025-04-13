@@ -20,8 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
-#include <string>
-#include <map>
+#include <neolib/core/string.hpp>
+#include <neolib/core/map.hpp>
 
 namespace neos
 {
@@ -32,9 +32,37 @@ namespace neos
             Function,
             Data
         };
-        typedef std::string symbol_name_t;
-        typedef std::pair<symbol_type, symbol_name_t> symbol_key_t;
-        typedef void const* symbol_reference_t;
-        typedef std::map<symbol_key_t, symbol_reference_t> symbol_table_t;
+        using symbol_name = neolib::string;
+        struct i_symbol_key
+        {
+            virtual symbol_type type() const = 0;
+            virtual symbol_name name() const = 0;
+
+            std::strong_ordering operator<=>(i_symbol_key const& rhs) const noexcept
+            {
+                return std::forward_as_tuple(type(), name()) <=> std::forward_as_tuple(rhs.type(), rhs.name());
+            }
+        };
+        struct symbol_key : i_symbol_key
+        {
+            using abstract_type = i_symbol_key;
+
+            symbol_type t;
+            symbol_name n;
+
+            symbol_key(i_symbol_key const& other) :
+                t{ other.type() }, n{ other.name() }
+            {}
+
+            symbol_type type() const final { return t; }
+            symbol_name name() const final { return n; }
+
+            std::strong_ordering operator<=>(symbol_key const& rhs) const noexcept
+            {
+                return std::forward_as_tuple(type(), name()) <=> std::forward_as_tuple(rhs.type(), rhs.name());
+            }
+        };
+        using symbol_reference = void const*;
+        using symbol_table = neolib::map<symbol_key, symbol_reference>;
     }
 }

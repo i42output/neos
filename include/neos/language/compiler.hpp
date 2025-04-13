@@ -25,11 +25,11 @@
 #include <neolib/core/string_view.hpp>
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
-#include <neos/language/symbols.hpp>
 #include <neos/language/ast.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
+#include <neos/language/symbols.hpp>
 
 namespace neos::language
 {
@@ -163,7 +163,7 @@ namespace neos::language
     struct program
     {
         translation_units_t translationUnits;
-        symbol_table_t symbolTable;
+        symbol_table symbolTable;
         text text;
     };
 
