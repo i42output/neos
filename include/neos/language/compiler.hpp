@@ -182,7 +182,7 @@ namespace neos::language
             i_source_fragment* fragment;
             std::uint32_t level = 0u;
             fold_stack foldStack = {};
-            std::vector<i_scope*> namespaceScope;
+            std::vector<neolib::weak_ref_ptr<i_scope>> namespaceScope;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:

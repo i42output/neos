@@ -180,9 +180,9 @@ namespace neos::language
     void compiler::enter_namespace(neolib::i_string const& aNamespace)
     {
         if (state().namespaceScope.empty())
-            state().namespaceScope.push_back(&state().program->scope.create_child(aNamespace));
+            state().namespaceScope.push_back(state().program->scope.create_child(aNamespace));
         else
-            state().namespaceScope.push_back(&state().namespaceScope.back()->create_child(aNamespace));
+            state().namespaceScope.push_back(state().namespaceScope.back()->create_child(aNamespace));
     }
 
     void compiler::leave_namespace()
