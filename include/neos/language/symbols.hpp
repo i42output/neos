@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/core/string.hpp>
 #include <neolib/core/map.hpp>
+#include <neos/language/scope.hpp>
 
 namespace neos
 {
@@ -32,34 +33,40 @@ namespace neos
             Function,
             Data
         };
+
         using symbol_name = neolib::string;
+
         struct i_symbol_key
         {
+            virtual neolib::abstract_t<scope_name> const& scope() const = 0;
             virtual symbol_type type() const = 0;
-            virtual symbol_name name() const = 0;
+            virtual neolib::abstract_t<symbol_name> const& name() const = 0;
 
             std::strong_ordering operator<=>(i_symbol_key const& rhs) const noexcept
             {
-                return std::forward_as_tuple(type(), name()) <=> std::forward_as_tuple(rhs.type(), rhs.name());
+                return std::forward_as_tuple(scope(), type(), name()) <=> std::forward_as_tuple(rhs.scope(), rhs.type(), rhs.name());
             }
         };
+
         struct symbol_key : i_symbol_key
         {
             using abstract_type = i_symbol_key;
 
+            scope_name s;
             symbol_type t;
             symbol_name n;
 
             symbol_key(i_symbol_key const& other) :
-                t{ other.type() }, n{ other.name() }
+                s{ other.scope() }, t{ other.type() }, n{ other.name() }
             {}
 
+            scope_name const& scope() const final { return s; }
             symbol_type type() const final { return t; }
-            symbol_name name() const final { return n; }
+            symbol_name const& name() const final { return n; }
 
             std::strong_ordering operator<=>(symbol_key const& rhs) const noexcept
             {
-                return std::forward_as_tuple(type(), name()) <=> std::forward_as_tuple(rhs.type(), rhs.name());
+                return std::forward_as_tuple(scope(), type(), name()) <=> std::forward_as_tuple(rhs.scope(), rhs.type(), rhs.name());
             }
         };
         using symbol_reference = void const*;

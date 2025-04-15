@@ -29,6 +29,7 @@
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
+#include <neos/language/scope.hpp>
 #include <neos/language/symbols.hpp>
 
 namespace neos::language
@@ -163,6 +164,7 @@ namespace neos::language
     struct program
     {
         translation_units_t translationUnits;
+        scope scope;
         symbol_table symbolTable;
         text text;
     };
@@ -180,7 +182,7 @@ namespace neos::language
             i_source_fragment* fragment;
             std::uint32_t level = 0u;
             fold_stack foldStack = {};
-            std::vector<std::string> namespaceScope;
+            std::vector<i_scope*> namespaceScope;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
