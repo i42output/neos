@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <unordered_map>
 #include <neolib/core/reference_counted.hpp>
 #include <neolib/core/vector.hpp>
 #include <neolib/core/string.hpp>
@@ -52,16 +53,18 @@ namespace neos
         {
         public:
             using child_list = neolib::vector<neolib::ref_ptr<i_scope>>;
+        private:
+            using index = std::unordered_map<std::string_view, child_list::iterator>;
         public:
             scope() :
                 iParent{ nullptr },
                 iName{}
             {}
-            scope(neolib::i_string const& aName) :
+            scope(neolib::abstract_t<scope_name> const& aName) :
                 iParent{ nullptr },
                 iName{ aName }
             {}
-            scope(i_scope& aParent, neolib::i_string const& aName) :
+            scope(i_scope& aParent, neolib::abstract_t<scope_name> const& aName) :
                 iParent{ &aParent },
                 iName{ aName }
             {}
@@ -101,18 +104,19 @@ namespace neos
         public:
             i_scope& create_child(neolib::abstract_t<scope_name> const& aName) final
             {
-                auto existing = std::find_if(children().begin(), children().end(),
-                    [&](auto const& e) { return e->name() == aName; });
-                if (existing != children().end())
-                    return **existing;
-                children().push_back(neolib::make_ref<scope>(*this, aName));
-                return *children().back();
+                auto const indexed = iChildIndex.find(aName.to_std_string_view());
+                if (indexed != iChildIndex.end())
+                    return **indexed->second;
+                auto const newChild = children().insert(children().end(), neolib::make_ref<scope>(*this, aName));
+                iChildIndex[aName.to_std_string_view()] = newChild;
+                return **newChild;
             }
         private:
             i_scope* iParent;
             neolib::string iName;
             mutable std::optional<neolib::string> iQualifiedName;
             child_list iChildren;
+            index iChildIndex;
         };
     }
 }
