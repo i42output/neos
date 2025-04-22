@@ -1,0 +1,136 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Languages">
+      <UniqueIdentifier>{980ba3dc-2fd3-4451-86bd-7c57b9b0e6b6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Languages\Packages">
+      <UniqueIdentifier>{b4d5513e-37f8-4609-9c0e-3431d6e53e92}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Languages\Examples">
+      <UniqueIdentifier>{a52f0df8-41a1-4461-976f-02fb7a9b51b4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\api">
+      <UniqueIdentifier>{f2473f00-19bb-40c7-bae9-6a690667dcbe}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\bytecode">
+      <UniqueIdentifier>{5cfecffd-0b6a-4ca4-9f4e-e29cdb3b44e4}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\bytecode.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\exceptions.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\opcodes.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\text.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\vm.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\ast.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\compiler.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\concept_library.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\concept_library_plugin.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\i_compiler.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\i_concept_library.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\i_schema.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\i_semantic_concept.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\schema.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\scope.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\semantic_concept.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\language\symbols.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\context.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\fwd.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\i_context.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\neos.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\..\..\languages\Calculator.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\neoscript.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.stream.neo">
+      <Filter>Languages\Packages</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.string.neo">
+      <Filter>Languages\Packages</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\examples\neoscript\fibonacci.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\examples\neoscript\proc.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\..\languages\examples\neoscript\add.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\..\..\src\compiler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\src\neos.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\src\schema.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\src\api\context.cpp">
+      <Filter>Source Files\api</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\src\bytecode\text.cpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\..\src\bytecode\vm.cpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
