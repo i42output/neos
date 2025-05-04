@@ -164,8 +164,8 @@ void main_loop(boost::program_options::variables_map& aOptions)
                 process_command(context, interactive, "t " + boost::lexical_cast<std::string>(aOptions["trace"].as<uint32_t>()));
             if (aOptions.count("t"))
                 process_command(context, interactive, "t " + boost::lexical_cast<std::string>(aOptions["t"].as<uint32_t>()));
-            if (aOptions.count("program"))
-                for (auto const& p : aOptions["program"].as<std::vector<std::string>>())
+            if (aOptions.count("load"))
+                for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
                     process_command(context, interactive, "l " + p);
             if (aOptions.count("c") || aOptions.count("compile"))
                 process_command(context, interactive, "c");
@@ -187,9 +187,9 @@ int main(int argc, char* argv[])
             ("schema,s", boost::program_options::value<std::string>(), "language schema")
             ("trace,t", boost::program_options::value<uint32_t>(), "compiler trace")
             ("compile,c", "compile program")
-            ("program", boost::program_options::value<std::vector<std::string>>(), "program(s) to load");
+            ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
         boost::program_options::positional_options_description positionalOptionsDescription;
-        positionalOptionsDescription.add("program", -1);
+        positionalOptionsDescription.add("load", -1);
         boost::program_options::variables_map options;
         boost::program_options::store(boost::program_options::command_line_parser(argc, argv).
             options(optionsDescription).positional(positionalOptionsDescription).run(), options);
