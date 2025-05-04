@@ -188,10 +188,10 @@ namespace neos::language
     public:
         compiler(i_context& aContext);
     public:
-        void compile(program& aProgram);
-        void compile(program& aProgram, translation_unit& aUnit);
-        void compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
-        void compile(const i_source_fragment& aFragment) final;
+        bool compile(program& aProgram);
+        bool compile(program& aProgram, translation_unit& aUnit);
+        bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
+        bool compile(const i_source_fragment& aFragment) final;
         void enter_namespace(neolib::i_string const& aNamespace) final;
         void leave_namespace() final;
         std::uint32_t trace() const;

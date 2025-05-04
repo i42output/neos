@@ -78,7 +78,8 @@ namespace neos::concepts::core
             language::source_fragment file{ data<neolib::string>() };
             file.set_imported();
             aContext.load_fragment(file);
-            aContext.compiler().compile(std::move(file));
+            if (!aContext.compiler().compile(std::move(file)))
+                throw std::runtime_error("failed to compile imported source fragment.");
         }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {

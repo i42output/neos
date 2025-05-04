@@ -63,7 +63,7 @@ namespace neos::language
         return iEndTime;
     }
 
-    void compiler::compile(program& aProgram)
+    bool compiler::compile(program& aProgram)
     {
         for (auto& unit : aProgram.translationUnits)
             for (auto fragment = unit.fragments.begin(); fragment != unit.fragments.end();)
@@ -74,10 +74,13 @@ namespace neos::language
 
         iStartTime = std::chrono::steady_clock::now();
 
+        bool ok = true;
+
         try
         {
             for (auto& unit : aProgram.translationUnits)
-                compile(aProgram, unit);
+                if (ok)
+                    ok = compile(aProgram, unit);
         }
         catch(...)
         {
@@ -86,12 +89,19 @@ namespace neos::language
         }
 
         iEndTime = std::chrono::steady_clock::now();
+
+        return ok;
     }
 
-    void compiler::compile(program& aProgram, translation_unit& aUnit)
+    bool compiler::compile(program& aProgram, translation_unit& aUnit)
     {
+        bool ok = true;
+
         for (auto& fragment : aUnit.fragments)
-            compile(aProgram, aUnit, fragment);
+            if (ok)
+                ok = compile(aProgram, aUnit, fragment);
+
+        return ok;
     }
 
     namespace
@@ -121,10 +131,10 @@ namespace neos::language
         };
     }
 
-    void compiler::compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment)
+    bool compiler::compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment)
     {
         if (aFragment.status() != compilation_status::Pending)
-            return;
+            return false;
 
         iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit, &aFragment));
 
@@ -167,14 +177,16 @@ namespace neos::language
         aFragment.set_status(compilation_status::Compiled);
 
         iCompilationStateStack.pop_back();
+
+        return ok;
     }
 
-    void compiler::compile(const i_source_fragment& aFragment)
+    bool compiler::compile(const i_source_fragment& aFragment)
     {
         auto& program = *state().program;
         auto& unit = *state().unit;
         auto& fragment = *unit.fragments.emplace(unit.fragments.end(), aFragment);
-        compile(program, unit, fragment);
+        return compile(program, unit, fragment);
     }
 
     void compiler::enter_namespace(neolib::i_string const& aNamespace)
