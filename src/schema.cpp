@@ -351,7 +351,8 @@ namespace neos::language
             auto range = keyStart == "%{" ? 
                 std::make_pair(iSource.find(keyStart), iSource.find(keyEnd)) : 
                 std::make_pair(iSource.rfind(keyStart), iSource.rfind(keyEnd));
-            if (range.first == range.second || range.first == std::string::npos || range.second == std::string::npos)
+            if (range.first == range.second || range.first == std::string::npos || range.second == std::string::npos ||
+                range.first >= range.second)
                 throw std::runtime_error("Error reading schema");
             range.first += (keyStart == "%{" ? 1 : keyStart.size());
             range.second += (keyEnd == "}%" ? 1 : 0);

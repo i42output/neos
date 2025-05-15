@@ -14,7 +14,7 @@
             text : [ "#{" "}#" ]
         }
         parser : {
-            text : [ "*{" "}*" ]
+            text : [ "${" "}$" ]
             root : program
         }
     }
@@ -153,7 +153,7 @@
     whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } + ;
 }#
 
-*{
+${
     program $ language.program ::= { WS , ( using directive | import directive | namespace scope ) , WS } ;
     using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
@@ -253,4 +253,4 @@
     type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
 
     WS ::= [ whitespace ] ;
-}*
+}$

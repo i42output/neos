@@ -17,7 +17,7 @@
             text : [ "#{" "}#" ]
         }
         parser : {
-            text : [ "*{" "}*" ]
+            text : [ "${" "}$" ]
             root : program
         }
     }
@@ -43,7 +43,7 @@
 }#
 
 (* parsing stage *)
-*{
+${
     program $ language.program ::= WS , statement , WS ;
     statement $ language.statement ::= { expression , WS , ";" } ;
     expression $ math.expression ::= term , WS, { ( "+" $ math.operator.add | "-" $ math.operator.subtract ) , WS , term } ;
@@ -53,4 +53,4 @@
     number $ math.universal.number ::= digit sequence , [ '.' , digit sequence , [ exponent ] ] ;
 
     WS ::= [ whitespace ] ;
-}*
+}$
