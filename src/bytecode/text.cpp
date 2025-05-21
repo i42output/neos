@@ -66,6 +66,20 @@ namespace neos
                             throw exceptions::out_of_text();
                         leb128_3 rest3 = { rest2[0], rest2[1], static_cast<std::uint8_t>(*(aText++)) };
                         existing = inverse_opcode_dictionary().find(op2{ b1, rest3 });
+                        if (existing == inverse_opcode_dictionary().end())
+                        {
+                            if (aText == aTextEnd)
+                                throw exceptions::out_of_text();
+                            leb128_4 rest4 = { rest3[0], rest3[1], rest3[2], static_cast<std::uint8_t>(*(aText++)) };
+                            existing = inverse_opcode_dictionary().find(op2{ b1, rest4 });
+                            if (existing == inverse_opcode_dictionary().end())
+                            {
+                                if (aText == aTextEnd)
+                                    throw exceptions::out_of_text();
+                                leb128_5 rest5 = { rest4[0], rest4[1], rest4[2], rest4[3], static_cast<std::uint8_t>(*(aText++)) };
+                                existing = inverse_opcode_dictionary().find(op2{ b1, rest5 });
+                            }
+                        }
                     }
                 }
             }
