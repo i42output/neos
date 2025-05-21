@@ -1,4 +1,4 @@
-/*
+﻿/*
   opcodes.hpp
 
   Copyright (c) 2025 Leigh Johnston.  All Rights Reserved.
@@ -212,29 +212,138 @@ namespace neos
         using leb128_1 = std::array<std::uint8_t, 1>;
         using leb128_2 = std::array<std::uint8_t, 2>;
         using leb128_3 = std::array<std::uint8_t, 3>;
-        using leb128 = std::variant<leb128_1, leb128_2, leb128_3>;
+        using leb128_4 = std::array<std::uint8_t, 4>;
+        using leb128_5 = std::array<std::uint8_t, 5>;
 
-        inline leb128 LEB128(std::uint32_t aValue)
+        using leb128 = std::variant<
+            leb128_1, leb128_2, leb128_3, leb128_4, leb128_5>;
+
+        /// Encode any 32-bit unsigned integer as LEB128 (for opcodes).
+        /// Returns the concrete array type whose size matches the encoded length.
+        inline leb128 LEB128(std::uint32_t value)
         {
-            if (aValue <= 0x7F) { // Fits in 1 byte (7 bits)
-                return leb128_1{ static_cast<std::uint8_t>(aValue) };
+            std::uint8_t buf[5]{};     // 5 bytes is the max for 32 bits (5 × 7 = 35 payload bits).
+            std::size_t  len = 0;
+
+            // Emit little-endian, base-128, adding the continuation bit (0x80)
+            // to every byte except the last.
+            do {
+                std::uint8_t byte = static_cast<std::uint8_t>(value & 0x7F);
+                value >>= 7;
+                if (value != 0) byte |= 0x80;   // set continuation
+                buf[len++] = byte;
+            } while (value != 0 && len < 5);
+
+            // Runtime length → concrete type
+            switch (len) {
+            case 1:  return leb128_1{ buf[0] };
+            case 2:  return leb128_2{ buf[0], buf[1] };
+            case 3:  return leb128_3{ buf[0], buf[1], buf[2] };
+            case 4:  return leb128_4{ buf[0], buf[1], buf[2], buf[3] };
+            case 5:  return leb128_5{ buf[0], buf[1], buf[2], buf[3], buf[4] };
+            default:
+                throw std::logic_error("LEB128 encoding produced an invalid length");
             }
-            else if (aValue <= 0x3FFF) { // Fits in 2 bytes (14 bits)
-                std::uint8_t byte1 = (aValue & 0x7F) | 0x80; // First 7 bits + continuation bit
-                std::uint8_t byte2 = (aValue >> 7) & 0x7F;  // Next 7 bits, no continuation
-                return leb128_2{ byte1, byte2 };
+        }
+
+        using uleb128_1 = std::array<std::uint8_t, 1>;
+        using uleb128_2 = std::array<std::uint8_t, 2>;
+        using uleb128_3 = std::array<std::uint8_t, 3>;
+        using uleb128_4 = std::array<std::uint8_t, 4>;
+        using uleb128_5 = std::array<std::uint8_t, 5>;
+        using uleb128_6 = std::array<std::uint8_t, 6>;
+        using uleb128_7 = std::array<std::uint8_t, 7>;
+        using uleb128_8 = std::array<std::uint8_t, 8>;
+        using uleb128_9 = std::array<std::uint8_t, 9>;
+        using uleb128_10 = std::array<std::uint8_t, 10>;
+
+        using uleb128 = std::variant<
+            uleb128_1, uleb128_2, uleb128_3, uleb128_4, uleb128_5,
+            uleb128_6, uleb128_7, uleb128_8, uleb128_9, uleb128_10>;
+
+        /// Encode any 64-bit unsigned integer as ULEB128.
+        /// Returns the concrete array type whose size matches the encoded length.
+        inline uleb128 ULEB128(std::uint64_t value)
+        {
+            std::uint8_t buf[10]{};     // 10 bytes is the max for 64 bits (10 × 7 = 70 payload bits).
+            std::size_t  len = 0;
+
+            // Emit little-endian, base-128, adding the continuation bit (0x80)
+            // to every byte except the last.
+            do {
+                std::uint8_t byte = static_cast<std::uint8_t>(value & 0x7F);
+                value >>= 7;
+                if (value != 0) byte |= 0x80;   // set continuation
+                buf[len++] = byte;
+            } while (value != 0 && len < 10);
+
+            // Runtime length → concrete type
+            switch (len) {
+            case 1:  return uleb128_1{ buf[0] };
+            case 2:  return uleb128_2{ buf[0], buf[1] };
+            case 3:  return uleb128_3{ buf[0], buf[1], buf[2] };
+            case 4:  return uleb128_4{ buf[0], buf[1], buf[2], buf[3] };
+            case 5:  return uleb128_5{ buf[0], buf[1], buf[2], buf[3], buf[4] };
+            case 6:  return uleb128_6{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5] };
+            case 7:  return uleb128_7{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6] };
+            case 8:  return uleb128_8{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7] };
+            case 9:  return uleb128_9{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8] };
+            case 10: return uleb128_10{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9] };
+            default:
+                throw std::logic_error("ULEB128 encoding produced an invalid length");
             }
-            else if (aValue <= 0x1FFFFF) { // Fits in 3 bytes (21 bits)
-                std::uint8_t byte1 = (aValue & 0x7F) | 0x80;        // First 7 bits + continuation
-                std::uint8_t byte2 = ((aValue >> 7) & 0x7F) | 0x80; // Next 7 bits + continuation
-                std::uint8_t byte3 = (aValue >> 14) & 0x7F;         // Last 7 bits, no continuation
-                return leb128_3{ byte1, byte2, byte3 };
-            }
-            else {
-                // Value exceeds 21 bits, which is the max supported by leb128_3.
-                // For WebAssembly, some opcodes use larger LEB128 (e.g., 5 bytes for 32-bit),
-                // but the current type system limits us to 3 bytes.
-                throw exceptions::logic_error("LEB128 value exceeds 3-byte limit (max 2,097,151)");
+        }
+
+        using sleb128_1 = std::array<std::uint8_t, 1>;
+        using sleb128_2 = std::array<std::uint8_t, 2>;
+        using sleb128_3 = std::array<std::uint8_t, 3>;
+        using sleb128_4 = std::array<std::uint8_t, 4>;
+        using sleb128_5 = std::array<std::uint8_t, 5>;
+        using sleb128_6 = std::array<std::uint8_t, 6>;
+        using sleb128_7 = std::array<std::uint8_t, 7>;
+        using sleb128_8 = std::array<std::uint8_t, 8>;
+        using sleb128_9 = std::array<std::uint8_t, 9>;
+        using sleb128_10 = std::array<std::uint8_t, 10>;
+
+        using sleb128 = std::variant<
+            sleb128_1, sleb128_2, sleb128_3, sleb128_4, sleb128_5,
+            sleb128_6, sleb128_7, sleb128_8, sleb128_9, sleb128_10>;
+
+        /// Encode any 64-bit *signed* integer as SLEB128.
+        /// Returns the concrete array type whose size matches the encoded length.
+        inline sleb128 SLEB128(std::int64_t value)
+        {
+            std::uint8_t buf[10]{};   // 10 bytes is still enough (10×7 = 70 payload bits)
+            std::size_t  len = 0;
+
+            bool more;
+            do {
+                std::uint8_t byte = static_cast<std::uint8_t>(value & 0x7F);
+                value >>= 7;
+
+                // Sign-extend after shift so that `value` is either all 0s or all 1s
+                // if we’re done.
+                const bool sign_bit = (byte & 0x40) != 0;
+                more = !((value == 0 && !sign_bit) || (value == -1 && sign_bit));
+
+                if (more) byte |= 0x80;          // set continuation bit
+                buf[len++] = byte;
+            } while (more && len < 10);
+
+            // Runtime length → concrete type
+            switch (len) {
+            case 1:  return sleb128_1{ buf[0] };
+            case 2:  return sleb128_2{ buf[0], buf[1] };
+            case 3:  return sleb128_3{ buf[0], buf[1], buf[2] };
+            case 4:  return sleb128_4{ buf[0], buf[1], buf[2], buf[3] };
+            case 5:  return sleb128_5{ buf[0], buf[1], buf[2], buf[3], buf[4] };
+            case 6:  return sleb128_6{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5] };
+            case 7:  return sleb128_7{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6] };
+            case 8:  return sleb128_8{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7] };
+            case 9:  return sleb128_9{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8] };
+            case 10: return sleb128_10{ buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9] };
+            default:
+                throw std::logic_error("SLEB128 encoding produced an invalid length");
             }
         }
 
