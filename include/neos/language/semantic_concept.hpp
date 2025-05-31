@@ -40,17 +40,25 @@ namespace neos::language
             iConcept{ aConcept.clone(*this) }, iSource{ aSource }
         {
         }
-        bool has_parent() const override
+        bool has_parent() const final
         {
             return iConcept->has_parent();
         }
-        const i_semantic_concept& parent() const override
+        const i_semantic_concept& parent() const final
         {
             return iConcept->parent();
         }
-        const neolib::i_string& name() const override
+        const neolib::i_string& name() const final
         {
             return iConcept->name();
+        }
+        bool is(neolib::i_string const& aName) const final
+        {
+            return iConcept->is(aName);
+        }
+        bool similar(i_semantic_concept const& aRhs) const final
+        {
+            return iConcept->similar(aRhs);
         }
         // folding support
     public:
@@ -181,19 +189,37 @@ namespace neos::language
         }
         // family
     public:
-        bool has_parent() const override
+        bool has_parent() const final
         {
             return iParent != nullptr;
         }
-        const i_semantic_concept& parent() const override
+        const i_semantic_concept& parent() const final
         {
             if (has_parent())
                 return *iParent;
             throw no_parent();
         }
-        const neolib::i_string& name() const override
+        const neolib::i_string& name() const final
         {
             return iName;
+        }
+        virtual bool is(neolib::i_string const& aName) const final
+        {
+            if (name() == aName)
+                return true;
+            if (has_parent())
+                return parent().is(aName);
+            return false;
+        }
+        bool similar(i_semantic_concept const& aRhs) const final
+        {
+            if (name() == aRhs.name())
+                return true;
+            if (aRhs.has_parent())
+                return similar(aRhs.parent());
+            if (has_parent())
+                return parent().similar(aRhs);
+            return false;
         }
         // parse
     public:

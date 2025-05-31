@@ -118,6 +118,9 @@ namespace neos::language
                 astNode = semanticConcept;
                 if (conceptName != "language.keyword")
                     foldStack.push_back(semanticConcept);
+                if (context.compiler().trace() >= 2)
+                    context.cout() << "Fold stack add: " << conceptName << " [" <<
+                    neolib::to_escaped_string(conceptValue.to_std_string_view(), 32u, true) << "]" << std::endl;
             }
             else
                 throw concept_not_found(parserAstNode.c.value());
@@ -267,6 +270,8 @@ namespace neos::language
                     auto result = rhs.fold(iContext, lhs);
                     trace_out("Folded", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
+                    if (!result)
+                        ilhs = fold_stack().erase(ilhs);
                     didSome = true;
                 }
                 else if (lhs.can_fold(rhs))
@@ -275,6 +280,8 @@ namespace neos::language
                     auto result = lhs.fold(iContext, rhs);
                     trace_out("Folded", ilhs, irhs, result);
                     fold_stack().erase(irhs);
+                    if (!result)
+                        ilhs = fold_stack().erase(ilhs);
                     didSome = true;
                 }
                 else
@@ -288,11 +295,11 @@ namespace neos::language
             if (fold_stack().size() == 1)
                 throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
                     "Failed to fold semantic concept: "s +
-                    fold_stack().front()->name());
+                    fold_stack().front()->trace());
             else
                 throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
                     "Failed to fold semantic concepts: "s +
-                    (**fold_stack().begin()).name() + " <- " + (**std::next(fold_stack().begin())).name());
+                    (**fold_stack().begin()).trace() + " <- " + (**std::next(fold_stack().begin())).trace());
         }
         return didSome;
     }

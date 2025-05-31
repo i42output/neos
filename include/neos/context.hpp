@@ -62,7 +62,7 @@ namespace neos
     public:
         bool running() const final;
         void run() final;
-        bytecode::data_type evaluate(std::string const& aExpression) final;
+        language::data_type evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
     private:
         void init();

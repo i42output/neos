@@ -28,6 +28,7 @@
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/exceptions.hpp>
 #include <neos/bytecode/opcodes.hpp>
+#include <neos/language/type.hpp>
 
 namespace neos
 {
@@ -48,7 +49,7 @@ namespace neos
                     /// todo
                 }
             public:
-                data_type const& result() const
+                language::data_type const& result() const
                 {
                     return iResult;
                 }
@@ -59,7 +60,7 @@ namespace neos
                     return {}; 
                 }
             private:
-                data_type iResult;
+                language::data_type iResult;
             };
         }
     }

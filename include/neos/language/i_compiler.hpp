@@ -76,5 +76,6 @@ namespace neos::language
         virtual bool compile(i_source_fragment const& aFragment) = 0;
         virtual void enter_namespace(neolib::i_string const& aNamespace) = 0;
         virtual void leave_namespace() = 0;
+        virtual std::uint32_t trace() const = 0;
     };
 }

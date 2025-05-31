@@ -155,7 +155,7 @@ namespace neos
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
     }
 
-    bytecode::data_type context::evaluate(const std::string& aExpression)
+    language::data_type context::evaluate(const std::string& aExpression)
     {
         program().translationUnits.clear();
         std::istringstream stream{ aExpression };

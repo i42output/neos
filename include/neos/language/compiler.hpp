@@ -34,11 +34,11 @@
 
 namespace neos::language
 {
-    typedef neolib::string source_file_path_t;
-    typedef neolib::optional<source_file_path_t> optional_source_file_path_t;
-    typedef neolib::string_view source_t;
-    typedef source_t::const_iterator const_source_iterator;
-    typedef source_t::iterator source_iterator;
+    using source_file_path_t = neolib::string;
+    using optional_source_file_path_t = neolib::optional<source_file_path_t>;
+    using source_t = neolib::string_view;
+    using const_source_iterator = source_t::const_iterator;
+    using source_iterator = source_t::iterator;
 
     class source_fragment : public i_source_fragment
     {
@@ -194,7 +194,7 @@ namespace neos::language
         bool compile(const i_source_fragment& aFragment) final;
         void enter_namespace(neolib::i_string const& aNamespace) final;
         void leave_namespace() final;
-        std::uint32_t trace() const;
+        std::uint32_t trace() const final;
         const std::optional<std::string>& trace_filter() const;
         void set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter = {});
         const std::chrono::steady_clock::time_point& start_time() const;    

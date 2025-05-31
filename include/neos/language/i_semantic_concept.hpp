@@ -50,8 +50,10 @@ namespace neos::language
         virtual void clone(i_semantic_concept& aDataStore, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const = 0;
     public:
         virtual bool has_parent() const = 0;
-        virtual const i_semantic_concept& parent() const = 0;
-        virtual const neolib::i_string& name() const = 0;
+        virtual i_semantic_concept const& parent() const = 0;
+        virtual neolib::i_string const& name() const = 0;
+        virtual bool is(neolib::i_string const& aName) const = 0;
+        virtual bool similar(i_semantic_concept const& aRhs) const = 0;
         // parse
     public:
         virtual neolib::i_string_view const& source() const = 0;

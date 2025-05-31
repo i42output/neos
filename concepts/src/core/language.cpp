@@ -19,6 +19,7 @@
 
 #include <neos/i_context.hpp>
 #include <neos/language/semantic_concept.hpp>
+#include <neos/language/type.hpp>
 #include "language.hpp"
 
 namespace neos::concepts::core
@@ -117,6 +118,7 @@ namespace neos::concepts::core
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::i_string>() = aRhs.data<neolib::i_string>();
+            aResult.reset(this);
         }
     };
 
@@ -130,6 +132,25 @@ namespace neos::concepts::core
         language_namespace_name() :
             semantic_concept{ "language.namespace.name", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return false;
+        }
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.name() == "language.namespace.scope.open")
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            aContext.compiler().enter_namespace(data<neolib::i_string>());
         }
     };
 
@@ -168,7 +189,8 @@ namespace neos::concepts::core
         }
         bool can_fold(const i_semantic_concept& aRhs) const override
         {
-            if (aRhs.name() == "language.namespace")
+            if (aRhs.name() == "language.namespace.name" ||
+                aRhs.name() == "language.namespace")
                 return true;
             return false;
         }
@@ -203,13 +225,10 @@ namespace neos::concepts::core
     public:
         bool can_fold(const i_semantic_concept& aRhs) const override
         {
-            if (aRhs.name() == "language.namespace.scope")
-                return true;
-            return false;
+            return true;
         }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            aContext.compiler().leave_namespace();
         }
     };
 
@@ -369,16 +388,23 @@ namespace neos::concepts::core
     {
         // data
     public:
+        using i_parameter_list = neolib::i_optional<neolib::i_vector<neolib::i_pair<neos::language::type, neolib::i_string>>>;
         struct i_data_type
         {
             virtual neolib::i_string const& function_name() const = 0;
             virtual void set_function_name(neolib::i_string_view const& aFunctionName) = 0;
+            virtual i_parameter_list const& parameters() const = 0;
+            virtual i_parameter_list& parameters() = 0;
         };
+        using parameter_list = neolib::optional<neolib::vector<neolib::pair<neos::language::type, neolib::string>>>;
         struct data_type : i_data_type
         {
             neolib::string functionName;
+            parameter_list functionParameters;
             neolib::i_string const& function_name() const final { return functionName; }
             void set_function_name(neolib::i_string_view const& aFunctionName) final { functionName = aFunctionName; }
+            parameter_list const& parameters() const final { return functionParameters; }
+            parameter_list& parameters() { return functionParameters; }
         };
         // construction
     public:
@@ -401,6 +427,11 @@ namespace neos::concepts::core
             if (aRhs.name() == "language.function.name")
             {
                 data<i_data_type>().set_function_name(aRhs.source());
+                aResult.reset(this);
+            }
+            else if (aRhs.name() == "language.function.parameters")
+            {
+                data<i_data_type>().parameters();
                 aResult.reset(this);
             }
         }
