@@ -108,6 +108,13 @@ namespace neos::language
     {
         void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, language::parser::ast_node const& parserAstNode, ast::node& astNode)
         {
+            for (auto const& childParserNode : parserAstNode.children)
+            {
+                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
+                auto& childNode = *astNode.children().back();
+                walk_ast(context, ast, foldStack, *childParserNode, childNode);
+            }
+
             neolib::string_view const conceptName{ parserAstNode.c.value() };
             neolib::string_view const conceptValue{ parserAstNode.value };
 
@@ -124,13 +131,6 @@ namespace neos::language
             }
             else
                 throw concept_not_found(parserAstNode.c.value());
-
-            for (auto const& childParserNode : parserAstNode.children)
-            {
-                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
-                auto& childNode = *astNode.children().back();
-                walk_ast(context, ast, foldStack, *childParserNode, childNode);
-            }
         };
     }
 
