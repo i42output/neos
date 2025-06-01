@@ -268,7 +268,17 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
-                if (rhs.can_fold(lhs))
+                if (rhs.can_fold())
+                {
+                    trace_out("Folding", irhs);
+                    auto result = rhs.fold(iContext);
+                    trace_out("Folded", irhs, {}, result);
+                    irhs = fold_stack().erase(irhs);
+                    if (result)
+                        irhs = fold_stack().insert(irhs, result);
+                    didSome = true;
+                }
+                else if (rhs.can_fold(lhs))
                 {
                     trace_out("Folding", irhs, ilhs);
                     auto result = rhs.fold(iContext, lhs);

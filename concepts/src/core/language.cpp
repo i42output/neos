@@ -183,19 +183,12 @@ namespace neos::concepts::core
         }
         // emit
     public:
-        bool can_fold() const override
-        {
-            return true;
-        }
         bool can_fold(const i_semantic_concept& aRhs) const override
         {
             if (aRhs.name() == "language.namespace.name" ||
                 aRhs.name() == "language.namespace")
                 return true;
             return false;
-        }
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
         }
         void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
@@ -326,11 +319,53 @@ namespace neos::concepts::core
 
     class language_function_parameter : public semantic_concept<language_function_parameter>
     {
+        // data
+    public:
+        struct i_data_type
+        {
+            virtual neolib::i_string const& parameter_name() const = 0;
+            virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
+            virtual neos::language::type parameter_type() const = 0;
+            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
+        };
+        using parameter_list = neolib::optional<neolib::vector<neolib::pair<neos::language::type, neolib::string>>>;
+        struct data_type : i_data_type
+        {
+            neolib::string parameterName;
+            neos::language::type parameterType = neos::language::type::UNKNOWN;
+            neolib::i_string const& parameter_name() const final { return parameterName; }
+            void set_parameter_name(neolib::i_string_view const& aParameterName) final { parameterName = aParameterName; }
+            neos::language::type parameter_type() const final { return parameterType; }
+            void set_parameter_type(neos::language::type aParameterType) final { parameterType = aParameterType; }
+        };
         // construction
     public:
         language_function_parameter() :
             semantic_concept{ "language.function.parameter", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !holds_data();
+        }
+        bool can_fold(const i_semantic_concept& aRhs) const override
+        {
+            if (aRhs.is("language.type"_s))
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            data<i_data_type>().set_parameter_name(source());
+            aResult.reset(this);
+        }
+        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.type"_s))
+                data<i_data_type>().set_parameter_type(aRhs.data<neos::language::type>());
+            aResult.reset(this);
         }
     };
 
@@ -489,6 +524,9 @@ namespace neos::concepts::core
 
     class language_type : public semantic_concept<language_type>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
         language_type() :
@@ -499,54 +537,124 @@ namespace neos::concepts::core
 
     class language_type_tuple : public semantic_concept<language_type_tuple>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
-        language_type_tuple() :
-            semantic_concept{ "language.type.tuple", neos::language::emit_type::Infix }
+        language_type_tuple(i_semantic_concept& aParent, const std::string& aName) :
+            semantic_concept<language_type_tuple>{ aParent, aName, neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type::Composite;
+            aResult.reset(this);
         }
     };
 
     template <typename Float>
     class language_type_float : public semantic_concept<language_type_float<Float>>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
         language_type_float(i_semantic_concept& aParent, const std::string& aName) :
             semantic_concept<language_type_float<Float>>{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type_to_enum_v<Float>;
+            aResult.reset(this);
+        }
     };
 
     template <typename Integer>
     class language_type_integer : public semantic_concept<language_type_integer<Integer>>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
         language_type_integer(i_semantic_concept& aParent, const std::string& aName) :
             semantic_concept<language_type_integer<Integer>>{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type_to_enum_v<Integer>;
+            aResult.reset(this);
+        }
     };
 
     template <typename Character>
     class language_type_string : public semantic_concept<language_type_string<Character>>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
         language_type_string(i_semantic_concept& aParent, const std::string& aName) :
             semantic_concept<language_type_string<Character>>{ aParent, aName, neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type::String;
+            aResult.reset(this);
+        }
     };
 
     class language_type_custom : public semantic_concept<language_type_custom>
     {
+        // data
+    public:
+        using data_type = neos::language::type;
         // construction
     public:
         language_type_custom(i_semantic_concept& aParent) :
             semantic_concept{ aParent, "language.type.custom", neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type::Composite;
+            aResult.reset(this);
         }
     };
 
@@ -638,7 +746,7 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.type" }] = 
             neolib::make_ref<language_type>();
         concepts()[neolib::string{ "language.type.tuple" }] = 
-            neolib::make_ref<language_type_tuple>();
+            neolib::make_ref<language_type_tuple>(*concepts()[neolib::string{ "language.type" }], "language.type.tuple");
         concepts()[neolib::string{ "language.type.float" }] = 
             neolib::make_ref<language_type_float<float>>(*concepts()[neolib::string{ "language.type" }], "language.type.float");
         concepts()[neolib::string{ "language.type.double" }] = 

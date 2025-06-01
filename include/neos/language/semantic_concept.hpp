@@ -225,10 +225,14 @@ namespace neos::language
     public:
         neolib::i_string_view const& source() const override
         {
+            if (iDataStore)
+                return iDataStore->source();
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         void update_source(neolib::i_string_view const& aSource) override
         {
+            if (iDataStore)
+                return iDataStore->update_source(aSource);
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         bool holds_data() const override

@@ -135,48 +135,48 @@ namespace neos
 
         enum class type : std::uint32_t
         {
-            Void        = 0x00000000,
-            Boolean     = 0x00000001,
-            U8          = 0x00000002,
-            U16         = 0x00000003,
-            U32         = 0x00000004,
-            U64         = 0x00000005,
-            I8          = 0x00000006,
-            I16         = 0x00000007,
-            I32         = 0x00000008,
-            I64         = 0x00000009,
-            F32         = 0x0000000A,
-            F64         = 0x0000000B,
-            Ibig        = 0x0000000C,
-            Fbig        = 0x0000000D,
-            String      = 0x0000000E,
-            Reference   = 0x0000000F,
-            Composite   = 0x00000010,
+            UNKNOWN     = 0x00000000,
 
-            UNKNOWN     = 0xFFFFFFFF
+            Void        = 0x00000001,
+            Boolean     = 0x00000002,
+            U8          = 0x00000003,
+            U16         = 0x00000004,
+            U32         = 0x00000005,
+            U64         = 0x00000006,
+            I8          = 0x00000007,
+            I16         = 0x00000008,
+            I32         = 0x00000009,
+            I64         = 0x0000000A,
+            F32         = 0x0000000B,
+            F64         = 0x0000000C,
+            Ibig        = 0x0000000D,
+            Fbig        = 0x0000000E,
+            String      = 0x0000000F,
+            Reference   = 0x00000010,
+            Composite   = 0x00000011
         };
 
-        template <typename T> inline constexpr type type_to_enum = type::UNKNOWN;
-        template <> inline constexpr type type_to_enum<void> = type::Void;
-        template <> inline constexpr type type_to_enum<bool> = type::Boolean;
-        template <> inline constexpr type type_to_enum<std::uint8_t> = type::U8;
-        template <> inline constexpr type type_to_enum<std::uint16_t> = type::U16;
-        template <> inline constexpr type type_to_enum<std::uint32_t> = type::U32;
-        template <> inline constexpr type type_to_enum<std::uint64_t> = type::U64;
-        template <> inline constexpr type type_to_enum<std::int8_t> = type::I8;
-        template <> inline constexpr type type_to_enum<std::int16_t> = type::I16;
-        template <> inline constexpr type type_to_enum<std::int32_t> = type::I32;
-        template <> inline constexpr type type_to_enum<std::int64_t> = type::I64;
-        template <> inline constexpr type type_to_enum<float> = type::F32;
-        template <> inline constexpr type type_to_enum<double> = type::F64;
-        template <> inline constexpr type type_to_enum<ibig> = type::Ibig;
-        //template <> inline constexpr type type_to_enum<neolib::abstract_t<ibig>> = type::Ibig;
-        template <> inline constexpr type type_to_enum<fbig> = type::Fbig;
-        //template <> inline constexpr type type_to_enum<neolib::abstract_t<fbig>> = type::Fbig;
-        template <> inline constexpr type type_to_enum<string> = type::String;
-        template <> inline constexpr type type_to_enum<neolib::abstract_t<string>> = type::String;
-        template <> inline constexpr type type_to_enum<reference> = type::Reference;
-        template <> inline constexpr type type_to_enum<composite_type> = type::Composite;
-        template <> inline constexpr type type_to_enum<neolib::ref_ptr<i_composite_type>> = type::Composite;
+        template <typename T> inline constexpr type type_to_enum_v = type::UNKNOWN;
+        template <> inline constexpr type type_to_enum_v<void> = type::Void;
+        template <> inline constexpr type type_to_enum_v<bool> = type::Boolean;
+        template <> inline constexpr type type_to_enum_v<std::uint8_t> = type::U8;
+        template <> inline constexpr type type_to_enum_v<std::uint16_t> = type::U16;
+        template <> inline constexpr type type_to_enum_v<std::uint32_t> = type::U32;
+        template <> inline constexpr type type_to_enum_v<std::uint64_t> = type::U64;
+        template <> inline constexpr type type_to_enum_v<std::int8_t> = type::I8;
+        template <> inline constexpr type type_to_enum_v<std::int16_t> = type::I16;
+        template <> inline constexpr type type_to_enum_v<std::int32_t> = type::I32;
+        template <> inline constexpr type type_to_enum_v<std::int64_t> = type::I64;
+        template <> inline constexpr type type_to_enum_v<float> = type::F32;
+        template <> inline constexpr type type_to_enum_v<double> = type::F64;
+        template <> inline constexpr type type_to_enum_v<ibig> = type::Ibig;
+        //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<ibig>> = type::Ibig;
+        template <> inline constexpr type type_to_enum_v<fbig> = type::Fbig;
+        //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<fbig>> = type::Fbig;
+        template <> inline constexpr type type_to_enum_v<string> = type::String;
+        template <> inline constexpr type type_to_enum_v<neolib::abstract_t<string>> = type::String;
+        template <> inline constexpr type type_to_enum_v<reference> = type::Reference;
+        template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_composite_type>> = type::Composite;
    }
 }

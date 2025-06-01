@@ -29,6 +29,8 @@
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/semantic_concept.hpp>
 
+using namespace neolib::string_literals;
+
 namespace neos::language
 {
     class concept_library : public neolib::reference_counted<i_concept_library>
