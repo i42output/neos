@@ -124,10 +124,12 @@ namespace neos::language
                 auto const semanticConcept = c->instantiate(context, conceptValue);
                 astNode = semanticConcept;
                 if (conceptName != "language.keyword")
+                {
                     foldStack.push_back(semanticConcept);
-                if (context.compiler().trace() >= 2)
-                    context.cout() << "Fold stack add: " << conceptName << " [" <<
-                    neolib::to_escaped_string(conceptValue.to_std_string_view(), 32u, true) << "]" << std::endl;
+                    if (context.compiler().trace() >= 2)
+                        context.cout() << "Fold stack add: " << conceptName << " [" <<
+                        neolib::to_escaped_string(conceptValue.to_std_string_view(), 32u, true) << "]" << std::endl;
+                }
             }
             else
                 throw concept_not_found(parserAstNode.c.value());
