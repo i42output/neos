@@ -133,25 +133,6 @@ namespace neos::concepts::core
             semantic_concept{ "language.namespace.name", neos::language::emit_type::Infix }
         {
         }
-        // emit
-    public:
-        bool can_fold() const override
-        {
-            return false;
-        }
-        bool can_fold(const i_semantic_concept& aRhs) const override
-        {
-            if (aRhs.name() == "language.namespace.scope.open")
-                return true;
-            return false;
-        }
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-        }
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-            aContext.compiler().enter_namespace(data<neolib::i_string>());
-        }
     };
 
     class language_scope_open : public semantic_concept<language_scope_open>
