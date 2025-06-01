@@ -258,6 +258,8 @@ namespace neos::language
                 auto result = lhs.fold(iContext);
                 trace_out("Folded", ilhs, {}, result);
                 ilhs = fold_stack().erase(ilhs);
+                if (result)
+                    ilhs = fold_stack().insert(ilhs, result);
                 didSome = true;
             }
             else if (std::next(ilhs) != fold_stack().end())
@@ -270,8 +272,9 @@ namespace neos::language
                     auto result = rhs.fold(iContext, lhs);
                     trace_out("Folded", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
-                    if (!result)
-                        ilhs = fold_stack().erase(ilhs);
+                    ilhs = fold_stack().erase(ilhs);
+                    if (result)
+                        ilhs = fold_stack().insert(ilhs, result);
                     didSome = true;
                 }
                 else if (lhs.can_fold(rhs))
@@ -279,9 +282,10 @@ namespace neos::language
                     trace_out("Folding", ilhs, irhs);
                     auto result = lhs.fold(iContext, rhs);
                     trace_out("Folded", ilhs, irhs, result);
-                    fold_stack().erase(irhs);
-                    if (!result)
-                        ilhs = fold_stack().erase(ilhs);
+                    ilhs = fold_stack().erase(ilhs);
+                    ilhs = fold_stack().erase(ilhs);
+                    if (result)
+                        ilhs = fold_stack().insert(ilhs, result);
                     didSome = true;
                 }
                 else
