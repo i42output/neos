@@ -26,8 +26,8 @@
 
 namespace neos::language
 {
-    typedef neolib::i_string i_source_file_path_t;
-    typedef neolib::i_optional<i_source_file_path_t> i_optional_source_file_path_t;
+    typedef neolib::i_string i_source_path_t;
+    typedef neolib::i_optional<i_source_path_t> i_optional_source_path_t;
     typedef neolib::i_string_view i_source_t;
 
     enum class compilation_status
@@ -46,8 +46,9 @@ namespace neos::language
     public:
         virtual ~i_source_fragment() {}
     public:
-        virtual i_optional_source_file_path_t const& source_file_path() const = 0;
-        virtual i_optional_source_file_path_t& source_file_path() = 0;
+        virtual i_optional_source_path_t const& source_file_path() const = 0;
+        virtual i_optional_source_path_t& source_file_path() = 0;
+        virtual i_optional_source_path_t const& source_directory_path() const = 0;
         virtual i_source_t const& source() const = 0;
         virtual void set_source(i_source_t const& aSource) = 0;
         virtual bool imported() const = 0;

@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <neos/neos.hpp>
 #include <neolib/core/optional.hpp>
 #include <neolib/core/string.hpp>
@@ -34,8 +35,8 @@
 
 namespace neos::language
 {
-    using source_file_path_t = neolib::string;
-    using optional_source_file_path_t = neolib::optional<source_file_path_t>;
+    using source_path_t = neolib::string;
+    using optional_source_path_t = neolib::optional<source_path_t>;
     using source_t = neolib::string_view;
     using const_source_iterator = source_t::const_iterator;
     using source_iterator = source_t::iterator;
@@ -43,7 +44,7 @@ namespace neos::language
     class source_fragment : public i_source_fragment
     {
     public:
-        source_fragment(const optional_source_file_path_t& aSourceFilePath = optional_source_file_path_t{}, const source_t& aSource = source_t{}) :
+        source_fragment(const optional_source_path_t& aSourceFilePath = optional_source_path_t{}, const source_t& aSource = source_t{}) :
             iSourceFilePath{ aSourceFilePath }, iSource{ aSource }, iImported{ false }, iStatus{ compilation_status::Pending }
         {
         }
@@ -52,13 +53,23 @@ namespace neos::language
         {
         }
     public:
-        const i_optional_source_file_path_t& source_file_path() const final
+        const i_optional_source_path_t& source_file_path() const final
         { 
             return iSourceFilePath;
         }
-        i_optional_source_file_path_t& source_file_path() final
+        i_optional_source_path_t& source_file_path() final
         { 
             return iSourceFilePath;
+        }
+        i_optional_source_path_t const& source_directory_path() const final
+        {
+            thread_local optional_source_path_t result;
+            result = std::nullopt;
+            if (source_file_path().has_value())
+            {
+                result = std::filesystem::path{ source_file_path().value().to_std_string() }.parent_path().string();
+            }
+            return result;
         }
         const i_source_t& source() const final
         { 
@@ -111,7 +122,7 @@ namespace neos::language
             return source().end();
         }
     private:
-        optional_source_file_path_t iSourceFilePath;
+        optional_source_path_t iSourceFilePath;
         neolib::string iSource;
         mutable source_t iSourceView;
         bool iImported;
@@ -192,6 +203,7 @@ namespace neos::language
         bool compile(program& aProgram, translation_unit& aUnit);
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         bool compile(const i_source_fragment& aFragment) final;
+        i_source_fragment const& current_fragment() const;
         void enter_namespace(neolib::i_string const& aNamespace) final;
         void leave_namespace() final;
         std::uint32_t trace() const final;

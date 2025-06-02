@@ -1,13 +1,10 @@
 // neoscript example: Fibonacci
 
+using neoscript.test;
 using neo.string;
 using neo.stream;
 
 // functions are pure
-fn add(x, y : i32) -> i32
-{
-    return x + y;
-}
 fn fib(x : i32) -> i32 
 {
     if (x < 2) 

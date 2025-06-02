@@ -226,15 +226,22 @@ namespace neos
             throw invalid_fragment();
 
         std::optional<std::ifstream> fragmentStream;
-        fragmentStream.emplace(*aFragment.source_file_path(), std::ios::binary);
+        fragmentStream.emplace(aFragment.source_file_path().value(), std::ios::binary);
         if (!*fragmentStream)
             for (auto const& ext : schema().meta().sourcecodeFileExtension)
             {
-                std::string tryPath = "packages/" + schema().meta().language + "/" + *aFragment.source_file_path() + ext;
+                std::string tryPath = "packages/" + schema().meta().language + "/" + aFragment.source_file_path().value() + ext;
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {
-                    *aFragment.source_file_path() = tryPath;
+                    aFragment.source_file_path().value() = tryPath;
+                    break;
+                }
+                tryPath = compiler().current_fragment().source_directory_path().value() + "/" + aFragment.source_file_path().value() + ext;
+                fragmentStream.emplace(tryPath, std::ios::binary);
+                if (*fragmentStream)
+                {
+                    aFragment.source_file_path().value() = tryPath;
                     break;
                 }
             }

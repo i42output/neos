@@ -194,6 +194,11 @@ namespace neos::language
         return compile(program, unit, fragment);
     }
 
+    i_source_fragment const& compiler::current_fragment() const
+    {
+        return *state().fragment;
+    }
+
     void compiler::enter_namespace(neolib::i_string const& aNamespace)
     {
         if (state().namespaceScope.empty())
