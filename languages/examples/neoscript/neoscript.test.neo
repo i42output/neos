@@ -1,6 +1,6 @@
 // functions are pure
-fn add(x, y : i32) -> i32
+fn test(x, y : i32; z : string) -> i64
 {
-    return x + y;
+    return 42;
 }
 
