@@ -272,7 +272,7 @@ namespace neos::language
             };
 
         bool didSome = false;
-        for (auto ilhs = fold_stack().begin(); ilhs != fold_stack().end();)
+        for (auto ilhs = fold_stack().begin(); !didSome && ilhs != fold_stack().end();)
         {
             auto& lhs = **ilhs;
             if (lhs.can_fold())
@@ -289,7 +289,7 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
-                if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs))
+                if (!rhs.is_sibling(lhs) && !rhs.is_child(lhs) && !didSome)
                     ++ilhs;
                 else if (rhs.can_fold())
                 {
@@ -306,17 +306,6 @@ namespace neos::language
                     trace_out("Folding", irhs, ilhs);
                     auto result = rhs.fold(iContext, lhs);
                     trace_out("Folded", irhs, ilhs, result);
-                    ilhs = fold_stack().erase(ilhs);
-                    ilhs = fold_stack().erase(ilhs);
-                    if (!result->is_empty())
-                        ilhs = fold_stack().insert(ilhs, result);
-                    didSome = true;
-                }
-                else if (lhs.can_fold(rhs))
-                {
-                    trace_out("Folding", ilhs, irhs);
-                    auto result = lhs.fold(iContext, rhs);
-                    trace_out("Folded", ilhs, irhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     ilhs = fold_stack().erase(ilhs);
                     if (!result->is_empty())
