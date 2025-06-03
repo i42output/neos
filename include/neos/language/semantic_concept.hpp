@@ -40,11 +40,18 @@ namespace neos::language
             iConcept{ aConcept.clone(*this) }, iSource{ aSource }
         {
         }
+        ~semanteme()
+        {
+        }
+        i_semantic_concept& c() const
+        {
+            return *iConcept;
+        }
         bool has_parent() const final
         {
             return iConcept->has_parent();
         }
-        const i_semantic_concept& parent() const final
+        i_semantic_concept const& parent() const final
         {
             return iConcept->parent();
         }
@@ -62,7 +69,7 @@ namespace neos::language
         }
         // folding support
     public:
-        void clone(i_semantic_concept& aDataStore, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const final
+        void clone(i_semantic_concept& aInstance, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const final
         {
             throw std::logic_error("neos::language::semanteme: not clonable");
         }
@@ -113,7 +120,7 @@ namespace neos::language
         {
             return iConcept->can_fold();
         }
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return iConcept->can_fold(aRhs);
         }
@@ -148,7 +155,7 @@ namespace neos::language
         {
             iConcept->do_fold(aContext, aResult);
         }
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             iConcept->do_fold(aContext, aRhs, aResult);
         }
@@ -181,10 +188,10 @@ namespace neos::language
         }
         // folding support
     public:
-        void clone(i_semantic_concept& aDataStore, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const final
+        void clone(i_semantic_concept& aInstance, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const final
         {
             auto copy = neolib::make_ref<concept_type>(static_cast<concept_type const&>(*this));
-            copy->set_data_store(aDataStore);
+            copy->set_instance(aInstance);
             aCopy = copy;
         }
         // family
@@ -193,7 +200,7 @@ namespace neos::language
         {
             return iParent != nullptr;
         }
-        const i_semantic_concept& parent() const final
+        i_semantic_concept const& parent() const final
         {
             if (has_parent())
                 return *iParent;
@@ -225,28 +232,28 @@ namespace neos::language
     public:
         neolib::i_string_view const& source() const override
         {
-            if (iDataStore)
-                return iDataStore->source();
+            if (iInstance)
+                return iInstance->source();
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         void update_source(neolib::i_string_view const& aSource) override
         {
-            if (iDataStore)
-                return iDataStore->update_source(aSource);
+            if (iInstance)
+                return iInstance->update_source(aSource);
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         bool holds_data() const override
         {
-            return iDataStore && iDataStore->holds_data();
+            return iInstance && iInstance->holds_data();
         }
         using i_semantic_concept::data;
         void const* data() const override
         {
-            return iDataStore ? iDataStore->data() : nullptr;
+            return iInstance ? iInstance->data() : nullptr;
         }
         void* data() override
         {
-            return iDataStore ? iDataStore->data() : nullptr;
+            return iInstance ? iInstance->data() : nullptr;
         }
         // emit
     public:
@@ -258,7 +265,7 @@ namespace neos::language
         {
             return false;
         }
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return false;
         }
@@ -266,8 +273,8 @@ namespace neos::language
     public:
         void trace(neolib::i_string& aResult) const override
         {
-            if (iDataStore)
-                iDataStore->trace(aResult);
+            if (iInstance)
+                iInstance->trace(aResult);
             else
                 aResult = name();
         }
@@ -279,14 +286,18 @@ namespace neos::language
         }
         // emit
     protected:
-        void set_data_store(i_semantic_concept& aDataStore)
+        neolib::ref_ptr<i_semantic_concept> instance() const
         {
-            iDataStore = aDataStore;
+            return iInstance;
+        }
+        void set_instance(i_semantic_concept& aInstance)
+        {
+            iInstance = aInstance;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
         }
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
         }
         // attributes
@@ -294,7 +305,7 @@ namespace neos::language
         i_semantic_concept const* iParent;
         neolib::string iName;
         emit_type iEmitAs;
-        neolib::ref_ptr<i_semantic_concept> iDataStore;
+        neolib::ref_ptr<i_semantic_concept> iInstance;
     };
 
     class unimplemented_semantic_concept : public semantic_concept<unimplemented_semantic_concept>

@@ -47,7 +47,7 @@ namespace neos::language
         typedef i_semantic_concept abstract_type;
         typedef neolib::i_string_view::const_iterator source_iterator;
     public:
-        virtual void clone(i_semantic_concept& aDataStore, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const = 0;
+        virtual void clone(i_semantic_concept& aInstance, neolib::i_ref_ptr<i_semantic_concept>& aCopy) const = 0;
     public:
         virtual bool has_parent() const = 0;
         virtual i_semantic_concept const& parent() const = 0;
@@ -65,16 +65,16 @@ namespace neos::language
     public:
         virtual emit_type emit_as() const = 0;
         virtual bool can_fold() const = 0;
-        virtual bool can_fold(const i_semantic_concept& aRhs) const = 0;
+        virtual bool can_fold(i_semantic_concept const& aRhs) const = 0;
         // debug
     public:
         virtual void trace(neolib::i_string& aResult) const = 0;
         // helpers
     public:
-        neolib::ref_ptr<i_semantic_concept> clone(i_semantic_concept& aDataStore) const
+        neolib::ref_ptr<i_semantic_concept> clone(i_semantic_concept& aInstance) const
         {
             neolib::ref_ptr<i_semantic_concept> copy;
-            clone(aDataStore, copy);
+            clone(aInstance, copy);
             return copy;
         }
         std::string trace() const
@@ -85,11 +85,11 @@ namespace neos::language
         }
         // family
     public:
-        bool is_same(const i_semantic_concept& other) const
+        bool is_same(i_semantic_concept const& other) const
         {
             return &other == this;
         }
-        bool is_ancestor_of(const i_semantic_concept& child) const
+        bool is_ancestor_of(i_semantic_concept const& child) const
         {
             auto a = &child;
             while (a->has_parent())
@@ -100,7 +100,7 @@ namespace neos::language
             }
             return false;
         }
-        bool is_related_to(const i_semantic_concept& other) const
+        bool is_related_to(i_semantic_concept const& other) const
         {
             return is_same(other) || is_ancestor_of(other);
         }
@@ -131,7 +131,7 @@ namespace neos::language
                 do_fold(aContext, result);
             return result;
         }
-        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext, const i_semantic_concept& aRhs)
+        neolib::ref_ptr<i_semantic_concept> fold(i_context& aContext, i_semantic_concept const& aRhs)
         {
             neolib::ref_ptr<i_semantic_concept> result;
             if (can_fold(aRhs))
@@ -144,7 +144,7 @@ namespace neos::language
         // emit
     protected:
         virtual void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) = 0;
-        virtual void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) = 0;
+        virtual void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) = 0;
     };
 }
 

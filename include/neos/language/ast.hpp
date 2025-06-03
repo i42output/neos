@@ -31,11 +31,13 @@ namespace neos
         class ast
         {
         public:
-            class node : public std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table::iterator>
+            class node : 
+                public std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table::iterator>, 
+                public std::enable_shared_from_this<node>
             {
             public:
                 using value_type = std::variant<std::monostate, neolib::ref_ptr<i_semantic_concept>, symbol_table::iterator>;
-                using children_t = std::vector<std::unique_ptr<node>>;
+                using children_t = std::vector<std::shared_ptr<node>>;
             public:
                 node()
                 {
@@ -58,6 +60,33 @@ namespace neos
             public:
                 using value_type::operator=;
             public:
+                bool is_sibling(node const& aSibling) const
+                {
+                    return iParent == aSibling.iParent;
+                }
+                bool is_child(node const& aChild) const
+                {
+                    for (auto const& child : children())
+                        if (&*child == &aChild)
+                            return true;
+                    return false;
+                }
+                bool has_parent() const
+                {
+                    return iParent != nullptr;
+                }
+                node const& parent() const
+                {
+                    if (iParent != nullptr)
+                        return *iParent;
+                    throw std::logic_error("neos::language::ast::node::parent");
+                }
+                node& parent()
+                {
+                    if (iParent != nullptr)
+                        return *iParent;
+                    throw std::logic_error("neos::language::ast::node::parent");
+                }
                 children_t const& children() const
                 {
                     return iChildren;
@@ -65,6 +94,103 @@ namespace neos
                 children_t& children()
                 {
                     return iChildren;
+                }
+            public:
+                neolib::i_string_view const& source() const
+                {
+                    neolib::i_string_view const* result = nullptr;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                result = &lhs->source();
+                            }
+                        }, *this);
+                    if (result != nullptr)
+                        return *result;
+                    throw std::logic_error("neos::language::ast::node::source()");
+                }
+            public:
+                bool can_fold() const
+                {
+                    bool canFold = false;
+                    std::visit([&](auto const& lhs)
+                    {
+                        if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                            neolib::ref_ptr<i_semantic_concept>>)
+                        {
+                            canFold = lhs->can_fold();
+                        }
+                    }, *this);
+                    return canFold;
+                }
+                bool can_fold(node const& aRhs) const
+                {
+                    bool canFold = false;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                std::visit([&](auto const& rhs)
+                                {
+                                    if constexpr (std::is_same_v<std::decay_t<decltype(rhs)>,
+                                        neolib::ref_ptr<i_semantic_concept>>)
+                                    {
+                                        canFold = lhs->can_fold(*rhs);
+                                    }
+                                }, aRhs);
+                            }
+                        }, *this);
+                    return canFold;
+                }
+                std::shared_ptr<node> fold(i_context& aContext)
+                {
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                auto result = lhs->fold(aContext);
+                                *this = result;
+                            }
+                        }, *this);
+                    return shared_from_this();
+                }
+                std::shared_ptr<node> fold(i_context& aContext, node const& aRhs)
+                {
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                std::visit([&](auto const& rhs)
+                                    {
+                                        if constexpr (std::is_same_v<std::decay_t<decltype(rhs)>,
+                                            neolib::ref_ptr<i_semantic_concept>>)
+                                        {
+                                            auto result = lhs->fold(aContext, *rhs);
+                                            *this = result;
+                                        }
+                                    }, aRhs);
+                            }
+                        }, *this);
+                    return shared_from_this();
+                }
+            public:
+                std::string trace() const
+                {
+                    std::string result;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                result = lhs->trace();
+                            }
+                        }, *this);
+                    return result;
                 }
             private:
                 node* iParent = nullptr;
@@ -87,17 +213,13 @@ namespace neos
                 return *this;
             }
         public:
-            node const& root() const
-            {
-                return iRoot;
-            }
-            node& root()
+            std::shared_ptr<node> root() const
             {
                 return iRoot;
             }
         private:
             symbol_table& iSymbolTable;
-            node iRoot;
+            std::shared_ptr<node> iRoot = std::make_shared<node>();
         };
     }
 }

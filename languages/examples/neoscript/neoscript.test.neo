@@ -1,6 +1,6 @@
 // functions are pure
 fn test(x, y : i32; z : string) -> i64
 {
-    return 42;
+    return 1 + 2 + 3 * 4;
 }
 

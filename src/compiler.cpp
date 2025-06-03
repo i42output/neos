@@ -125,7 +125,7 @@ namespace neos::language
                 astNode = semanticConcept;
                 if (conceptName != "language.keyword")
                 {
-                    foldStack.push_back(semanticConcept);
+                    foldStack.push_back(astNode.shared_from_this());
                     if (context.compiler().trace() >= 2)
                         context.cout() << "Fold stack add: " << conceptName << " [" <<
                         neolib::to_escaped_string(conceptValue.to_std_string_view(), 32u, true) << "]" << std::endl;
@@ -163,7 +163,7 @@ namespace neos::language
             if (last)
             {
                 parser.create_ast();
-                walk_ast(iContext, aUnit.ast, fold_stack(), parser.ast(), aUnit.ast.root());
+                walk_ast(iContext, aUnit.ast, fold_stack(), parser.ast(), *aUnit.ast.root());
             }
         }
             
@@ -237,19 +237,35 @@ namespace neos::language
         if (fold_stack().empty())
             return false;
 
-        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<neolib::ref_ptr<i_semantic_concept>> result = {})
+        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<std::shared_ptr<ast::node>> result = {})
             {
                 std::ostringstream traceOutput;
                 if (trace() >= 1)
                 {
-                    if (rhs)
-                        traceOutput << op << ": " << (**lhs).trace() << " <- " << (***rhs).trace() <<
-                            (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
-                            std::endl;
-                    else
-                        traceOutput << op << ": " << (**lhs).trace() << " <-|" <<
-                        (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
-                        std::endl;
+                    std::visit([&](auto const& lhs)
+                    {
+                        if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>, 
+                            neolib::ref_ptr<i_semantic_concept>>)
+                        {
+                            if (rhs)
+                            {
+                                std::visit([&](auto const& rhs)
+                                {
+                                    if constexpr (std::is_same_v<std::decay_t<decltype(rhs)>,
+                                        neolib::ref_ptr<i_semantic_concept>>)
+                                    {
+                                        traceOutput << op << ": " << lhs->trace() << " <- " << rhs->trace() <<
+                                            (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
+                                            std::endl;
+                                    }
+                                }, ***rhs);
+                            }
+                            else
+                                traceOutput << op << ": " << lhs->trace() << " <-|" <<
+                                    (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
+                                    std::endl;
+                        }
+                    }, **lhs);
                 }
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
                     iContext.cout() << traceOutput.str() << std::flush;
@@ -294,22 +310,11 @@ namespace neos::language
                         ilhs = fold_stack().insert(ilhs, result);
                     didSome = true;
                 }
-                else if (lhs.can_fold(rhs))
-                {
-                    trace_out("Folding", ilhs, irhs);
-                    auto result = lhs.fold(iContext, rhs);
-                    trace_out("Folded", ilhs, irhs, result);
-                    ilhs = fold_stack().erase(ilhs);
-                    ilhs = fold_stack().erase(ilhs);
-                    if (result)
-                        ilhs = fold_stack().insert(ilhs, result);
-                    didSome = true;
-                }
                 else
-                    ++ilhs;
+                    break;
             }
             else
-                ++ilhs;
+                break;
         }
         if (!didSome)
         {

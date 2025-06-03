@@ -180,7 +180,7 @@ namespace neos::language
         text text;
     };
 
-    using fold_stack = std::vector<neolib::ref_ptr<i_semantic_concept>>;
+    using fold_stack = std::vector<std::shared_ptr<ast::node>>;
 
     class compiler : public i_compiler
     {

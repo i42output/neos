@@ -37,16 +37,16 @@ namespace neos::concepts::core
         }
         // emit
     public:
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return aRhs.name() == "string.utf8";
         }
         // emit
     protected:
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();
-            aResult.reset(this);
+            aResult = instance();
         }
     };
 
@@ -67,7 +67,7 @@ namespace neos::concepts::core
         {
             return holds_data();
         }
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return aRhs.name() == "source.package.name";
         }
@@ -81,10 +81,10 @@ namespace neos::concepts::core
             if (!aContext.compiler().compile(std::move(file)))
                 throw std::runtime_error("failed to compile imported source fragment.");
         }
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();
-            aResult.reset(this);
+            aResult = instance();
         }
     };
 
@@ -101,16 +101,16 @@ namespace neos::concepts::core
         }
         // emit
     public:
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return aRhs.name() == "string.utf8";
         }
         // emit
     protected:
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();
-            aResult.reset(this);
+            aResult = instance();
         }
     };
 
@@ -131,14 +131,14 @@ namespace neos::concepts::core
         {
             return holds_data();
         }
-        bool can_fold(const i_semantic_concept& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const override
         {
             return aRhs.name() == "module.package.name";
         }
-        void do_fold(i_context& aContext, const i_semantic_concept& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             data<neolib::string>() = aRhs.data<neolib::i_string>();
-            aResult.reset(this);
+            aResult = instance();
         }
     };
 

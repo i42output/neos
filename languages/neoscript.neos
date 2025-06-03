@@ -166,7 +166,7 @@ ${
 
     function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
     procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
-    fn sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression , WS , arrow , WS , type ) ;
+    fn sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression , WS , arrow , WS , type $ language.function.return.type ) ;
     proc sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , proc parameters , WS , close expression ) ;
     fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
     proc parameters $ language.function.parameters ::= [ proc parameter block , { WS , semicolon , WS , proc parameter block } ] ;
