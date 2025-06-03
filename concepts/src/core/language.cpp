@@ -326,6 +326,28 @@ namespace neos::concepts::core
             semantic_concept{ "language.function.parameters", neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.is("language.type"_s) || aRhs.is("language.function.parameter"_s))
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.type"_s))
+            {
+                for (auto i = data<i_data_type>().rbegin(); i != data<i_data_type>().rend(); ++i)
+                    i->set_parameter_type(aRhs.data<neos::language::type>());
+                aResult = instance();
+            }
+            else if (aRhs.is("language.function.parameter"_s))
+            {
+                data<i_data_type>().push_back(aRhs.data<i_function_parameter>());
+                aResult = instance();
+            }
+        }
     };
 
     class language_function_parameter : public semantic_concept<language_function_parameter>

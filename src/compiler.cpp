@@ -289,9 +289,7 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
-                if (!rhs.is_sibling(lhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs) && !didSome)
-                    ++ilhs;
-                else if (rhs.can_fold())
+                if (rhs.can_fold())
                 {
                     trace_out("Folding", irhs);
                     auto result = rhs.fold(iContext);
@@ -301,6 +299,8 @@ namespace neos::language
                         irhs = fold_stack().insert(irhs, result);
                     didSome = true;
                 }
+                else if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs))
+                    ++ilhs;
                 else if (lhs.can_fold(rhs))
                 {
                     trace_out("Folding", ilhs, irhs);
