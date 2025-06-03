@@ -281,7 +281,7 @@ namespace neos::language
                 auto result = lhs.fold(iContext);
                 trace_out("Folded", ilhs, {}, result);
                 ilhs = fold_stack().erase(ilhs);
-                if (result)
+                if (!result->is_empty())
                     ilhs = fold_stack().insert(ilhs, result);
                 didSome = true;
             }
@@ -289,13 +289,15 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
-                if (rhs.can_fold())
+                if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs))
+                    ++ilhs;
+                else if (rhs.can_fold())
                 {
                     trace_out("Folding", irhs);
                     auto result = rhs.fold(iContext);
                     trace_out("Folded", irhs, {}, result);
                     irhs = fold_stack().erase(irhs);
-                    if (result)
+                    if (!result->is_empty())
                         irhs = fold_stack().insert(irhs, result);
                     didSome = true;
                 }
@@ -306,7 +308,18 @@ namespace neos::language
                     trace_out("Folded", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     ilhs = fold_stack().erase(ilhs);
-                    if (result)
+                    if (!result->is_empty())
+                        ilhs = fold_stack().insert(ilhs, result);
+                    didSome = true;
+                }
+                else if (lhs.can_fold(rhs))
+                {
+                    trace_out("Folding", ilhs, irhs);
+                    auto result = lhs.fold(iContext, rhs);
+                    trace_out("Folded", ilhs, irhs, result);
+                    ilhs = fold_stack().erase(ilhs);
+                    ilhs = fold_stack().erase(ilhs);
+                    if (!result->is_empty())
                         ilhs = fold_stack().insert(ilhs, result);
                     didSome = true;
                 }

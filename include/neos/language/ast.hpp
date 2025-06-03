@@ -60,6 +60,13 @@ namespace neos
             public:
                 using value_type::operator=;
             public:
+                bool is_empty() const
+                {
+                    return std::holds_alternative<std::monostate>(*this) ||
+                        (std::holds_alternative<neolib::ref_ptr<i_semantic_concept>>(*this) &&
+                            !std::get<neolib::ref_ptr<i_semantic_concept>>(*this).valid());
+                }
+            public:
                 bool is_sibling(node const& aSibling) const
                 {
                     return iParent == aSibling.iParent;
