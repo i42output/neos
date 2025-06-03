@@ -43,10 +43,6 @@ namespace neos::language
         ~semanteme()
         {
         }
-        i_semantic_concept& c() const
-        {
-            return *iConcept;
-        }
         bool has_parent() const final
         {
             return iConcept->has_parent();
@@ -75,20 +71,20 @@ namespace neos::language
         }
         // parse
     public:
-        neolib::i_string_view const& source() const override
+        neolib::i_string_view const& source() const final
         {
             return iSource;
         }
-        void update_source(neolib::i_string_view const& aSource) override
+        void update_source(neolib::i_string_view const& aSource) final
         {
             iSource = aSource;
         }
-        bool holds_data() const override
+        bool holds_data() const final
         {
             return iData.has_value();
         }
         using i_semantic_concept::data;
-        void const* data() const override
+        void const* data() const final
         {
             if constexpr (!std::is_same_v<typename Concept::data_type, void>)
             {
@@ -106,27 +102,27 @@ namespace neos::language
             else
                 return nullptr;
         }
-        void* data() override
+        void* data() final
         {
             return const_cast<void*>(const_cast<semanteme const&>(*this).data());
         }
         // emit
     public:
-        emit_type emit_as() const override
+        emit_type emit_as() const final
         {
             return iConcept->emit_as();
         }
-        bool can_fold() const override
+        bool can_fold() const final
         {
             return iConcept->can_fold();
         }
-        bool can_fold(i_semantic_concept const& aRhs) const override
+        bool can_fold(i_semantic_concept const& aRhs) const final
         {
             return iConcept->can_fold(aRhs);
         }
         // debug
     public:
-        void trace(neolib::i_string& aResult) const override
+        void trace(neolib::i_string& aResult) const final
         {
             std::ostringstream oss;
             oss << name();
@@ -145,17 +141,17 @@ namespace neos::language
         }
         // parse
     protected:
-        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
+        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const final
         {
             throw std::logic_error("neos::language::semanteme: already instantiated!");
         }
         // emit
     protected:
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) final
         {
             iConcept->do_fold(aContext, aResult);
         }
-        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) final
         {
             iConcept->do_fold(aContext, aRhs, aResult);
         }
@@ -230,34 +226,34 @@ namespace neos::language
         }
         // parse
     public:
-        neolib::i_string_view const& source() const override
+        neolib::i_string_view const& source() const final
         {
             if (iInstance)
                 return iInstance->source();
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
-        void update_source(neolib::i_string_view const& aSource) override
+        void update_source(neolib::i_string_view const& aSource) final
         {
             if (iInstance)
                 return iInstance->update_source(aSource);
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
-        bool holds_data() const override
+        bool holds_data() const final
         {
             return iInstance && iInstance->holds_data();
         }
         using i_semantic_concept::data;
-        void const* data() const override
+        void const* data() const final
         {
             return iInstance ? iInstance->data() : nullptr;
         }
-        void* data() override
+        void* data() final
         {
             return iInstance ? iInstance->data() : nullptr;
         }
         // emit
     public:
-        emit_type emit_as() const override
+        emit_type emit_as() const final
         {
             return iEmitAs;
         }
