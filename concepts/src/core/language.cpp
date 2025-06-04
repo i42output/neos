@@ -303,10 +303,22 @@ namespace neos::concepts::core
         neolib::string parameterName;
         neos::language::type parameterType = neos::language::type::UNKNOWN;
 
-        neolib::i_string const& parameter_name() const final { return parameterName; }
-        void set_parameter_name(neolib::i_string_view const& aParameterName) final { parameterName = aParameterName; }
-        neos::language::type parameter_type() const final { return parameterType; }
-        void set_parameter_type(neos::language::type aParameterType) final { parameterType = aParameterType; }
+        neolib::i_string const& parameter_name() const final 
+        { 
+            return parameterName; 
+        }
+        void set_parameter_name(neolib::i_string_view const& aParameterName) final 
+        { 
+            parameterName = aParameterName; 
+        }
+        neos::language::type parameter_type() const final 
+        { 
+            return parameterType; 
+        }
+        void set_parameter_type(neos::language::type aParameterType) final 
+        { 
+            parameterType = aParameterType; 
+        }
 
         function_parameter() = default;
         function_parameter(i_function_parameter const& other) : 
@@ -338,7 +350,9 @@ namespace neos::concepts::core
         {
             if (aRhs.is("language.type"_s))
             {
-                for (auto i = data<i_data_type>().rbegin(); i != data<i_data_type>().rend(); ++i)
+                for (auto i = data<i_data_type>().rbegin(); 
+                    i != data<i_data_type>().rend() && i->parameter_type() == neos::language::type::UNKNOWN; 
+                    ++i)
                     i->set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
