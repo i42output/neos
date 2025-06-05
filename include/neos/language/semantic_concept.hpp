@@ -79,6 +79,14 @@ namespace neos::language
         {
             iSource = aSource;
         }
+        void instance(neolib::i_ref_ptr<i_semantic_concept>& aInstance) const final
+        {
+            throw std::logic_error("neos::language::semanteme: is instance!");
+        }
+        void set_instance(i_semantic_concept& aInstance) final
+        {
+            throw std::logic_error("neos::language::semanteme: already instantiated!");
+        }
         bool holds_data() const final
         {
             return iData.has_value();
@@ -276,17 +284,18 @@ namespace neos::language
         }
         // parse
     protected:
-        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const override
+        void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const final
         {
             aResult = neolib::make_ref<semanteme<Concept>>(*this, aContext, aSource);
         }
         // emit
     protected:
-        neolib::ref_ptr<i_semantic_concept> instance() const
+        using i_semantic_concept::instance;
+        void instance(neolib::i_ref_ptr<i_semantic_concept>& aInstance) const final
         {
-            return iInstance;
+            aInstance = iInstance;
         }
-        void set_instance(i_semantic_concept& aInstance)
+        void set_instance(i_semantic_concept& aInstance) final
         {
             iInstance = aInstance;
         }

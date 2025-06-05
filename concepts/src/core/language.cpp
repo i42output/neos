@@ -24,6 +24,95 @@
 
 namespace neos::concepts::core
 {   
+    namespace shared
+    {
+        struct i_function_parameter
+        {
+            virtual neolib::i_string const& parameter_name() const = 0;
+            virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
+            virtual neos::language::type parameter_type() const = 0;
+            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
+        };
+
+        struct function_parameter : i_function_parameter
+        {
+            using abstract_type = i_function_parameter;
+
+            neolib::string parameterName;
+            neos::language::type parameterType = neos::language::type::UNKNOWN;
+
+            neolib::i_string const& parameter_name() const final
+            {
+                return parameterName;
+            }
+            void set_parameter_name(neolib::i_string_view const& aParameterName) final
+            {
+                parameterName = aParameterName;
+            }
+            neos::language::type parameter_type() const final
+            {
+                return parameterType;
+            }
+            void set_parameter_type(neos::language::type aParameterType) final
+            {
+                parameterType = aParameterType;
+            }
+
+            function_parameter() = default;
+            function_parameter(i_function_parameter const& other) :
+                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
+            {}
+        };
+
+        using i_function_parameters = neolib::i_vector<i_function_parameter>;
+        using function_parameters = neolib::vector<function_parameter>;
+
+        using i_optional_parameter_list = neolib::i_optional<i_function_parameters>;
+
+        struct i_function_signature
+        {
+            virtual neolib::i_string const& function_name() const = 0;
+            virtual void set_function_name(neolib::i_string const& aFunctionName) = 0;
+            virtual i_optional_parameter_list const& parameters() const = 0;
+            virtual i_optional_parameter_list& parameters() = 0;
+            virtual neos::language::type return_type() const = 0;
+            virtual void set_return_type(neos::language::type aFunctionReturnType) = 0;
+        };
+
+        using optional_parameter_list = neolib::optional<neolib::vector<function_parameter>>;
+
+        struct function_signature : i_function_signature
+        {
+            neolib::string functionName;
+            optional_parameter_list functionParameters;
+            neos::language::type functionReturnType;
+            neolib::i_string const& function_name() const final
+            {
+                return functionName;
+            }
+            void set_function_name(neolib::i_string const& aFunctionName) final
+            {
+                functionName = aFunctionName;
+            }
+            optional_parameter_list const& parameters() const final
+            {
+                return functionParameters;
+            }
+            optional_parameter_list& parameters() final
+            {
+                return functionParameters;
+            }
+            neos::language::type return_type() const final
+            {
+                return functionReturnType;
+            }
+            void set_return_type(neos::language::type aFunctionReturnType) final
+            {
+                functionReturnType = aFunctionReturnType;
+            }
+        };
+    }
+
     class language_whitespace : public semantic_concept<language_whitespace>
     {
         // construction
@@ -260,6 +349,9 @@ namespace neos::concepts::core
 
     class language_function_name : public semantic_concept<language_function_name>
     {
+        // data
+    public:
+        using data_type = neolib::string;
         // construction
     public:
         language_function_name() :
@@ -288,50 +380,54 @@ namespace neos::concepts::core
         }
     };
 
-    struct i_function_parameter
+    class language_function_signature : public semantic_concept<language_function_signature>
     {
-        virtual neolib::i_string const& parameter_name() const = 0;
-        virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
-        virtual neos::language::type parameter_type() const = 0;
-        virtual void set_parameter_type(neos::language::type aParameterType) = 0;
-    };
-
-    struct function_parameter : i_function_parameter
-    {
-        using abstract_type = i_function_parameter;
-
-        neolib::string parameterName;
-        neos::language::type parameterType = neos::language::type::UNKNOWN;
-
-        neolib::i_string const& parameter_name() const final 
-        { 
-            return parameterName; 
+        // data
+    public:
+        using data_type = shared::function_signature;
+        // construction
+    public:
+        language_function_signature() :
+            semantic_concept{ "language.function.signature", neos::language::emit_type::Infix }
+        {
         }
-        void set_parameter_name(neolib::i_string_view const& aParameterName) final 
-        { 
-            parameterName = aParameterName; 
+        // emit
+    public:
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.name() == "language.function.name")
+                return true;
+            else if (aRhs.name() == "language.function.parameters")
+                return true;
+            else if (aRhs.name() == "language.function.return.type")
+                return true;
+            return false;
         }
-        neos::language::type parameter_type() const final 
-        { 
-            return parameterType; 
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.name() == "language.function.name")
+            {
+                data<shared::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
+                aResult = instance();
+            }
+            else if (aRhs.name() == "language.function.parameters")
+            {
+                data<shared::i_function_signature>().parameters() = aRhs.data<shared::i_function_parameters>();
+                aResult = instance();
+            }
+            else if (aRhs.name() == "language.function.return.type")
+            {
+                data<shared::i_function_signature>().set_return_type(aRhs.data<neos::language::type>());
+                aResult = instance();
+            }
         }
-        void set_parameter_type(neos::language::type aParameterType) final 
-        { 
-            parameterType = aParameterType; 
-        }
-
-        function_parameter() = default;
-        function_parameter(i_function_parameter const& other) : 
-            parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
-        {}
     };
 
     class language_function_parameters : public semantic_concept<language_function_parameters>
     {
         // data
     public:
-        using i_data_type = neolib::i_vector<i_function_parameter>;
-        using data_type = neolib::vector<function_parameter>;
+        using data_type = shared::function_parameters;
         // construction
     public:
         language_function_parameters() :
@@ -342,7 +438,10 @@ namespace neos::concepts::core
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.type"_s) || aRhs.is("language.function.parameter"_s))
+            if (aRhs.is("language.type"_s) || 
+                aRhs.is("language.function.parameter"_s) ||
+                aRhs.is("language.function.parameters"_s) ||
+                aRhs.is("language.function.name"_s))
                 return true;
             return false;
         }
@@ -350,16 +449,30 @@ namespace neos::concepts::core
         {
             if (aRhs.is("language.type"_s))
             {
-                for (auto i = data<i_data_type>().rbegin(); 
-                    i != data<i_data_type>().rend() && i->parameter_type() == neos::language::type::UNKNOWN; 
+                for (auto i = data<shared::i_function_parameters>().rbegin();
+                    i != data<shared::i_function_parameters>().rend() && 
+                        i->parameter_type() == neos::language::type::UNKNOWN;
                     ++i)
                     i->set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
             else if (aRhs.is("language.function.parameter"_s))
             {
-                data<i_data_type>().push_back(aRhs.data<i_function_parameter>());
+                data<shared::i_function_parameters>().push_back(aRhs.data<shared::i_function_parameter>());
                 aResult = instance();
+            }
+            else if (aRhs.is("language.function.parameters"_s))
+            {
+                if (holds_data())
+                    aResult = instance();
+                else
+                    aResult = aRhs.instance();
+            }
+            else if (aRhs.is("language.function.name"_s))
+            {
+                aResult = language_function_signature{}.instantiate(aContext, aRhs.source());
+                aResult->data<shared::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
+                aResult->data<shared::i_function_signature>().parameters() = data<shared::i_function_parameters>();
             }
         }
     };
@@ -368,8 +481,7 @@ namespace neos::concepts::core
     {
         // data
     public:
-        using i_data_type = i_function_parameter;
-        using data_type = function_parameter;
+        using data_type = shared::function_parameter;
         // construction
     public:
         language_function_parameter() :
@@ -384,32 +496,34 @@ namespace neos::concepts::core
         }
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.identifier"_s) || aRhs.is("language.type"_s) || aRhs.is("language.function.parameter"_s))
+            if (aRhs.is("language.identifier"_s) || 
+                aRhs.is("language.type"_s) || 
+                aRhs.is("language.function.parameter"_s))
                 return true;
             return false;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            data<i_data_type>().set_parameter_name(source());
+            data<shared::i_function_parameter>().set_parameter_name(source());
             aResult = instance();
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             if (aRhs.is("language.identifier"_s))
             {
-                data<i_data_type>().set_parameter_name(aRhs.source());
+                data<shared::i_function_parameter>().set_parameter_name(aRhs.source());
                 aResult = instance();
             }
             else if (aRhs.is("language.type"_s))
             {
-                data<i_data_type>().set_parameter_type(aRhs.data<neos::language::type>());
+                data<shared::i_function_parameter>().set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
             else if (aRhs.is("language.function.parameter"_s))
             {
                 aResult = language_function_parameters{}.instantiate(aContext, source());
-                aResult->data<neolib::i_vector<i_function_parameter>>().push_back(data<i_function_parameter>());
-                aResult->data<neolib::i_vector<i_function_parameter>>().push_back(aRhs.data<i_function_parameter>());
+                aResult->data<shared::i_function_parameters>().push_back(data<shared::i_function_parameter>());
+                aResult->data<shared::i_function_parameters>().push_back(aRhs.data<shared::i_function_parameter>());
             }
         }
     };
@@ -455,6 +569,22 @@ namespace neos::concepts::core
             semantic_concept{ "language.function.return.type", neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.is("language.type"_s))
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.type"_s))
+            {
+                data<neos::language::type>() = aRhs.data<neos::language::type>();
+                aResult = instance();
+            }
+        }
     };
 
     class language_function_locals : public semantic_concept<language_function_locals>
@@ -474,59 +604,6 @@ namespace neos::concepts::core
         language_function_local() :
             semantic_concept{ "language.function.local", neos::language::emit_type::Infix }
         {
-        }
-    };
-
-    class language_function_signature : public semantic_concept<language_function_signature>
-    {
-        // data
-    public:
-        using i_parameter_list = neolib::i_optional<neolib::i_vector<neolib::i_pair<neos::language::type, neolib::i_string>>>;
-        struct i_data_type
-        {
-            virtual neolib::i_string const& function_name() const = 0;
-            virtual void set_function_name(neolib::i_string_view const& aFunctionName) = 0;
-            virtual i_parameter_list const& parameters() const = 0;
-            virtual i_parameter_list& parameters() = 0;
-        };
-        using parameter_list = neolib::optional<neolib::vector<neolib::pair<neos::language::type, neolib::string>>>;
-        struct data_type : i_data_type
-        {
-            neolib::string functionName;
-            parameter_list functionParameters;
-            neolib::i_string const& function_name() const final { return functionName; }
-            void set_function_name(neolib::i_string_view const& aFunctionName) final { functionName = aFunctionName; }
-            parameter_list const& parameters() const final { return functionParameters; }
-            parameter_list& parameters() { return functionParameters; }
-        };
-        // construction
-    public:
-        language_function_signature() :
-            semantic_concept{ "language.function.signature", neos::language::emit_type::Infix }
-        {
-        }
-        // emit
-    public:
-        bool can_fold(i_semantic_concept const& aRhs) const override
-        {
-            if (aRhs.name() == "language.function.name")
-                return true;
-            else if (aRhs.name() == "language.function.parameters")
-                return aRhs.holds_data();
-            return false;
-        }
-        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-            if (aRhs.name() == "language.function.name")
-            {
-                data<i_data_type>().set_function_name(aRhs.source());
-                aResult = instance();
-            }
-            else if (aRhs.name() == "language.function.parameters")
-            {
-                data<i_data_type>().parameters();
-                aResult = instance();
-            }
         }
     };
 

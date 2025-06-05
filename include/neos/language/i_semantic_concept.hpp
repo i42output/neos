@@ -58,6 +58,9 @@ namespace neos::language
     public:
         virtual neolib::i_string_view const& source() const = 0;
         virtual void update_source(neolib::i_string_view const& aSource) = 0;
+        virtual void instance(neolib::i_ref_ptr<i_semantic_concept>& aInstance) const = 0;
+        neolib::ref_ptr<i_semantic_concept> instance() const { neolib::ref_ptr<i_semantic_concept> result; instance(result); return result; }
+        virtual void set_instance(i_semantic_concept& aInstance) = 0;
         virtual bool holds_data() const = 0;
         virtual void const* data() const = 0;
         virtual void* data() = 0;

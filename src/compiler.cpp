@@ -242,30 +242,16 @@ namespace neos::language
                 std::ostringstream traceOutput;
                 if (trace() >= 1)
                 {
-                    std::visit([&](auto const& lhs)
-                    {
-                        if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>, 
-                            neolib::ref_ptr<i_semantic_concept>>)
-                        {
-                            if (rhs)
-                            {
-                                std::visit([&](auto const& rhs)
-                                {
-                                    if constexpr (std::is_same_v<std::decay_t<decltype(rhs)>,
-                                        neolib::ref_ptr<i_semantic_concept>>)
-                                    {
-                                        traceOutput << op << ": " << lhs->trace() << " <- " << rhs->trace() <<
-                                            (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
-                                            std::endl;
-                                    }
-                                }, ***rhs);
-                            }
-                            else
-                                traceOutput << op << ": " << lhs->trace() << " <-|" <<
-                                    (result ? (*result) ? " = " + (**result).trace() : " = ()" : "") <<
-                                    std::endl;
-                        }
-                    }, **lhs);
+                    if (rhs)
+                        traceOutput << op << ": " << 
+                            (**lhs).trace() << " <- " << (***rhs).trace() <<
+                            (result ? " = " + (**result).trace() : "") <<
+                            std::endl;
+                    else
+                        traceOutput << op << ": " << 
+                            (**lhs).trace() << " <-|" <<
+                            (result ? " = " + (**result).trace() : "") <<
+                            std::endl;
                 }
                 if (!trace_filter() || traceOutput.str().find(*trace_filter()) != std::string::npos)
                     iContext.cout() << traceOutput.str() << std::flush;
