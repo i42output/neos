@@ -57,14 +57,44 @@ namespace neos
                     iParent{ &aParent } 
                 {
                 }
+                node& operator=(node const& aOther)
+                {
+                    value_type::operator=(aOther);
+                    return *this;
+                }
             public:
-                using value_type::operator=;
+                node& operator=(value_type const& aValue)
+                {
+                    value_type::operator=(aValue);
+                    return *this;
+                }
             public:
+                std::string name() const
+                {
+                    std::string result;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                result = lhs->name();
+                            }
+                        }, *this);
+                    if (!result.empty())
+                        return result;
+                    throw std::logic_error("neos::language::ast::node::name");
+                }
                 bool is_empty() const
                 {
                     return std::holds_alternative<std::monostate>(*this) ||
                         (std::holds_alternative<neolib::ref_ptr<i_semantic_concept>>(*this) &&
                             !std::get<neolib::ref_ptr<i_semantic_concept>>(*this).valid());
+                }
+                bool holds_data() const
+                {
+                    return !is_empty() &&
+                        (std::holds_alternative<neolib::ref_ptr<i_semantic_concept>>(*this) &&
+                            std::get<neolib::ref_ptr<i_semantic_concept>>(*this)->holds_data());
                 }
             public:
                 bool is_sibling(node const& aSibling) const
@@ -75,6 +105,15 @@ namespace neos
                 {
                     for (auto const& child : children())
                         if (&*child == &aChild)
+                            return true;
+                    return false;
+                }
+                bool is_descendent(node const& aChild) const
+                {
+                    for (auto const& child : children())
+                        if (&*child == &aChild)
+                            return true;
+                        else if (child->is_descendent(aChild))
                             return true;
                     return false;
                 }
@@ -116,9 +155,22 @@ namespace neos
                         }, *this);
                     if (result != nullptr)
                         return *result;
-                    throw std::logic_error("neos::language::ast::node::source()");
+                    throw std::logic_error("neos::language::ast::node::source");
                 }
             public:
+                bool has_ghosts() const
+                {
+                    bool result = false;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                result = lhs->has_ghosts();
+                            }
+                        }, *this);
+                    return result;
+                }
                 bool can_fold() const
                 {
                     bool canFold = false;

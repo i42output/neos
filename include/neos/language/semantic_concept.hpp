@@ -120,6 +120,10 @@ namespace neos::language
         {
             return iConcept->emit_as();
         }
+        bool has_ghosts() const final
+        {
+            return iConcept->has_ghosts();
+        }
         bool can_fold() const final
         {
             return iConcept->can_fold();
@@ -176,6 +180,9 @@ namespace neos::language
     public:
         using base_type = neolib::reference_counted<i_semantic_concept>;
         using concept_type = Concept;
+        // folding
+    public:
+        static constexpr bool HasGhosts = false;
         // construction
     public:
         semantic_concept(std::string const& aName, emit_type aEmitAs = emit_type::Postfix) :
@@ -264,6 +271,10 @@ namespace neos::language
         emit_type emit_as() const final
         {
             return iEmitAs;
+        }
+        bool has_ghosts() const final
+        {
+            return Concept::HasGhosts;
         }
         bool can_fold() const override
         {

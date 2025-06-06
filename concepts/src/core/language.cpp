@@ -385,6 +385,8 @@ namespace neos::concepts::core
         // data
     public:
         using data_type = shared::function_signature;
+    public:
+        static constexpr bool HasGhosts = true;
         // construction
     public:
         language_function_signature() :
@@ -428,6 +430,9 @@ namespace neos::concepts::core
         // data
     public:
         using data_type = shared::function_parameters;
+        // folding
+    public:
+        static constexpr bool HasGhosts = true;
         // construction
     public:
         language_function_parameters() :
@@ -440,7 +445,6 @@ namespace neos::concepts::core
         {
             if (aRhs.is("language.type"_s) || 
                 aRhs.is("language.function.parameter"_s) ||
-                aRhs.is("language.function.parameters"_s) ||
                 aRhs.is("language.function.name"_s))
                 return true;
             return false;
@@ -460,13 +464,6 @@ namespace neos::concepts::core
             {
                 data<shared::i_function_parameters>().push_back(aRhs.data<shared::i_function_parameter>());
                 aResult = instance();
-            }
-            else if (aRhs.is("language.function.parameters"_s))
-            {
-                if (holds_data())
-                    aResult = instance();
-                else
-                    aResult = aRhs.instance();
             }
             else if (aRhs.is("language.function.name"_s))
             {

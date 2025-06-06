@@ -286,7 +286,36 @@ namespace neos::language
                     didSome = true;
                 }
                 else if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs))
+                {
+                    if (trace() >= 3)
+                        trace_out("Skipping", ilhs, irhs);
                     ++ilhs;
+                }
+                else if (lhs.name() == rhs.name() && lhs.has_ghosts())
+                {
+                    if (lhs.holds_data() && !rhs.holds_data())
+                    {
+                        if (lhs.is_child(rhs))
+                            fold_stack().erase(irhs);
+                        else
+                        {
+                            rhs = lhs;
+                            ilhs = fold_stack().erase(ilhs);
+                        }
+                        didSome = true;
+                    }
+                    else if (!lhs.holds_data() && rhs.holds_data())
+                    {
+                        if (lhs.is_child(rhs))
+                        {
+                            lhs = rhs;
+                            fold_stack().erase(irhs);
+                        }
+                        else
+                            fold_stack().erase(ilhs);
+                        didSome = true;
+                    }
+                }
                 else if (lhs.can_fold(rhs))
                 {
                     trace_out("Folding", ilhs, irhs);
@@ -317,6 +346,12 @@ namespace neos::language
         }
         if (!didSome)
         {
+            if (trace() >= 3)
+            {
+                for (auto const& e : fold_stack())
+                    iContext.cout() << "Fold stack: " << e->name() << " [" <<
+                    neolib::to_escaped_string(e->source().to_std_string_view(), 32u, true) << "]" << std::endl;
+            }
             if (fold_stack().size() == 1)
                 throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
                     "Failed to fold semantic concept: "s +
