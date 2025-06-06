@@ -890,19 +890,19 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "language.type.i8" }] = 
             neolib::make_ref<language_type_integer<std::int8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
         concepts()[neolib::string{ "language.type.u8" }] = 
-            neolib::make_ref<language_type_integer<std::uint8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
+            neolib::make_ref<language_type_integer<std::uint8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u8");
         concepts()[neolib::string{ "language.type.i16" }] = 
             neolib::make_ref<language_type_integer<int16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
         concepts()[neolib::string{ "language.type.u16" }] = 
-            neolib::make_ref<language_type_integer<std::uint16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
+            neolib::make_ref<language_type_integer<std::uint16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u16");
         concepts()[neolib::string{ "language.type.i32" }] = 
             neolib::make_ref<language_type_integer<std::int32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
         concepts()[neolib::string{ "language.type.u32" }] = 
-            neolib::make_ref<language_type_integer<std::uint32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
+            neolib::make_ref<language_type_integer<std::uint32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u32");
         concepts()[neolib::string{ "language.type.i64" }] = 
             neolib::make_ref<language_type_integer<std::int64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
         concepts()[neolib::string{ "language.type.u64" }] = 
-            neolib::make_ref<language_type_integer<std::uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
+            neolib::make_ref<language_type_integer<std::uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u64");
 // bignum
 //        concepts()[neolib::string{ "language.type.integer" }] = 
 //            neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.integer");
