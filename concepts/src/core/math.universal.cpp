@@ -19,6 +19,7 @@
 
 #include <neonumeric/integer.hpp>
 #include <neonumeric/real.hpp>
+#include <neos/language/type.hpp>
 #include "core.hpp"
 #include "math.universal.hpp"
 
@@ -34,17 +35,20 @@ namespace neos::concepts::core
     {
         // types
     public:
-        using data_type = neonumeric::integer<0u>;
+        using data_type = language::data<language::ibig>;
     public:
         using semantic_concept::semantic_concept;
         // emit
     public:
         bool can_fold() const override
         {
-            return true;
+            return !holds_data();
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
+            std::string value = source().to_std_string();
+            data<data_type>().v = language::ibig{ value };
+            aResult = instance();
         }
     };
 
@@ -52,17 +56,20 @@ namespace neos::concepts::core
     {
         // types
     public:
-        using data_type = neonumeric::real<0u>;
+        using data_type = language::data<language::fbig>;
     public:
         using semantic_concept::semantic_concept;
         // emit
     public:
         bool can_fold() const override
         {
-            return true;
+            return !holds_data();
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
+            std::string value = source().to_std_string();
+            data<data_type>().v = language::fbig{ value };
+            aResult = instance();
         }
     };
 

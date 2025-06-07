@@ -56,9 +56,12 @@ namespace neos
         template<typename T>
         struct i_data
         {
+            using abstract_type = i_data;
             using type = T;
 
+            virtual neolib::i_optional<type> const& value() const = 0;
             virtual neolib::i_optional<type>& value() = 0;
+            virtual neolib::i_optional<language::symbol_table::iterator> const& symbol() const = 0;
             virtual neolib::i_optional<language::symbol_table::iterator>& symbol() = 0;
         };
 
@@ -71,36 +74,47 @@ namespace neos
             neolib::optional<type> v;
             neolib::optional<language::symbol_table::iterator> s;
 
+            neolib::optional<type> const& value() const final { return v; }
             neolib::optional<type>& value() final { return v; }
+            neolib::optional<language::symbol_table::iterator> const& symbol() const final { return s; }
             neolib::optional<language::symbol_table::iterator>& symbol() final { return s; }
+
+            data() {}
+            data(abstract_type const& other) :
+                v{ other.value() },
+                s{ other.symbol() } {}
         };
+
+        struct i_composite_type;
+
+        using i_data_type = neolib::i_variant<
+            i_data<_void>,
+            i_data<boolean>,
+            i_data<u8>,
+            i_data<u16>,
+            i_data<u32>,
+            i_data<u64>,
+            i_data<i8>,
+            i_data<i16>,
+            i_data<i32>,
+            i_data<i64>,
+            i_data<f32>,
+            i_data<f64>,
+            i_data<neolib::abstract_t<ibig>>,
+            i_data<neolib::abstract_t<fbig>>,
+            i_data<neolib::abstract_t<string>>,
+            i_data<reference>,
+            i_data<neolib::i_ref_ptr<i_composite_type>>>;
 
         struct i_composite_type : neolib::i_reference_counted
         {
             using abstract_type = i_composite_type;
 
-            using i_data_type = neolib::i_variant<
-                i_data<_void>,
-                i_data<boolean>,
-                i_data<u8>,
-                i_data<u16>,
-                i_data<u32>,
-                i_data<u64>,
-                i_data<i8>,
-                i_data<i16>,
-                i_data<i32>,
-                i_data<i64>,
-                i_data<f32>,
-                i_data<f64>,
-                i_data<neolib::abstract_t<ibig>>,
-                i_data<neolib::abstract_t<fbig>>,
-                i_data<neolib::abstract_t<string>>,
-                i_data<reference>,
-                i_data<neolib::i_ref_ptr<i_composite_type>>>;
-
             virtual neolib::i_vector<i_data_type> const& contents() const = 0;
             virtual neolib::i_vector<i_data_type>& contents() = 0;
         };
+
+        struct composite_type;
 
         using data_type = neolib::variant<
             data<_void>,
