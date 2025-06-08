@@ -77,6 +77,17 @@ namespace neos::language
         virtual bool compile(i_source_fragment const& aFragment) = 0;
         virtual void enter_namespace(neolib::i_string const& aNamespace) = 0;
         virtual void leave_namespace() = 0;
+        virtual void push_operand(neolib::i_ref_ptr<i_semantic_concept> const& aOperand) = 0;
+        virtual void pop_operand(neolib::i_ref_ptr<i_semantic_concept>& aOperand) = 0;
+    public:
         virtual std::uint32_t trace() const = 0;
+        // helpers
+    public:
+        neolib::ref_ptr<i_semantic_concept> pop_operand()
+        {
+            neolib::ref_ptr<i_semantic_concept> operand;
+            pop_operand(operand);
+            return operand;
+        }
     };
 }

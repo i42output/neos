@@ -215,6 +215,22 @@ namespace neos::language
             throw std::runtime_error("Unmatched namespace scopes");
     }
 
+    void compiler::push_operand(neolib::i_ref_ptr<i_semantic_concept> const& aOperand)
+    {
+        state().operandStack.push_back(aOperand);
+    }
+
+    void compiler::pop_operand(neolib::i_ref_ptr<i_semantic_concept>& aOperand)
+    {
+        if (!state().operandStack.empty())
+        {
+            aOperand = state().operandStack.back();
+            state().operandStack.pop_back();
+        }
+        else
+            throw std::runtime_error("No operand");
+    }
+
     const compiler::compilation_state& compiler::state() const
     {
         return *iCompilationStateStack.back();

@@ -308,14 +308,10 @@ namespace neos::language
         }
         void set_instance(i_semantic_concept& aInstance) final
         {
-            iInstance = aInstance;
+            iInstance.reset(&aInstance);
         }
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-        }
-        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override {}
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override {}
         // attributes
     private:
         i_semantic_concept const* iParent;

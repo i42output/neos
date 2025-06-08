@@ -19,6 +19,7 @@
 
 #include <neonumeric/integer.hpp>
 #include <neonumeric/real.hpp>
+#include <neos/i_context.hpp>
 #include <neos/language/type.hpp>
 #include "core.hpp"
 #include "math.universal.hpp"
@@ -42,13 +43,16 @@ namespace neos::concepts::core
     public:
         bool can_fold() const override
         {
-            return !holds_data();
+            return true;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            std::string value = source().to_std_string();
-            data<data_type>().v = language::ibig{ value };
-            aResult = instance();
+            if (!holds_data())
+            {
+                std::string value = source().to_std_string();
+                data<data_type>().v = language::ibig{ value };
+            }
+            aContext.compiler().push_operand(instance());
         }
     };
 
@@ -63,13 +67,16 @@ namespace neos::concepts::core
     public:
         bool can_fold() const override
         {
-            return !holds_data();
+            return true;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            std::string value = source().to_std_string();
-            data<data_type>().v = language::fbig{ value };
-            aResult = instance();
+            if (!holds_data())
+            {
+                std::string value = source().to_std_string();
+                data<data_type>().v = language::fbig{ value };
+            }
+            aContext.compiler().push_operand(instance());
         }
     };
 
