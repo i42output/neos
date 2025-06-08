@@ -192,5 +192,32 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<reference> = type::Reference;
         template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_composite_type>> = type::Composite;
+
+        inline std::ostream& operator<<(std::ostream& stream, data_type const& data)
+        {
+            std::ostringstream result;
+            std::visit([&](auto const& d)
+                {
+                    if constexpr (std::is_same_v<std::decay_t<decltype(d)>, std::monostate>)
+                        result << "";
+                    else
+                    {
+                        if (!d.v.has_value())
+                            result << "";
+                        else
+                        {
+                            using vt = std::decay_t<decltype(d)>::type;
+                            if constexpr (std::is_scalar_v<std::decay_t<vt>> ||
+                                std::is_same_v<std::decay_t<vt>, ibig> ||
+                                std::is_same_v<std::decay_t<vt>, fbig>)
+                                result << d.v.value();
+                            else
+                                result << "*";
+                        }
+                    }
+                }, data);
+            stream << "[" << neolib::to_escaped_string(result.str(), 32u, true) << "]";
+            return stream;
+        }
    }
 }

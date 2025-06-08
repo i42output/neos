@@ -654,6 +654,25 @@ namespace neos::concepts::core
         }
     };
 
+    class language_expression : public semantic_concept<language_expression>
+    {
+        // construction
+    public:
+        language_expression() :
+            semantic_concept{ "language.expression", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+        }
+    };
+
     class language_type : public semantic_concept<language_type>
     {
         // data
@@ -809,10 +828,6 @@ namespace neos::concepts::core
             neolib::make_ref<language_program>();
         concepts()[neolib::string{ "language.namespace" }] =
             neolib::make_ref<language_namespace>();
-        concepts()[neolib::string{ "language.expression" }] =
-            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression");
-        concepts()[neolib::string{ "language.expression.operand" }] = 
-            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression.operand");
         concepts()[neolib::string{ "language.statement" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement");
         concepts()[neolib::string{ "language.statement.if" }] =
@@ -879,7 +894,11 @@ namespace neos::concepts::core
             neolib::make_ref<language_function_call>();
         concepts()[neolib::string{ "language.function.return" }] = 
             neolib::make_ref<language_function_return>();
-        concepts()[neolib::string{ "language.type" }] = 
+        concepts()[neolib::string{ "language.expression" }] =
+            neolib::make_ref<language_expression>();
+        concepts()[neolib::string{ "language.expression.operand" }] =
+            neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression.operand");
+        concepts()[neolib::string{ "language.type" }] =
             neolib::make_ref<language_type>();
         concepts()[neolib::string{ "language.type.tuple" }] = 
             neolib::make_ref<language_type_tuple>(*concepts()[neolib::string{ "language.type" }], "language.type.tuple");

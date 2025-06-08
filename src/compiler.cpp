@@ -218,6 +218,8 @@ namespace neos::language
     void compiler::push_operand(language::i_data_type const& aOperand)
     {
         state().operandStack.push_back(aOperand);
+        if (trace() >= 2)
+            iContext.cout() << "Pushed operand: " << aOperand << std::endl;
     }
 
     void compiler::pop_operand(language::i_data_type& aOperand)
@@ -226,6 +228,8 @@ namespace neos::language
         {
             aOperand = state().operandStack.back();
             state().operandStack.pop_back();
+            if (trace() >= 2)
+                iContext.cout() << "Popped operand: " << aOperand << std::endl;
         }
         else
             throw std::runtime_error("No operand");
