@@ -194,7 +194,7 @@ namespace neos::language
             std::uint32_t level = 0u;
             fold_stack foldStack = {};
             std::vector<neolib::weak_ref_ptr<i_scope>> namespaceScope;
-            std::vector<neolib::ref_ptr<i_semantic_concept>> operandStack;
+            std::vector<language::data_type> operandStack;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -207,8 +207,8 @@ namespace neos::language
         i_source_fragment const& current_fragment() const;
         void enter_namespace(neolib::i_string const& aNamespace) final;
         void leave_namespace() final;
-        void push_operand(neolib::i_ref_ptr<i_semantic_concept> const& aOperand) final;
-        void pop_operand(neolib::i_ref_ptr<i_semantic_concept>& aOperand) final;
+        void push_operand(language::i_data_type const& aOperand) final;
+        void pop_operand(language::i_data_type& aOperand) final;
     public:
         std::uint32_t trace() const final;
         const std::optional<std::string>& trace_filter() const;

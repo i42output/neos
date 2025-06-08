@@ -52,7 +52,7 @@ namespace neos::concepts::core
                 std::string value = source().to_std_string();
                 data<data_type>().v = language::ibig{ value };
             }
-            aContext.compiler().push_operand(instance());
+            aContext.compiler().push_operand(data<data_type>());
         }
     };
 
@@ -76,7 +76,7 @@ namespace neos::concepts::core
                 std::string value = source().to_std_string();
                 data<data_type>().v = language::fbig{ value };
             }
-            aContext.compiler().push_operand(instance());
+            aContext.compiler().push_operand(data<data_type>());
         }
     };
 

@@ -23,6 +23,7 @@
 #include <neolib/core/i_string.hpp>
 #include <neolib/core/i_string_view.hpp>
 #include <neolib/core/i_optional.hpp>
+#include <neos/language/type.hpp>
 
 namespace neos::language
 {
@@ -77,15 +78,20 @@ namespace neos::language
         virtual bool compile(i_source_fragment const& aFragment) = 0;
         virtual void enter_namespace(neolib::i_string const& aNamespace) = 0;
         virtual void leave_namespace() = 0;
-        virtual void push_operand(neolib::i_ref_ptr<i_semantic_concept> const& aOperand) = 0;
-        virtual void pop_operand(neolib::i_ref_ptr<i_semantic_concept>& aOperand) = 0;
+        virtual void push_operand(language::i_data_type const& aOperand) = 0;
+        virtual void pop_operand(language::i_data_type& aOperand) = 0;
     public:
         virtual std::uint32_t trace() const = 0;
         // helpers
     public:
-        neolib::ref_ptr<i_semantic_concept> pop_operand()
+        template <typename DataT>
+        void push_operand(DataT const& aOperand, std::enable_if_t<!std::is_base_of_v<language::i_data_type, DataT>, neolib::sfinae> = {})
         {
-            neolib::ref_ptr<i_semantic_concept> operand;
+            push_operand(language::data_type{ aOperand });
+        }
+        language::data_type pop_operand()
+        {
+            language::data_type operand;
             pop_operand(operand);
             return operand;
         }
