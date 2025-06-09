@@ -171,6 +171,19 @@ namespace neos
                         }, *this);
                     return result;
                 }
+                bool unstructured() const
+                {
+                    bool result = false;
+                    std::visit([&](auto const& lhs)
+                        {
+                            if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
+                                neolib::ref_ptr<i_semantic_concept>>)
+                            {
+                                result = lhs->unstructured();
+                            }
+                        }, *this);
+                    return result;
+                }
                 bool can_fold() const
                 {
                     bool canFold = false;

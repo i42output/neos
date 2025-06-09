@@ -305,7 +305,7 @@ namespace neos::language
                         irhs = fold_stack().insert(irhs, result);
                     didSome = true;
                 }
-                else if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs))
+                else if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs) && !(lhs.unstructured() && rhs.unstructured()))
                 {
                     if (trace() >= 3)
                         trace_out("Skipping", ilhs, irhs);

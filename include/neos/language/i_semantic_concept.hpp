@@ -68,6 +68,7 @@ namespace neos::language
     public:
         virtual emit_type emit_as() const = 0;
         virtual bool has_ghosts() const = 0;
+        virtual bool unstructured() const = 0;
         virtual bool can_fold() const = 0;
         virtual bool can_fold(i_semantic_concept const& aRhs) const = 0;
         // debug

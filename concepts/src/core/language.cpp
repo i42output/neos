@@ -226,19 +226,13 @@ namespace neos::concepts::core
 
     class language_scope_open : public semantic_concept<language_scope_open>
     {
+        // folding
+    public:
+        static constexpr bool Unstructured = true;
         // construction
     public:
         language_scope_open() :
             semantic_concept{ "language.scope.open", neos::language::emit_type::Infix }
-        {
-        }
-        // emit
-    public:
-        bool can_fold() const override
-        {
-            return true;
-        }
-        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
         }
     };
@@ -387,6 +381,7 @@ namespace neos::concepts::core
         using data_type = shared::function_signature;
     public:
         static constexpr bool HasGhosts = true;
+        static constexpr bool Unstructured = true;
         // construction
     public:
         language_function_signature() :
@@ -402,6 +397,8 @@ namespace neos::concepts::core
             else if (aRhs.name() == "language.function.parameters")
                 return true;
             else if (aRhs.name() == "language.function.return.type")
+                return true;
+            else if (aRhs.name() == "language.scope.open")
                 return true;
             return false;
         }
@@ -421,6 +418,10 @@ namespace neos::concepts::core
             {
                 data<shared::i_function_signature>().set_return_type(aRhs.data<neos::language::type>());
                 aResult = instance();
+            }
+            else if (aRhs.name() == "language.scope.open")
+            {
+                // todo -- create function
             }
         }
     };

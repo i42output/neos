@@ -124,6 +124,10 @@ namespace neos::language
         {
             return iConcept->has_ghosts();
         }
+        bool unstructured() const final
+        {
+            return iConcept->unstructured();
+        }
         bool can_fold() const final
         {
             return iConcept->can_fold();
@@ -183,6 +187,7 @@ namespace neos::language
         // folding
     public:
         static constexpr bool HasGhosts = false;
+        static constexpr bool Unstructured = false;
         // construction
     public:
         semantic_concept(std::string const& aName, emit_type aEmitAs = emit_type::Postfix) :
@@ -275,6 +280,10 @@ namespace neos::language
         bool has_ghosts() const final
         {
             return Concept::HasGhosts;
+        }
+        bool unstructured() const final
+        {
+            return Concept::Unstructured;
         }
         bool can_fold() const override
         {
