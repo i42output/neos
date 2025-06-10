@@ -295,6 +295,7 @@ namespace neos::language
             {
                 auto irhs = std::next(ilhs);
                 auto& rhs = **irhs;
+                bool const unrelated = !lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs);
                 if (rhs.can_fold())
                 {
                     trace_out("Folding", irhs);
@@ -305,7 +306,7 @@ namespace neos::language
                         irhs = fold_stack().insert(irhs, result);
                     didSome = true;
                 }
-                else if (!lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs) && !(lhs.unstructured() && rhs.unstructured()))
+                else if (unrelated && !(lhs.unstructured() && rhs.unstructured()))
                 {
                     if (trace() >= 3)
                         trace_out("Skipping", ilhs, irhs);
@@ -338,9 +339,9 @@ namespace neos::language
                 }
                 else if (lhs.can_fold(rhs))
                 {
-                    trace_out("Folding", ilhs, irhs);
+                    trace_out(!unrelated ? "Folding" : "Folding (unstructured)", ilhs, irhs);
                     auto result = lhs.fold(iContext, rhs);
-                    trace_out("Folded", ilhs, irhs, result);
+                    trace_out(!unrelated ? "Folded" : "Folded (unstructured)", ilhs, irhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     ilhs = fold_stack().erase(ilhs);
                     if (!result->is_empty())
@@ -349,9 +350,9 @@ namespace neos::language
                 }
                 else if (rhs.can_fold(lhs))
                 {
-                    trace_out("Folding", irhs, ilhs);
+                    trace_out(!unrelated ? "Folding" : "Folding (unstructured)", irhs, ilhs);
                     auto result = rhs.fold(iContext, lhs);
-                    trace_out("Folded", irhs, ilhs, result);
+                    trace_out(!unrelated ? "Folded" : "Folded (unstructured)", irhs, ilhs, result);
                     ilhs = fold_stack().erase(ilhs);
                     ilhs = fold_stack().erase(ilhs);
                     if (!result->is_empty())
