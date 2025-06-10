@@ -398,11 +398,11 @@ namespace neos::language
             }
             if (fold_stack().size() == 1)
                 throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
-                    "Failed to fold semantic concept: "s +
+                    "failed to fold semantic concept: "s +
                     fold_stack().front()->trace());
             else
                 throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
-                    "Failed to fold semantic concepts: "s +
+                    "failed to fold semantic concepts: "s +
                     (**fold_stack().begin()).trace() + " <- " + (**std::next(fold_stack().begin())).trace());
         }
         return didSome;
@@ -427,11 +427,28 @@ namespace neos::language
             else
                 ++col;
         }
-        return (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? "file '" + *aFragment.source_file_path() + "', " : "") + "line " + boost::lexical_cast<std::string>(line) + ", col " + boost::lexical_cast<std::string>(col);
+        std::vector<std::string> lines;
+        std::istringstream iss{ aFragment.source().to_std_string() };
+        std::string nextLine;
+        while (std::getline(iss, nextLine))
+            lines.push_back(nextLine);
+        std::size_t numberWidth = std::to_string(lines.size()).size();
+        std::uint32_t lineNumber = 1u;
+        std::ostringstream oss;
+        for (auto const& outputLine : lines)
+        {
+            if (std::abs(static_cast<int>(line - lineNumber)) <= 5)
+                oss << std::setw(numberWidth) << lineNumber << (lineNumber == line ? ">" : "|") << outputLine << std::endl;
+            ++lineNumber;
+        }
+        oss << std::string(col + numberWidth, '-') << "^" << std::endl;
+        std::string info = (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? aFragment.source_file_path()->to_std_string() : "") + "(" + boost::lexical_cast<std::string>(line) + "," + boost::lexical_cast<std::string>(col) + ")";
+        oss << info;
+        return oss.str();
     }
 
     void compiler::throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError)
     {
-        throw std::runtime_error("(" + aError + ") " + location(aUnit, aFragment, aSourcePos));
+        throw std::runtime_error(location(aUnit, aFragment, aSourcePos) + ": error: " + aError);
     }
 }

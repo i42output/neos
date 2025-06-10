@@ -131,11 +131,11 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
     catch (const neos::context::warning& e)
     {
         output_compilation_time();
-        std::cerr << "Warning: " << e.what() << std::endl;
+        std::cerr << (std::string_view{ e.what() }.find("warning:") == std::string_view::npos ? "Warning: " : "") << e.what() << std::endl;
     }
     catch (const std::exception& e)
     {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << (std::string_view{ e.what() }.find("error:") == std::string_view::npos ? "Error: " : "") << e.what() << std::endl;
     }
     catch (...)
     {
