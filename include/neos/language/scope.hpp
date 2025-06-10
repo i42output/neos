@@ -31,6 +31,15 @@ namespace neos
     {
         using scope_name = neolib::string;
 
+        enum scope_type : std::uint32_t
+        {
+            Program,
+            Namespace,
+            Class,
+            Function,
+            Block
+        };
+
         class i_scope : public neolib::i_reference_counted
         {
         public:
@@ -45,11 +54,17 @@ namespace neos
             virtual i_child_list& children() = 0;
             virtual neolib::abstract_t<scope_name> const& name() const = 0;
             virtual neolib::abstract_t<scope_name> const& qualified_name() const = 0;
+            virtual scope_type type() const = 0;
         public:
-            virtual i_scope& create_child(neolib::abstract_t<scope_name> const& aName) = 0;
+            virtual i_scope& create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType) = 0;
         };
 
-        class scope : public neolib::reference_counted<i_scope>
+        class i_function_scope : public i_scope
+        {
+        };
+
+        template <typename Base = i_scope>
+        class scope : public neolib::reference_counted<Base>
         {
         public:
             using child_list = neolib::vector<neolib::ref_ptr<i_scope>>;
@@ -58,15 +73,18 @@ namespace neos
         public:
             scope() :
                 iParent{ nullptr },
-                iName{}
+                iName{},
+                iType{ scope_type::Program }
             {}
-            scope(neolib::abstract_t<scope_name> const& aName) :
+            scope(neolib::abstract_t<scope_name> const& aName, scope_type aType) :
                 iParent{ nullptr },
-                iName{ aName }
+                iName{ aName },
+                iType{ aType }
             {}
-            scope(i_scope& aParent, neolib::abstract_t<scope_name> const& aName) :
+            scope(i_scope& aParent, neolib::abstract_t<scope_name> const& aName, scope_type aType) :
                 iParent{ &aParent },
-                iName{ aName }
+                iName{ aName },
+                iType{ aType }
             {}
         public:
             bool has_parent() const final
@@ -101,22 +119,50 @@ namespace neos
                     iQualifiedName = name();
                 return iQualifiedName.value();
             }
-        public:
-            i_scope& create_child(neolib::abstract_t<scope_name> const& aName) final
+            scope_type type() const final
             {
-                auto const indexed = iChildIndex.find(aName.to_std_string_view());
-                if (indexed != iChildIndex.end())
-                    return **indexed->second;
-                auto const newChild = children().insert(children().end(), neolib::make_ref<scope>(*this, aName));
-                iChildIndex[aName.to_std_string_view()] = newChild;
-                return **newChild;
+                return iType;
             }
+        public:
+            i_scope& create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType) final;
         private:
             i_scope* iParent;
             neolib::string iName;
             mutable std::optional<neolib::string> iQualifiedName;
+            scope_type iType;
             child_list iChildren;
             index iChildIndex;
         };
+
+        class function_scope : public scope<i_function_scope>
+        {
+        public:
+            using scope::scope;
+        };
+
+        template <typename Base>
+        inline i_scope& scope<Base>::create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType)
+        {
+            auto const indexed = iChildIndex.find(aName.to_std_string_view());
+            if (indexed != iChildIndex.end())
+                return **indexed->second;
+            switch (aType)
+            {
+            case scope_type::Namespace:
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                break;
+            case scope_type::Class:
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                break;
+            case scope_type::Function:
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<function_scope>(*this, aName, aType));
+                break;
+            case scope_type::Block:
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                break;
+            }
+            return **iChildIndex[aName.to_std_string_view()];
+        }
+
     }
 }

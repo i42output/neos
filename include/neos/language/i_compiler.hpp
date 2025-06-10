@@ -24,6 +24,7 @@
 #include <neolib/core/i_string_view.hpp>
 #include <neolib/core/i_optional.hpp>
 #include <neos/language/type.hpp>
+#include <neos/language/scope.hpp>
 
 namespace neos::language
 {
@@ -76,14 +77,22 @@ namespace neos::language
         virtual ~i_compiler() {}
     public:
         virtual bool compile(i_source_fragment const& aFragment) = 0;
-        virtual void enter_namespace(neolib::i_string const& aNamespace) = 0;
-        virtual void leave_namespace() = 0;
+        virtual void enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName) = 0;
+        virtual void leave_scope(scope_type aScopeType) = 0;
         virtual void push_operand(language::i_data_type const& aOperand) = 0;
         virtual void pop_operand(language::i_data_type& aOperand) = 0;
     public:
         virtual std::uint32_t trace() const = 0;
         // helpers
     public:
+        void enter_namespace(neolib::i_string const& aNamespace)
+        {
+            enter_scope(scope_type::Namespace, aNamespace);
+        }
+        void leave_namespace()
+        {
+            leave_scope(scope_type::Namespace);
+        }
         template <typename DataT>
         void push_operand(DataT const& aOperand, std::enable_if_t<!std::is_base_of_v<language::i_data_type, DataT>, neolib::sfinae> = {})
         {

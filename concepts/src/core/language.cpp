@@ -20,99 +20,11 @@
 #include <neos/i_context.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/type.hpp>
+#include <neos/language/function.hpp>
 #include "language.hpp"
 
 namespace neos::concepts::core
 {   
-    namespace shared
-    {
-        struct i_function_parameter
-        {
-            virtual neolib::i_string const& parameter_name() const = 0;
-            virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
-            virtual neos::language::type parameter_type() const = 0;
-            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
-        };
-
-        struct function_parameter : i_function_parameter
-        {
-            using abstract_type = i_function_parameter;
-
-            neolib::string parameterName;
-            neos::language::type parameterType = neos::language::type::UNKNOWN;
-
-            neolib::i_string const& parameter_name() const final
-            {
-                return parameterName;
-            }
-            void set_parameter_name(neolib::i_string_view const& aParameterName) final
-            {
-                parameterName = aParameterName;
-            }
-            neos::language::type parameter_type() const final
-            {
-                return parameterType;
-            }
-            void set_parameter_type(neos::language::type aParameterType) final
-            {
-                parameterType = aParameterType;
-            }
-
-            function_parameter() = default;
-            function_parameter(i_function_parameter const& other) :
-                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
-            {}
-        };
-
-        using i_function_parameters = neolib::i_vector<i_function_parameter>;
-        using function_parameters = neolib::vector<function_parameter>;
-
-        using i_optional_parameter_list = neolib::i_optional<i_function_parameters>;
-
-        struct i_function_signature
-        {
-            virtual neolib::i_string const& function_name() const = 0;
-            virtual void set_function_name(neolib::i_string const& aFunctionName) = 0;
-            virtual i_optional_parameter_list const& parameters() const = 0;
-            virtual i_optional_parameter_list& parameters() = 0;
-            virtual neos::language::type return_type() const = 0;
-            virtual void set_return_type(neos::language::type aFunctionReturnType) = 0;
-        };
-
-        using optional_parameter_list = neolib::optional<neolib::vector<function_parameter>>;
-
-        struct function_signature : i_function_signature
-        {
-            neolib::string functionName;
-            optional_parameter_list functionParameters;
-            neos::language::type functionReturnType;
-            neolib::i_string const& function_name() const final
-            {
-                return functionName;
-            }
-            void set_function_name(neolib::i_string const& aFunctionName) final
-            {
-                functionName = aFunctionName;
-            }
-            optional_parameter_list const& parameters() const final
-            {
-                return functionParameters;
-            }
-            optional_parameter_list& parameters() final
-            {
-                return functionParameters;
-            }
-            neos::language::type return_type() const final
-            {
-                return functionReturnType;
-            }
-            void set_return_type(neos::language::type aFunctionReturnType) final
-            {
-                functionReturnType = aFunctionReturnType;
-            }
-        };
-    }
-
     class language_whitespace : public semantic_concept<language_whitespace>
     {
         // construction
@@ -378,7 +290,7 @@ namespace neos::concepts::core
     {
         // data
     public:
-        using data_type = shared::function_signature;
+        using data_type = neos::language::function_signature;
     public:
         static constexpr bool HasGhosts = true;
         static constexpr bool Unstructured = true;
@@ -406,17 +318,17 @@ namespace neos::concepts::core
         {
             if (aRhs.name() == "language.function.name")
             {
-                data<shared::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
+                data<neos::language::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
                 aResult = instance();
             }
             else if (aRhs.name() == "language.function.parameters")
             {
-                data<shared::i_function_signature>().parameters() = aRhs.data<shared::i_function_parameters>();
+                data<neos::language::i_function_signature>().parameters() = aRhs.data<neos::language::i_function_parameters>();
                 aResult = instance();
             }
             else if (aRhs.name() == "language.function.return.type")
             {
-                data<shared::i_function_signature>().set_return_type(aRhs.data<neos::language::type>());
+                data<neos::language::i_function_signature>().set_return_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
             else if (aRhs.name() == "language.scope.open")
@@ -430,7 +342,7 @@ namespace neos::concepts::core
     {
         // data
     public:
-        using data_type = shared::function_parameters;
+        using data_type = neos::language::function_parameters;
         // folding
     public:
         static constexpr bool HasGhosts = true;
@@ -454,8 +366,8 @@ namespace neos::concepts::core
         {
             if (aRhs.is("language.type"_s))
             {
-                for (auto i = data<shared::i_function_parameters>().rbegin();
-                    i != data<shared::i_function_parameters>().rend() && 
+                for (auto i = data<neos::language::i_function_parameters>().rbegin();
+                    i != data<neos::language::i_function_parameters>().rend() && 
                         i->parameter_type() == neos::language::type::UNKNOWN;
                     ++i)
                     i->set_parameter_type(aRhs.data<neos::language::type>());
@@ -463,14 +375,14 @@ namespace neos::concepts::core
             }
             else if (aRhs.is("language.function.parameter"_s))
             {
-                data<shared::i_function_parameters>().push_back(aRhs.data<shared::i_function_parameter>());
+                data<neos::language::i_function_parameters>().push_back(aRhs.data<neos::language::i_function_parameter>());
                 aResult = instance();
             }
             else if (aRhs.is("language.function.name"_s))
             {
                 aResult = language_function_signature{}.instantiate(aContext, aRhs.source());
-                aResult->data<shared::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
-                aResult->data<shared::i_function_signature>().parameters() = data<shared::i_function_parameters>();
+                aResult->data<neos::language::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
+                aResult->data<neos::language::i_function_signature>().parameters() = data<neos::language::i_function_parameters>();
             }
         }
     };
@@ -479,7 +391,7 @@ namespace neos::concepts::core
     {
         // data
     public:
-        using data_type = shared::function_parameter;
+        using data_type = neos::language::function_parameter;
         // construction
     public:
         language_function_parameter() :
@@ -502,26 +414,26 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            data<shared::i_function_parameter>().set_parameter_name(source());
+            data<neos::language::i_function_parameter>().set_parameter_name(source());
             aResult = instance();
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             if (aRhs.is("language.identifier"_s))
             {
-                data<shared::i_function_parameter>().set_parameter_name(aRhs.source());
+                data<neos::language::i_function_parameter>().set_parameter_name(aRhs.source());
                 aResult = instance();
             }
             else if (aRhs.is("language.type"_s))
             {
-                data<shared::i_function_parameter>().set_parameter_type(aRhs.data<neos::language::type>());
+                data<neos::language::i_function_parameter>().set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
             else if (aRhs.is("language.function.parameter"_s))
             {
                 aResult = language_function_parameters{}.instantiate(aContext, source());
-                aResult->data<shared::i_function_parameters>().push_back(data<shared::i_function_parameter>());
-                aResult->data<shared::i_function_parameters>().push_back(aRhs.data<shared::i_function_parameter>());
+                aResult->data<neos::language::i_function_parameters>().push_back(data<neos::language::i_function_parameter>());
+                aResult->data<neos::language::i_function_parameters>().push_back(aRhs.data<neos::language::i_function_parameter>());
             }
         }
     };
@@ -811,7 +723,7 @@ namespace neos::concepts::core
     };
 
     language::language(neos::language::i_concept_library& aParent) :
-        neos::language::concept_library
+        language::concept_library
         { 
             aParent,
             library_id(), 

@@ -175,7 +175,7 @@ namespace neos::language
     struct program
     {
         translation_units_t translationUnits;
-        scope scope;
+        scope<> scope;
         symbol_table symbolTable;
         text text;
     };
@@ -193,7 +193,7 @@ namespace neos::language
             i_source_fragment* fragment;
             std::uint32_t level = 0u;
             fold_stack foldStack = {};
-            std::vector<neolib::weak_ref_ptr<i_scope>> namespaceScope;
+            std::vector<neolib::weak_ref_ptr<i_scope>> scopeStack;
             std::vector<language::data_type> operandStack;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
@@ -205,8 +205,8 @@ namespace neos::language
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         bool compile(const i_source_fragment& aFragment) final;
         i_source_fragment const& current_fragment() const;
-        void enter_namespace(neolib::i_string const& aNamespace) final;
-        void leave_namespace() final;
+        void enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName) final;
+        void leave_scope(scope_type aScopeType) final;
         void push_operand(language::i_data_type const& aOperand) final;
         void pop_operand(language::i_data_type& aOperand) final;
     public:

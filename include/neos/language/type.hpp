@@ -1,5 +1,5 @@
 /*
-  bytecode.hpp
+  type.hpp
 
   Copyright (c) 2025 Leigh Johnston.  All Rights Reserved.
 

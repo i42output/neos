@@ -199,20 +199,43 @@ namespace neos::language
         return *state().fragment;
     }
 
-    void compiler::enter_namespace(neolib::i_string const& aNamespace)
+    void compiler::enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName)
     {
-        if (state().namespaceScope.empty())
-            state().namespaceScope.push_back(state().program->scope.create_child(aNamespace));
+        if (state().scopeStack.empty())
+            state().scopeStack.push_back(state().program->scope.create_child(aScopeName, aScopeType));
         else
-            state().namespaceScope.push_back(state().namespaceScope.back()->create_child(aNamespace));
+            state().scopeStack.push_back(state().scopeStack.back()->create_child(aScopeName, aScopeType));
     }
 
-    void compiler::leave_namespace()
+    void compiler::leave_scope(scope_type aScopeType)
     {
-        if (!state().namespaceScope.empty())
-            state().namespaceScope.pop_back();
-        else
-            throw std::runtime_error("Unmatched namespace scopes");
+        switch (aScopeType)
+        {
+        case scope_type::Namespace:
+            if (!state().scopeStack.empty() && state().scopeStack.back()->type() == scope_type::Namespace)
+                state().scopeStack.pop_back();
+            else
+                throw std::runtime_error("Unmatched namespace scopes");
+            break;
+        case scope_type::Class:
+            if (!state().scopeStack.empty() && state().scopeStack.back()->type() == scope_type::Class)
+                state().scopeStack.pop_back();
+            else
+                throw std::runtime_error("Unmatched class scopes");
+            break;
+        case scope_type::Function:
+            if (!state().scopeStack.empty() && state().scopeStack.back()->type() == scope_type::Function)
+                state().scopeStack.pop_back();
+            else
+                throw std::runtime_error("Unmatched function scopes");
+            break;
+        case scope_type::Block:
+            if (!state().scopeStack.empty() && state().scopeStack.back()->type() == scope_type::Block)
+                state().scopeStack.pop_back();
+            else
+                throw std::runtime_error("Unmatched block scopes");
+            break;
+        }
     }
 
     void compiler::push_operand(language::i_data_type const& aOperand)
