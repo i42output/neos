@@ -26,11 +26,19 @@
 #include <neos/language/type.hpp>
 #include <neos/language/scope.hpp>
 
+using namespace neolib::string_literals;
+
 namespace neos::language
 {
-    typedef neolib::i_string i_source_path_t;
-    typedef neolib::i_optional<i_source_path_t> i_optional_source_path_t;
-    typedef neolib::i_string_view i_source_t;
+    using i_source_path_t = neolib::i_string;
+    using i_optional_source_path_t = neolib::i_optional<i_source_path_t>;
+    using i_source_t = neolib::i_string_view;
+
+    using source_path_t = neolib::string;
+    using optional_source_path_t = neolib::optional<source_path_t>;
+    using source_t = neolib::string_view;
+    using const_source_iterator = source_t::const_iterator;
+    using source_iterator = source_t::iterator;
 
     enum class compilation_status
     {
@@ -81,7 +89,9 @@ namespace neos::language
         virtual void leave_scope(scope_type aScopeType) = 0;
         virtual void push_operand(language::i_data_type const& aOperand) = 0;
         virtual void pop_operand(language::i_data_type& aOperand) = 0;
+        virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const = 0;
     public:
+        virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;
         // helpers
     public:
@@ -103,6 +113,12 @@ namespace neos::language
             language::data_type operand;
             pop_operand(operand);
             return operand;
+        }
+        neolib::optional<language::data_type> find_identifier(neolib::i_string_view const& aIdentifier) const
+        {
+            neolib::optional<language::data_type> result;
+            find_identifier(aIdentifier, result);
+            return result;
         }
     };
 }

@@ -71,5 +71,6 @@ namespace neos
         };
         using symbol_reference = void const*;
         using symbol_table = neolib::map<symbol_key, symbol_reference>;
+        using symbol_table_pointer = symbol_table::abstract_value_type*;
     }
 }

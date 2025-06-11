@@ -66,6 +66,22 @@ namespace neos::concepts::core
             semantic_concept{ "language.identifier", neos::language::emit_type::Infix }
         {
         }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            auto existing = aContext.compiler().find_identifier(source());
+            if (existing != std::nullopt)
+            {
+
+            }
+            else
+                aContext.compiler().throw_error(source().begin(), "'"_s + source() + "': undeclared identifier"_s);
+        }
     };
 
     class language_program : public semantic_concept<language_program>

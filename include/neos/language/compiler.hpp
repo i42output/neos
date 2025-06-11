@@ -35,12 +35,6 @@
 
 namespace neos::language
 {
-    using source_path_t = neolib::string;
-    using optional_source_path_t = neolib::optional<source_path_t>;
-    using source_t = neolib::string_view;
-    using const_source_iterator = source_t::const_iterator;
-    using source_iterator = source_t::iterator;
-
     class source_fragment : public i_source_fragment
     {
     public:
@@ -180,7 +174,7 @@ namespace neos::language
         text text;
     };
 
-    using fold_stack = std::vector<std::shared_ptr<ast::node>>;
+    using fold_stack = neolib::vector<neolib::ref_ptr<i_ast_node>>;
 
     class compiler : public i_compiler
     {
@@ -209,7 +203,9 @@ namespace neos::language
         void leave_scope(scope_type aScopeType) final;
         void push_operand(language::i_data_type const& aOperand) final;
         void pop_operand(language::i_data_type& aOperand) final;
+        void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const final;
     public:
+        void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;
         const std::optional<std::string>& trace_filter() const;
         void set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter = {});
@@ -222,7 +218,6 @@ namespace neos::language
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
-        static void throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError);
     private:
         i_context& iContext;
         std::uint32_t iTrace;

@@ -106,11 +106,11 @@ namespace neos::language
 
     namespace
     {
-        void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, language::parser::ast_node const& parserAstNode, ast::node& astNode)
+        void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, language::parser::ast_node const& parserAstNode, i_ast_node& astNode)
         {
             for (auto const& childParserNode : parserAstNode.children)
             {
-                astNode.children().push_back(std::make_unique<ast::node>(std::monostate{}, astNode));
+                astNode.children().push_back(neolib::make_ref<ast_node>(std::monostate{}, astNode));
                 auto& childNode = *astNode.children().back();
                 walk_ast(context, ast, foldStack, *childParserNode, childNode);
             }
@@ -122,10 +122,10 @@ namespace neos::language
             if (c)
             {
                 auto const semanticConcept = c->instantiate(context, conceptValue);
-                astNode = semanticConcept;
+                astNode.value() = semanticConcept;
                 if (conceptName != "language.keyword")
                 {
-                    foldStack.push_back(astNode.shared_from_this());
+                    foldStack.push_back(neolib::ref_ptr<i_ast_node>{ astNode });
                     if (context.compiler().trace() >= 2)
                         context.cout() << "Fold stack add: " << conceptName << " [" <<
                         neolib::to_escaped_string(conceptValue.to_std_string_view(), 32u, true) << "]" << std::endl;
@@ -258,6 +258,11 @@ namespace neos::language
             throw std::runtime_error("No operand");
     }
 
+    void compiler::find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const
+    {
+        // todo
+    }
+
     const compiler::compilation_state& compiler::state() const
     {
         return *iCompilationStateStack.back();
@@ -280,7 +285,7 @@ namespace neos::language
         if (fold_stack().empty())
             return false;
 
-        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<std::shared_ptr<ast::node>> result = {})
+        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<neolib::ref_ptr<i_ast_node>> result = {})
             {
                 std::ostringstream traceOutput;
                 if (trace() >= 1)
@@ -397,12 +402,12 @@ namespace neos::language
                     neolib::to_escaped_string(e->source().to_std_string_view(), 32u, true) << "]" << std::endl;
             }
             if (fold_stack().size() == 1)
-                throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
-                    "failed to fold semantic concept: "s +
+                throw_error(fold_stack().front()->source().begin(),
+                    "failed to fold semantic concept: "_s +
                     fold_stack().front()->trace());
             else
-                throw_error(*state().unit, *state().fragment, fold_stack().front()->source().begin(),
-                    "failed to fold semantic concepts: "s +
+                throw_error(fold_stack().front()->source().begin(),
+                    "failed to fold semantic concepts: "_s +
                     (**fold_stack().begin()).trace() + " <- " + (**std::next(fold_stack().begin())).trace());
         }
         return didSome;
@@ -447,8 +452,8 @@ namespace neos::language
         return oss.str();
     }
 
-    void compiler::throw_error(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, const std::string& aError)
+    void compiler::throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType)
     {
-        throw std::runtime_error(location(aUnit, aFragment, aSourcePos) + ": error: " + aError);
+        throw std::runtime_error(location(*state().unit, *state().fragment, aSourcePos) + ": " + aErrorType + ": " + aError);
     }
 }
