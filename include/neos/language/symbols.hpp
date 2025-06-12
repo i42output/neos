@@ -22,12 +22,13 @@
 #include <neos/neos.hpp>
 #include <neolib/core/string.hpp>
 #include <neolib/core/map.hpp>
-#include <neos/language/scope.hpp>
 
 namespace neos
 {
     namespace language
     {
+        using scope_name = neolib::string;
+
         enum class symbol_type : std::uint32_t
         {
             Function,

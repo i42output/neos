@@ -70,17 +70,10 @@ namespace neos::concepts::core
     public:
         bool can_fold() const override
         {
-            return true;
+            return false;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            auto existing = aContext.compiler().find_identifier(source());
-            if (existing != std::nullopt)
-            {
-
-            }
-            else
-                aContext.compiler().throw_error(source().begin(), "'"_s + source() + "': undeclared identifier"_s);
         }
     };
 
@@ -349,7 +342,10 @@ namespace neos::concepts::core
             }
             else if (aRhs.name() == "language.scope.open")
             {
-                // todo -- create function
+                auto& scope = static_cast<neos::language::i_function_scope&>(
+                    aContext.compiler().enter_scope(neos::language::scope_type::Function,
+                    data<neos::language::i_function_signature>().function_name()));
+                scope.set_function_signature(data<neos::language::i_function_signature>());
             }
         }
     };

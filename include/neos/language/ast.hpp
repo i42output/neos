@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neolib/core/reference_counted.hpp>
+#include <neolib/core/vector.hpp>
 #include <neos/language/i_semantic_concept.hpp>
 #include <neos/language/symbols.hpp>
 

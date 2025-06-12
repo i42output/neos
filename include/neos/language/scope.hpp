@@ -24,6 +24,7 @@
 #include <neolib/core/reference_counted.hpp>
 #include <neolib/core/vector.hpp>
 #include <neolib/core/string.hpp>
+#include <neos/language/function.hpp>
 
 namespace neos
 {
@@ -61,6 +62,10 @@ namespace neos
 
         class i_function_scope : public i_scope
         {
+        public:
+            using abstract_type = i_function_scope;
+        public:
+            virtual void set_function_signature(language::i_function_signature const& aSignature) = 0;
         };
 
         template <typename Base = i_scope>
@@ -138,6 +143,11 @@ namespace neos
         {
         public:
             using scope::scope;
+        public:
+            void set_function_signature(language::i_function_signature const& aSignature) final
+            {
+                // todo
+            }
         };
 
         template <typename Base>
@@ -149,16 +159,16 @@ namespace neos
             switch (aType)
             {
             case scope_type::Namespace:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), child_list::value_type{ neolib::make_ref<scope<>>(*this, aName, aType) });
                 break;
             case scope_type::Class:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), child_list::value_type{ neolib::make_ref<scope<>>(*this, aName, aType) });
                 break;
             case scope_type::Function:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<function_scope>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), child_list::value_type{ neolib::make_ref<function_scope>(*this, aName, aType) });
                 break;
             case scope_type::Block:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), child_list::value_type{ neolib::make_ref<scope<>>(*this, aName, aType) });
                 break;
             }
             return **iChildIndex[aName.to_std_string_view()];

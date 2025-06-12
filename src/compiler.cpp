@@ -199,12 +199,13 @@ namespace neos::language
         return *state().fragment;
     }
 
-    void compiler::enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName)
+    i_scope& compiler::enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName)
     {
         if (state().scopeStack.empty())
             state().scopeStack.push_back(state().program->scope.create_child(aScopeName, aScopeType));
         else
             state().scopeStack.push_back(state().scopeStack.back()->create_child(aScopeName, aScopeType));
+        return *state().scopeStack.back();
     }
 
     void compiler::leave_scope(scope_type aScopeType)
