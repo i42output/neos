@@ -52,7 +52,8 @@ namespace neos
             Fbig = 0x0000000E,
             String = 0x0000000F,
             Pointer = 0x00000010,
-            Composite = 0x00000011
+            Composite = 0x00000011,
+            Function = 0x00000012
         };
 
         inline std::string type_name(language::type t)
@@ -78,6 +79,7 @@ namespace neos
             case type::String:    return "string";
             case type::Pointer:   return "*";
             case type::Composite: return "composite";
+            case type::Function:  return "function";
             default:              return "unknown";
             }
         }
@@ -102,6 +104,7 @@ namespace neos
                 { "string",    type::String },
                 { "*",         type::Pointer },
                 { "composite", type::Composite },
+                { "function",  type::Function },
                 { "unknown",   type::UNKNOWN }
             };
             return map.at(aName);
@@ -128,6 +131,7 @@ namespace neos
 
         struct pointer_type;
         struct composite_type;
+        struct function_type;
 
         template<typename T>
         struct i_data
@@ -163,6 +167,7 @@ namespace neos
 
         struct i_pointer_type;
         struct i_composite_type;
+        struct i_function_type;
 
         using i_data_type = neolib::i_variant<
             i_data<_void>,
@@ -181,7 +186,8 @@ namespace neos
             i_data<neolib::abstract_t<fbig>>,
             i_data<neolib::abstract_t<string>>,
             i_data<neolib::i_ref_ptr<i_pointer_type>>,
-            i_data<neolib::i_ref_ptr<i_composite_type>>>;
+            i_data<neolib::i_ref_ptr<i_composite_type>>,
+            i_data<neolib::i_ref_ptr<i_function_type>>>;
 
         struct i_pointer_type : neolib::i_reference_counted
         {
@@ -208,8 +214,39 @@ namespace neos
             virtual neolib::i_vector<i_data_type>& contents() = 0;
         };
 
+        struct i_function_parameter
+        {
+            virtual neolib::i_string const& parameter_name() const = 0;
+            virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
+            virtual neos::language::type parameter_type() const = 0;
+            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
+        };
+
+        using i_function_parameters = neolib::i_vector<i_function_parameter>;
+
+        struct i_function_type : neolib::i_reference_counted
+        {
+            using abstract_type = i_function_type;
+
+            virtual type return_type() const = 0;
+            virtual void set_return_type(type aReturnType) = 0;
+
+            virtual i_function_parameters const& parameters() const = 0;
+            virtual i_function_parameters& parameters() = 0;
+
+            virtual void to_string(neolib::i_string& aResult) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string result;
+                to_string(result);
+                return result.to_std_string();
+            }
+        };
+
         struct pointer_type;
         struct composite_type;
+        struct function_type;
 
         using data_type = neolib::variant<
             data<_void>,
@@ -228,7 +265,8 @@ namespace neos
             data<fbig>,
             data<string>,
             data<neolib::ref_ptr<i_pointer_type>>,
-            data<neolib::ref_ptr<i_composite_type>>>;
+            data<neolib::ref_ptr<i_composite_type>>,
+            data<neolib::ref_ptr<i_function_type>>>;
 
         struct pointer_type : neolib::reference_counted<i_pointer_type>
         {
@@ -252,7 +290,7 @@ namespace neos
                 if (base != language::type::Pointer || !nested)
                     result = type_name(base);
                 result = nested->to_string() + "*";
-                aResult = neolib::string{ result };
+                aResult = result;
             }
         };
 
@@ -265,6 +303,71 @@ namespace neos
             neolib::vector<data_type>& contents() final
             {
                 return *this;
+            }
+        };
+
+        struct function_parameter : i_function_parameter
+        {
+            using abstract_type = i_function_parameter;
+
+            neolib::string parameterName;
+            neos::language::type parameterType = neos::language::type::UNKNOWN;
+
+            neolib::i_string const& parameter_name() const final
+            {
+                return parameterName;
+            }
+            void set_parameter_name(neolib::i_string_view const& aParameterName) final
+            {
+                parameterName = aParameterName;
+            }
+            neos::language::type parameter_type() const final
+            {
+                return parameterType;
+            }
+            void set_parameter_type(neos::language::type aParameterType) final
+            {
+                parameterType = aParameterType;
+            }
+
+            function_parameter() = default;
+            function_parameter(i_function_parameter const& other) :
+                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
+            {}
+        };
+
+        using function_parameters = neolib::vector<function_parameter>;
+
+        struct function_type : neolib::reference_counted<i_function_type>
+        {
+            type returnType = neos::language::type::UNKNOWN;
+            function_parameters parameterList;
+
+            function_type() = default;
+            function_type(type aReturnType, function_parameters aParameters) :
+                returnType{ aReturnType }, parameterList{ std::move(aParameters) } {}
+
+            neos::language::type return_type() const override { return returnType; }
+            void set_return_type(neos::language::type aReturnType) override { returnType = aReturnType; }
+
+            i_function_parameters const& parameters() const override { return parameterList; }
+            i_function_parameters& parameters() override { return parameterList; }
+
+            using i_function_type::to_string;
+            void to_string(neolib::i_string& aResult) const override
+            {
+                std::string result;
+                result += type_name(returnType);
+                result += "(";
+                for (std::size_t i = 0; i < parameterList.size(); ++i)
+                {
+                    if (i > 0) result += ", ";
+                    result += type_name(parameterList[i].parameter_type());
+                    result += " ";
+                    result += parameterList[i].parameter_name();
+                }
+                result += ")";
+                aResult = result;
             }
         };
 
@@ -291,6 +394,8 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_pointer_type>> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_composite_type>> = type::Composite;
+        template <> inline constexpr type type_to_enum_v<function_type> = type::Function;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_function_type>> = type::Function;
 
         inline std::ostream& operator<<(std::ostream& stream, data_type const& data)
         {

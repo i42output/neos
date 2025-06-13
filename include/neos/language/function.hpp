@@ -31,47 +31,6 @@ namespace neos
 {
     namespace language
     {
-        struct i_function_parameter
-        {
-            virtual neolib::i_string const& parameter_name() const = 0;
-            virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
-            virtual neos::language::type parameter_type() const = 0;
-            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
-        };
-
-        struct function_parameter : i_function_parameter
-        {
-            using abstract_type = i_function_parameter;
-
-            neolib::string parameterName;
-            neos::language::type parameterType = neos::language::type::UNKNOWN;
-
-            neolib::i_string const& parameter_name() const final
-            {
-                return parameterName;
-            }
-            void set_parameter_name(neolib::i_string_view const& aParameterName) final
-            {
-                parameterName = aParameterName;
-            }
-            neos::language::type parameter_type() const final
-            {
-                return parameterType;
-            }
-            void set_parameter_type(neos::language::type aParameterType) final
-            {
-                parameterType = aParameterType;
-            }
-
-            function_parameter() = default;
-            function_parameter(i_function_parameter const& other) :
-                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
-            {}
-        };
-
-        using i_function_parameters = neolib::i_vector<i_function_parameter>;
-        using function_parameters = neolib::vector<function_parameter>;
-
         using i_optional_parameter_list = neolib::i_optional<i_function_parameters>;
 
         struct i_function_signature
