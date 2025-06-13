@@ -141,8 +141,8 @@ namespace neos
 
             virtual neolib::i_optional<type> const& value() const = 0;
             virtual neolib::i_optional<type>& value() = 0;
-            virtual neolib::i_optional<language::symbol_table::iterator> const& symbol() const = 0;
-            virtual neolib::i_optional<language::symbol_table::iterator>& symbol() = 0;
+            virtual neolib::i_optional<symbol_table_pointer> const& symbol() const = 0;
+            virtual neolib::i_optional<symbol_table_pointer>& symbol() = 0;
         };
 
         template<typename T>
@@ -152,12 +152,12 @@ namespace neos
             using type = T;
 
             neolib::optional<type> v;
-            neolib::optional<language::symbol_table::iterator> s;
+            neolib::optional<symbol_table_pointer> s;
 
             neolib::optional<type> const& value() const final { return v; }
             neolib::optional<type>& value() final { return v; }
-            neolib::optional<language::symbol_table::iterator> const& symbol() const final { return s; }
-            neolib::optional<language::symbol_table::iterator>& symbol() final { return s; }
+            neolib::optional<symbol_table_pointer> const& symbol() const final { return s; }
+            neolib::optional<symbol_table_pointer>& symbol() final { return s; }
 
             data() {}
             data(abstract_type const& other) :
