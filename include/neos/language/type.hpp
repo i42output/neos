@@ -458,6 +458,25 @@ namespace neos
                             oss << "@" << pd.second();
                         }
                     }
+                    else if constexpr (std::is_same_v<vt, data<array_type>>)
+                    {
+                        if (d.v.has_value())
+                        {
+                            auto const& ad = d.v.value();
+                            // 1) shape e.g. "i32[3][4]"
+                            oss << ad.first()->to_string();
+                            // 2) contents via the composite inside ad.second()
+                            //    ad.second() is a ref_ptr<i_composite_type>
+                            auto const& elems = ad.second()->contents();
+                            oss << "{";
+                            for (std::size_t i = 0; i < elems.size(); ++i)
+                            {
+                                if (i) oss << ", ";
+                                oss << elems[i];  // recursive call to operator<<
+                            }
+                            oss << "}";
+                        }
+                    }
                     else if constexpr (std::is_same_v<vt, data<neolib::ref_ptr<i_function_type>>>)
                     {
                         if (d.v.has_value())
