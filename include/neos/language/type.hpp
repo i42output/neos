@@ -52,11 +52,12 @@ namespace neos
             Fbig = 0x0000000E,
             String = 0x0000000F,
             Pointer = 0x00000010,
-            Composite = 0x00000011,
-            Function = 0x00000012
+            Array = 0x00000011,
+            Composite = 0x00000012,
+            Function = 0x00000013
         };
 
-        inline std::string type_name(language::type t)
+        inline std::string type_name(type t)
         {
             using namespace language;
             switch (t)
@@ -78,6 +79,7 @@ namespace neos
             case type::Fbig:      return "fbig";
             case type::String:    return "string";
             case type::Pointer:   return "*";
+            case type::Array:     return "[]";
             case type::Composite: return "composite";
             case type::Function:  return "function";
             default:              return "unknown";
@@ -103,6 +105,7 @@ namespace neos
                 { "fbig",      type::Fbig },
                 { "string",    type::String },
                 { "*",         type::Pointer },
+                { "[]",        type::Array },
                 { "composite", type::Composite },
                 { "function",  type::Function },
                 { "unknown",   type::UNKNOWN }
@@ -180,14 +183,14 @@ namespace neos
 
         struct pointer_descriptor : neolib::reference_counted<i_pointer_descriptor>
         {
-            language::type base;
+            type base;
             neolib::ref_ptr<i_pointer_descriptor> nested;
 
-            pointer_descriptor(language::type aBase) :
+            pointer_descriptor(type aBase) :
                 base{ aBase }, nested{} {}
 
             pointer_descriptor(neolib::ref_ptr<i_pointer_descriptor> aNested) :
-                base{ language::type::Pointer }, nested{ std::move(aNested) } {}
+                base{ type::Pointer }, nested{ std::move(aNested) } {}
 
             type base_type() const final { return base; }
             neolib::ref_ptr<i_pointer_descriptor> const& pointee() const final { return nested; }
@@ -197,7 +200,7 @@ namespace neos
             void to_string(neolib::i_string& aResult) const final
             {
                 std::string result;
-                if (base != language::type::Pointer || !nested)
+                if (base != type::Pointer || !nested)
                     result = type_name(base);
                 result = nested->to_string() + "*";
                 aResult = result;
@@ -207,7 +210,47 @@ namespace neos
         using i_pointer_type = neolib::i_pair<neolib::i_ref_ptr<i_pointer_descriptor>, void*>;
         using pointer_type = neolib::pair<neolib::ref_ptr<i_pointer_descriptor>, void*>;
 
+        struct i_array_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_array_descriptor;
+
+            virtual type element_type() const = 0;
+            virtual neolib::i_vector<std::size_t> const& extents() const = 0;
+            virtual void to_string(neolib::i_string& out) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string tmp;
+                to_string(tmp);
+                return tmp.to_std_string();
+            }
+        };
+
+        struct array_descriptor : neolib::reference_counted<i_array_descriptor>
+        {
+            type elemType{};
+            neolib::vector<std::size_t>  dims;
+
+            array_descriptor(type e, neolib::vector<std::size_t> xs)
+                : elemType{ e }, dims{ std::move(xs) } {}
+
+            type element_type() const final { return elemType; }
+            neolib::i_vector<std::size_t> const& extents() const final { return dims; }
+
+            using i_array_descriptor::to_string;
+            void to_string(neolib::i_string& out) const final
+            {
+                std::string s = type_name(elemType);
+                for (auto x : dims) s += "[" + std::to_string(x) + "]";
+                out = neolib::string{ s };
+            }
+        };
+
         struct i_composite_type;
+
+        using i_array_type = neolib::i_pair<neolib::i_ref_ptr<i_array_descriptor>, neolib::i_ref_ptr<i_composite_type>>;
+        using array_type = neolib::pair<neolib::ref_ptr<i_array_descriptor>, neolib::ref_ptr<i_composite_type>>;
+
         struct i_function_type;
 
         using i_data_type = neolib::i_variant<
@@ -226,7 +269,8 @@ namespace neos
             i_data<neolib::abstract_t<ibig>>,
             i_data<neolib::abstract_t<fbig>>,
             i_data<neolib::abstract_t<string>>,
-            i_data<neolib::abstract_t<pointer_type>>,
+            i_data<i_pointer_type>,
+            i_data<i_array_type>,
             i_data<neolib::i_ref_ptr<i_composite_type>>,
             i_data<neolib::i_ref_ptr<i_function_type>>>;
 
@@ -242,8 +286,8 @@ namespace neos
         {
             virtual neolib::i_string const& parameter_name() const = 0;
             virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
-            virtual neos::language::type parameter_type() const = 0;
-            virtual void set_parameter_type(neos::language::type aParameterType) = 0;
+            virtual type parameter_type() const = 0;
+            virtual void set_parameter_type(type aParameterType) = 0;
         };
 
         using i_function_parameters = neolib::i_vector<i_function_parameter>;
@@ -288,6 +332,7 @@ namespace neos
             data<fbig>,
             data<string>,
             data<pointer_type>,
+            data<array_type>,
             data<neolib::ref_ptr<i_composite_type>>,
             data<neolib::ref_ptr<i_function_type>>>;
 
@@ -308,7 +353,7 @@ namespace neos
             using abstract_type = i_function_parameter;
 
             neolib::string parameterName;
-            neos::language::type parameterType = neos::language::type::UNKNOWN;
+            type parameterType = type::UNKNOWN;
 
             neolib::i_string const& parameter_name() const final
             {
@@ -318,11 +363,11 @@ namespace neos
             {
                 parameterName = aParameterName;
             }
-            neos::language::type parameter_type() const final
+            type parameter_type() const final
             {
                 return parameterType;
             }
-            void set_parameter_type(neos::language::type aParameterType) final
+            void set_parameter_type(type aParameterType) final
             {
                 parameterType = aParameterType;
             }
@@ -337,15 +382,15 @@ namespace neos
 
         struct function_type : neolib::reference_counted<i_function_type>
         {
-            type returnType = neos::language::type::UNKNOWN;
+            type returnType = type::UNKNOWN;
             function_parameters parameterList;
 
             function_type() = default;
             function_type(type aReturnType, function_parameters aParameters) :
                 returnType{ aReturnType }, parameterList{ std::move(aParameters) } {}
 
-            neos::language::type return_type() const final { return returnType; }
-            void set_return_type(neos::language::type aReturnType) final { returnType = aReturnType; }
+            type return_type() const final { return returnType; }
+            void set_return_type(type aReturnType) final { returnType = aReturnType; }
 
             i_function_parameters const& parameters() const final { return parameterList; }
             i_function_parameters& parameters() final { return parameterList; }
@@ -389,6 +434,8 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<neolib::abstract_t<string>> = type::String;
         template <> inline constexpr type type_to_enum_v<pointer_type> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_pointer_type>> = type::Pointer;
+        template <> inline constexpr type type_to_enum_v<array_type> = type::Array;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_array_type>> = type::Array;
         template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_composite_type>> = type::Composite;
         template <> inline constexpr type type_to_enum_v<function_type> = type::Function;
