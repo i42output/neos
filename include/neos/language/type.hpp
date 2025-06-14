@@ -129,10 +129,6 @@ namespace neos
         static_assert(sizeof(f32) == 4);
         static_assert(sizeof(f64) == 8);
 
-        struct pointer_type;
-        struct composite_type;
-        struct function_type;
-
         template<typename T>
         struct i_data
         {
@@ -165,7 +161,52 @@ namespace neos
                 s{ other.symbol() } {}
         };
 
-        struct i_pointer_type;
+        struct i_pointer_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_pointer_descriptor;
+
+            virtual type base_type() const = 0;
+            virtual neolib::i_ref_ptr<i_pointer_descriptor> const& pointee() const = 0;
+            virtual neolib::i_ref_ptr<i_pointer_descriptor>& pointee() = 0;
+            virtual void to_string(neolib::i_string& aResult) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string result;
+                to_string(result);
+                return result.to_std_string();
+            }
+        };
+
+        struct pointer_descriptor : neolib::reference_counted<i_pointer_descriptor>
+        {
+            language::type base;
+            neolib::ref_ptr<i_pointer_descriptor> nested;
+
+            pointer_descriptor(language::type aBase) :
+                base{ aBase }, nested{} {}
+
+            pointer_descriptor(neolib::ref_ptr<i_pointer_descriptor> aNested) :
+                base{ language::type::Pointer }, nested{ std::move(aNested) } {}
+
+            type base_type() const final { return base; }
+            neolib::ref_ptr<i_pointer_descriptor> const& pointee() const final { return nested; }
+            neolib::ref_ptr<i_pointer_descriptor>& pointee() final { return nested; }
+
+            using i_pointer_descriptor::to_string;
+            void to_string(neolib::i_string& aResult) const final
+            {
+                std::string result;
+                if (base != language::type::Pointer || !nested)
+                    result = type_name(base);
+                result = nested->to_string() + "*";
+                aResult = result;
+            }
+        };
+
+        using i_pointer_type = neolib::i_pair<neolib::i_ref_ptr<i_pointer_descriptor>, void*>;
+        using pointer_type = neolib::pair<neolib::ref_ptr<i_pointer_descriptor>, void*>;
+
         struct i_composite_type;
         struct i_function_type;
 
@@ -185,26 +226,9 @@ namespace neos
             i_data<neolib::abstract_t<ibig>>,
             i_data<neolib::abstract_t<fbig>>,
             i_data<neolib::abstract_t<string>>,
-            i_data<neolib::i_ref_ptr<i_pointer_type>>,
+            i_data<neolib::abstract_t<pointer_type>>,
             i_data<neolib::i_ref_ptr<i_composite_type>>,
             i_data<neolib::i_ref_ptr<i_function_type>>>;
-
-        struct i_pointer_type : neolib::i_reference_counted
-        {
-            using abstract_type = i_pointer_type;
-
-            virtual type base_type() const = 0;
-            virtual neolib::i_ref_ptr<i_pointer_type> const& pointee() const = 0;
-            virtual neolib::i_ref_ptr<i_pointer_type>& pointee() = 0;
-            virtual void to_string(neolib::i_string& aResult) const = 0;
-
-            std::string to_string() const
-            {
-                neolib::string result;
-                to_string(result);
-                return result.to_std_string();
-            }
-        };
 
         struct i_composite_type : neolib::i_reference_counted
         {
@@ -244,7 +268,6 @@ namespace neos
             }
         };
 
-        struct pointer_type;
         struct composite_type;
         struct function_type;
 
@@ -264,35 +287,9 @@ namespace neos
             data<ibig>,
             data<fbig>,
             data<string>,
-            data<neolib::ref_ptr<i_pointer_type>>,
+            data<pointer_type>,
             data<neolib::ref_ptr<i_composite_type>>,
             data<neolib::ref_ptr<i_function_type>>>;
-
-        struct pointer_type : neolib::reference_counted<i_pointer_type>
-        {
-            language::type base;
-            neolib::ref_ptr<i_pointer_type> nested;
-
-            pointer_type(language::type aBase) :
-                base{ aBase }, nested{} {}
-
-            pointer_type(neolib::ref_ptr<i_pointer_type> aNested) :
-                base{ language::type::Pointer }, nested{ std::move(aNested) } {}
-
-            type base_type() const override { return base; }
-            neolib::ref_ptr<i_pointer_type> const& pointee() const override { return nested; }
-            neolib::ref_ptr<i_pointer_type>& pointee() override { return nested; }
-
-            using i_pointer_type::to_string;
-            void to_string(neolib::i_string& aResult) const override
-            {
-                std::string result;
-                if (base != language::type::Pointer || !nested)
-                    result = type_name(base);
-                result = nested->to_string() + "*";
-                aResult = result;
-            }
-        };
 
         struct composite_type : neolib::reference_counted<i_composite_type>, neolib::vector<data_type>
         {
@@ -347,14 +344,14 @@ namespace neos
             function_type(type aReturnType, function_parameters aParameters) :
                 returnType{ aReturnType }, parameterList{ std::move(aParameters) } {}
 
-            neos::language::type return_type() const override { return returnType; }
-            void set_return_type(neos::language::type aReturnType) override { returnType = aReturnType; }
+            neos::language::type return_type() const final { return returnType; }
+            void set_return_type(neos::language::type aReturnType) final { returnType = aReturnType; }
 
-            i_function_parameters const& parameters() const override { return parameterList; }
-            i_function_parameters& parameters() override { return parameterList; }
+            i_function_parameters const& parameters() const final { return parameterList; }
+            i_function_parameters& parameters() final { return parameterList; }
 
             using i_function_type::to_string;
-            void to_string(neolib::i_string& aResult) const override
+            void to_string(neolib::i_string& aResult) const final
             {
                 std::string result;
                 result += type_name(returnType);
@@ -397,31 +394,43 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<function_type> = type::Function;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_function_type>> = type::Function;
 
-        inline std::ostream& operator<<(std::ostream& stream, data_type const& data)
+        inline std::ostream& operator<<(std::ostream& aStream, data_type const& aData)
         {
-            std::ostringstream result;
+            std::ostringstream oss;
             std::visit([&](auto const& d)
                 {
                     using vt = std::decay_t<decltype(d)>;
                     if constexpr (std::is_same_v<vt, std::monostate>)
-                        result << "";
-                    else
+                        ; /* empty */
+                    else if constexpr (std::is_same_v<vt, data<pointer_type>>)
                     {
-                        if (!d.v.has_value())
-                            result << "";
-                        else
+                        if (d.v.has_value())
                         {
-                            if constexpr (std::is_scalar_v<vt> ||
-                                std::is_same_v<vt, ibig> ||
-                                std::is_same_v<vt, fbig>)
-                                result << d.v.value();
-                            else
-                                result << "*";
+                            auto const& pd = d.v.value();
+                            oss << pd.first()->to_string();
+                            oss << "@" << pd.second();
                         }
                     }
-                }, data);
-            stream << "[" << neolib::to_escaped_string(result.str(), 32u, true) << "]";
-            return stream;
+                    else if constexpr (std::is_same_v<vt, data<neolib::ref_ptr<i_function_type>>>)
+                    {
+                        if (d.v.has_value())
+                            oss << (**d.v).to_string();
+                    }
+                    else if constexpr (std::is_scalar_v<typename vt::type> ||
+                        std::is_same_v<typename vt::type, ibig> ||
+                        std::is_same_v<typename vt::type, fbig>)
+                    {
+                        if (d.v.has_value())
+                            oss << d.v.value();
+                    }
+                    else
+                        oss << "*";
+                }, aData);
+
+            aStream << "["
+                << neolib::to_escaped_string(oss.str(), 32u, true)
+                << "]";
+            return aStream;
         }
    }
 }
