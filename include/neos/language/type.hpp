@@ -78,8 +78,8 @@ namespace neos
             case type::Ibig:      return "ibig";
             case type::Fbig:      return "fbig";
             case type::String:    return "string";
-            case type::Pointer:   return "*";
-            case type::Array:     return "[]";
+            case type::Pointer:   return "pointer";
+            case type::Array:     return "array";
             case type::Composite: return "composite";
             case type::Function:  return "function";
             default:              return "unknown";
@@ -104,8 +104,8 @@ namespace neos
                 { "ibig",      type::Ibig },
                 { "fbig",      type::Fbig },
                 { "string",    type::String },
-                { "*",         type::Pointer },
-                { "[]",        type::Array },
+                { "pointer",   type::Pointer },
+                { "array",     type::Array },
                 { "composite", type::Composite },
                 { "function",  type::Function },
                 { "unknown",   type::UNKNOWN }
@@ -128,31 +128,40 @@ namespace neos
         using ibig = neonumeric::integer<0u>;
         using fbig = neonumeric::real<0u>;
         using string = neolib::string;
+        using reference = void*;
 
         static_assert(sizeof(f32) == 4);
         static_assert(sizeof(f64) == 8);
 
-        template<typename T>
+        struct i_default_type_descriptor { using abstract_type = i_default_type_descriptor; };
+        struct default_type_descriptor : i_default_type_descriptor {};
+
+        template<typename T, typename D = i_default_type_descriptor>
         struct i_data
         {
             using abstract_type = i_data;
             using type = T;
+            using type_descriptor = D;
 
+            virtual neolib::i_optional<type_descriptor> const& descriptor() const = 0;
             virtual neolib::i_optional<type> const& value() const = 0;
             virtual neolib::i_optional<type>& value() = 0;
             virtual neolib::i_optional<symbol_table_pointer> const& symbol() const = 0;
             virtual neolib::i_optional<symbol_table_pointer>& symbol() = 0;
         };
 
-        template<typename T>
-        struct data : i_data<typename neolib::abstract_t<T>>
+        template<typename T, typename D = default_type_descriptor>
+        struct data : i_data<typename neolib::abstract_t<T>, neolib::abstract_t<D>>
         {
-            using abstract_type = i_data<typename neolib::abstract_t<T>>;
+            using abstract_type = i_data<typename neolib::abstract_t<T>, neolib::abstract_t<D>>;
             using type = T;
+            using type_descriptor = D;
 
+            neolib::optional<type_descriptor> d;
             neolib::optional<type> v;
             neolib::optional<symbol_table_pointer> s;
 
+            neolib::optional<type_descriptor> const& descriptor() const final { return d; }
             neolib::optional<type> const& value() const final { return v; }
             neolib::optional<type>& value() final { return v; }
             neolib::optional<symbol_table_pointer> const& symbol() const final { return s; }
@@ -183,14 +192,15 @@ namespace neos
 
         struct pointer_descriptor : neolib::reference_counted<i_pointer_descriptor>
         {
-            type base;
+            type base = {};
             neolib::ref_ptr<i_pointer_descriptor> nested;
 
             pointer_descriptor(type aBase) :
                 base{ aBase }, nested{} {}
-
             pointer_descriptor(neolib::ref_ptr<i_pointer_descriptor> aNested) :
                 base{ type::Pointer }, nested{ std::move(aNested) } {}
+            pointer_descriptor(i_pointer_descriptor const& other) :
+                base{ type::Pointer }, nested{ other.pointee() } {}
 
             type base_type() const final { return base; }
             neolib::ref_ptr<i_pointer_descriptor> const& pointee() const final { return nested; }
@@ -206,9 +216,6 @@ namespace neos
                 aResult = result;
             }
         };
-
-        using i_pointer_type = neolib::i_pair<neolib::i_ref_ptr<i_pointer_descriptor>, void*>;
-        using pointer_type = neolib::pair<neolib::ref_ptr<i_pointer_descriptor>, void*>;
 
         struct i_array_descriptor : neolib::i_reference_counted
         {
@@ -228,11 +235,13 @@ namespace neos
 
         struct array_descriptor : neolib::reference_counted<i_array_descriptor>
         {
-            type elemType{};
-            neolib::vector<std::size_t>  dims;
+            type elemType = {};
+            neolib::vector<std::size_t> dims;
 
-            array_descriptor(type e, neolib::vector<std::size_t> xs)
-                : elemType{ e }, dims{ std::move(xs) } {}
+            array_descriptor(type e, std::vector<std::size_t> const& xs)
+                : elemType{ e }, dims{ xs } {}
+            array_descriptor(i_array_descriptor const& other)
+                : elemType{ other.element_type() }, dims{ other.extents() } {}
 
             type element_type() const final { return elemType; }
             neolib::i_vector<std::size_t> const& extents() const final { return dims; }
@@ -246,11 +255,8 @@ namespace neos
             }
         };
 
+        struct i_array_type;
         struct i_composite_type;
-
-        using i_array_type = neolib::i_pair<neolib::i_ref_ptr<i_array_descriptor>, neolib::i_ref_ptr<i_composite_type>>;
-        using array_type = neolib::pair<neolib::ref_ptr<i_array_descriptor>, neolib::ref_ptr<i_composite_type>>;
-
         struct i_function_type;
 
         using i_data_type = neolib::i_variant<
@@ -269,10 +275,18 @@ namespace neos
             i_data<neolib::abstract_t<ibig>>,
             i_data<neolib::abstract_t<fbig>>,
             i_data<neolib::abstract_t<string>>,
-            i_data<i_pointer_type>,
-            i_data<i_array_type>,
+            i_data<reference, i_pointer_descriptor>,
+            i_data<neolib::i_ref_ptr<i_array_type>, i_array_descriptor>,
             i_data<neolib::i_ref_ptr<i_composite_type>>,
             i_data<neolib::i_ref_ptr<i_function_type>>>;
+
+        struct i_array_type : neolib::i_reference_counted
+        {
+            using abstract_type = i_array_type;
+
+            virtual neolib::i_vector<i_data_type> const& contents() const = 0;
+            virtual neolib::i_vector<i_data_type>& contents() = 0;
+        };
 
         struct i_composite_type : neolib::i_reference_counted
         {
@@ -331,10 +345,22 @@ namespace neos
             data<ibig>,
             data<fbig>,
             data<string>,
-            data<pointer_type>,
-            data<array_type>,
+            data<reference, pointer_descriptor>,
+            data<neolib::ref_ptr<i_array_type>, array_descriptor>,
             data<neolib::ref_ptr<i_composite_type>>,
             data<neolib::ref_ptr<i_function_type>>>;
+
+        struct array_type : neolib::reference_counted<i_array_type>, neolib::vector<data_type>
+        {
+            neolib::vector<data_type> const& contents() const final
+            {
+                return *this;
+            }
+            neolib::vector<data_type>& contents() final
+            {
+                return *this;
+            }
+        };
 
         struct composite_type : neolib::reference_counted<i_composite_type>, neolib::vector<data_type>
         {
@@ -432,8 +458,7 @@ namespace neos
         //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<fbig>> = type::Fbig;
         template <> inline constexpr type type_to_enum_v<string> = type::String;
         template <> inline constexpr type type_to_enum_v<neolib::abstract_t<string>> = type::String;
-        template <> inline constexpr type type_to_enum_v<pointer_type> = type::Pointer;
-        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_pointer_type>> = type::Pointer;
+        template <> inline constexpr type type_to_enum_v<reference> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<array_type> = type::Array;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_array_type>> = type::Array;
         template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
@@ -449,25 +474,25 @@ namespace neos
                     using vt = std::decay_t<decltype(d)>;
                     if constexpr (std::is_same_v<vt, std::monostate>)
                         ; /* empty */
-                    else if constexpr (std::is_same_v<vt, data<pointer_type>>)
+                    else if constexpr (std::is_same_v<vt, data<reference, i_pointer_descriptor>>)
                     {
                         if (d.v.has_value())
                         {
-                            auto const& pd = d.v.value();
-                            oss << pd.first()->to_string();
-                            oss << "@" << pd.second();
+                            auto const& pd = d.d.value();
+                            oss << pd.to_string();
+                            oss << "@" << d.v.value();
                         }
                     }
-                    else if constexpr (std::is_same_v<vt, data<array_type>>)
+                    else if constexpr (std::is_same_v<vt, data<array_type, array_descriptor>>)
                     {
                         if (d.v.has_value())
                         {
-                            auto const& ad = d.v.value();
+                            auto const& ad = d.d.value();
                             // 1) shape e.g. "i32[3][4]"
-                            oss << ad.first()->to_string();
+                            oss << ad.to_string();
                             // 2) contents via the composite inside ad.second()
                             //    ad.second() is a ref_ptr<i_composite_type>
-                            auto const& elems = ad.second()->contents();
+                            auto const& elems = d.v.value()->contents();
                             oss << "{";
                             for (std::size_t i = 0; i < elems.size(); ++i)
                             {
