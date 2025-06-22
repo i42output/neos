@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <cstdint>
 #include <unordered_map>
 #include <neolib/core/variant.hpp>
 #include <neolib/core/vector.hpp>
@@ -32,35 +33,21 @@ namespace neos
 {
     namespace language
     {
-        enum class type : std::uint32_t
-        {
+        enum class type : std::uint32_t {
             UNKNOWN = 0x00000000,
-
-            Void = 0x00000001,
-            Boolean = 0x00000002,
-            U8 = 0x00000003,
-            U16 = 0x00000004,
-            U32 = 0x00000005,
-            U64 = 0x00000006,
-            I8 = 0x00000007,
-            I16 = 0x00000008,
-            I32 = 0x00000009,
-            I64 = 0x0000000A,
-            F32 = 0x0000000B,
-            F64 = 0x0000000C,
-            Ibig = 0x0000000D,
-            Fbig = 0x0000000E,
-            String = 0x0000000F,
-            Pointer = 0x00000010,
-            Array = 0x00000011,
-            Tuple = 0x00000012,
-            Struct = 0x00000013,
-            Function = 0x00000014
+            Void, 
+            Boolean, 
+            U8, U16, U32, U64, I8, I16, I32, I64, 
+            F32, F64, 
+            Ibig, Fbig, 
+            String,
+            Reference, Pointer, 
+            Array, Tuple, Struct, 
+            Function
         };
 
         inline std::string type_name(type t)
         {
-            using namespace language;
             switch (t)
             {
             case type::UNKNOWN:   return "unknown";
@@ -79,6 +66,7 @@ namespace neos
             case type::Ibig:      return "ibig";
             case type::Fbig:      return "fbig";
             case type::String:    return "string";
+            case type::Reference: return "reference";
             case type::Pointer:   return "pointer";
             case type::Array:     return "array";
             case type::Tuple:     return "tuple";
@@ -91,6 +79,7 @@ namespace neos
         inline type type_from_name(std::string const& aName)
         {
             static const std::unordered_map<std::string, type> map = {
+                { "unknown",   type::UNKNOWN },
                 { "void",      type::Void },
                 { "bool",      type::Boolean },
                 { "u8",        type::U8 },
@@ -106,24 +95,31 @@ namespace neos
                 { "ibig",      type::Ibig },
                 { "fbig",      type::Fbig },
                 { "string",    type::String },
+                { "reference", type::Reference },
                 { "pointer",   type::Pointer },
                 { "array",     type::Array },
                 { "tuple",     type::Tuple },
                 { "struct",    type::Struct },
-                { "function",  type::Function },
-                { "unknown",   type::UNKNOWN }
+                { "function",  type::Function }
             };
-            return map.at(aName);
+            try
+            {
+                return map.at(aName);
+            }
+            catch (...)
+            {
+                return type::UNKNOWN;
+            }
         }
 
-        using _void = std::monostate;
+        enum _Void {}; using _void = _Void;
         using boolean = bool;
         using u8 = std::uint8_t;
         using u16 = std::uint16_t;
         using u32 = std::uint32_t;
         using u64 = std::uint64_t;
         using i8 = std::int8_t;
-        using i16 = int16_t;
+        using i16 = std::int16_t;
         using i32 = std::int32_t;
         using i64 = std::int64_t;
         using f32 = float;
@@ -131,7 +127,8 @@ namespace neos
         using ibig = neonumeric::integer<0u>;
         using fbig = neonumeric::real<0u>;
         using string = neolib::string;
-        using reference = void*;
+        enum _Reference {}; using reference = _Reference*;
+        enum _Pointer {}; using pointer = _Pointer*;
 
         static_assert(sizeof(f32) == 4);
         static_assert(sizeof(f64) == 8);
@@ -177,6 +174,40 @@ namespace neos
                 d{ other.descriptor() } {}
         };
 
+        struct i_reference_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_reference_descriptor;
+
+            virtual type base_type() const = 0;
+            virtual void to_string(neolib::i_string& aResult) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string result;
+                to_string(result);
+                return result.to_std_string();
+            }
+        };
+
+        struct reference_descriptor : neolib::reference_counted<i_reference_descriptor>
+        {
+            type base = {};
+
+            reference_descriptor(type aBase) :
+                base{ aBase } {}
+            reference_descriptor(i_reference_descriptor const& other) :
+                base{ other.base_type() } {}
+
+            type base_type() const final { return base; }
+
+            using i_reference_descriptor::to_string;
+            void to_string(neolib::i_string& aResult) const final
+            {
+                std::string result = type_name(base) + "&";
+                aResult = result;
+            }
+        };
+
         struct i_pointer_descriptor : neolib::i_reference_counted
         {
             using abstract_type = i_pointer_descriptor;
@@ -216,7 +247,8 @@ namespace neos
                 std::string result;
                 if (base != type::Pointer || !nested)
                     result = type_name(base);
-                result = nested->to_string() + "*";
+                else
+                    result = nested->to_string() + "*";
                 aResult = result;
             }
         };
@@ -369,7 +401,8 @@ namespace neos
             i_data<neolib::abstract_t<ibig>>,
             i_data<neolib::abstract_t<fbig>>,
             i_data<neolib::abstract_t<string>>,
-            i_data<reference, i_pointer_descriptor>,
+            i_data<reference, i_reference_descriptor>,
+            i_data<pointer, i_pointer_descriptor>,
             i_data<neolib::i_ref_ptr<i_array_type>, i_array_descriptor>,
             i_data<neolib::i_ref_ptr<i_tuple_type>, i_tuple_descriptor>,
             i_data<neolib::i_ref_ptr<i_struct_type>, i_struct_descriptor>,
@@ -442,7 +475,8 @@ namespace neos
             data<ibig>,
             data<fbig>,
             data<string>,
-            data<reference, pointer_descriptor>,
+            data<reference, reference_descriptor>,
+            data<pointer, pointer_descriptor>,
             data<neolib::ref_ptr<i_array_type>, array_descriptor>,
             data<neolib::ref_ptr<i_tuple_type>, tuple_descriptor>,
             data<neolib::ref_ptr<i_struct_type>, struct_descriptor>,
@@ -540,6 +574,7 @@ namespace neos
 
         template <typename T> inline constexpr type type_to_enum_v = type::UNKNOWN;
         template <> inline constexpr type type_to_enum_v<void> = type::Void;
+        template <> inline constexpr type type_to_enum_v<_void> = type::Void;
         template <> inline constexpr type type_to_enum_v<bool> = type::Boolean;
         template <> inline constexpr type type_to_enum_v<std::uint8_t> = type::U8;
         template <> inline constexpr type type_to_enum_v<std::uint16_t> = type::U16;
@@ -557,7 +592,8 @@ namespace neos
         //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<fbig>> = type::Fbig;
         template <> inline constexpr type type_to_enum_v<string> = type::String;
         template <> inline constexpr type type_to_enum_v<neolib::abstract_t<string>> = type::String;
-        template <> inline constexpr type type_to_enum_v<reference> = type::Pointer;
+        template <> inline constexpr type type_to_enum_v<reference> = type::Reference;
+        template <> inline constexpr type type_to_enum_v<pointer> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<array_type> = type::Array;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_array_type>> = type::Array;
         template <> inline constexpr type type_to_enum_v<tuple_type> = type::Tuple;
@@ -574,8 +610,19 @@ namespace neos
                 {
                     using vt = std::decay_t<decltype(d)>;
                     if constexpr (std::is_same_v<vt, std::monostate>)
+                        ;
+                    else if constexpr (std::is_same_v<vt, data<_void>>)
                         ; /* empty */
-                    else if constexpr (std::is_same_v<vt, data<reference, i_pointer_descriptor>>)
+                    else if constexpr (std::is_same_v<vt, data<reference, reference_descriptor>>)
+                    {
+                        if (d.v.has_value())
+                        {
+                            auto const& rd = d.d.value();
+                            oss << rd.to_string();
+                            oss << "@" << d.v.value();
+                        }
+                    }
+                    else if constexpr (std::is_same_v<vt, data<pointer, pointer_descriptor>>)
                     {
                         if (d.v.has_value())
                         {
@@ -584,21 +631,18 @@ namespace neos
                             oss << "@" << d.v.value();
                         }
                     }
-                    else if constexpr (std::is_same_v<vt, data<array_type, array_descriptor>>)
+                    else if constexpr (std::is_same_v<vt, data<neolib::ref_ptr<i_array_type>, array_descriptor>>)
                     {
                         if (d.v.has_value())
                         {
                             auto const& ad = d.d.value();
-                            // 1) shape e.g. "i32[3][4]"
                             oss << ad.to_string();
-                            // 2) contents via the struct inside ad.second()
-                            //    ad.second() is a ref_ptr<i_struct_type>
                             auto const& elems = d.v.value()->contents();
                             oss << "{";
                             for (std::size_t i = 0; i < elems.size(); ++i)
                             {
                                 if (i) oss << ", ";
-                                oss << elems[i];  // recursive call to operator<<
+                                oss << elems[i];
                             }
                             oss << "}";
                         }
@@ -614,6 +658,13 @@ namespace neos
                     {
                         if (d.v.has_value())
                             oss << d.v.value();
+                    }
+                    else if constexpr (std::is_same_v<typename vt::type, string>)
+                    {
+                        oss << "\"";
+                        if (d.v.has_value())
+                            oss << d.v.value();
+                        oss << "\"";
                     }
                     else
                         oss << "*";
