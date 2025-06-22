@@ -630,7 +630,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Composite;
+            this->data<neos::language::type>() = neos::language::type::Tuple;
             aResult = instance();
         }
     };
@@ -729,7 +729,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Composite;
+            this->data<neos::language::type>() = neos::language::type::Struct;
             aResult = instance();
         }
     };

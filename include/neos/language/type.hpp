@@ -53,8 +53,9 @@ namespace neos
             String = 0x0000000F,
             Pointer = 0x00000010,
             Array = 0x00000011,
-            Composite = 0x00000012,
-            Function = 0x00000013
+            Tuple = 0x00000012,
+            Struct = 0x00000013,
+            Function = 0x00000014
         };
 
         inline std::string type_name(type t)
@@ -80,7 +81,8 @@ namespace neos
             case type::String:    return "string";
             case type::Pointer:   return "pointer";
             case type::Array:     return "array";
-            case type::Composite: return "composite";
+            case type::Tuple:     return "tuple";
+            case type::Struct:    return "struct";
             case type::Function:  return "function";
             default:              return "unknown";
             }
@@ -106,7 +108,8 @@ namespace neos
                 { "string",    type::String },
                 { "pointer",   type::Pointer },
                 { "array",     type::Array },
-                { "composite", type::Composite },
+                { "tuple",     type::Tuple },
+                { "struct",    type::Struct },
                 { "function",  type::Function },
                 { "unknown",   type::UNKNOWN }
             };
@@ -170,7 +173,8 @@ namespace neos
             data() {}
             data(abstract_type const& other) :
                 v{ other.value() },
-                s{ other.symbol() } {}
+                s{ other.symbol() },
+                d{ other.descriptor() } {}
         };
 
         struct i_pointer_descriptor : neolib::i_reference_counted
@@ -238,8 +242,8 @@ namespace neos
             type elemType = {};
             neolib::vector<std::size_t> dims;
 
-            array_descriptor(type e, std::vector<std::size_t> const& xs)
-                : elemType{ e }, dims{ xs } {}
+            array_descriptor(type e, std::vector<std::size_t> const& dims)
+                : elemType{ e }, dims{ dims } {}
             array_descriptor(i_array_descriptor const& other)
                 : elemType{ other.element_type() }, dims{ other.extents() } {}
 
@@ -255,8 +259,98 @@ namespace neos
             }
         };
 
+        struct i_tuple_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_tuple_descriptor;
+
+            virtual neolib::i_vector<type> const& element_types() const = 0;
+            virtual void to_string(neolib::i_string& out) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string tmp;
+                to_string(tmp);
+                return tmp.to_std_string();
+            }
+        };
+
+        struct tuple_descriptor : neolib::reference_counted<i_tuple_descriptor>
+        {
+            neolib::vector<type> elementTypes;
+
+            tuple_descriptor(std::vector<type> const& elements)
+                : elementTypes{ elements } {}
+            tuple_descriptor(i_tuple_descriptor const& other)
+                : elementTypes{ other.element_types() } {}
+
+            neolib::i_vector<type> const& element_types() const final { return elementTypes; }
+
+            using i_tuple_descriptor::to_string;
+            void to_string(neolib::i_string& out) const final
+            {
+                std::string s;
+                for (auto x : elementTypes)
+                { 
+                    if (s.empty())
+                        s = "(";
+                    else
+                        s += ("," + type_name(x));
+                };
+                if (!s.empty())
+                    s += ")";
+                else
+                    s = "()";
+                out = neolib::string{ s };
+            }
+        };
+
+        struct i_struct_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_struct_descriptor;
+
+            virtual neolib::i_vector<neolib::i_pair<type, neolib::i_string>> const& members() const = 0;
+            virtual void to_string(neolib::i_string& out) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string tmp;
+                to_string(tmp);
+                return tmp.to_std_string();
+            }
+        };
+
+        struct struct_descriptor : neolib::reference_counted<i_struct_descriptor>
+        {
+            neolib::vector<neolib::pair<type, neolib::string>> structMembers;
+
+            struct_descriptor(neolib::vector<neolib::pair<type, neolib::string>> const& members)
+                : structMembers{ members } {}
+            struct_descriptor(i_struct_descriptor const& other)
+                : structMembers{ other.members() } {}
+
+            neolib::i_vector<neolib::i_pair<type, neolib::i_string>> const& members() const { return structMembers; }
+
+            using i_struct_descriptor::to_string;
+            void to_string(neolib::i_string& out) const final
+            {
+                std::string s = "{";
+                for (std::size_t i = 0; i < structMembers.size(); ++i)
+                {
+                    if (i > 0)
+                        s += ',';
+                    auto const& [memberType, memberName] = structMembers[i];
+                    s += memberName.to_std_string();
+                    s += ':';
+                    s += type_name(memberType);
+                }
+                s += '}';
+                out = neolib::string{ s };
+            }
+        };
+
         struct i_array_type;
-        struct i_composite_type;
+        struct i_tuple_type;
+        struct i_struct_type;
         struct i_function_type;
 
         using i_data_type = neolib::i_variant<
@@ -277,23 +371,29 @@ namespace neos
             i_data<neolib::abstract_t<string>>,
             i_data<reference, i_pointer_descriptor>,
             i_data<neolib::i_ref_ptr<i_array_type>, i_array_descriptor>,
-            i_data<neolib::i_ref_ptr<i_composite_type>>,
+            i_data<neolib::i_ref_ptr<i_tuple_type>, i_tuple_descriptor>,
+            i_data<neolib::i_ref_ptr<i_struct_type>, i_struct_descriptor>,
             i_data<neolib::i_ref_ptr<i_function_type>>>;
 
-        struct i_array_type : neolib::i_reference_counted
+        struct i_composite_type : neolib::i_reference_counted
         {
-            using abstract_type = i_array_type;
-
             virtual neolib::i_vector<i_data_type> const& contents() const = 0;
             virtual neolib::i_vector<i_data_type>& contents() = 0;
         };
 
-        struct i_composite_type : neolib::i_reference_counted
+        struct i_array_type : i_composite_type
         {
-            using abstract_type = i_composite_type;
+            using abstract_type = i_array_type;
+        };
 
-            virtual neolib::i_vector<i_data_type> const& contents() const = 0;
-            virtual neolib::i_vector<i_data_type>& contents() = 0;
+        struct i_tuple_type : i_composite_type
+        {
+            using abstract_type = i_tuple_type;
+        };
+
+        struct i_struct_type : i_composite_type
+        {
+            using abstract_type = i_struct_type;
         };
 
         struct i_function_parameter
@@ -326,9 +426,6 @@ namespace neos
             }
         };
 
-        struct composite_type;
-        struct function_type;
-
         using data_type = neolib::variant<
             data<_void>,
             data<boolean>,
@@ -347,10 +444,12 @@ namespace neos
             data<string>,
             data<reference, pointer_descriptor>,
             data<neolib::ref_ptr<i_array_type>, array_descriptor>,
-            data<neolib::ref_ptr<i_composite_type>>,
+            data<neolib::ref_ptr<i_tuple_type>, tuple_descriptor>,
+            data<neolib::ref_ptr<i_struct_type>, struct_descriptor>,
             data<neolib::ref_ptr<i_function_type>>>;
 
-        struct array_type : neolib::reference_counted<i_array_type>, neolib::vector<data_type>
+        template <typename Base>
+        struct composite_type : neolib::reference_counted<Base>, neolib::vector<data_type>
         {
             neolib::vector<data_type> const& contents() const final
             {
@@ -362,16 +461,16 @@ namespace neos
             }
         };
 
-        struct composite_type : neolib::reference_counted<i_composite_type>, neolib::vector<data_type>
+        struct array_type : composite_type<i_array_type>
         {
-            neolib::vector<data_type> const& contents() const final
-            {
-                return *this;
-            }
-            neolib::vector<data_type>& contents() final
-            {
-                return *this;
-            }
+        };
+
+        struct tuple_type : composite_type<i_tuple_type>
+        {
+        };
+
+        struct struct_type : composite_type<i_struct_type>
+        {
         };
 
         struct function_parameter : i_function_parameter
@@ -461,8 +560,10 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<reference> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<array_type> = type::Array;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_array_type>> = type::Array;
-        template <> inline constexpr type type_to_enum_v<composite_type> = type::Composite;
-        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_composite_type>> = type::Composite;
+        template <> inline constexpr type type_to_enum_v<tuple_type> = type::Tuple;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_tuple_type>> = type::Tuple;
+        template <> inline constexpr type type_to_enum_v<struct_type> = type::Struct;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_struct_type>> = type::Struct;
         template <> inline constexpr type type_to_enum_v<function_type> = type::Function;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_function_type>> = type::Function;
 
@@ -490,8 +591,8 @@ namespace neos
                             auto const& ad = d.d.value();
                             // 1) shape e.g. "i32[3][4]"
                             oss << ad.to_string();
-                            // 2) contents via the composite inside ad.second()
-                            //    ad.second() is a ref_ptr<i_composite_type>
+                            // 2) contents via the struct inside ad.second()
+                            //    ad.second() is a ref_ptr<i_struct_type>
                             auto const& elems = d.v.value()->contents();
                             oss << "{";
                             for (std::size_t i = 0; i < elems.size(); ++i)
