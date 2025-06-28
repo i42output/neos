@@ -21,6 +21,7 @@
 
 #include <neos/neos.hpp>
 #include <neos/language/type.hpp>
+#include <neos/language/i_semantic_concept.hpp>
 
 namespace neos
 {
@@ -58,11 +59,13 @@ namespace neos
 
         using i_operator_type = neolib::i_variant<
             neolib::i_ref_ptr<i_unary_operator>,
-            neolib::i_ref_ptr<i_binary_operator>>;
+            neolib::i_ref_ptr<i_binary_operator>,
+            neolib::i_ref_ptr<i_semantic_concept>>;
 
         using operator_type = neolib::variant<
             neolib::ref_ptr<i_unary_operator>,
-            neolib::ref_ptr<i_binary_operator>>;
+            neolib::ref_ptr<i_binary_operator>,
+            neolib::ref_ptr<i_semantic_concept>>;
 
         inline std::ostream& operator<<(std::ostream& aStream, i_operator_type const& aOperator)
         {
