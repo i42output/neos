@@ -4,3 +4,7 @@ fn test(x, y : i32; z : string) -> i64
     return 1 + (2 + 3) * 4 + x / y;
 }
 
+proc wibble(foo : out i32)
+{
+}
+

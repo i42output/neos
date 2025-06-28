@@ -25,6 +25,7 @@
 #include <neolib/core/variant.hpp>
 #include <neolib/core/vector.hpp>
 #include <neolib/core/optional.hpp>
+#include <neolib/core/uuid.hpp>
 #include <neonumeric/integer.hpp>
 #include <neonumeric/real.hpp>
 #include <neos/language/symbols.hpp>
@@ -43,8 +44,11 @@ namespace neos
             String,
             Reference, Pointer, 
             Array, Tuple, Struct, 
-            Function
+            Function,
+            Custom
         };
+
+        using custom_type_id = neolib::uuid;
 
         inline std::string type_name(type t)
         {
@@ -72,6 +76,7 @@ namespace neos
             case type::Tuple:     return "tuple";
             case type::Struct:    return "struct";
             case type::Function:  return "function";
+            case type::Custom:    return "custom";
             default:              return "unknown";
             }
         }
@@ -100,7 +105,8 @@ namespace neos
                 { "array",     type::Array },
                 { "tuple",     type::Tuple },
                 { "struct",    type::Struct },
-                { "function",  type::Function }
+                { "function",  type::Function },
+                { "custom",    type::Custom }
             };
             try
             {
@@ -143,7 +149,7 @@ namespace neos
             using type = T;
             using type_descriptor = D;
 
-            virtual neolib::i_optional<type_descriptor> const& descriptor() const = 0;
+            virtual type_descriptor const& descriptor() const = 0;
             virtual neolib::i_optional<type> const& value() const = 0;
             virtual neolib::i_optional<type>& value() = 0;
             virtual neolib::i_optional<symbol_table_pointer> const& symbol() const = 0;
@@ -157,21 +163,24 @@ namespace neos
             using type = T;
             using type_descriptor = D;
 
-            neolib::optional<type_descriptor> d;
+            type_descriptor d;
             neolib::optional<type> v;
             neolib::optional<symbol_table_pointer> s;
 
-            neolib::optional<type_descriptor> const& descriptor() const final { return d; }
+            type_descriptor const& descriptor() const final { return d; }
             neolib::optional<type> const& value() const final { return v; }
             neolib::optional<type>& value() final { return v; }
             neolib::optional<symbol_table_pointer> const& symbol() const final { return s; }
             neolib::optional<symbol_table_pointer>& symbol() final { return s; }
 
-            data() {}
+            data(type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
+                d{ descriptor } {}
+            data(type_descriptor const& descriptor) requires !std::is_default_constructible_v<type_descriptor> :
+                d{ descriptor } {}
             data(abstract_type const& other) :
+                d{ other.descriptor() },
                 v{ other.value() },
-                s{ other.symbol() },
-                d{ other.descriptor() } {}
+                s{ other.symbol() } {}
         };
 
         struct i_reference_descriptor : neolib::i_reference_counted
@@ -380,10 +389,55 @@ namespace neos
             }
         };
 
+        struct i_custom_type_descriptor : neolib::i_reference_counted
+        {
+            using abstract_type = i_custom_type_descriptor;
+
+            virtual custom_type_id type() const = 0;
+            virtual neolib::i_optional<neolib::i_string> const& type_name() const = 0;
+
+            virtual void to_string(neolib::i_string& out) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string tmp;
+                to_string(tmp);
+                return tmp.to_std_string();
+            }
+        };
+
+        struct custom_type_descriptor : neolib::reference_counted<i_custom_type_descriptor>
+        {
+            custom_type_id typeId;
+            neolib::optional<neolib::string> typeName;
+
+            custom_type_descriptor(custom_type_id aTypeId, neolib::string const& aTypeName = {}) :
+                typeId{ aTypeId }, typeName{ aTypeName } {}
+            custom_type_descriptor(i_custom_type_descriptor const& other) :
+                typeId{ other.type() }, typeName{ other.type_name() } {}
+
+            custom_type_id type() const final { return typeId; }
+            neolib::optional<neolib::string> const& type_name() const final { return typeName; }
+
+            using i_custom_type_descriptor::to_string;
+            void to_string(neolib::i_string& out) const final
+            {
+                if (typeName && !typeName.value().empty())
+                    out = *typeName;
+                else 
+                {
+                    std::ostringstream oss;
+                    oss << typeId;
+                    out = neolib::string{ oss.str() };
+                }
+            }
+        };
+
         struct i_array_type;
         struct i_tuple_type;
         struct i_struct_type;
         struct i_function_type;
+        struct i_custom_type;
 
         using i_data_type = neolib::i_variant<
             i_data<_void>,
@@ -406,7 +460,41 @@ namespace neos
             i_data<neolib::i_ref_ptr<i_array_type>, i_array_descriptor>,
             i_data<neolib::i_ref_ptr<i_tuple_type>, i_tuple_descriptor>,
             i_data<neolib::i_ref_ptr<i_struct_type>, i_struct_descriptor>,
-            i_data<neolib::i_ref_ptr<i_function_type>>>;
+            i_data<neolib::i_ref_ptr<i_function_type>>,
+            i_data<neolib::i_ref_ptr<i_custom_type>, i_custom_type_descriptor>>;
+
+        inline bool is_scalar(i_data_type const& aDataType)
+        {
+            switch (static_cast<type>(aDataType.index()))
+            {
+            case type::Boolean:
+            case type::U8:
+            case type::U16:
+            case type::U32:
+            case type::U64:
+            case type::I8:
+            case type::I16:
+            case type::I32:
+            case type::I64:
+            case type::F32:
+            case type::F64:
+            case type::Ibig:
+            case type::Fbig:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        inline bool is_custom_type(i_data_type const& aDataType, custom_type_id const& aTypeId)
+        {
+            if (static_cast<type>(aDataType.index()) == type::Custom)
+            {
+                return aDataType.get<i_data<neolib::i_ref_ptr<i_custom_type>, i_custom_type_descriptor>>().descriptor().type() ==
+                    aTypeId;
+            }
+            return false;
+        }
 
         struct i_composite_type : neolib::i_reference_counted
         {
@@ -459,6 +547,11 @@ namespace neos
             }
         };
 
+        struct i_custom_type : neolib::i_reference_counted 
+        {
+            using abstract_type = i_custom_type;
+        };
+
         using data_type = neolib::variant<
             data<_void>,
             data<boolean>,
@@ -480,7 +573,8 @@ namespace neos
             data<neolib::ref_ptr<i_array_type>, array_descriptor>,
             data<neolib::ref_ptr<i_tuple_type>, tuple_descriptor>,
             data<neolib::ref_ptr<i_struct_type>, struct_descriptor>,
-            data<neolib::ref_ptr<i_function_type>>>;
+            data<neolib::ref_ptr<i_function_type>>,
+            data<neolib::ref_ptr<i_custom_type>, custom_type_descriptor>>;
 
         template <typename Base>
         struct composite_type : neolib::reference_counted<Base>, neolib::vector<data_type>
@@ -572,6 +666,9 @@ namespace neos
             }
         };
 
+        template <typename Base = i_custom_type>
+        struct custom_type : neolib::reference_counted<Base> {};
+
         template <typename T> inline constexpr type type_to_enum_v = type::UNKNOWN;
         template <> inline constexpr type type_to_enum_v<void> = type::Void;
         template <> inline constexpr type type_to_enum_v<_void> = type::Void;
@@ -602,6 +699,8 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_struct_type>> = type::Struct;
         template <> inline constexpr type type_to_enum_v<function_type> = type::Function;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_function_type>> = type::Function;
+        template <> inline constexpr type type_to_enum_v<i_custom_type> = type::Custom;
+        template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_custom_type>> = type::Custom;
 
         inline std::ostream& operator<<(std::ostream& aStream, data_type const& aData)
         {
@@ -617,7 +716,7 @@ namespace neos
                     {
                         if (d.v.has_value())
                         {
-                            auto const& rd = d.d.value();
+                            auto const& rd = d.d;
                             oss << rd.to_string();
                             oss << "@" << d.v.value();
                         }
@@ -626,7 +725,7 @@ namespace neos
                     {
                         if (d.v.has_value())
                         {
-                            auto const& pd = d.d.value();
+                            auto const& pd = d.d;
                             oss << pd.to_string();
                             oss << "@" << d.v.value();
                         }
@@ -635,7 +734,7 @@ namespace neos
                     {
                         if (d.v.has_value())
                         {
-                            auto const& ad = d.d.value();
+                            auto const& ad = d.d;
                             oss << ad.to_string();
                             auto const& elems = d.v.value()->contents();
                             oss << "{";
@@ -667,7 +766,10 @@ namespace neos
                         oss << "\"";
                     }
                     else
-                        oss << "*";
+                    {
+                        oss << d.d.to_string();
+                        oss << "{*}";
+                    }
                 }, aData);
 
             aStream << "["
@@ -675,5 +777,5 @@ namespace neos
                 << "]";
             return aStream;
         }
-   }
+    }
 }
