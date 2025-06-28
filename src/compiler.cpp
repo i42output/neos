@@ -239,6 +239,22 @@ namespace neos::language
         }
     }
 
+    language::i_data_type const& compiler::lhs_operand() const
+    {
+        if (state().operandStack.size() == 1)
+            return *(state().operandStack.rbegin());
+        else if (state().operandStack.size() >= 2)
+            return *std::next(state().operandStack.rbegin());
+        throw std::logic_error("neos::language::compiler::lhs_operand");
+    }
+
+    language::i_data_type const& compiler::rhs_operand() const
+    {
+        if (state().operandStack.size() >= 2)
+            return *(state().operandStack.rbegin());
+        throw std::logic_error("neos::language::compiler::rhs_operand");
+    }
+
     void compiler::push_operand(language::i_data_type const& aOperand)
     {
         state().operandStack.push_back(aOperand);

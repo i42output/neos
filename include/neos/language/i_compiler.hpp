@@ -87,6 +87,8 @@ namespace neos::language
         virtual bool compile(i_source_fragment const& aFragment) = 0;
         virtual i_scope& enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName) = 0;
         virtual void leave_scope(scope_type aScopeType) = 0;
+        virtual language::i_data_type const& lhs_operand() const = 0;
+        virtual language::i_data_type const& rhs_operand() const = 0;
         virtual void push_operand(language::i_data_type const& aOperand) = 0;
         virtual void pop_operand(language::i_data_type& aOperand) = 0;
         virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const = 0;

@@ -173,6 +173,9 @@ namespace neos
             neolib::optional<symbol_table_pointer> const& symbol() const final { return s; }
             neolib::optional<symbol_table_pointer>& symbol() final { return s; }
 
+            data(type const& value, type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
+                d{ descriptor },
+                v{ value } {}
             data(type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
                 d{ descriptor } {}
             data(type_descriptor const& descriptor) requires !std::is_default_constructible_v<type_descriptor> :
@@ -463,27 +466,29 @@ namespace neos
             i_data<neolib::i_ref_ptr<i_function_type>>,
             i_data<neolib::i_ref_ptr<i_custom_type>, i_custom_type_descriptor>>;
 
+        template <typename T>
+        constexpr bool is_scalar_v = (std::is_scalar_v<T> && !std::is_enum_v<T> && !std::is_pointer_v<T>) 
+            || std::is_same_v<T, ibig> || std::is_same_v<T, fbig>;
+
         inline bool is_scalar(i_data_type const& aDataType)
         {
-            switch (static_cast<type>(aDataType.index()))
+            bool result = false;
+            neolib::visit([&](const auto& aData)
             {
-            case type::Boolean:
-            case type::U8:
-            case type::U16:
-            case type::U32:
-            case type::U64:
-            case type::I8:
-            case type::I16:
-            case type::I32:
-            case type::I64:
-            case type::F32:
-            case type::F64:
-            case type::Ibig:
-            case type::Fbig:
-                return true;
-            default:
-                return false;
-            }
+                result = is_scalar_v<std::decay_t<decltype(aData)>>;
+            }, aDataType);
+            return result;
+        }
+
+        inline bool is_scalar_immediate(i_data_type const& aDataType)
+        {
+            bool result = false;
+            neolib::visit([&](const auto& aData)
+                {
+                    result = !aData.symbol().has_value() && aData.value().has_value() && 
+                        is_scalar_v<std::decay_t<decltype(aData.value().value())>>;
+                }, aDataType);
+            return result;
         }
 
         inline bool is_custom_type(i_data_type const& aDataType, custom_type_id const& aTypeId)
