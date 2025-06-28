@@ -275,6 +275,26 @@ namespace neos::language
             throw std::runtime_error("No operand");
     }
 
+    void compiler::push_operator(language::i_operator_type const& aOperator)
+    {
+        state().operatorStack.push_back(aOperator);
+        if (trace() >= 2)
+            iContext.cout() << "Pushed operator: " << aOperator << std::endl;
+    }
+
+    void compiler::pop_operator(language::i_operator_type& aOperator)
+    {
+        if (!state().operatorStack.empty())
+        {
+            aOperator = state().operatorStack.back();
+            state().operatorStack.pop_back();
+            if (trace() >= 2)
+                iContext.cout() << "Popped operator: " << aOperator << std::endl;
+        }
+        else
+            throw std::runtime_error("No operator");
+    }
+
     void compiler::find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const
     {
         // todo

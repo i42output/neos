@@ -189,6 +189,7 @@ namespace neos::language
             fold_stack foldStack = {};
             std::vector<neolib::ref_ptr<i_scope>> scopeStack;
             std::vector<language::data_type> operandStack;
+            std::vector<language::operator_type> operatorStack;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -205,6 +206,8 @@ namespace neos::language
         language::i_data_type const& rhs_operand() const final;
         void push_operand(language::i_data_type const& aOperand) final;
         void pop_operand(language::i_data_type& aOperand) final;
+        void push_operator(language::i_operator_type const& aOperator) final;
+        void pop_operator(language::i_operator_type& aOperator) final;
         void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const final;
     public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;

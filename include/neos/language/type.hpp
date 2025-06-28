@@ -139,8 +139,29 @@ namespace neos
         static_assert(sizeof(f32) == 4);
         static_assert(sizeof(f64) == 8);
 
-        struct i_default_type_descriptor { using abstract_type = i_default_type_descriptor; };
-        struct default_type_descriptor : i_default_type_descriptor {};
+        struct i_default_type_descriptor 
+        { 
+            using abstract_type = i_default_type_descriptor; 
+
+            virtual void to_string(neolib::i_string& out) const = 0;
+
+            std::string to_string() const
+            {
+                neolib::string tmp;
+                to_string(tmp);
+                return tmp.to_std_string();
+            }
+        };
+        struct default_type_descriptor : i_default_type_descriptor 
+        {
+            default_type_descriptor() = default;
+            default_type_descriptor(i_default_type_descriptor const&) {}
+
+            void to_string(neolib::i_string& out) const final
+            {
+                out.clear(); ///< @todo
+            }
+        };
 
         template<typename T, typename D = i_default_type_descriptor>
         struct i_data
@@ -707,41 +728,39 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<i_custom_type> = type::Custom;
         template <> inline constexpr type type_to_enum_v<neolib::ref_ptr<i_custom_type>> = type::Custom;
 
-        inline std::ostream& operator<<(std::ostream& aStream, data_type const& aData)
+        inline std::ostream& operator<<(std::ostream& aStream, i_data_type const& aData)
         {
             std::ostringstream oss;
-            std::visit([&](auto const& d)
+            neolib::visit([&](auto const& d)
                 {
                     using vt = std::decay_t<decltype(d)>;
-                    if constexpr (std::is_same_v<vt, std::monostate>)
-                        ;
-                    else if constexpr (std::is_same_v<vt, data<_void>>)
+                    if constexpr (std::is_same_v<vt, data<_void>>)
                         ; /* empty */
                     else if constexpr (std::is_same_v<vt, data<reference, reference_descriptor>>)
                     {
-                        if (d.v.has_value())
+                        if (d.value().has_value())
                         {
-                            auto const& rd = d.d;
+                            auto const& rd = d.descriptor();
                             oss << rd.to_string();
-                            oss << "@" << d.v.value();
+                            oss << "@" << d.value().value();
                         }
                     }
                     else if constexpr (std::is_same_v<vt, data<pointer, pointer_descriptor>>)
                     {
-                        if (d.v.has_value())
+                        if (d.value().has_value())
                         {
-                            auto const& pd = d.d;
+                            auto const& pd = d.descriptor();
                             oss << pd.to_string();
-                            oss << "@" << d.v.value();
+                            oss << "@" << d.value().value();
                         }
                     }
                     else if constexpr (std::is_same_v<vt, data<neolib::ref_ptr<i_array_type>, array_descriptor>>)
                     {
-                        if (d.v.has_value())
+                        if (d.value().has_value())
                         {
-                            auto const& ad = d.d;
+                            auto const& ad = d.descriptor();
                             oss << ad.to_string();
-                            auto const& elems = d.v.value()->contents();
+                            auto const& elems = d.value().value()->contents();
                             oss << "{";
                             for (std::size_t i = 0; i < elems.size(); ++i)
                             {
@@ -753,26 +772,26 @@ namespace neos
                     }
                     else if constexpr (std::is_same_v<vt, data<neolib::ref_ptr<i_function_type>>>)
                     {
-                        if (d.v.has_value())
-                            oss << (**d.v).to_string();
+                        if (d.value().has_value())
+                            oss << (**d.value()).to_string();
                     }
                     else if constexpr (std::is_scalar_v<typename vt::type> ||
                         std::is_same_v<typename vt::type, ibig> ||
                         std::is_same_v<typename vt::type, fbig>)
                     {
-                        if (d.v.has_value())
-                            oss << d.v.value();
+                        if (d.value().has_value())
+                            oss << d.value().value();
                     }
                     else if constexpr (std::is_same_v<typename vt::type, string>)
                     {
                         oss << "\"";
-                        if (d.v.has_value())
-                            oss << d.v.value();
+                        if (d.value().has_value())
+                            oss << d.value().value();
                         oss << "\"";
                     }
                     else
                     {
-                        oss << d.d.to_string();
+                        oss << d.descriptor().to_string();
                         oss << "{*}";
                     }
                 }, aData);

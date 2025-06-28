@@ -24,6 +24,7 @@
 #include <neolib/core/i_string_view.hpp>
 #include <neolib/core/i_optional.hpp>
 #include <neos/language/type.hpp>
+#include <neos/language/operator.hpp>
 #include <neos/language/scope.hpp>
 
 using namespace neolib::string_literals;
@@ -91,6 +92,8 @@ namespace neos::language
         virtual language::i_data_type const& rhs_operand() const = 0;
         virtual void push_operand(language::i_data_type const& aOperand) = 0;
         virtual void pop_operand(language::i_data_type& aOperand) = 0;
+        virtual void push_operator(language::i_operator_type const& aOperator) = 0;
+        virtual void pop_operator(language::i_operator_type& aOperator) = 0;
         virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
@@ -115,6 +118,17 @@ namespace neos::language
             language::data_type operand;
             pop_operand(operand);
             return operand;
+        }
+        template <typename OperatorT>
+        void push_operator(neolib::ref_ptr<OperatorT> const& aOperator)
+        {
+            push_operator(language::operator_type{ aOperator });
+        }
+        language::operator_type pop_operator()
+        {
+            language::operator_type op;
+            pop_operator(op);
+            return op;
         }
         neolib::optional<language::data_type> find_identifier(neolib::i_string_view const& aIdentifier) const
         {
