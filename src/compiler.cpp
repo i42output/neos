@@ -433,6 +433,10 @@ namespace neos::language
                     break;
             }
         }
+        catch (compiler_error const&)
+        {
+            throw;
+        }
         catch (std::exception const& ex)
         {
             throw_error(fold_stack().front()->source().begin(),
@@ -499,6 +503,6 @@ namespace neos::language
 
     void compiler::throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType)
     {
-        throw std::runtime_error(location(*state().unit, *state().fragment, aSourcePos) + ": " + aErrorType + ": " + aError);
+        throw compiler_error((location(*state().unit, *state().fragment, aSourcePos) + ": " + aErrorType + ": " + aError).to_std_string());
     }
 }

@@ -221,7 +221,8 @@ ${
     factor ::= 
         primary / ( minus $ math.operator.negate , WS , ( function call | numeric expression ) ) ;
     primary ::= 
-        ( open expression , WS , expression , WS , close expression ) | function call | number | identifier | character literal | string literal ;
+        ( open expression , WS , expression , WS , close expression ) | math operand ;
+    math operand $ math.expression.operand ::= function call | number | identifier | character literal | string literal ;
 
     return statement $ language.function.return ::= 
         ( return , WS , expression , WS , semicolon ) ;

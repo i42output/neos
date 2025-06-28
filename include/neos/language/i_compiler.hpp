@@ -80,6 +80,11 @@ namespace neos::language
         concept_not_found(std::string_view const& aConceptName) : std::runtime_error{ std::string{ "Concept '" } + std::string{ aConceptName } + "' not found" } {}
     };
 
+    struct compiler_error : std::runtime_error
+    {
+        compiler_error(std::string const& aError) : std::runtime_error{ aError } {}
+    };
+
     class i_compiler
     {
     public:

@@ -43,7 +43,14 @@ namespace neos::concepts::core
     public:
         bool can_fold() const override
         {
-            return true;
+            return !holds_data();
+        }
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.is("language.identifier"_s) ||
+                aRhs.is("math.expression.operand"_s))
+                return true;
+            return false;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
@@ -52,7 +59,14 @@ namespace neos::concepts::core
                 std::string value = source().to_std_string();
                 data<data_type>().v = language::ibig{ value };
             }
-            aContext.compiler().push_operand(data<data_type>());
+            aResult = instance();
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.identifier"_s))
+                ; ///< @todo
+            else if (aRhs.is("math.expression.operand"_s))
+                aContext.compiler().push_operand(data<data_type>());
         }
     };
 
@@ -67,7 +81,14 @@ namespace neos::concepts::core
     public:
         bool can_fold() const override
         {
-            return true;
+            return !holds_data();
+        }
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.is("language.identifier"_s) ||
+                aRhs.is("math.expression.operand"_s))
+                return true;
+            return false;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
@@ -76,7 +97,14 @@ namespace neos::concepts::core
                 std::string value = source().to_std_string();
                 data<data_type>().v = language::fbig{ value };
             }
-            aContext.compiler().push_operand(data<data_type>());
+            aResult = instance();
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.identifier"_s))
+                ; ///< @todo
+            else if (aRhs.is("math.expression.operand"_s))
+                aContext.compiler().push_operand(data<data_type>());
         }
     };
 
