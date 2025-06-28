@@ -24,26 +24,44 @@
 
 namespace neos
 {
+    class i_context;
+
     namespace language
     {
+        struct i_unary_operator : neolib::i_reference_counted
+        {
+            using abstract_type = i_unary_operator;
+
+            virtual void operator()(i_context& context, i_data_type const& lhs, i_data_type& result) const = 0;
+
+            data_type operator()(i_context& context, i_data_type const& lhs) const
+            {
+                data_type result;
+                (*this)(context, lhs, result);
+                return result;
+            }
+        };
+
         struct i_binary_operator : neolib::i_reference_counted
         {
             using abstract_type = i_binary_operator;
 
-            virtual void operator()(i_data_type const& lhs, i_data_type const& rhs, i_data_type& result) const = 0;
+            virtual void operator()(i_context& context, i_data_type const& lhs, i_data_type const& rhs, i_data_type& result) const = 0;
 
-            data_type operator()(i_data_type const& lhs, i_data_type const& rhs) const
+            data_type operator()(i_context& context, i_data_type const& lhs, i_data_type const& rhs) const
             {
                 data_type result;
-                (*this)(lhs, rhs, result);
+                (*this)(context, lhs, rhs, result);
                 return result;
             }
         };
 
         using i_operator_type = neolib::i_variant<
+            neolib::i_ref_ptr<i_unary_operator>,
             neolib::i_ref_ptr<i_binary_operator>>;
 
         using operator_type = neolib::variant<
+            neolib::ref_ptr<i_unary_operator>,
             neolib::ref_ptr<i_binary_operator>>;
 
         inline std::ostream& operator<<(std::ostream& aStream, i_operator_type const& aOperator)
