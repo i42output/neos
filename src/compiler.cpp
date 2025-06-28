@@ -323,92 +323,100 @@ namespace neos::language
             };
 
         bool didSome = false;
-        for (auto ilhs = fold_stack().begin(); !didSome && ilhs != fold_stack().end();)
+        try
         {
-            auto& lhs = **ilhs;
-            if (lhs.can_fold())
+            for (auto ilhs = fold_stack().begin(); !didSome && ilhs != fold_stack().end();)
             {
-                trace_out("Folding", ilhs);
-                auto result = lhs.fold(iContext);
-                trace_out("Folded", ilhs, {}, result);
-                ilhs = fold_stack().erase(ilhs);
-                if (!result->is_empty())
-                    ilhs = fold_stack().insert(ilhs, result);
-                didSome = true;
-            }
-            else if (std::next(ilhs) != fold_stack().end())
-            {
-                auto irhs = std::next(ilhs);
-                auto& rhs = **irhs;
-                bool const unrelated = !lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs);
-                if (rhs.can_fold())
+                auto& lhs = **ilhs;
+                if (lhs.can_fold())
                 {
-                    trace_out("Folding", irhs);
-                    auto result = rhs.fold(iContext);
-                    trace_out("Folded", irhs, {}, result);
-                    irhs = fold_stack().erase(irhs);
-                    if (!result->is_empty())
-                        irhs = fold_stack().insert(irhs, result);
-                    didSome = true;
-                }
-                else if (unrelated && !(lhs.unstructured() && rhs.unstructured()))
-                {
-                    if (trace() >= 3)
-                        trace_out("Skipping", ilhs, irhs);
-                    ++ilhs;
-                }
-                else if (lhs.name() == rhs.name() && lhs.has_ghosts())
-                {
-                    if (lhs.holds_data() && !rhs.holds_data())
-                    {
-                        if (lhs.is_child(rhs))
-                            fold_stack().erase(irhs);
-                        else
-                        {
-                            rhs = lhs;
-                            ilhs = fold_stack().erase(ilhs);
-                        }
-                        didSome = true;
-                    }
-                    else if (!lhs.holds_data() && rhs.holds_data())
-                    {
-                        if (lhs.is_child(rhs))
-                        {
-                            lhs = rhs;
-                            fold_stack().erase(irhs);
-                        }
-                        else
-                            fold_stack().erase(ilhs);
-                        didSome = true;
-                    }
-                }
-                else if (lhs.can_fold(rhs))
-                {
-                    trace_out(!unrelated ? "Folding" : "Folding (unstructured)", ilhs, irhs);
-                    auto result = lhs.fold(iContext, rhs);
-                    trace_out(!unrelated ? "Folded" : "Folded (unstructured)", ilhs, irhs, result);
-                    ilhs = fold_stack().erase(ilhs);
+                    trace_out("Folding", ilhs);
+                    auto result = lhs.fold(iContext);
+                    trace_out("Folded", ilhs, {}, result);
                     ilhs = fold_stack().erase(ilhs);
                     if (!result->is_empty())
                         ilhs = fold_stack().insert(ilhs, result);
                     didSome = true;
                 }
-                else if (rhs.can_fold(lhs))
+                else if (std::next(ilhs) != fold_stack().end())
                 {
-                    trace_out(!unrelated ? "Folding" : "Folding (unstructured)", irhs, ilhs);
-                    auto result = rhs.fold(iContext, lhs);
-                    trace_out(!unrelated ? "Folded" : "Folded (unstructured)", irhs, ilhs, result);
-                    ilhs = fold_stack().erase(ilhs);
-                    ilhs = fold_stack().erase(ilhs);
-                    if (!result->is_empty())
-                        ilhs = fold_stack().insert(ilhs, result);
-                    didSome = true;
+                    auto irhs = std::next(ilhs);
+                    auto& rhs = **irhs;
+                    bool const unrelated = !lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs);
+                    if (rhs.can_fold())
+                    {
+                        trace_out("Folding", irhs);
+                        auto result = rhs.fold(iContext);
+                        trace_out("Folded", irhs, {}, result);
+                        irhs = fold_stack().erase(irhs);
+                        if (!result->is_empty())
+                            irhs = fold_stack().insert(irhs, result);
+                        didSome = true;
+                    }
+                    else if (unrelated && !(lhs.unstructured() && rhs.unstructured()))
+                    {
+                        if (trace() >= 3)
+                            trace_out("Skipping", ilhs, irhs);
+                        ++ilhs;
+                    }
+                    else if (lhs.name() == rhs.name() && lhs.has_ghosts())
+                    {
+                        if (lhs.holds_data() && !rhs.holds_data())
+                        {
+                            if (lhs.is_child(rhs))
+                                fold_stack().erase(irhs);
+                            else
+                            {
+                                rhs = lhs;
+                                ilhs = fold_stack().erase(ilhs);
+                            }
+                            didSome = true;
+                        }
+                        else if (!lhs.holds_data() && rhs.holds_data())
+                        {
+                            if (lhs.is_child(rhs))
+                            {
+                                lhs = rhs;
+                                fold_stack().erase(irhs);
+                            }
+                            else
+                                fold_stack().erase(ilhs);
+                            didSome = true;
+                        }
+                    }
+                    else if (lhs.can_fold(rhs))
+                    {
+                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", ilhs, irhs);
+                        auto result = lhs.fold(iContext, rhs);
+                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", ilhs, irhs, result);
+                        ilhs = fold_stack().erase(ilhs);
+                        ilhs = fold_stack().erase(ilhs);
+                        if (!result->is_empty())
+                            ilhs = fold_stack().insert(ilhs, result);
+                        didSome = true;
+                    }
+                    else if (rhs.can_fold(lhs))
+                    {
+                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", irhs, ilhs);
+                        auto result = rhs.fold(iContext, lhs);
+                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", irhs, ilhs, result);
+                        ilhs = fold_stack().erase(ilhs);
+                        ilhs = fold_stack().erase(ilhs);
+                        if (!result->is_empty())
+                            ilhs = fold_stack().insert(ilhs, result);
+                        didSome = true;
+                    }
+                    else
+                        break;
                 }
                 else
                     break;
             }
-            else
-                break;
+        }
+        catch (std::exception const& ex)
+        {
+            throw_error(fold_stack().front()->source().begin(),
+                "failed to fold semantic concept: "_s + ex.what());
         }
         if (!didSome)
         {

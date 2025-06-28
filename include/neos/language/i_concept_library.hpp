@@ -80,6 +80,12 @@ namespace neos
             {
                 return find_concept(neolib::string_view{ aSymbol }, aConcept);
             }
+            neolib::ref_ptr<i_semantic_concept> find_concept(neolib::string const& aSymbol) const
+            {
+                neolib::ref_ptr<i_semantic_concept> result;
+                find_concept(neolib::string_view{ aSymbol }, result);
+                return result;
+            }
             // interface
         public:
             static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("DF0D818D-7C3F-4958-8FCF-9FE6A9B2A501"); return sId; }
