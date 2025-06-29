@@ -106,7 +106,7 @@ namespace neos::language
 
     namespace
     {
-        void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, language::parser::ast_node const& parserAstNode, i_ast_node& astNode)
+        void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, parser::ast_node const& parserAstNode, i_ast_node& astNode)
         {
             for (auto const& childParserNode : parserAstNode.children)
             {
@@ -199,6 +199,13 @@ namespace neos::language
         return *state().fragment;
     }
 
+    i_scope const& compiler::current_scope() const
+    {
+        if (!state().scopeStack.empty())
+            return *state().scopeStack.back();
+        return state().program->scope;
+    }
+
     i_scope& compiler::enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName)
     {
         if (state().scopeStack.empty())
@@ -239,7 +246,7 @@ namespace neos::language
         }
     }
 
-    language::i_data_type const& compiler::lhs_operand() const
+    i_operand_type const& compiler::lhs_operand() const
     {
         if (state().operandStack.size() == 1)
             return *(state().operandStack.rbegin());
@@ -248,25 +255,25 @@ namespace neos::language
         throw std::logic_error("neos::language::compiler::lhs_operand");
     }
 
-    language::i_data_type const& compiler::rhs_operand() const
+    i_operand_type const& compiler::rhs_operand() const
     {
         if (state().operandStack.size() >= 2)
             return *(state().operandStack.rbegin());
         throw std::logic_error("neos::language::compiler::rhs_operand");
     }
 
-    void compiler::push_operand(language::i_data_type const& aOperand)
+    void compiler::push_operand(i_operand_type const& aOperand)
     {
         state().operandStack.push_back(aOperand);
         if (trace() >= 2)
             iContext.cout() << "Pushed operand: " << aOperand << std::endl;
     }
 
-    void compiler::pop_operand(language::i_data_type& aOperand)
+    void compiler::pop_operand(i_data_type& aOperand)
     {
         if (!state().operandStack.empty())
         {
-            aOperand = state().operandStack.back();
+            aOperand = state().operandStack.back().get<i_data_type>();
             state().operandStack.pop_back();
             if (trace() >= 2)
                 iContext.cout() << "Popped operand: " << aOperand << std::endl;
@@ -275,14 +282,14 @@ namespace neos::language
             throw std::runtime_error("No operand");
     }
 
-    void compiler::push_operator(language::i_operator_type const& aOperator)
+    void compiler::push_operator(i_operator_type const& aOperator)
     {
         state().operatorStack.push_back(aOperator);
         if (trace() >= 2)
             iContext.cout() << "Pushed operator: " << aOperator << std::endl;
     }
 
-    void compiler::pop_operator(language::i_operator_type& aOperator)
+    void compiler::pop_operator(i_operator_type& aOperator)
     {
         if (!state().operatorStack.empty())
         {
@@ -295,7 +302,7 @@ namespace neos::language
             throw std::runtime_error("No operator");
     }
 
-    void compiler::find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const
+    void compiler::find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const
     {
         // todo
     }

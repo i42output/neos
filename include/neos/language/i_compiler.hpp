@@ -26,6 +26,7 @@
 #include <neos/language/type.hpp>
 #include <neos/language/operator.hpp>
 #include <neos/language/scope.hpp>
+#include <neos/language/symbol.hpp>
 
 using namespace neolib::string_literals;
 
@@ -85,21 +86,40 @@ namespace neos::language
         compiler_error(std::string const& aError) : std::runtime_error{ aError } {}
     };
 
+    using i_operand_type = neolib::i_variant<
+        i_data_type,
+        i_symbol_reference>;
+
+    using operand_type = neolib::variant<
+        data_type,
+        symbol_reference>;
+
+    inline std::ostream& operator<<(std::ostream& stream, i_operand_type const& operand)
+    {
+        neolib::visit([&](auto const& operand)
+            {
+                stream << operand;
+            }, operand);
+        return stream;
+    }
+
     class i_compiler
     {
     public:
         virtual ~i_compiler() {}
     public:
         virtual bool compile(i_source_fragment const& aFragment) = 0;
+        virtual i_source_fragment const& current_fragment() const = 0;
+        virtual i_scope const& current_scope() const = 0;
         virtual i_scope& enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName) = 0;
         virtual void leave_scope(scope_type aScopeType) = 0;
-        virtual language::i_data_type const& lhs_operand() const = 0;
-        virtual language::i_data_type const& rhs_operand() const = 0;
-        virtual void push_operand(language::i_data_type const& aOperand) = 0;
-        virtual void pop_operand(language::i_data_type& aOperand) = 0;
-        virtual void push_operator(language::i_operator_type const& aOperator) = 0;
-        virtual void pop_operator(language::i_operator_type& aOperator) = 0;
-        virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const = 0;
+        virtual i_operand_type const& lhs_operand() const = 0;
+        virtual i_operand_type const& rhs_operand() const = 0;
+        virtual void push_operand(i_operand_type const& aOperand) = 0;
+        virtual void pop_operand(i_data_type& aOperand) = 0;
+        virtual void push_operator(i_operator_type const& aOperator) = 0;
+        virtual void pop_operator(i_operator_type& aOperator) = 0;
+        virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;
@@ -113,31 +133,36 @@ namespace neos::language
         {
             leave_scope(scope_type::Namespace);
         }
-        template <typename DataT>
-        void push_operand(DataT const& aOperand, std::enable_if_t<!std::is_base_of_v<language::i_data_type, DataT>, neolib::sfinae> = {})
+        template <typename OperandT>
+        void push_operand(OperandT const& aOperand, std::enable_if_t<!std::is_base_of_v<i_operand_type, OperandT>, neolib::sfinae> = {})
         {
-            push_operand(language::data_type{ aOperand });
+            if constexpr (std::is_base_of_v<i_data_type, OperandT>)
+                push_operand(operand_type{ aOperand });
+            else if constexpr (std::is_base_of_v<i_symbol_reference, OperandT>)
+                push_operand(operand_type{ aOperand });
+            else
+                push_operand(operand_type{ data_type{ aOperand } });
         }
-        language::data_type pop_operand()
+        data_type pop_operand()
         {
-            language::data_type operand;
+            data_type operand;
             pop_operand(operand);
             return operand;
         }
         template <typename OperatorT>
         void push_operator(neolib::ref_ptr<OperatorT> const& aOperator)
         {
-            push_operator(language::operator_type{ aOperator });
+            push_operator(operator_type{ aOperator });
         }
-        language::operator_type pop_operator()
+        operator_type pop_operator()
         {
-            language::operator_type op;
+            operator_type op;
             pop_operator(op);
             return op;
         }
-        neolib::optional<language::data_type> find_identifier(neolib::i_string_view const& aIdentifier) const
+        neolib::optional<data_type> find_identifier(neolib::i_string_view const& aIdentifier) const
         {
-            neolib::optional<language::data_type> result;
+            neolib::optional<data_type> result;
             find_identifier(aIdentifier, result);
             return result;
         }

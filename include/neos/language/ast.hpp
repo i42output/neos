@@ -23,13 +23,13 @@
 #include <neolib/core/reference_counted.hpp>
 #include <neolib/core/vector.hpp>
 #include <neos/language/i_semantic_concept.hpp>
-#include <neos/language/symbols.hpp>
+#include <neos/language/symbol_table.hpp>
 
 namespace neos
 {
     namespace language
     {
-        using ast_node_value = neolib::variant<neolib::ref_ptr<i_semantic_concept>, symbol_table_pointer>;
+        using ast_node_value = neolib::variant<neolib::ref_ptr<i_semantic_concept>, symbol_table_entry*>;
         using i_ast_node_value = neolib::abstract_t<ast_node_value>;
 
         class i_ast_node : public neolib::i_reference_counted

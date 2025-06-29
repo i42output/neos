@@ -25,7 +25,7 @@
 #include <neolib/core/optional.hpp>
 #include <neonumeric/integer.hpp>
 #include <neonumeric/real.hpp>
-#include <neos/language/symbols.hpp>
+#include <neos/language/symbol_table.hpp>
 
 namespace neos
 {

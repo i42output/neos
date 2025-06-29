@@ -22,14 +22,22 @@
 #include <neos/neos.hpp>
 #include <neolib/core/string.hpp>
 #include <neolib/core/map.hpp>
+#include <neos/language/type.hpp>
+#include <neos/language/symbol.hpp>
 
 namespace neos
 {
     namespace language
     {
-        using symbol_name = neolib::string;
-        using symbol_reference = void const*;
-        using symbol_table = neolib::multimap<symbol_name, symbol_reference>;
-        using symbol_table_pointer = symbol_table::abstract_value_type*;
+        struct i_symbol_table_entry
+        {
+            using abstract_type = i_symbol_table_entry;
+        };
+
+        struct symbol_table_entry : i_symbol_table_entry
+        {
+        };
+
+        using symbol_table = neolib::multimap<symbol_name, symbol_table_entry> ;
     }
 }

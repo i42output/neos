@@ -31,7 +31,7 @@
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
 #include <neos/language/scope.hpp>
-#include <neos/language/symbols.hpp>
+#include <neos/language/symbol_table.hpp>
 
 namespace neos::language
 {
@@ -123,7 +123,7 @@ namespace neos::language
         mutable compilation_status iStatus;
     };
 
-    typedef std::shared_ptr<language::schema> schema_pointer_t;
+    typedef std::shared_ptr<schema> schema_pointer_t;
     typedef std::list<source_fragment> source_fragments_t;
 
     struct source_fragment_not_found : std::logic_error { source_fragment_not_found() : std::logic_error("neos::language::source_fragment_not_found") {} };
@@ -188,8 +188,8 @@ namespace neos::language
             std::uint32_t level = 0u;
             fold_stack foldStack = {};
             std::vector<neolib::ref_ptr<i_scope>> scopeStack;
-            std::vector<language::data_type> operandStack;
-            std::vector<language::operator_type> operatorStack;
+            std::vector<operand_type> operandStack;
+            std::vector<operator_type> operatorStack;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -199,16 +199,17 @@ namespace neos::language
         bool compile(program& aProgram, translation_unit& aUnit);
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         bool compile(const i_source_fragment& aFragment) final;
-        i_source_fragment const& current_fragment() const;
+        i_source_fragment const& current_fragment() const final;
+        i_scope const& current_scope() const final;
         i_scope& enter_scope(scope_type aScopeType, neolib::i_string const& aScopeName) final;
         void leave_scope(scope_type aScopeType) final;
-        language::i_data_type const& lhs_operand() const final;
-        language::i_data_type const& rhs_operand() const final;
-        void push_operand(language::i_data_type const& aOperand) final;
-        void pop_operand(language::i_data_type& aOperand) final;
-        void push_operator(language::i_operator_type const& aOperator) final;
-        void pop_operator(language::i_operator_type& aOperator) final;
-        void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<language::i_data_type>& aResult) const final;
+        i_operand_type const& lhs_operand() const final;
+        i_operand_type const& rhs_operand() const final;
+        void push_operand(i_operand_type const& aOperand) final;
+        void pop_operand(i_data_type& aOperand) final;
+        void push_operator(i_operator_type const& aOperator) final;
+        void pop_operator(i_operator_type& aOperator) final;
+        void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const final;
     public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;

@@ -28,12 +28,13 @@
 #include <neolib/core/uuid.hpp>
 #include <neonumeric/integer.hpp>
 #include <neonumeric/real.hpp>
-#include <neos/language/symbols.hpp>
 
 namespace neos
 {
     namespace language
     {
+        struct i_symbol_table_entry;
+
         enum class type : std::uint32_t {
             UNKNOWN = 0x00000000,
             Void, 
@@ -173,8 +174,8 @@ namespace neos
             virtual type_descriptor const& descriptor() const = 0;
             virtual neolib::i_optional<type> const& value() const = 0;
             virtual neolib::i_optional<type>& value() = 0;
-            virtual neolib::i_optional<symbol_table_pointer> const& symbol() const = 0;
-            virtual neolib::i_optional<symbol_table_pointer>& symbol() = 0;
+            virtual neolib::i_optional<i_symbol_table_entry*> const& symbol() const = 0;
+            virtual neolib::i_optional<i_symbol_table_entry*>& symbol() = 0;
         };
 
         template<typename T, typename D = default_type_descriptor>
@@ -186,13 +187,13 @@ namespace neos
 
             type_descriptor d;
             neolib::optional<type> v;
-            neolib::optional<symbol_table_pointer> s;
+            neolib::optional<i_symbol_table_entry*> s;
 
             type_descriptor const& descriptor() const final { return d; }
             neolib::optional<type> const& value() const final { return v; }
             neolib::optional<type>& value() final { return v; }
-            neolib::optional<symbol_table_pointer> const& symbol() const final { return s; }
-            neolib::optional<symbol_table_pointer>& symbol() final { return s; }
+            neolib::optional<i_symbol_table_entry*> const& symbol() const final { return s; }
+            neolib::optional<i_symbol_table_entry*>& symbol() final { return s; }
 
             data(type const& value, type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
                 d{ descriptor },
