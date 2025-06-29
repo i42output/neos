@@ -3,7 +3,7 @@
 # Introduction
 "neos" is a cross-platform language agnostic scripting engine with a custom bytecode JIT. 
 
-Development started on 7 Feb 2019 so don't expect a release anytime soon.
+neos is still a work in progress so don't expect a release anytime soon.
 
 # Dependencies
 * Boost
