@@ -492,6 +492,10 @@ namespace neos
         constexpr bool is_scalar_v = (std::is_scalar_v<T> && !std::is_enum_v<T> && !std::is_pointer_v<T>) 
             || std::is_same_v<T, ibig> || std::is_same_v<T, fbig>;
 
+        template <typename T1, typename T2>
+        constexpr bool is_scalar_convertable_v = is_scalar_v<T1> && is_scalar_v<T2> &&
+            (std::is_same_v<T1, T2> || (!std::is_scalar_v<T1> && !std::is_scalar_v<T2>));
+
         inline bool is_scalar(i_data_type const& aDataType)
         {
             bool result = false;
