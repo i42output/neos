@@ -20,6 +20,8 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <unordered_map>
+#include <unordered_set>
 #include <boost/functional/hash.hpp>
 #include <neolib/core/i_map.hpp>
 #include <neolib/core/i_string.hpp>
