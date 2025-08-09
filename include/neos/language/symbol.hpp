@@ -27,6 +27,15 @@ namespace neos
 {
     namespace language
     {
+        enum class symbol_type : std::uint32_t
+        {
+            Function,
+            Variable
+        };
+
+        using i_symbol_name = neolib::i_string;
+        using symbol_name = neolib::string;
+
         struct i_symbol_reference
         {
             using abstract_type = i_symbol_reference;

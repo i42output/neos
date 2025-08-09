@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <neolib/core/string.hpp>
 #include <neolib/core/map.hpp>
+#include <neolib/core/unordered_map.hpp>
 #include <neos/language/type.hpp>
 #include <neos/language/symbol.hpp>
 
@@ -29,6 +30,8 @@ namespace neos
 {
     namespace language
     {
+        class i_scope;
+
         struct i_symbol_table_entry
         {
             using abstract_type = i_symbol_table_entry;
@@ -38,6 +41,7 @@ namespace neos
         {
         };
 
-        using symbol_table = neolib::multimap<symbol_name, symbol_table_entry> ;
+        using symbol_table = neolib::unordered_map<i_scope*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;
+        using i_symbol_table = neolib::abstract_t<symbol_table>;
     }
 }

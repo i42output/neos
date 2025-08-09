@@ -33,7 +33,7 @@ namespace neos
         using i_scope_name = neolib::i_string;
         using scope_name = neolib::string;
 
-        enum scope_type : std::uint32_t
+        enum class scope_type : std::uint32_t
         {
             Program,
             Namespace,
