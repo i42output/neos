@@ -177,9 +177,12 @@ namespace neos::language
 
                 throw std::runtime_error("Failed to fold semantic concepts");
             }
-        }
 
-        aFragment.set_status(compilation_status::Compiled);
+            aFragment.set_status(compilation_status::Compiled);
+        }
+        else
+            aFragment.set_status(compilation_status::Error);
+
 
         iCompilationStateStack.pop_back();
 
