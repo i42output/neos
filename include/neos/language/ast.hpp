@@ -41,6 +41,8 @@ namespace neos
         public:
             virtual ~i_ast_node() = default;
         public:
+            virtual i_ast_node& operator=(i_ast_node& aNewNode) = 0;
+        public:
             virtual void name(neolib::i_string& aResult) const = 0;
             virtual bool is_empty() const = 0;
             virtual bool holds_data() const = 0;
@@ -109,6 +111,13 @@ namespace neos
                 iParent{ &aParent },
                 iValue{ aValue }
             {
+            }
+        public:
+            i_ast_node& operator=(i_ast_node& aNewNode) final
+            {
+                children() = aNewNode.children();
+                value() = aNewNode.value();
+                return *this;
             }
         public:
             using i_ast_node::name;

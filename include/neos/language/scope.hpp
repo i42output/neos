@@ -30,6 +30,7 @@ namespace neos
 {
     namespace language
     {
+        using i_scope_name = neolib::i_string;
         using scope_name = neolib::string;
 
         enum scope_type : std::uint32_t
@@ -53,11 +54,11 @@ namespace neos
             virtual i_scope const& parent() const = 0;
             virtual i_child_list const& children() const = 0;
             virtual i_child_list& children() = 0;
-            virtual neolib::abstract_t<scope_name> const& name() const = 0;
-            virtual neolib::abstract_t<scope_name> const& qualified_name() const = 0;
+            virtual i_scope_name const& name() const = 0;
+            virtual i_scope_name const& qualified_name() const = 0;
             virtual scope_type type() const = 0;
         public:
-            virtual i_scope& create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType) = 0;
+            virtual i_scope& create_child(i_scope_name const& aName, scope_type aType) = 0;
         };
 
         class i_function_scope : public i_scope
@@ -65,7 +66,8 @@ namespace neos
         public:
             using abstract_type = i_function_scope;
         public:
-            virtual void set_function_signature(language::i_function_signature const& aSignature) = 0;
+            virtual i_function_signature const& function_signature() const = 0;
+            virtual void set_function_signature(i_function_signature const& aSignature) = 0;
         };
 
         template <typename Base = i_scope>
@@ -81,12 +83,12 @@ namespace neos
                 iName{},
                 iType{ scope_type::Program }
             {}
-            scope(neolib::abstract_t<scope_name> const& aName, scope_type aType) :
+            scope(i_scope_name const& aName, scope_type aType) :
                 iParent{ nullptr },
                 iName{ aName },
                 iType{ aType }
             {}
-            scope(i_scope& aParent, neolib::abstract_t<scope_name> const& aName, scope_type aType) :
+            scope(i_scope& aParent, i_scope_name const& aName, scope_type aType) :
                 iParent{ &aParent },
                 iName{ aName },
                 iType{ aType }
@@ -100,7 +102,7 @@ namespace neos
             {
                 if (iParent)
                     return *iParent;
-                throw std::logic_error("neos::language::scope: no parent!");
+                throw std::logic_error("neos::scope: no parent!");
             }
             child_list const& children() const final
             {
@@ -129,7 +131,7 @@ namespace neos
                 return iType;
             }
         public:
-            i_scope& create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType) final;
+            i_scope& create_child(i_scope_name const& aName, scope_type aType) final;
         private:
             i_scope* iParent;
             neolib::string iName;
@@ -144,14 +146,20 @@ namespace neos
         public:
             using scope::scope;
         public:
-            void set_function_signature(language::i_function_signature const& aSignature) final
+            i_function_signature const& function_signature() const final
             {
-                // todo
+                return iFunctionSignature;
             }
+            void set_function_signature(i_function_signature const& aSignature) final
+            {
+                iFunctionSignature = aSignature;
+            }
+        private:
+            language::function_signature iFunctionSignature;
         };
 
         template <typename Base>
-        inline i_scope& scope<Base>::create_child(neolib::abstract_t<scope_name> const& aName, scope_type aType)
+        inline i_scope& scope<Base>::create_child(i_scope_name const& aName, scope_type aType)
         {
             auto const indexed = iChildIndex.find(aName.to_std_string_view());
             if (indexed != iChildIndex.end())

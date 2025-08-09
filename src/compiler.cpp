@@ -329,19 +329,19 @@ namespace neos::language
         if (fold_stack().empty())
             return false;
 
-        auto trace_out = [&](std::string const& op, fold_stack::iterator const& lhs, std::optional<fold_stack::iterator> const& rhs = {}, const std::optional<neolib::ref_ptr<i_ast_node>> result = {})
+        auto trace_out = [&](std::string const& op, i_ast_node const& lhs, std::optional<neolib::ref_ptr<i_ast_node>> const& rhs = {}, const std::optional<neolib::ref_ptr<i_ast_node>> result = {})
             {
                 std::ostringstream traceOutput;
                 if (trace() >= 1)
                 {
                     if (rhs)
                         traceOutput << op << ": " << 
-                            (**lhs).trace() << " <- " << (***rhs).trace() <<
+                            lhs.trace() << " <- " << (**rhs).trace() <<
                             (result ? " = " + (**result).trace() : "") <<
                             std::endl;
                     else
                         traceOutput << op << ": " << 
-                            (**lhs).trace() << " <-|" <<
+                            lhs.trace() << " <-|" <<
                             (result ? " = " + (**result).trace() : "") <<
                             std::endl;
                 }
@@ -357,9 +357,9 @@ namespace neos::language
                 auto& lhs = **ilhs;
                 if (lhs.can_fold())
                 {
-                    trace_out("Folding", ilhs);
-                    auto result = lhs.fold(iContext);
-                    trace_out("Folded", ilhs, {}, result);
+                    trace_out("Folding", lhs);
+                    auto const result = lhs.fold(iContext);
+                    trace_out("Folded", lhs, {}, result);
                     ilhs = fold_stack().erase(ilhs);
                     if (!result->is_empty())
                         ilhs = fold_stack().insert(ilhs, result);
@@ -372,9 +372,9 @@ namespace neos::language
                     bool const unrelated = !lhs.is_sibling(rhs) && !lhs.is_child(rhs) && !rhs.is_child(lhs);
                     if (rhs.can_fold())
                     {
-                        trace_out("Folding", irhs);
-                        auto result = rhs.fold(iContext);
-                        trace_out("Folded", irhs, {}, result);
+                        trace_out("Folding", rhs);
+                        auto const result = rhs.fold(iContext);
+                        trace_out("Folded", rhs, {}, result);
                         irhs = fold_stack().erase(irhs);
                         if (!result->is_empty())
                             irhs = fold_stack().insert(irhs, result);
@@ -383,7 +383,7 @@ namespace neos::language
                     else if (unrelated && !(lhs.unstructured() && rhs.unstructured()))
                     {
                         if (trace() >= 3)
-                            trace_out("Skipping", ilhs, irhs);
+                            trace_out("Skipping", lhs, rhs);
                         ++ilhs;
                     }
                     else if (lhs.name() == rhs.name() && lhs.has_ghosts())
@@ -407,15 +407,15 @@ namespace neos::language
                                 fold_stack().erase(irhs);
                             }
                             else
-                                fold_stack().erase(ilhs);
+                                ilhs = fold_stack().erase(ilhs);
                             didSome = true;
                         }
                     }
                     else if (lhs.can_fold(rhs))
                     {
-                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", ilhs, irhs);
-                        auto result = lhs.fold(iContext, rhs);
-                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", ilhs, irhs, result);
+                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", lhs, rhs);
+                        auto const result = lhs.fold(iContext, rhs);
+                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", lhs, rhs, result);
                         ilhs = fold_stack().erase(ilhs);
                         ilhs = fold_stack().erase(ilhs);
                         if (!result->is_empty())
@@ -424,14 +424,41 @@ namespace neos::language
                     }
                     else if (rhs.can_fold(lhs))
                     {
-                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", irhs, ilhs);
-                        auto result = rhs.fold(iContext, lhs);
-                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", irhs, ilhs, result);
+                        trace_out(!unrelated ? "Folding" : "Folding (unstructured)", rhs, lhs);
+                        auto const result = rhs.fold(iContext, lhs);
+                        trace_out(!unrelated ? "Folded" : "Folded (unstructured)", rhs, lhs, result);
                         ilhs = fold_stack().erase(ilhs);
                         ilhs = fold_stack().erase(ilhs);
                         if (!result->is_empty())
                             ilhs = fold_stack().insert(ilhs, result);
                         didSome = true;
+                    }
+                    else if (lhs.has_parent())
+                    {
+                        if (lhs.can_fold(lhs.parent()))
+                        {
+                            trace_out("Folding", lhs, lhs.parent());
+                            auto const result = lhs.fold(iContext, lhs.parent());
+                            trace_out("Folded", lhs, lhs.parent(), result);
+                            bool const insert = (!result->is_empty() && result != &lhs.parent());
+                            ilhs = fold_stack().erase(ilhs);
+                            if (insert)
+                                ilhs = fold_stack().insert(ilhs, result);
+                            didSome = true;
+                        }
+                        else if (lhs.parent().can_fold(lhs))
+                        {
+                            trace_out("Folding", lhs.parent(), lhs);
+                            auto const result = lhs.parent().fold(iContext, lhs);
+                            trace_out("Folded", lhs.parent(), lhs, result);
+                            bool const insert = (!result->is_empty() && result != &lhs.parent());
+                            ilhs = fold_stack().erase(ilhs);
+                            if (insert)
+                                ilhs = fold_stack().insert(ilhs, result);
+                            didSome = true;
+                        }
+                        else
+                            break;
                     }
                     else
                         break;

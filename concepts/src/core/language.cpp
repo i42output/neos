@@ -301,7 +301,6 @@ namespace neos::concepts::core
     public:
         using data_type = neos::language::function_signature;
     public:
-        static constexpr bool HasGhosts = true;
         static constexpr bool Unstructured = true;
         // construction
     public:
@@ -327,12 +326,19 @@ namespace neos::concepts::core
         {
             if (aRhs.name() == "language.function.name")
             {
-                data<neos::language::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
+                data<neos::language::i_function_signature>().set_name(aRhs.data<neolib::i_string>());
                 aResult = instance();
             }
             else if (aRhs.name() == "language.function.parameters")
             {
-                data<neos::language::i_function_signature>().parameters() = aRhs.data<neos::language::i_function_parameters>();
+                data<neos::language::i_function_signature>().set_parameters(aRhs.data<neos::language::i_function_parameters>());
+                aResult = instance();
+            }
+            else if (aRhs.name() == "language.function.parameter")
+            {
+                if (!data<neos::language::i_function_signature>().parameters().has_value())
+                    data<neos::language::i_function_signature>().set_parameters(neos::language::function_parameters{});
+                data<neos::language::i_function_signature>().parameters().value().push_back(aRhs.data<neos::language::i_function_parameter>());
                 aResult = instance();
             }
             else if (aRhs.name() == "language.function.return.type")
@@ -344,7 +350,7 @@ namespace neos::concepts::core
             {
                 auto& scope = static_cast<neos::language::i_function_scope&>(
                     aContext.compiler().enter_scope(neos::language::scope_type::Function,
-                    data<neos::language::i_function_signature>().function_name()));
+                    data<neos::language::i_function_signature>().name()));
                 scope.set_function_signature(data<neos::language::i_function_signature>());
             }
         }
@@ -369,8 +375,7 @@ namespace neos::concepts::core
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
             if (aRhs.is("language.type"_s) || 
-                aRhs.is("language.function.parameter"_s) ||
-                aRhs.is("language.function.name"_s))
+                aRhs.is("language.function.parameter"_s))
                 return true;
             return false;
         }
@@ -389,12 +394,6 @@ namespace neos::concepts::core
             {
                 data<neos::language::i_function_parameters>().push_back(aRhs.data<neos::language::i_function_parameter>());
                 aResult = instance();
-            }
-            else if (aRhs.is("language.function.name"_s))
-            {
-                aResult = language_function_signature{}.instantiate(aContext, aRhs.source());
-                aResult->data<neos::language::i_function_signature>().set_function_name(aRhs.data<neolib::i_string>());
-                aResult->data<neos::language::i_function_signature>().parameters() = data<neos::language::i_function_parameters>();
             }
         }
     };

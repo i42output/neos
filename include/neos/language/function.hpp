@@ -35,10 +35,11 @@ namespace neos
 
         struct i_function_signature
         {
-            virtual neolib::i_string const& function_name() const = 0;
-            virtual void set_function_name(neolib::i_string const& aFunctionName) = 0;
+            virtual neolib::i_string const& name() const = 0;
+            virtual void set_name(neolib::i_string const& aFunctionName) = 0;
             virtual i_optional_parameter_list const& parameters() const = 0;
             virtual i_optional_parameter_list& parameters() = 0;
+            virtual void set_parameters(i_function_parameters const& aFunctionParameters) = 0;
             virtual neos::language::type return_type() const = 0;
             virtual void set_return_type(neos::language::type aFunctionReturnType) = 0;
         };
@@ -50,11 +51,27 @@ namespace neos
             neolib::string functionName;
             optional_parameter_list functionParameters;
             neos::language::type functionReturnType;
-            neolib::i_string const& function_name() const final
+
+            function_signature() = default;
+
+            function_signature(i_function_signature const& aOther) :
+                functionName{ aOther.name() },
+                functionParameters{ aOther.parameters() },
+                functionReturnType{ aOther.return_type() } {}
+
+            function_signature& operator=(i_function_signature const& aOther)
+            {
+                functionName = aOther.name();
+                functionParameters = aOther.parameters();
+                functionReturnType = aOther.return_type();
+                return *this;
+            }
+
+            neolib::i_string const& name() const final
             {
                 return functionName;
             }
-            void set_function_name(neolib::i_string const& aFunctionName) final
+            void set_name(neolib::i_string const& aFunctionName) final
             {
                 functionName = aFunctionName;
             }
@@ -65,6 +82,10 @@ namespace neos
             optional_parameter_list& parameters() final
             {
                 return functionParameters;
+            }
+            void set_parameters(i_function_parameters const& aFunctionParameters) final
+            {
+                functionParameters = aFunctionParameters;
             }
             neos::language::type return_type() const final
             {
