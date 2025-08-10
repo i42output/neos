@@ -35,7 +35,8 @@ namespace neos
     {
         class i_symbol_table_entry;
 
-        enum class type : std::uint32_t {
+        enum class type : std::uint32_t 
+        {
             UNKNOWN = 0x00000000,
             Void, 
             Boolean, 
