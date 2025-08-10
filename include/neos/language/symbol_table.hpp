@@ -35,10 +35,20 @@ namespace neos
         struct i_symbol_table_entry
         {
             using abstract_type = i_symbol_table_entry;
+
+            virtual ~i_symbol_table_entry() = default;
         };
 
         struct symbol_table_entry : i_symbol_table_entry
         {
+            symbol_table_entry() 
+            {}
+            symbol_table_entry(i_symbol_table_entry const& aOther)
+            {}
+            symbol_table_entry& operator=(i_symbol_table_entry const& aOther)
+            { 
+                return *this; 
+            }
         };
 
         using symbol_table = neolib::unordered_map<i_scope*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;
