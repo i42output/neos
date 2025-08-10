@@ -32,23 +32,37 @@ namespace neos
     {
         class i_scope;
 
-        struct i_symbol_table_entry
+        class i_symbol_table_entry
         {
+        public:
             using abstract_type = i_symbol_table_entry;
-
+        public:
             virtual ~i_symbol_table_entry() = default;
+        public:
+            virtual symbol_type type() const = 0;
         };
 
-        struct symbol_table_entry : i_symbol_table_entry
+        class symbol_table_entry : public i_symbol_table_entry
         {
-            symbol_table_entry() 
+        public:
+            symbol_table_entry(symbol_type aType) : 
+                iType{ aType }
             {}
-            symbol_table_entry(i_symbol_table_entry const& aOther)
+            symbol_table_entry(i_symbol_table_entry const& aOther) :
+                iType{ aOther.type() }
             {}
             symbol_table_entry& operator=(i_symbol_table_entry const& aOther)
             { 
+                iType = aOther.type();
                 return *this; 
             }
+        public:
+            symbol_type type() const final
+            {
+                return iType;
+            }
+        private:
+            symbol_type iType;
         };
 
         using symbol_table = neolib::unordered_map<i_scope*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;

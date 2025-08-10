@@ -33,7 +33,7 @@ namespace neos
 {
     namespace language
     {
-        struct i_symbol_table_entry;
+        class i_symbol_table_entry;
 
         enum class type : std::uint32_t {
             UNKNOWN = 0x00000000,
