@@ -6,6 +6,7 @@ fn test(x, y : i32; z : string) -> i64
 
 proc wibble(foo : out i32)
 {
+    i32 n = -1;
     foo = test(7, 42, "wibble");
 }
 

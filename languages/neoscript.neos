@@ -181,7 +181,10 @@ ${
     scope $ language.function.scope ::= ( open scope $ language.scope.open , { WS , statement } , WS , close scope  $ language.scope.close ) ; 
 
     statement $ language.statement ::= 
-        ( expression , WS , semicolon ) | ( assignment , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
+        ( initialize , WS , semicolon ) | ( assignment , WS , semicolon ) | ( expression , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
+
+    initialize $ language.initialize ::= 
+        ( type , WS , identifier , WS , assign , WS , expression ) ;
 
     assignment $ language.assignment ::= 
         ( identifier , WS , assign , WS , expression ) ;
