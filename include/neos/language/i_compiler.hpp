@@ -78,7 +78,11 @@ namespace neos::language
 
     struct concept_not_found : std::runtime_error
     {
-        concept_not_found(std::string_view const& aConceptName) : std::runtime_error{ std::string{ "Concept '" } + std::string{ aConceptName } + "' not found" } {}
+        std::optional<const_source_iterator> sourcePos;
+        concept_not_found(std::string_view const& aConceptName) : 
+            std::runtime_error{ std::string{ "Concept '" } + std::string{ aConceptName } + "' not found" } {}
+        concept_not_found(std::string_view const& aConceptName, const_source_iterator aSourcePos) :
+            std::runtime_error{ std::string{ "Concept '" } + std::string{ aConceptName } + "' not found" }, sourcePos{ aSourcePos } {}
     };
 
     struct compiler_error : std::runtime_error

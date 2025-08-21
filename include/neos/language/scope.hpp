@@ -167,16 +167,20 @@ namespace neos
             switch (aType)
             {
             case scope_type::Namespace:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(
+                    children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
                 break;
             case scope_type::Class:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(
+                    children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
                 break;
             case scope_type::Function:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<function_scope, i_scope>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(
+                    children().end(), neolib::make_ref<function_scope, i_scope>(*this, aName, aType));
                 break;
             case scope_type::Block:
-                iChildIndex[aName.to_std_string_view()] = children().insert(children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
+                iChildIndex[aName.to_std_string_view()] = children().insert(
+                    children().end(), neolib::make_ref<scope<>>(*this, aName, aType));
                 break;
             }
             return **iChildIndex[aName.to_std_string_view()];

@@ -597,6 +597,27 @@ namespace neos::concepts::core
         }
     };
 
+    class language_assignment : public semantic_concept<language_assignment>
+    {
+        // construction
+    public:
+        language_assignment() :
+            semantic_concept{ "language.assignment", neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            // todo
+            return false;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            // todo
+        }
+    };
+
     class language_type : public semantic_concept<language_type>
     {
         // data
@@ -822,6 +843,8 @@ namespace neos::concepts::core
             neolib::make_ref<language_expression>();
         concepts()[neolib::string{ "language.expression.operand" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression.operand");
+        concepts()[neolib::string{ "language.assignment" }] =
+            neolib::make_ref<language_assignment>();
         concepts()[neolib::string{ "language.type" }] =
             neolib::make_ref<language_type>();
         concepts()[neolib::string{ "language.type.tuple" }] = 

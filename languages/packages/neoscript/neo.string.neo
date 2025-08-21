@@ -2,6 +2,10 @@
 
 namespace neo
 {
+    fn length(s : string) -> i32
+    {
+        // todo
+    }
     fn to_integer(s : string) -> i32
     {
         // todo

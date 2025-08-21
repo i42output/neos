@@ -132,7 +132,7 @@ namespace neos::language
                 }
             }
             else
-                throw concept_not_found(parserAstNode.c.value());
+                throw concept_not_found(conceptName.to_std_string_view(), conceptValue.begin());
         };
     }
 
@@ -473,6 +473,10 @@ namespace neos::language
         catch (compiler_error const&)
         {
             throw;
+        }
+        catch (concept_not_found const& ex)
+        {
+            throw_error(ex.sourcePos.value(), neolib::string{ ex.what() });
         }
         catch (std::exception const& ex)
         {

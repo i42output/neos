@@ -1038,7 +1038,7 @@ namespace neos
                 /* Custom Descriptors proposal */
                 { opcode::RefGetDesc, op2{ 0xFB, LEB128(0x22) }, _, "ref.get_desc" },
                 { opcode::RefCastDesc, op2{ 0xFB, LEB128(0x23) }, _, "ref.cast_desc" },
-                { opcode::RefCastDescNull, op2{ 0xFB, LEB128(0x24) }, _, "ref.cast_desc null" },
+                { opcode::RefCastDescNull, op2{ 0xFB, LEB128(0x24) }, _, "ref.cast_desc_null" },
                 { opcode::BrOnCastDesc, op2{ 0xFB, LEB128(0x25) }, _, "br_on_cast_desc" },
                 { opcode::BrOnCastDescFail, op2{ 0xFB, LEB128(0x26) }, _, "br_on_cast_desc_fail" },
                 { opcode::RefCastNop, op2{ 0xFB, LEB128(0x4C) }, _, "ref.cast_nop" },

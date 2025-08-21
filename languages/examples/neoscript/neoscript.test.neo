@@ -1,10 +1,11 @@
 // functions are pure
 fn test(x, y : i32; z : string) -> i64
 {
-    return 1 + (2 + 3) * 4 + x / y;
+    return 1 + (2 + 3) * 4 + x / y + length(z);
 }
 
 proc wibble(foo : out i32)
 {
+    foo = test(7, 42, "wibble");
 }
 

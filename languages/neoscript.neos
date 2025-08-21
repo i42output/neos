@@ -184,7 +184,7 @@ ${
         ( expression , WS , semicolon ) | ( assignment , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
 
     assignment $ language.assignment ::= 
-        ( object , WS , assign , WS , expression ) ;
+        ( identifier , WS , assign , WS , expression ) ;
 
     expression $ language.expression ::= 
         function call | numeric expression | boolean expression ;
