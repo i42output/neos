@@ -26,19 +26,28 @@
 
 namespace neos::concepts::core
 {   
-    class math_universal_number : public semantic_concept<math_universal_number>
+    template <typename Derived = void>
+    class math_universal_number : public semantic_concept_t<Derived, math_universal_number<Derived>>
     {
+        // concept
     public:
-        using semantic_concept::semantic_concept;
+        static constexpr auto Name = "math.universal.number";
+        // construction
+    public:
+        using semantic_concept_t<Derived, math_universal_number<Derived>>::semantic_concept_t;
     };
 
-    class math_universal_integer : public semantic_concept<math_universal_integer>
+    class math_universal_integer : public math_universal_number<math_universal_integer>
     {
+        // concept
+    public:
+        static constexpr auto Name = "math.universal.integer";
         // types
     public:
         using data_type = language::data<language::ibig>;
+        // construction
     public:
-        using semantic_concept::semantic_concept;
+        using math_universal_number<math_universal_integer>::math_universal_number;
         // emit
     public:
         bool can_fold() const override
@@ -47,8 +56,8 @@ namespace neos::concepts::core
         }
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.identifier"_s) ||
-                aRhs.is("math.expression.operand"_s))
+            if (aRhs.is("language.identifier"_sv) ||
+                aRhs.is("math.expression.operand"_sv))
                 return true;
             return false;
         }
@@ -63,20 +72,24 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (aRhs.is("language.identifier"_s))
+            if (aRhs.is("language.identifier"_sv))
                 ; ///< @todo
-            else if (aRhs.is("math.expression.operand"_s))
+            else if (aRhs.is("math.expression.operand"_sv))
                 aContext.compiler().push_operand(data<data_type>());
         }
     };
 
-    class math_universal_real : public semantic_concept<math_universal_real>
+    class math_universal_real : public math_universal_number<math_universal_real>
     {
+        // concept
+    public:
+        static constexpr auto Name = "math.universal.real";
         // types
     public:
         using data_type = language::data<language::fbig>;
+        // construction
     public:
-        using semantic_concept::semantic_concept;
+        using math_universal_number<math_universal_real>::math_universal_number;
         // emit
     public:
         bool can_fold() const override
@@ -85,8 +98,8 @@ namespace neos::concepts::core
         }
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.identifier"_s) ||
-                aRhs.is("math.expression.operand"_s))
+            if (aRhs.is("language.identifier"_sv) ||
+                aRhs.is("math.expression.operand"_sv))
                 return true;
             return false;
         }
@@ -101,9 +114,9 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (aRhs.is("language.identifier"_s))
+            if (aRhs.is("language.identifier"_sv))
                 ; ///< @todo
-            else if (aRhs.is("math.expression.operand"_s))
+            else if (aRhs.is("math.expression.operand"_sv))
                 aContext.compiler().push_operand(data<data_type>());
         }
     };
@@ -132,9 +145,9 @@ namespace neos::concepts::core
         }
     {
         /* todo */
-        concepts()[neolib::string{ "math.universal.number" }] = neolib::make_ref<math_universal_number>("math.universal.number", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.integer" }] = neolib::make_ref<math_universal_integer>(*concepts()[neolib::string{ "math.universal.number" }], "math.universal.integer", language::emit_type::Infix);
-        concepts()[neolib::string{ "math.universal.real" }] = neolib::make_ref<math_universal_real>(*concepts()[neolib::string{ "math.universal.number" }], "math.universal.real", language::emit_type::Infix);
+        concepts()[neolib::string{ "math.universal.number" }] = neolib::make_ref<math_universal_number<>>();
+        concepts()[neolib::string{ "math.universal.integer" }] = neolib::make_ref<math_universal_integer>();
+        concepts()[neolib::string{ "math.universal.real" }] = neolib::make_ref<math_universal_real>();
         concepts()[neolib::string{ "math.universal.number.digit" }] = neolib::make_ref<math_universal_number_digit>("math.universal.number.digit", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.point" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.point", language::emit_type::Infix);
         concepts()[neolib::string{ "math.universal.number.exponent" }] = neolib::make_ref<language::unimplemented_semantic_concept>("math.universal.number.exponent", language::emit_type::Infix);

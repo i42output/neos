@@ -129,7 +129,7 @@ namespace neos
                         if constexpr (std::is_same_v<std::decay_t<decltype(lhs)>,
                             neolib::ref_ptr<i_semantic_concept>>)
                         {
-                            result = lhs->name();
+                            result = lhs->name().to_std_string_view();
                         }
                     }, value());
                 if (result.empty())

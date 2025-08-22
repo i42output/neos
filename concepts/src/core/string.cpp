@@ -79,33 +79,33 @@ namespace neos::concepts::core
         concepts()[neolib::string{ "string.character" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("string.character");
         concepts()[neolib::string{ "string.utf8" }] = 
-            neolib::make_ref<string_utf8>(*concepts()[neolib::string{ "string" }], "string.utf8");
+            neolib::make_ref<string_utf8>("string.utf8");
         concepts()[neolib::string{ "string.utf8.character" }] = 
-            neolib::make_ref<string_utf8_character<any_char>>(*concepts()[neolib::string{ "string.character" }], "string.utf8.character");
+            neolib::make_ref<string_utf8_character<any_char>>("string.utf8.character");
         concepts()[neolib::string{ "string.utf8.character.LF" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\n'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.LF");
+            neolib::make_ref<string_utf8_character<specific_char<'\n'>>>("string.utf8.character.LF");
         concepts()[neolib::string{ "string.utf8.character.CR" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\r'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.CR");
+            neolib::make_ref<string_utf8_character<specific_char<'\r'>>>("string.utf8.character.CR");
         concepts()[neolib::string{ "string.utf8.character.tab" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\t'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.tab");
+            neolib::make_ref<string_utf8_character<specific_char<'\t'>>>("string.utf8.character.tab");
         concepts()[neolib::string{ "string.utf8.character.backslash" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\\'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.backslash");
+            neolib::make_ref<string_utf8_character<specific_char<'\\'>>>("string.utf8.character.backslash");
         concepts()[neolib::string{ "string.utf8.character.alpha" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'A', 'Z'>, specific_char<'a', 'z'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.alpha");
+            neolib::make_ref<string_utf8_character<specific_char<'A', 'Z'>, specific_char<'a', 'z'>>>("string.utf8.character.alpha");
         concepts()[neolib::string{ "string.utf8.character.digit" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'0', '9'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.digit");
+            neolib::make_ref<string_utf8_character<specific_char<'0', '9'>>>("string.utf8.character.digit");
         concepts()[neolib::string{ "string.utf8.character.hexdigit" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'0', '9'>, specific_char<'A', 'F'>, specific_char<'a', 'f'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.hexdigit");
+            neolib::make_ref<string_utf8_character<specific_char<'0', '9'>, specific_char<'A', 'F'>, specific_char<'a', 'f'>>>("string.utf8.character.hexdigit");
         concepts()[neolib::string{ "string.utf8.character.period" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'.'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.period");
+            neolib::make_ref<string_utf8_character<specific_char<'.'>>>("string.utf8.character.period");
         concepts()[neolib::string{ "string.utf8.character.comma" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<','>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.comma");
+            neolib::make_ref<string_utf8_character<specific_char<','>>>("string.utf8.character.comma");
         concepts()[neolib::string{ "string.utf8.character.underscore" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'_'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.underscore");
+            neolib::make_ref<string_utf8_character<specific_char<'_'>>>("string.utf8.character.underscore");
         concepts()[neolib::string{ "string.utf8.character.doublequote" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\"'>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.double_quote");
+            neolib::make_ref<string_utf8_character<specific_char<'\"'>>>("string.utf8.character.double_quote");
         concepts()[neolib::string{ "string.utf8.character.singlequote" }] = 
-            neolib::make_ref<string_utf8_character<specific_char<'\''>>>(*concepts()[neolib::string{ "string.utf8.character" }], "string.utf8.character.single_quote");
+            neolib::make_ref<string_utf8_character<specific_char<'\''>>>("string.utf8.character.single_quote");
     }
 
     const std::string& string::library_name()

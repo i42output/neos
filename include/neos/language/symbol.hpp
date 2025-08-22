@@ -23,6 +23,7 @@
 #include <neolib/core/string.hpp>
 #include <neolib/core/map.hpp>
 #include <neos/language/type.hpp>
+#include <neos/language/scope.hpp>
 
 namespace neos
 {
@@ -39,28 +40,28 @@ namespace neos
 
             virtual ~i_symbol_reference() = default;
 
-            virtual neolib::i_string const& scope() const = 0;
+            virtual i_scope const& scope() const = 0;
             virtual neolib::i_string const& name() const = 0;
         };
 
         struct symbol_reference : i_symbol_reference
         {
-            neolib::string symbolScope;
+            neolib::ref_ptr<i_scope const> symbolScope;
             neolib::string symbolName;
 
             symbol_reference() = default;
             symbol_reference(i_symbol_reference const& other) :
                 symbolScope{ other.scope() }, symbolName{ other.name() } {}
-            symbol_reference(neolib::string const& scope, neolib::string const& name) :
+            symbol_reference(i_scope const& scope, neolib::string const& name) :
                 symbolScope{ scope }, symbolName{ name } {}
 
-            neolib::i_string const& scope() const final { return symbolScope; }
+            i_scope const& scope() const final { return *symbolScope; }
             neolib::i_string const& name() const final { return symbolName; }
         };
 
         inline std::ostream& operator<<(std::ostream& stream, i_symbol_reference const& operand)
         {
-            stream << "@" << "(" << operand.scope() << ")::" << operand.name();
+            stream << "@" << "(" << operand.scope().name() << ")::" << operand.name();
             return stream;
         }
 

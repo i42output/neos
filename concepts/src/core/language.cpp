@@ -27,43 +27,55 @@ namespace neos::concepts::core
 {   
     class language_whitespace : public semantic_concept<language_whitespace>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.whitespace";
         // construction
     public:
         language_whitespace() :
-            semantic_concept{ "language.whitespace", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_comment : public semantic_concept<language_comment>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.comment";
         // construction
     public:
         language_comment() :
-            semantic_concept{ "language.comment", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_keyword : public semantic_concept<language_keyword>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.keyword";
         // construction
     public:
         language_keyword() :
-            semantic_concept{ "language.keyword", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_identifier : public semantic_concept<language_identifier>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.identifier";
         // types
     public:
         using data_type = neolib::string;
         // construction
     public:
         language_identifier() :
-            semantic_concept{ "language.identifier", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -79,10 +91,13 @@ namespace neos::concepts::core
 
     class language_program : public semantic_concept<language_program>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.program";
         // construction
     public:
         language_program() :
-            semantic_concept{ "language.program", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -98,23 +113,29 @@ namespace neos::concepts::core
 
     class language_scope : public semantic_concept<language_scope>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.scope";
         // construction
     public:
         language_scope() :
-            semantic_concept{ "language.scope", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_namespace : public semantic_concept<language_namespace>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.namespace";
         // types
     public:
         using data_type = neolib::string;
         // construction
     public:
         language_namespace() :
-            semantic_concept{ "language.namespace", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -134,36 +155,46 @@ namespace neos::concepts::core
 
     class language_namespace_name : public semantic_concept<language_namespace_name>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.namespace.name";
         // types
     public:
         using data_type = neolib::string;
         // construction
     public:
         language_namespace_name() :
-            semantic_concept{ "language.namespace.name", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
-    class language_scope_open : public semantic_concept<language_scope_open>
+    template <typename Derived = void>
+    class language_scope_open : public semantic_concept_t<Derived, language_scope_open<Derived>>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.scope.open";
         // folding
     public:
         static constexpr bool Unstructured = true;
         // construction
     public:
         language_scope_open() :
-            semantic_concept{ "language.scope.open", neos::language::emit_type::Infix }
+            semantic_concept_t<Derived, language_scope_open<Derived>>{ neos::language::emit_type::Infix }
         {
         }
     };
 
-    class language_namespace_scope_open : public semantic_concept<language_namespace_scope_open>
+    class language_namespace_scope_open : public language_scope_open<language_namespace_scope_open>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.namespace.scope.open";
         // construction
     public:
-        language_namespace_scope_open(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.namespace.scope.open", neos::language::emit_type::Infix }
+        language_namespace_scope_open() :
+            language_scope_open{}
         {
         }
         // emit
@@ -181,22 +212,29 @@ namespace neos::concepts::core
         }
     };
 
-    class language_scope_open_by_indentation : public semantic_concept<language_scope_open_by_indentation>
+    class language_scope_open_by_indentation : public language_scope_open<language_scope_open_by_indentation>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.scope.open.by_indentation";
         // construction
     public:
         language_scope_open_by_indentation() :
-            semantic_concept{ "language.scope.open.by_indentation", neos::language::emit_type::Infix }
+            language_scope_open{}
         {
         }
     };
 
-    class language_scope_close : public semantic_concept<language_scope_close>
+    template <typename Derived = void>
+    class language_scope_close : public semantic_concept_t<Derived, language_scope_close<Derived>>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.scope.close";
         // construction
     public:
         language_scope_close() :
-            semantic_concept{ "language.scope.close", neos::language::emit_type::Infix }
+            semantic_concept_t<Derived, language_scope_close<Derived>>{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -210,12 +248,15 @@ namespace neos::concepts::core
         }
     };
 
-    class language_namespace_scope_close : public semantic_concept<language_namespace_scope_close>
+    class language_namespace_scope_close : public language_scope_close<language_namespace_scope_close>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.namespace.scope.close";
         // construction
     public:
-        language_namespace_scope_close(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.namespace.scope.close", neos::language::emit_type::Infix }
+        language_namespace_scope_close() :
+            language_scope_close{}
         {
         }
         // emit
@@ -232,20 +273,26 @@ namespace neos::concepts::core
 
     class language_scope_add_package : public semantic_concept<language_scope_add_package>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.scope.add.package";
         // construction
     public:
         language_scope_add_package() :
-            semantic_concept{ "language.scope.add.package", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function : public semantic_concept<language_function>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function";
         // construction
     public:
         language_function() :
-            semantic_concept{ "language.function", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -264,39 +311,51 @@ namespace neos::concepts::core
 
     class language_function_name : public semantic_concept<language_function_name>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.name";
         // data
     public:
         using data_type = neolib::string;
         // construction
     public:
         language_function_name() :
-            semantic_concept{ "language.function.name", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_scope : public semantic_concept<language_function_scope>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.scope";        
         // construction
     public:
-        language_function_scope(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.function.scope", neos::language::emit_type::Infix }
+        language_function_scope() :
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_body : public semantic_concept<language_function_body>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.body";
         // construction
     public:
-        language_function_body(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.function.body", neos::language::emit_type::Infix }
+        language_function_body() :
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_signature : public semantic_concept<language_function_signature>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.signature";
         // data
     public:
         using data_type = neos::language::function_signature;
@@ -305,7 +364,7 @@ namespace neos::concepts::core
         // construction
     public:
         language_function_signature() :
-            semantic_concept{ "language.function.signature", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -358,6 +417,9 @@ namespace neos::concepts::core
 
     class language_function_parameters : public semantic_concept<language_function_parameters>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.parameters";
         // data
     public:
         using data_type = neos::language::function_parameters;
@@ -367,21 +429,21 @@ namespace neos::concepts::core
         // construction
     public:
         language_function_parameters() :
-            semantic_concept{ "language.function.parameters", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.type"_s) || 
-                aRhs.is("language.function.parameter"_s))
+            if (aRhs.is("language.type"_sv) || 
+                aRhs.is("language.function.parameter"_sv))
                 return true;
             return false;
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (aRhs.is("language.type"_s))
+            if (aRhs.is("language.type"_sv))
             {
                 for (auto i = data<neos::language::i_function_parameters>().rbegin();
                     i != data<neos::language::i_function_parameters>().rend() && 
@@ -390,7 +452,7 @@ namespace neos::concepts::core
                     i->set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
-            else if (aRhs.is("language.function.parameter"_s))
+            else if (aRhs.is("language.function.parameter"_sv))
             {
                 data<neos::language::i_function_parameters>().push_back(aRhs.data<neos::language::i_function_parameter>());
                 aResult = instance();
@@ -400,13 +462,16 @@ namespace neos::concepts::core
 
     class language_function_parameter : public semantic_concept<language_function_parameter>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.parameter";
         // data
     public:
         using data_type = neos::language::function_parameter;
         // construction
     public:
         language_function_parameter() :
-            semantic_concept{ "language.function.parameter", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -417,9 +482,9 @@ namespace neos::concepts::core
         }
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.identifier"_s) || 
-                aRhs.is("language.type"_s) || 
-                aRhs.is("language.function.parameter"_s))
+            if (aRhs.is("language.identifier"_sv) || 
+                aRhs.is("language.type"_sv) || 
+                aRhs.is("language.function.parameter"_sv))
                 return true;
             return false;
         }
@@ -430,17 +495,17 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (aRhs.is("language.identifier"_s))
+            if (aRhs.is("language.identifier"_sv))
             {
                 data<neos::language::i_function_parameter>().set_parameter_name(aRhs.source());
                 aResult = instance();
             }
-            else if (aRhs.is("language.type"_s))
+            else if (aRhs.is("language.type"_sv))
             {
                 data<neos::language::i_function_parameter>().set_parameter_type(aRhs.data<neos::language::type>());
                 aResult = instance();
             }
-            else if (aRhs.is("language.function.parameter"_s))
+            else if (aRhs.is("language.function.parameter"_sv))
             {
                 aResult = language_function_parameters{}.instantiate(aContext, source());
                 aResult->data<neos::language::i_function_parameters>().push_back(data<neos::language::i_function_parameter>());
@@ -451,56 +516,68 @@ namespace neos::concepts::core
 
     class language_function_parameter_in : public semantic_concept<language_function_parameter_in>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.parameter.in";
         // construction
     public:
         language_function_parameter_in() :
-            semantic_concept{ "language.function.parameter.in", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_parameter_out : public semantic_concept<language_function_parameter_out>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.parameter.out";
         // construction
     public:
         language_function_parameter_out() :
-            semantic_concept{ "language.function.parameter.out", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_parameter_inout : public semantic_concept<language_function_parameter_inout>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.parameter.inout";
         // construction
     public:
         language_function_parameter_inout() :
-            semantic_concept{ "language.function.parameter.inout", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_return_type : public semantic_concept<language_function_return_type>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.return.type";
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
         language_function_return_type() :
-            semantic_concept{ "language.function.return.type", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            if (aRhs.is("language.type"_s))
+            if (aRhs.is("language.type"_sv))
                 return true;
             return false;
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (aRhs.is("language.type"_s))
+            if (aRhs.is("language.type"_sv))
             {
                 data<neos::language::type>() = aRhs.data<neos::language::type>();
                 aResult = instance();
@@ -510,80 +587,104 @@ namespace neos::concepts::core
 
     class language_function_locals : public semantic_concept<language_function_locals>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.locals";
         // construction
     public:
         language_function_locals() :
-            semantic_concept{ "language.function.locals", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_local : public semantic_concept<language_function_local>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.local";
         // construction
     public:
         language_function_local() :
-            semantic_concept{ "language.function.local", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_import : public semantic_concept<language_function_import>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.import";
         // construction
     public:
         language_function_import() :
-            semantic_concept{ "language.function.import", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_arguments : public semantic_concept<language_function_arguments>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.arguments";
         // construction
     public:
         language_function_arguments() :
-            semantic_concept{ "language.function.arguments", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_argument : public semantic_concept<language_function_argument>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.argument";
         // construction
     public:
         language_function_argument() :
-            semantic_concept{ "language.function.argument", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_call : public semantic_concept<language_function_call>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.call";
         // construction
     public:
         language_function_call() :
-            semantic_concept{ "language.function.call", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_function_return : public semantic_concept<language_function_return>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.function.return";
         // construction
     public:
         language_function_return() :
-            semantic_concept{ "language.function.return", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
     };
 
     class language_expression : public semantic_concept<language_expression>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.expression";
         // construction
     public:
         language_expression() :
-            semantic_concept{ "language.expression", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -599,10 +700,13 @@ namespace neos::concepts::core
 
     class language_initialize : public semantic_concept<language_initialize>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.initialize";
         // construction
     public:
         language_initialize() :
-            semantic_concept{ "language.initialize", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -620,10 +724,13 @@ namespace neos::concepts::core
 
     class language_assignment : public semantic_concept<language_assignment>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.assignment";
         // construction
     public:
         language_assignment() :
-            semantic_concept{ "language.assignment", neos::language::emit_type::Infix }
+            semantic_concept{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -639,28 +746,51 @@ namespace neos::concepts::core
         }
     };
 
-    class language_type : public semantic_concept<language_type>
+    template <typename Derived = void>
+    class language_type : public semantic_concept_t<Derived, language_type<Derived>>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.type";
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
         language_type() :
-            semantic_concept{ "language.type", neos::language::emit_type::Infix }
+            semantic_concept_t<Derived, language_type<Derived>>{ neos::language::emit_type::Infix }
         {
+        }
+        // emit
+    public:
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            if (aRhs.is("language.identifier"_sv))
+                return true;
+            return false;
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            if (aRhs.is("language.identifier"_sv))
+            {
+                // todo
+                aResult = this->instance();
+            }
         }
     };
 
-    class language_type_tuple : public semantic_concept<language_type_tuple>
+    class language_type_tuple : public language_type<language_type_tuple>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.type.tuple";
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
-        language_type_tuple(i_semantic_concept& aParent, const std::string& aName) :
-            semantic_concept<language_type_tuple>{ aParent, aName, neos::language::emit_type::Infix }
+        language_type_tuple() :
+            language_type<language_type_tuple>{}
         {
         }
         // emit
@@ -676,16 +806,26 @@ namespace neos::concepts::core
         }
     };
 
-    template <typename Float>
-    class language_type_float : public semantic_concept<language_type_float<Float>>
+    namespace
     {
+        template <typename Type> struct float_type_name;
+        template<> struct float_type_name<float> { static constexpr auto Name = "language.type.float"; };
+        template<> struct float_type_name<double> { static constexpr auto Name = "language.type.double"; };
+    }
+
+    template <typename Float>
+    class language_type_float : public language_type<language_type_float<Float>>
+    {
+        // concept
+    public:
+        static constexpr auto Name = float_type_name<Float>::Name;
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
-        language_type_float(i_semantic_concept& aParent, const std::string& aName) :
-            semantic_concept<language_type_float<Float>>{ aParent, aName, neos::language::emit_type::Infix }
+        language_type_float() :
+            language_type<language_type_float<Float>>{}
         {
         }
         // emit
@@ -701,16 +841,32 @@ namespace neos::concepts::core
         }
     };
 
-    template <typename Integer>
-    class language_type_integer : public semantic_concept<language_type_integer<Integer>>
+    namespace
     {
+        template <typename Type> struct integer_type_name;
+        template<> struct integer_type_name<std::int8_t> { static constexpr auto Name = "language.type.i8"; };
+        template<> struct integer_type_name<std::uint8_t> { static constexpr auto Name = "language.type.u8"; };
+        template<> struct integer_type_name<std::int16_t> { static constexpr auto Name = "language.type.i16"; };
+        template<> struct integer_type_name<std::uint16_t> { static constexpr auto Name = "language.type.u16"; };
+        template<> struct integer_type_name<std::int32_t> { static constexpr auto Name = "language.type.i32"; };
+        template<> struct integer_type_name<std::uint32_t> { static constexpr auto Name = "language.type.u32"; };
+        template<> struct integer_type_name<std::int64_t> { static constexpr auto Name = "language.type.i64"; };
+        template<> struct integer_type_name<std::uint64_t> { static constexpr auto Name = "language.type.u64"; };
+    }
+
+    template <typename Integer>
+    class language_type_integer : public language_type<language_type_integer<Integer>>
+    {
+        // concept
+    public:
+        static constexpr auto Name = integer_type_name<Integer>::Name;
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
-        language_type_integer(i_semantic_concept& aParent, const std::string& aName) :
-            semantic_concept<language_type_integer<Integer>>{ aParent, aName, neos::language::emit_type::Infix }
+        language_type_integer() :
+            language_type<language_type_integer<Integer>>{}
         {
         }
         // emit
@@ -727,15 +883,18 @@ namespace neos::concepts::core
     };
 
     template <typename Character>
-    class language_type_string : public semantic_concept<language_type_string<Character>>
+    class language_type_string : public language_type<language_type_string<Character>>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.type.string";
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
-        language_type_string(i_semantic_concept& aParent, const std::string& aName) :
-            semantic_concept<language_type_string<Character>>{ aParent, aName, neos::language::emit_type::Infix }
+        language_type_string() :
+            language_type<language_type_string<Character>>{}
         {
         }
         // emit
@@ -751,15 +910,18 @@ namespace neos::concepts::core
         }
     };
 
-    class language_type_custom : public semantic_concept<language_type_custom>
+    class language_type_custom : public language_type<language_type_custom>
     {
+        // concept
+    public:
+        static constexpr auto Name = "language.type.custom";
         // data
     public:
         using data_type = neos::language::type;
         // construction
     public:
-        language_type_custom(i_semantic_concept& aParent) :
-            semantic_concept{ aParent, "language.type.custom", neos::language::emit_type::Infix }
+        language_type_custom() :
+            language_type{}
         {
         }
         // emit
@@ -790,9 +952,9 @@ namespace neos::concepts::core
         /* todo */
         concepts()[neolib::string{ "concept.unrealized" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("concept.unimplemented");
-        concepts()[neolib::string{ "language.program" }] =
+        concepts()[neolib::string{ language_program::Name }] =
             neolib::make_ref<language_program>();
-        concepts()[neolib::string{ "language.namespace" }] =
+        concepts()[neolib::string{ language_namespace::Name }] =
             neolib::make_ref<language_namespace>();
         concepts()[neolib::string{ "language.statement" }] = 
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement");
@@ -804,108 +966,108 @@ namespace neos::concepts::core
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.else");
         concepts()[neolib::string{ "language.statement.loop" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.statement.loop");
-        concepts()[neolib::string{ "language.keyword" }] =
+        concepts()[neolib::string{ language_keyword::Name }] =
             neolib::make_ref<language_keyword>();
-        concepts()[neolib::string{ "language.identifier" }] = 
+        concepts()[neolib::string{ language_identifier::Name }] =
             neolib::make_ref<language_identifier>();
-        concepts()[neolib::string{ "language.scope" }] =
+        concepts()[neolib::string{ language_scope::Name }] =
             neolib::make_ref<language_scope>();
-        concepts()[neolib::string{ "language.namespace.name" }] =
+        concepts()[neolib::string{ language_namespace_name::Name }] =
             neolib::make_ref<language_namespace_name>();
-        concepts()[neolib::string{ "language.scope.open" }] =
-            neolib::make_ref<language_scope_open>();
-        concepts()[neolib::string{ "language.namespace.scope.open" }] =
-            neolib::make_ref<language_namespace_scope_open>(*concepts()[neolib::string{ "language.scope.open" }]);
-        concepts()[neolib::string{ "language.scope.open.by_indentation" }] =
+        concepts()[neolib::string{ language_scope_open<>::Name }] =
+            neolib::make_ref<language_scope_open<>>();
+        concepts()[neolib::string{ language_namespace_scope_open::Name }] =
+            neolib::make_ref<language_namespace_scope_open>();
+        concepts()[neolib::string{ language_scope_open_by_indentation::Name }] =
             neolib::make_ref<language_scope_open_by_indentation>();
-        concepts()[neolib::string{ "language.scope.close" }] = 
-            neolib::make_ref<language_scope_close>();
-        concepts()[neolib::string{ "language.namespace.scope.close" }] =
-            neolib::make_ref<language_namespace_scope_close>(*concepts()[neolib::string{ "language.scope.close" }]);
-        concepts()[neolib::string{ "language.scope.add.package" }] =
+        concepts()[neolib::string{ language_scope_close<>::Name }] =
+            neolib::make_ref<language_scope_close<>>();
+        concepts()[neolib::string{ language_namespace_scope_close::Name }] =
+            neolib::make_ref<language_namespace_scope_close>();
+        concepts()[neolib::string{ language_scope_add_package::Name }] =
             neolib::make_ref<language_scope_add_package>();
-        concepts()[neolib::string{ "language.function" }] = 
+        concepts()[neolib::string{ language_function::Name }] =
             neolib::make_ref<language_function>();
-        concepts()[neolib::string{ "language.function.name" }] =
+        concepts()[neolib::string{ language_function_name::Name }] =
             neolib::make_ref<language_function_name>();
-        concepts()[neolib::string{ "language.function.scope" }] =
-            neolib::make_ref<language_function_scope>(*concepts()[neolib::string{ "language.scope" }]);
-        concepts()[neolib::string{ "language.function.body" }] =
-            neolib::make_ref<language_function_body>(*concepts()[neolib::string{ "language.function.scope" }]);
-        concepts()[neolib::string{ "language.function.parameters" }] =
+        concepts()[neolib::string{ language_function_scope::Name }] =
+            neolib::make_ref<language_function_scope>();
+        concepts()[neolib::string{ language_function_body::Name }] =
+            neolib::make_ref<language_function_body>();
+        concepts()[neolib::string{ language_function_parameters::Name }] =
             neolib::make_ref<language_function_parameters>();
-        concepts()[neolib::string{ "language.function.parameter" }] = 
+        concepts()[neolib::string{ language_function_parameter::Name }] =
             neolib::make_ref<language_function_parameter>();
-        concepts()[neolib::string{ "language.function.parameter.in" }] = 
+        concepts()[neolib::string{ language_function_parameter_in::Name }] =
             neolib::make_ref<language_function_parameter_in>();
-        concepts()[neolib::string{ "language.function.parameter.out" }] = 
+        concepts()[neolib::string{ language_function_parameter_out::Name }] =
             neolib::make_ref<language_function_parameter_out>();
-        concepts()[neolib::string{ "language.function.parameter.inout" }] =
+        concepts()[neolib::string{ language_function_parameter_inout::Name }] =
             neolib::make_ref<language_function_parameter_inout>();
-        concepts()[neolib::string{ "language.function.return.type" }] =
+        concepts()[neolib::string{ language_function_return_type::Name }] =
             neolib::make_ref<language_function_return_type>();
-        concepts()[neolib::string{ "language.function.locals" }] =
+        concepts()[neolib::string{ language_function_locals::Name }] =
             neolib::make_ref<language_function_locals>();
-        concepts()[neolib::string{ "language.function.local" }] = 
+        concepts()[neolib::string{ language_function_local::Name }] =
             neolib::make_ref<language_function_local>();
-        concepts()[neolib::string{ "language.function.signature" }] = 
+        concepts()[neolib::string{ language_function_signature::Name }] =
             neolib::make_ref<language_function_signature>();
-        concepts()[neolib::string{ "language.function.import" }] = 
+        concepts()[neolib::string{ language_function_import::Name }] =
             neolib::make_ref<language_function_import>();
-        concepts()[neolib::string{ "language.function.arguments" }] = 
+        concepts()[neolib::string{ language_function_arguments::Name }] =
             neolib::make_ref<language_function_arguments>();
-        concepts()[neolib::string{ "language.function.argument" }] = 
+        concepts()[neolib::string{ language_function_argument::Name }] =
             neolib::make_ref<language_function_argument>();
-        concepts()[neolib::string{ "language.function.call" }] = 
+        concepts()[neolib::string{ language_function_call::Name }] =
             neolib::make_ref<language_function_call>();
-        concepts()[neolib::string{ "language.function.return" }] = 
+        concepts()[neolib::string{ language_function_return::Name }] =
             neolib::make_ref<language_function_return>();
-        concepts()[neolib::string{ "language.expression" }] =
+        concepts()[neolib::string{ language_expression::Name }] =
             neolib::make_ref<language_expression>();
         concepts()[neolib::string{ "language.expression.operand" }] =
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("language.expression.operand");
-        concepts()[neolib::string{ "language.initialize" }] =
+        concepts()[neolib::string{ language_initialize::Name }] =
             neolib::make_ref<language_initialize>();
-        concepts()[neolib::string{ "language.assignment" }] =
+        concepts()[neolib::string{ language_assignment::Name }] =
             neolib::make_ref<language_assignment>();
-        concepts()[neolib::string{ "language.type" }] =
-            neolib::make_ref<language_type>();
-        concepts()[neolib::string{ "language.type.tuple" }] = 
-            neolib::make_ref<language_type_tuple>(*concepts()[neolib::string{ "language.type" }], "language.type.tuple");
-        concepts()[neolib::string{ "language.type.float" }] = 
-            neolib::make_ref<language_type_float<float>>(*concepts()[neolib::string{ "language.type" }], "language.type.float");
-        concepts()[neolib::string{ "language.type.double" }] = 
-            neolib::make_ref<language_type_float<double>>(*concepts()[neolib::string{ "language.type" }], "language.type.double");
-        concepts()[neolib::string{ "language.type.i8" }] = 
-            neolib::make_ref<language_type_integer<std::int8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i8");
-        concepts()[neolib::string{ "language.type.u8" }] = 
-            neolib::make_ref<language_type_integer<std::uint8_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u8");
-        concepts()[neolib::string{ "language.type.i16" }] = 
-            neolib::make_ref<language_type_integer<int16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i16");
-        concepts()[neolib::string{ "language.type.u16" }] = 
-            neolib::make_ref<language_type_integer<std::uint16_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u16");
-        concepts()[neolib::string{ "language.type.i32" }] = 
-            neolib::make_ref<language_type_integer<std::int32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i32");
-        concepts()[neolib::string{ "language.type.u32" }] = 
-            neolib::make_ref<language_type_integer<std::uint32_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u32");
-        concepts()[neolib::string{ "language.type.i64" }] = 
-            neolib::make_ref<language_type_integer<std::int64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.i64");
-        concepts()[neolib::string{ "language.type.u64" }] = 
-            neolib::make_ref<language_type_integer<std::uint64_t>>(*concepts()[neolib::string{ "language.type" }], "language.type.u64");
+        concepts()[neolib::string{ language_type<>::Name }] =
+            neolib::make_ref<language_type<>>();
+        concepts()[neolib::string{ language_type_tuple::Name }] =
+            neolib::make_ref<language_type_tuple>();
+        concepts()[neolib::string{ language_type_float<float>::Name }] =
+            neolib::make_ref<language_type_float<float>>();
+        concepts()[neolib::string{ language_type_float<double>::Name }] =
+            neolib::make_ref<language_type_float<double>>();
+        concepts()[neolib::string{ language_type_integer<std::int8_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::int8_t>>();
+        concepts()[neolib::string{ language_type_integer<std::uint8_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::uint8_t>>();
+        concepts()[neolib::string{ language_type_integer<int16_t>::Name }] =
+            neolib::make_ref<language_type_integer<int16_t>>();
+        concepts()[neolib::string{ language_type_integer<std::uint16_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::uint16_t>>();
+        concepts()[neolib::string{ language_type_integer<std::int32_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::int32_t>>();
+        concepts()[neolib::string{ language_type_integer<std::uint32_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::uint32_t>>();
+        concepts()[neolib::string{ language_type_integer<std::int64_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::int64_t>>();
+        concepts()[neolib::string{ language_type_integer<std::uint64_t>::Name }] =
+            neolib::make_ref<language_type_integer<std::uint64_t>>();
 // bignum
-//        concepts()[neolib::string{ "language.type.integer" }] = 
-//            neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.integer");
-//        concepts()[neolib::string{ "language.type.real" }] = 
-//            neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.real");
-//        concepts()[neolib::string{ "language.type.rational" }] = 
-//            neolib::make_ref<language_type_integer<neonumerical::xxx>>(*concepts()[neolib::string{ "language.type" }], "language.type.rational");
-        concepts()[neolib::string{ "language.type.string" }] = 
-            neolib::make_ref<language_type_string<char>>(*concepts()[neolib::string{ "language.type" }], "language.type.string");
-        concepts()[neolib::string{ "language.type.custom" }] = 
-            neolib::make_ref<language_type_custom>(*concepts()[neolib::string{ "language.type" }]);
-        concepts()[neolib::string{ "language.comment" }] = 
+//         concepts()[neolib::string{ language_type_integer<neonumerical::xxx>::Name }] = 
+//            neolib::make_ref<language_type_integer<neonumerical::xxx>>();
+//         concepts()[neolib::string{ language_type_integer<neonumerical::xxx>::Name }] = 
+//            neolib::make_ref<language_type_integer<neonumerical::xxx>>();
+//         concepts()[neolib::string{ language_type_integer<neonumerical::xxx>::Name }] = 
+//            neolib::make_ref<language_type_integer<neonumerical::xxx>>();
+        concepts()[neolib::string{ language_type_string<char>::Name }] =
+            neolib::make_ref<language_type_string<char>>();
+        concepts()[neolib::string{ language_type_custom::Name }] =
+            neolib::make_ref<language_type_custom>();
+        concepts()[neolib::string{ language_comment::Name }] =
             neolib::make_ref<language_comment>();
-        concepts()[neolib::string{ "language.whitespace" }] = 
+        concepts()[neolib::string{ language_whitespace::Name }] =
             neolib::make_ref<language_whitespace>();
     }
 

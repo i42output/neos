@@ -43,25 +43,13 @@ namespace neos::language
         ~semanteme()
         {
         }
-        bool has_parent() const final
-        {
-            return iConcept->has_parent();
-        }
-        i_semantic_concept const& parent() const final
-        {
-            return iConcept->parent();
-        }
-        const neolib::i_string& name() const final
+        const neolib::i_string_view& name() const final
         {
             return iConcept->name();
         }
-        bool is(neolib::i_string const& aName) const final
+        bool is(neolib::i_string_view const& aName) const final
         {
             return iConcept->is(aName);
-        }
-        bool similar(i_semantic_concept const& aRhs) const final
-        {
-            return iConcept->similar(aRhs);
         }
         // folding support
     public:
@@ -177,29 +165,36 @@ namespace neos::language
         mutable std::any iData;
     };
 
-    template <typename Concept>
+    namespace
+    {
+        template <typename First, typename... Rest>
+        struct primary_concept { using type = First; };
+    }
+
+    template <typename... ConceptHierarchy>
     class semantic_concept : public neolib::reference_counted<i_semantic_concept>
     {
         // types
     public:
         using base_type = neolib::reference_counted<i_semantic_concept>;
-        using concept_type = Concept;
+        using concept_type = typename primary_concept<ConceptHierarchy...>::type;
         // folding
     public:
+        static constexpr auto Name = "";
         static constexpr bool HasGhosts = false;
         static constexpr bool Unstructured = false;
         // construction
     public:
-        semantic_concept(std::string const& aName, emit_type aEmitAs = emit_type::Postfix) :
-            iParent{ nullptr }, iName { aName}, iEmitAs{ aEmitAs }
+        semantic_concept(emit_type aEmitAs = emit_type::Postfix) :
+            iName{ concept_type::Name }, iEmitAs { aEmitAs }
         {
         }
-        semantic_concept(i_semantic_concept& aParent, std::string const& aName, emit_type aEmitAs = emit_type::Postfix) :
-            iParent{ &aParent }, iName{ aName }, iEmitAs{ aEmitAs }
+        semantic_concept(neolib::string_view const& aName, emit_type aEmitAs = emit_type::Postfix) :
+            iName{ aName }, iEmitAs{ aEmitAs }
         {
         }
         semantic_concept(semantic_concept const& aOther) :
-            iParent{ aOther.iParent }, iName{ aOther.iName }, iEmitAs{ aOther.iEmitAs }
+            iName{ aOther.iName }, iEmitAs{ aOther.iEmitAs }
         {
         }
         // folding support
@@ -212,37 +207,15 @@ namespace neos::language
         }
         // family
     public:
-        bool has_parent() const final
-        {
-            return iParent != nullptr;
-        }
-        i_semantic_concept const& parent() const final
-        {
-            if (has_parent())
-                return *iParent;
-            throw no_parent();
-        }
-        const neolib::i_string& name() const final
+        const neolib::i_string_view& name() const final
         {
             return iName;
         }
-        virtual bool is(neolib::i_string const& aName) const final
+        virtual bool is(neolib::i_string_view const& aName) const final
         {
-            if (name() == aName)
-                return true;
-            if (has_parent())
-                return parent().is(aName);
-            return false;
-        }
-        bool similar(i_semantic_concept const& aRhs) const final
-        {
-            if (name() == aRhs.name())
-                return true;
-            if (aRhs.has_parent())
-                return similar(aRhs.parent());
-            if (has_parent())
-                return parent().similar(aRhs);
-            return false;
+            bool found = (aName == name());
+            ((found = found || ConceptHierarchy::Name == aName), ...);
+            return found;
         }
         // parse
     public:
@@ -279,11 +252,11 @@ namespace neos::language
         }
         bool has_ghosts() const final
         {
-            return Concept::HasGhosts;
+            return concept_type::HasGhosts;
         }
         bool unstructured() const final
         {
-            return Concept::Unstructured;
+            return concept_type::Unstructured;
         }
         bool can_fold() const override
         {
@@ -306,7 +279,7 @@ namespace neos::language
     protected:
         void do_instantiate(i_context& aContext, neolib::i_string_view const& aSource, neolib::i_ref_ptr<i_semantic_concept>& aResult) const final
         {
-            aResult = neolib::make_ref<semanteme<Concept>>(*this, aContext, aSource);
+            aResult = neolib::make_ref<semanteme<concept_type>>(*this, aContext, aSource);
         }
         // emit
     protected:
@@ -323,8 +296,7 @@ namespace neos::language
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override {}
         // attributes
     private:
-        i_semantic_concept const* iParent;
-        neolib::string iName;
+        neolib::string_view iName;
         emit_type iEmitAs;
         neolib::ref_ptr<i_semantic_concept> iInstance;
     };
@@ -334,9 +306,27 @@ namespace neos::language
     public:
         using semantic_concept::semantic_concept;
     };
+
+    namespace
+    {
+        template <typename... ConceptHierarchy>
+        struct semantic_concept_maker
+        {
+            using type = semantic_concept<ConceptHierarchy...>;
+        };
+        template <typename... ConceptHierarchy>
+        struct semantic_concept_maker<void, ConceptHierarchy...>
+        {
+            using type = semantic_concept<ConceptHierarchy...>;
+        };
+    }
+
+    template <typename... ConceptHierarchy>
+    using semantic_concept_t = typename semantic_concept_maker<ConceptHierarchy...>::type;
 }
 
 namespace neos::concepts
 {
     using neos::language::semantic_concept;
+    using neos::language::semantic_concept_t;
 }
