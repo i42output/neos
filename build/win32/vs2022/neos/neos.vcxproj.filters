@@ -91,29 +91,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\..\..\languages\Calculator.neos">
-      <Filter>Languages</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\neoscript.neos">
-      <Filter>Languages</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.stream.neo">
-      <Filter>Languages\Packages</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.string.neo">
-      <Filter>Languages\Packages</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\examples\neoscript\fibonacci.neo">
-      <Filter>Languages\Examples</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\examples\neoscript\proc.neo">
-      <Filter>Languages\Examples</Filter>
-    </None>
-    <None Include="..\..\..\..\..\languages\examples\neoscript\add.neo">
-      <Filter>Languages\Examples</Filter>
-    </None>
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="..\..\..\..\src\compiler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -132,5 +109,46 @@
     <ClCompile Include="..\..\..\..\src\bytecode\vm.cpp">
       <Filter>Source Files\bytecode</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\..\languages\Calculator.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\neoscript.neos">
+      <Filter>Languages</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\neoscript\neoscript.test.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\neoscript\fibonacci.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\neoscript\add.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\neoscript\proc.neo">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\Python\literal.py">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\Python\hello.py">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\Ada\ExitCode.adb">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\Ada\gem_7.ada">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\examples\Ada\HelloWorld.ada">
+      <Filter>Languages\Examples</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\packages\neoscript\neo.string.neo">
+      <Filter>Languages\Packages</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\packages\neoscript\neo.stream.neo">
+      <Filter>Languages\Packages</Filter>
+    </None>
   </ItemGroup>
 </Project>

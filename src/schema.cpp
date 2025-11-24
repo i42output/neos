@@ -144,6 +144,7 @@ namespace neos::language::schema_parser
         ( symbol::SpecialSequence >> ("?"_ , WS , repeat(symbol::Terminal) <=> "special"_concept , WS , "?"_) ),
 
         ( symbol::CharacterLiteral >> ("'"_ , (symbol::Character | symbol::EscapedCharacter) <=> "character"_concept , "'"_)),
+        ( symbol::CharacterLiteral >> ("U+"_ , +repeat(symbol::HexDigit) <=> "codepoint"_concept) ),
         ( symbol::StringLiteral >> ("\""_ , repeat(symbol::Character | symbol::EscapedCharacter) <=> "string"_concept , "\""_) ),
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
@@ -210,6 +211,8 @@ namespace neos::language
             value.emplace(parser::terminal{ neolib::unescape(aNode.value) });
         else if (aNode.c == "character")
             value.emplace(parser::terminal{ neolib::unescape(aNode.value) });
+        else if (aNode.c == "codepoint")
+            value.emplace(parser::terminal{ neolib::utf32_to_utf8(std::u32string{ static_cast<char32_t>(std::stoul(aNode.value.substr(2).data(), nullptr, 16))}) });
 
         if (value.has_value())
         {

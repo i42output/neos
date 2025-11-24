@@ -42,21 +42,27 @@
     <ClInclude Include="..\..\..\..\..\include\neos\neos.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\..\..\languages\Calculator.neos" />
-    <None Include="..\..\..\..\..\languages\examples\neoscript\add.neo" />
-    <None Include="..\..\..\..\..\languages\examples\neoscript\fibonacci.neo" />
-    <None Include="..\..\..\..\..\languages\examples\neoscript\proc.neo" />
-    <None Include="..\..\..\..\..\languages\neoscript.neos" />
-    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.stream.neo" />
-    <None Include="..\..\..\..\..\languages\packages\neoscript\neo.string.neo" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="..\..\..\..\src\api\context.cpp" />
     <ClCompile Include="..\..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\..\src\bytecode\vm.cpp" />
     <ClCompile Include="..\..\..\..\src\compiler.cpp" />
     <ClCompile Include="..\..\..\..\src\neos.cpp" />
     <ClCompile Include="..\..\..\..\src\schema.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\..\languages\Calculator.neos" />
+    <None Include="..\..\..\..\languages\examples\Ada\ExitCode.adb" />
+    <None Include="..\..\..\..\languages\examples\Ada\gem_7.ada" />
+    <None Include="..\..\..\..\languages\examples\Ada\HelloWorld.ada" />
+    <None Include="..\..\..\..\languages\examples\neoscript\add.neo" />
+    <None Include="..\..\..\..\languages\examples\neoscript\fibonacci.neo" />
+    <None Include="..\..\..\..\languages\examples\neoscript\neoscript.test.neo" />
+    <None Include="..\..\..\..\languages\examples\neoscript\proc.neo" />
+    <None Include="..\..\..\..\languages\examples\Python\hello.py" />
+    <None Include="..\..\..\..\languages\examples\Python\literal.py" />
+    <None Include="..\..\..\..\languages\neoscript.neos" />
+    <None Include="..\..\..\..\languages\packages\neoscript\neo.stream.neo" />
+    <None Include="..\..\..\..\languages\packages\neoscript\neo.string.neo" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -69,26 +75,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -161,7 +167,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>C:\code\neos\include;C:\usr\local\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>E:\code\neos\include;E:\usr\local\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -181,7 +187,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>C:\code\neos\include;C:\usr\local\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>E:\code\neos\include;E:\usr\local\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
