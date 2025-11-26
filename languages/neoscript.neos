@@ -48,9 +48,9 @@
         ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character, '\'' ) ;
     string literal ::= 
         { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) } $ string.utf8 , '\"' , [ whitespace ] } + ;
-    escaped character $ string.utf8.character.LF ::= U+000A ;
-    escaped character $ string.utf8.character.CR ::= U+000D ;
-    escaped character $ string.utf8.character.tab ::= U+0009 ;
+    escaped character $ string.utf8.character.LF ::= "\\n" ;
+    escaped character $ string.utf8.character.CR ::= "\\r" ;
+    escaped character $ string.utf8.character.tab ::= "\\t" ;
     escaped character $ string.utf8.character.singlequote ::= "\\\'" ;
     escaped character $ string.utf8.character.doublequote ::= "\\\"" ;
     escaped character $ string.utf8.character.backslash ::= "\\\\" ;
@@ -149,8 +149,8 @@
     multiply ::= "*" ;
     divide ::= "/" ;
 
-    comment $ language.comment ::= "//" , { ! '\n' .. '\n' } , ( '\n' | ? eof ? ) ;
-    whitespace $ language.whitespace ::= { ' ' | '\n' | '\r' | '\t' | comment | ? eof ? } + ;
+    comment $ language.comment ::= "//" , { ! U+000A .. U+000A } , ( U+000A | ? eof ? ) ;
+    whitespace $ language.whitespace ::= { U+0020 | U+000A | U+000D | U+0009 | comment | ? eof ? } + ;
 }#
 
 ${
