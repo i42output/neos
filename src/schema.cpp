@@ -212,7 +212,7 @@ namespace neos::language
         else if (aNode.c == "character")
             value.emplace(parser::terminal{ neolib::unescape(aNode.value) });
         else if (aNode.c == "codepoint")
-            value.emplace(parser::terminal{ neolib::utf32_to_utf8(std::u32string{ static_cast<char32_t>(std::stoul(aNode.value.substr(2).data(), nullptr, 16))}) });
+            value.emplace(parser::terminal{ neolib::utf32_to_utf8(std::u32string{ static_cast<char32_t>(std::stoul(aNode.value.data(), nullptr, 16))}) });
 
         if (value.has_value())
         {
