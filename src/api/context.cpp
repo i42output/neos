@@ -105,7 +105,7 @@ namespace neos
 
     void context::load_program(std::string const& aPath)
     {
-        std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? *iProgram.translationUnits.front().fragments.front().source_file_path() : aPath);
+        std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? iProgram.translationUnits.front().fragments.front().source_file_path()->to_std_string() : aPath);
         iProgram = decltype(iProgram){};
         auto& unit = load_unit(language::source_fragment{ neolib::string{ path } });
     }
@@ -200,9 +200,9 @@ namespace neos
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
-        std::ifstream fragmentStream{ *aFragment.source_file_path(), std::ios::binary };
+        std::ifstream fragmentStream{ aFragment.source_file_path()->to_std_string(), std::ios::binary};
         if (!fragmentStream)
-            throw compiler_error("failed to open source file '" + *aFragment.source_file_path() + "'");
+            throw compiler_error("failed to open source file '" + aFragment.source_file_path()->to_std_string() + "'");
 
         return load_unit(std::move(aFragment), fragmentStream);
     }
@@ -225,19 +225,20 @@ namespace neos
         if (aFragment.source_file_path() == std::nullopt)
             throw invalid_fragment();
 
+        auto const sourceFilePath = aFragment.source_file_path().value().to_std_string();
         std::optional<std::ifstream> fragmentStream;
-        fragmentStream.emplace(aFragment.source_file_path().value(), std::ios::binary);
+        fragmentStream.emplace(sourceFilePath, std::ios::binary);
         if (!*fragmentStream)
             for (auto const& ext : schema().meta().sourcecodeFileExtension)
             {
-                std::string tryPath = "packages/" + schema().meta().language + "/" + aFragment.source_file_path().value() + ext;
+                std::string tryPath = "packages/" + schema().meta().language + "/" + sourceFilePath + ext;
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {
                     aFragment.source_file_path().value() = tryPath;
                     break;
                 }
-                tryPath = compiler().current_fragment().source_directory_path().value() + "/" + aFragment.source_file_path().value() + ext;
+                tryPath = compiler().current_fragment().source_directory_path().value() + "/" + sourceFilePath + ext;
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {
@@ -246,7 +247,7 @@ namespace neos
                 }
             }
         if (!*fragmentStream)
-            throw compiler_error("failed to open source file '" + *aFragment.source_file_path() + "'");
+            throw compiler_error("failed to open source file '" + sourceFilePath + "'");
 
         load_fragment(aFragment, *fragmentStream);
     }

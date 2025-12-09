@@ -537,7 +537,8 @@ namespace neos::language
             ++lineNumber;
         }
         oss << std::string(col + numberWidth, '-') << "^" << std::endl;
-        std::string info = (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? aFragment.source_file_path()->to_std_string() : "") + "(" + boost::lexical_cast<std::string>(line) + "," + boost::lexical_cast<std::string>(col) + ")";
+        std::string info = (aShowFragmentFilePath && aFragment.source_file_path() != std::nullopt ? aFragment.source_file_path()->to_std_string() : "") + 
+            "(" + boost::lexical_cast<std::string>(line) + "," + boost::lexical_cast<std::string>(col) + ")";
         oss << info;
         return oss.str();
     }
