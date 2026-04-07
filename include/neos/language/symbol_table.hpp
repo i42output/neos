@@ -66,6 +66,6 @@ namespace neos
         };
 
         using symbol_table = neolib::unordered_map<i_scope*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;
-        using i_symbol_table = neolib::abstract_t<symbol_table>;
+        using i_symbol_table = neolib::maybe_abstract_t<symbol_table>;
     }
 }

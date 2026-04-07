@@ -180,9 +180,9 @@ namespace neos
         };
 
         template<typename T, typename D = default_type_descriptor>
-        struct data : i_data<typename neolib::abstract_t<T>, neolib::abstract_t<D>>
+        struct data : i_data<typename neolib::maybe_abstract_t<T>, neolib::maybe_abstract_t<D>>
         {
-            using abstract_type = i_data<typename neolib::abstract_t<T>, neolib::abstract_t<D>>;
+            using abstract_type = i_data<typename neolib::maybe_abstract_t<T>, neolib::maybe_abstract_t<D>>;
             using type = T;
             using type_descriptor = D;
 
@@ -478,9 +478,9 @@ namespace neos
             i_data<i64>,
             i_data<f32>,
             i_data<f64>,
-            i_data<neolib::abstract_t<ibig>>,
-            i_data<neolib::abstract_t<fbig>>,
-            i_data<neolib::abstract_t<string>>,
+            i_data<neolib::maybe_abstract_t<ibig>>,
+            i_data<neolib::maybe_abstract_t<fbig>>,
+            i_data<neolib::maybe_abstract_t<string>>,
             i_data<reference, i_reference_descriptor>,
             i_data<pointer, i_pointer_descriptor>,
             i_data<neolib::i_ref_ptr<i_array_type>, i_array_descriptor>,
@@ -716,11 +716,11 @@ namespace neos
         template <> inline constexpr type type_to_enum_v<float> = type::F32;
         template <> inline constexpr type type_to_enum_v<double> = type::F64;
         template <> inline constexpr type type_to_enum_v<ibig> = type::Ibig;
-        //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<ibig>> = type::Ibig;
+        //template <> inline constexpr type type_to_enum_v<neolib::maybe_abstract_t<ibig>> = type::Ibig;
         template <> inline constexpr type type_to_enum_v<fbig> = type::Fbig;
-        //template <> inline constexpr type type_to_enum_v<neolib::abstract_t<fbig>> = type::Fbig;
+        //template <> inline constexpr type type_to_enum_v<neolib::maybe_abstract_t<fbig>> = type::Fbig;
         template <> inline constexpr type type_to_enum_v<string> = type::String;
-        template <> inline constexpr type type_to_enum_v<neolib::abstract_t<string>> = type::String;
+        template <> inline constexpr type type_to_enum_v<neolib::maybe_abstract_t<string>> = type::String;
         template <> inline constexpr type type_to_enum_v<reference> = type::Reference;
         template <> inline constexpr type type_to_enum_v<pointer> = type::Pointer;
         template <> inline constexpr type type_to_enum_v<array_type> = type::Array;

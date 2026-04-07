@@ -30,7 +30,7 @@ namespace neos
     namespace language
     {
         using ast_node_value = neolib::variant<neolib::ref_ptr<i_semantic_concept>, symbol_table_entry*>;
-        using i_ast_node_value = neolib::abstract_t<ast_node_value>;
+        using i_ast_node_value = neolib::maybe_abstract_t<ast_node_value>;
 
         class i_ast_node : public neolib::i_reference_counted
         {
