@@ -110,13 +110,14 @@ namespace neos::language::schema_parser
 {
     enable_neolib_parser(symbol)
 
+    auto const SC_Rule = repeat(symbol::SemanticConcept);
     auto const SC = repeat((symbol::SemanticConcept | symbol::SemanticConceptRef));
     auto const WS = symbol::Whitespace;
         
     neolib::parser_rule<symbol> parserRules[] =
     {
         ( symbol::Grammar >> +repeat((WS , symbol::Rule <=> "rule"_concept , WS)) ),
-        ( symbol::Rule >> WS , symbol::RuleName , SC , WS , "::=" , WS , 
+        ( symbol::Rule >> WS , symbol::RuleName , SC_Rule , WS , "::=" , WS ,
             symbol::RuleExpression <=> "rule_expression"_concept , SC , WS , optional(("::="_ , WS , symbol::RuleExpression <=> "rule_constraint"_concept , SC)) , WS , ";" ),
         ( symbol::RuleName >> ((symbol::Identifier , repeat((" "_ , symbol::Identifier))) <=> "rule_name"_concept) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
@@ -144,7 +145,7 @@ namespace neos::language::schema_parser
         ( symbol::Not >> "!"_ ) ,
 
         ( symbol::SemanticConceptTag >> "$"_ ),
-        ( symbol::SemanticConceptTagRef >> "$="_),
+        ( symbol::SemanticConceptTagRef >> "$:"_),
         ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
 
         ( symbol::SpecialSequence >> ("?"_ , WS , repeat(symbol::Terminal) <=> "special"_concept , WS , "?"_) ),
