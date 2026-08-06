@@ -37,8 +37,10 @@ namespace neos::language::schema_parser
         Argument2,
         Identifier,
         SemanticConceptTag,
+        SemanticConceptTagRef,
         SemanticConceptName,
         SemanticConcept,
+        SemanticConceptRef,
         Concatenation,
         Alternation,
         Range,
@@ -75,8 +77,10 @@ declare_symbol(neos::language::schema_parser::symbol, Argument)
 declare_symbol(neos::language::schema_parser::symbol, Argument2)
 declare_symbol(neos::language::schema_parser::symbol, Identifier)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptTag)
+declare_symbol(neos::language::schema_parser::symbol, SemanticConceptTagRef)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConceptName)
 declare_symbol(neos::language::schema_parser::symbol, SemanticConcept)
+declare_symbol(neos::language::schema_parser::symbol, SemanticConceptRef)
 declare_symbol(neos::language::schema_parser::symbol, Optional)
 declare_symbol(neos::language::schema_parser::symbol, Concatenation)
 declare_symbol(neos::language::schema_parser::symbol, Alternation)
@@ -106,7 +110,7 @@ namespace neos::language::schema_parser
 {
     enable_neolib_parser(symbol)
 
-    auto const SC = repeat(symbol::SemanticConcept);
+    auto const SC = repeat((symbol::SemanticConcept | symbol::SemanticConceptRef));
     auto const WS = symbol::Whitespace;
         
     neolib::parser_rule<symbol> parserRules[] =
@@ -117,7 +121,8 @@ namespace neos::language::schema_parser
         ( symbol::RuleName >> ((symbol::Identifier , repeat((" "_ , symbol::Identifier))) <=> "rule_name"_concept) ),
         ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
         ( symbol::SemanticConcept >> (WS , symbol::SemanticConceptTag , WS , symbol::SemanticConceptName <=> "semantic_concept"_concept , WS) ),
-        ( symbol::RuleExpression >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
+        ( symbol::SemanticConceptRef >> (WS , symbol::SemanticConceptTagRef , WS , symbol::SemanticConceptName <=> "semantic_concept_ref"_concept , WS)),
+        ( symbol::RuleExpression >> (symbol::Grouping | symbol::Repetition | symbol::Optional |
             symbol::Concatenation | symbol::Alternation | symbol::Argument) , SC ),
         ( symbol::RuleExpression2 >> (symbol::Grouping | symbol::Repetition | symbol::Optional | 
             symbol::Concatenation | symbol::Alternation) , SC ),
@@ -139,6 +144,7 @@ namespace neos::language::schema_parser
         ( symbol::Not >> "!"_ ) ,
 
         ( symbol::SemanticConceptTag >> "$"_ ),
+        ( symbol::SemanticConceptTagRef >> "$="_),
         ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
 
         ( symbol::SpecialSequence >> ("?"_ , WS , repeat(symbol::Terminal) <=> "special"_concept , WS , "?"_) ),
