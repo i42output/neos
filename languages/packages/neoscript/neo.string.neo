@@ -2,17 +2,7 @@
 
 namespace neo
 {
-    fn length(s : string) -> i32
-    {
-        // todo
-    }
-    fn to_integer(s : string) -> i32
-    {
-        // todo
-    }
-    fn to_string(n : i32) -> string
-    {
-        // todo
-    }
+    import fn length(s : string) -> i32;
+    import fn to_integer(s : string) -> i32;
+    import fn to_string(n : i32) -> string;
 }
-

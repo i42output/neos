@@ -25,6 +25,8 @@
 #include <optional>
 #include <thread>
 #include <string>
+#include <iostream>
+#include <chrono>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/exceptions.hpp>
 #include <neos/bytecode/opcodes.hpp>
@@ -39,28 +41,35 @@ namespace neos
             class thread : public std::thread
             {
             public:
-                thread(text const& aText) :
-                    std::thread{ [&](){ execute(aText); } }
+                thread(text const& aText, std::ostream& aOutput, std::istream& aInput) :
+                    iText{ aText },
+                    iOutput{ aOutput },
+                    iInput{ aInput }
                 {
+                    // start executing only once all members have been constructed
+                    static_cast<std::thread&>(*this) = std::thread{ [this]() { execute(); } };
                 }
             public:
-                void execute(text const& aText)
-                {
-                    /// todo
-                }
+                void execute();
             public:
                 language::data_type const& result() const
                 {
                     return iResult;
                 }
-            public:
-                std::string metrics() const
+                std::optional<std::string> const& error() const
                 {
-                    /// todo
-                    return {}; 
+                    return iError;
                 }
+            public:
+                std::string metrics() const;
             private:
+                text const iText;
+                std::ostream& iOutput;
+                std::istream& iInput;
                 language::data_type iResult;
+                std::optional<std::string> iError;
+                std::uint64_t iInstructions = 0u;
+                std::chrono::steady_clock::duration iExecutionTime = {};
             };
         }
     }

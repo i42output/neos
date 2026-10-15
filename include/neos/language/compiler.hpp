@@ -20,6 +20,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <neos/neos.hpp>
 #include <neolib/core/optional.hpp>
 #include <neolib/core/string.hpp>
@@ -190,6 +191,29 @@ namespace neos::language
             std::vector<neolib::ref_ptr<i_scope>> scopeStack;
             std::vector<operand_type> operandStack;
             std::vector<operator_type> operatorStack;
+            std::optional<std::uint32_t> pendingFunction;
+            std::optional<std::uint32_t> function;
+            bool pendingEntry = false;
+        };
+        struct wasm_function
+        {
+            std::string name;
+            bool imported = false;
+            bool fromImportedFragment = false;
+            bool entry = false;
+            bool compiled = false;
+            i_function_scope const* scope = nullptr;
+            function_signature signature;
+            std::vector<type> locals;
+            std::vector<std::uint8_t> body;
+            std::vector<std::pair<std::uint32_t, std::uint32_t>> relocations;
+            std::size_t operandBase = 0u;
+        };
+        struct wasm_module
+        {
+            std::vector<wasm_function> functions;
+            std::vector<std::uint8_t> data;
+            std::map<std::string, std::uint32_t> strings;
         };
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -209,7 +233,22 @@ namespace neos::language
         void pop_operand(i_data_type& aOperand) final;
         void push_operator(i_operator_type const& aOperator) final;
         void pop_operator(i_operator_type& aOperator) final;
+        void define_symbol(i_symbol_name const& aName, symbol_type aType) final;
         void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const final;
+    public:
+        void declare_import(i_function_signature const& aSignature) final;
+        void set_entry_point() final;
+        void emit_operation(operation aOperation) final;
+        void emit_statement(neolib::i_string_view const& aSource) final;
+        void emit_block(neolib::i_string_view const& aSource) final;
+        void emit_return(neolib::i_string_view const& aSource) final;
+        void emit_assignment(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) final;
+        void emit_argument(neolib::i_string_view const& aSource) final;
+        void emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) final;
+        void emit_if(neolib::i_string_view const& aSource) final;
+        void emit_else_if(neolib::i_string_view const& aSource) final;
+        void emit_else(neolib::i_string_view const& aSource) final;
+        void emit_loop(loop_type aLoopType, neolib::i_string_view const& aSource) final;
     public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;
@@ -221,6 +260,16 @@ namespace neos::language
         const compilation_state& state() const;
         compilation_state& state();
         fold_stack& fold_stack();
+        i_symbol_table_entry* find_symbol(i_scope const& aScope, neolib::i_string_view const& aName) const;
+        wasm_function& current_function();
+        std::uint32_t add_function(std::string const& aName, bool aImported);
+        std::uint32_t runtime_function(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
+        void finish_function();
+        fragment materialize(operand_type const& aOperand, std::optional<type> aTargetType = {});
+        fragment pop_value();
+        std::vector<fragment> pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
+        std::uint32_t string_literal(std::string const& aValue);
+        void emit_module(program& aProgram);
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
@@ -231,5 +280,6 @@ namespace neos::language
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
         compilation_state_stack_t iCompilationStateStack;
+        wasm_module iModule;
     };
 }

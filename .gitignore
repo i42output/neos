@@ -53,3 +53,8 @@
 /build/win32/vs/.vs
 /build/win32/vs/neos/.vs
 /build/win32/vs/neos/x64
+/concepts/build/win32/vs/core/x64/Debug
+/build/win32/vs/neos/*.user
+/console/build/win32/vs/x64/Debug
+/concepts/build/win32/vs/core/*.user
+/console/build/win32/vs/*.user

@@ -58,6 +58,9 @@ namespace neos
 
     context::~context()
     {
+        for (auto& t : iThreads)
+            if (t->joinable())
+                t->join();
     }
 
     std::ostream& context::cout()
@@ -152,7 +155,14 @@ namespace neos
     {
         if (text().empty())
             throw no_text();
-        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
+        for (auto t = iThreads.begin(); t != iThreads.end();)
+        {
+            if ((**t).joinable())
+                (**t).join();
+            t = iThreads.erase(t);
+        }
+        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), std::cin));
+        iThreads.back()->join(); // run to completion: the program reads std::cin, so the console must not read it concurrently
     }
 
     language::data_type context::evaluate(const std::string& aExpression)
@@ -162,7 +172,8 @@ namespace neos
         load_program(stream);
         compile_program();
         run();
-        iThreads.back()->join();
+        if (iThreads.back()->error())
+            throw error(*iThreads.back()->error());
         auto const result = iThreads.back()->result();
         iThreads.pop_back();
         return result;

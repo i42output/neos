@@ -27,6 +27,8 @@
 #include <neos/language/operator.hpp>
 #include <neos/language/scope.hpp>
 #include <neos/language/symbol.hpp>
+#include <neos/language/symbol_table.hpp>
+#include <neos/language/function.hpp>
 
 using namespace neolib::string_literals;
 
@@ -90,13 +92,96 @@ namespace neos::language
         compiler_error(std::string const& aError) : std::runtime_error{ aError } {}
     };
 
+    enum class operation : std::uint32_t
+    {
+        Add,
+        Subtract,
+        Multiply,
+        Divide,
+        Negate,
+        Equal,
+        NotEqual,
+        LessThan,
+        GreaterThan,
+        LessThanOrEqual,
+        GreaterThanOrEqual,
+        LogicalAnd,
+        LogicalOr,
+        LogicalNot
+    };
+
+    enum class loop_type : std::uint32_t
+    {
+        While,
+        DoWhile,
+        For
+    };
+
+    enum class fragment_kind : std::uint32_t
+    {
+        Value,
+        Statement,
+        Argument,
+        ElseIf,
+        Else
+    };
+
+    // A fragment of emitted WASM code; produced by the compiler's emit_xxx operations
+    struct i_fragment
+    {
+        using abstract_type = i_fragment;
+
+        virtual ~i_fragment() = default;
+
+        virtual fragment_kind kind() const = 0;
+        virtual type value_type() const = 0;
+        virtual neolib::i_vector<std::uint8_t> const& code() const = 0;
+        virtual neolib::i_vector<neolib::i_pair<std::uint32_t, std::uint32_t>> const& relocations() const = 0;
+        virtual neolib::i_string_view const& source() const = 0;
+        virtual i_symbol_table_entry* lvalue() const = 0;
+    };
+
+    struct fragment : i_fragment
+    {
+        fragment_kind fragmentKind = fragment_kind::Value;
+        type valueType = type::Void;
+        neolib::vector<std::uint8_t> fragmentCode;
+        neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> fragmentRelocations; ///< (code offset, function id)
+        neolib::string_view fragmentSource;
+        i_symbol_table_entry* fragmentLvalue = nullptr;
+
+        fragment() = default;
+        fragment(i_fragment const& aOther) :
+            fragmentKind{ aOther.kind() },
+            valueType{ aOther.value_type() },
+            fragmentCode{ aOther.code() },
+            fragmentRelocations{ aOther.relocations() },
+            fragmentSource{ aOther.source() },
+            fragmentLvalue{ aOther.lvalue() } {}
+
+        fragment_kind kind() const final { return fragmentKind; }
+        type value_type() const final { return valueType; }
+        neolib::vector<std::uint8_t> const& code() const final { return fragmentCode; }
+        neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> const& relocations() const final { return fragmentRelocations; }
+        neolib::string_view const& source() const final { return fragmentSource; }
+        i_symbol_table_entry* lvalue() const final { return fragmentLvalue; }
+    };
+
+    inline std::ostream& operator<<(std::ostream& stream, i_fragment const& operand)
+    {
+        stream << "{fragment:" << static_cast<std::uint32_t>(operand.kind()) << ":" << type_name(operand.value_type()) << ":" << operand.code().size() << " bytes}";
+        return stream;
+    }
+
     using i_operand_type = neolib::i_variant<
         i_data_type,
-        i_symbol_reference>;
+        i_symbol_reference,
+        i_fragment>;
 
     using operand_type = neolib::variant<
         data_type,
-        symbol_reference>;
+        symbol_reference,
+        fragment>;
 
     inline std::ostream& operator<<(std::ostream& stream, i_operand_type const& operand)
     {
@@ -123,7 +208,23 @@ namespace neos::language
         virtual void pop_operand(i_data_type& aOperand) = 0;
         virtual void push_operator(i_operator_type const& aOperator) = 0;
         virtual void pop_operator(i_operator_type& aOperator) = 0;
+        virtual void define_symbol(i_symbol_name const& aName, symbol_type aType) = 0;
         virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const = 0;
+        // code generation (WASM)
+    public:
+        virtual void declare_import(i_function_signature const& aSignature) = 0;
+        virtual void set_entry_point() = 0;
+        virtual void emit_operation(operation aOperation) = 0;
+        virtual void emit_statement(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_block(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_return(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_assignment(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) = 0;
+        virtual void emit_argument(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource) = 0;
+        virtual void emit_if(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_else_if(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_else(neolib::i_string_view const& aSource) = 0;
+        virtual void emit_loop(loop_type aLoopType, neolib::i_string_view const& aSource) = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;
@@ -143,6 +244,8 @@ namespace neos::language
             if constexpr (std::is_base_of_v<i_data_type, OperandT>)
                 push_operand(operand_type{ aOperand });
             else if constexpr (std::is_base_of_v<i_symbol_reference, OperandT>)
+                push_operand(operand_type{ aOperand });
+            else if constexpr (std::is_base_of_v<i_fragment, OperandT>)
                 push_operand(operand_type{ aOperand });
             else
                 push_operand(operand_type{ data_type{ aOperand } });

@@ -549,12 +549,21 @@ namespace neos
             using abstract_type = i_struct_type;
         };
 
+        enum class parameter_direction : std::uint32_t
+        {
+            In,
+            Out,
+            InOut
+        };
+
         struct i_function_parameter
         {
             virtual neolib::i_string const& parameter_name() const = 0;
             virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
             virtual type parameter_type() const = 0;
             virtual void set_parameter_type(type aParameterType) = 0;
+            virtual parameter_direction direction() const = 0;
+            virtual void set_direction(parameter_direction aDirection) = 0;
         };
 
         using i_function_parameters = neolib::i_vector<i_function_parameter>;
@@ -639,6 +648,7 @@ namespace neos
 
             neolib::string parameterName;
             type parameterType = type::UNKNOWN;
+            parameter_direction parameterDirection = parameter_direction::In;
 
             neolib::i_string const& parameter_name() const final
             {
@@ -656,10 +666,18 @@ namespace neos
             {
                 parameterType = aParameterType;
             }
+            parameter_direction direction() const final
+            {
+                return parameterDirection;
+            }
+            void set_direction(parameter_direction aDirection) final
+            {
+                parameterDirection = aDirection;
+            }
 
             function_parameter() = default;
             function_parameter(i_function_parameter const& other) :
-                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
+                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }, parameterDirection{ other.direction() }
             {}
         };
 

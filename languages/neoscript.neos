@@ -40,6 +40,12 @@
         math.operator.subtract
         math.operator.multiply
         math.operator.divide
+        boolean.operator.relational.equal
+        boolean.operator.relational.notequal
+        boolean.operator.relational.lessthan
+        boolean.operator.relational.greaterthan
+        boolean.operator.relational.lessthanorequal
+        boolean.operator.relational.greaterthanorequal
     ]
 }%
 
@@ -106,6 +112,8 @@
     u64 $ language.type.u64 ::= potential keyword ::= "u64" ;
     float $ language.type.float ::= potential keyword ::= "float" ;
     double $ language.type.double ::= potential keyword ::= "double" ;
+    f32 $ language.type.float ::= potential keyword ::= "f32" ;
+    f64 $ language.type.double ::= potential keyword ::= "f64" ;
     character $ language.type.character ::= potential keyword ::= "char" ;
     string $ language.type.string ::= potential keyword ::= "string" ;
 
@@ -164,8 +172,8 @@ ${
     namespace def $ language.namespace ::= 
         namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope $ language.namespace.scope.open , WS , namespace scope , WS , close scope $ language.namespace.scope.close ;
 
-    function $ language.function ::= ( fn , WS , fn sig , WS , fn body ) ;
-    procedure $ language.function ::= ( proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
+    function $ language.function ::= ( [ def $ language.function.entry , WS ] , fn , WS , fn sig , WS , fn body ) ;
+    procedure $ language.function ::= ( [ def $ language.function.entry , WS ] , proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
     fn sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression , WS , arrow , WS , type $ language.function.return.type ) ;
     proc sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , proc parameters , WS , close expression ) ;
     fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
@@ -173,12 +181,13 @@ ${
     fn parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , type ] ;
     proc parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , ( in | out | inout ) , WS , type ] ;
     parameter $ language.function.parameter ::= identifier ;
-    proc locals ::= ( proc local block , { WS , semicolon , WS , proc local block } ) ;
+    proc locals $ language.function.locals ::= ( proc local block , { WS , semicolon , WS , proc local block } ) ;
     proc local block ::= [ local , { WS , comma , WS , local } , WS , colon , WS , type ] ;
     local $ language.function.local ::= identifier ;
     fn body $ language.function.body ::= scope ;
     proc body $ language.function.body ::= scope ;
     scope $ language.function.scope ::= ( open scope $ language.scope.open , { WS , statement } , WS , close scope  $ language.scope.close ) ; 
+    block $ language.scope ::= ( open scope , { WS , statement } , WS , close scope ) ;
 
     statement $ language.statement ::= 
         ( initialize , WS , semicolon ) | ( assignment , WS , semicolon ) | ( expression , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
@@ -195,66 +204,72 @@ ${
     function call $ language.function.call ::= 
         ( identifier | qualified identifier ) $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
 
-    arguments ::= [ expression , { WS , comma , WS , expression } ] ;
+    arguments ::= [ argument , { WS , comma , WS , argument } ] ;
+    argument $ language.function.argument ::= expression ;
 
     boolean expression $ boolean.expression ::= 
-          boolean term , { WS , or , WS , boolean term } $ boolean.logic.operator.or ;
+          boolean term , { WS , ( or , WS , boolean term ) $ boolean.operator.logical.or } ;
     boolean term ::= 
-          boolean factor , { WS , and , WS , boolean factor } $ boolean.logic.operator.and ;
+          boolean factor , { WS , ( and , WS , boolean factor ) $ boolean.operator.logical.and } ;
     boolean factor ::= 
           true 
         | false 
-        | ( not , WS , boolean factor ) $ boolean.logic.operator.not
+        | ( not , WS , boolean factor ) $ boolean.operator.logical.not
         | ( open expression , WS , boolean expression , WS , close expression )
-        | comparison expression ;
+        | comparison expression
+        | numeric expression ;
     comparison expression ::= 
-          numeric expression , WS , comparison operator , WS , numeric expression ;
-    comparison operator ::= 
-          equal $ boolean.operator.relational.equal
-        | notequal $ boolean.operator.relational.notequal
-        | lessthan $ boolean.operator.relational.lessthan
-        | greaterthan $ boolean.operator.relational.greaterthan
-        | lessthanorequal $ boolean.operator.relational.lessthanorequal
-        | greaterthanorequal $ boolean.operator.relational.greaterthanorequal ;
+          numeric expression , WS , 
+          ( lessthanorequal $ boolean.operator.relational.lessthanorequal
+          | greaterthanorequal $ boolean.operator.relational.greaterthanorequal
+          | equal $ boolean.operator.relational.equal
+          | notequal $ boolean.operator.relational.notequal
+          | lessthan $ boolean.operator.relational.lessthan
+          | greaterthan $ boolean.operator.relational.greaterthan ) , 
+          WS , numeric expression ;
 
     numeric expression $ math.expression ::= 
         term , { WS , ( plus $ math.operator.add | minus $ math.operator.subtract ) , WS , term } ;
     term ::= 
         factor , { WS , ( multiply $ math.operator.multiply | divide $ math.operator.divide ) , WS , factor } ;
     factor ::= 
-        primary / ( minus $ math.operator.negate , WS , ( function call | numeric expression ) ) ;
+        primary / ( minus , WS , factor ) $ math.operator.negate ;
     primary ::= 
-        ( open expression , WS , expression , WS , close expression ) | math operand ;
-    math operand $ math.expression.operand ::= function call | number | identifier $: language.variable | character literal | string literal ;
+        ( open expression , WS , expression , WS , close expression ) | function call | math operand ;
+    math operand $ math.expression.operand ::= number | identifier $: language.variable | character literal | string literal ;
 
     return statement $ language.function.return ::= 
         ( return , WS , expression , WS , semicolon ) ;
 
     if statement $ language.statement.if ::= 
-        if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.if , { WS , else if statement } , [ WS , else statement ] ;
+        if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( block | statement ) ) $ logic.operator.if , { WS , else if statement } , [ WS , else statement ] ;
     else if statement $ language.statement.elseif ::= 
-        else if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( scope | statement ) ) $ logic.operator.elseif ;
+        else if , ( WS , open expression , WS , boolean expression , WS , close expression , WS , ( block | statement ) ) $ logic.operator.elseif ;
     else statement $ language.statement.else ::= 
-        else , WS , ( scope | statement ) $ logic.operator.else ;
+        else , WS , ( block | statement ) $ logic.operator.else ;
 
     for loop $ language.statement.loop ::= 
-        for clause , WS , scope ;
+        for clause , WS , block ;
     for clause ::=
-        for , WS , open expression , WS , [ local , WS , colon , WS , type , WS , assign , WS , expression ] $ language.assignment , WS ,
-        semicolon , WS , boolean expression , WS , semicolon , WS , ( expression | assignment ) , WS , close expression ;
+        for , WS , open expression , WS , [ for init ] , WS ,
+        semicolon , WS , boolean expression , WS , semicolon , WS , for step , WS , close expression ;
+    for step $ language.statement ::= 
+        assignment | expression ;
+    for init $ language.initialize ::= 
+        local , WS , colon , WS , type , WS , assign , WS , expression ;
 
     while loop $ language.statement.loop ::= 
-        while clause , WS , scope ;
+        while clause , WS , block ;
     while clause ::=
         while , WS , open expression , WS , boolean expression , WS , close expression ;
 
     do while loop $ language.statement.loop ::= 
-        do , WS , scope, WS , while clause ;
+        do , WS , block , WS , while clause ;
 
     number $ math.universal.integer ::= ( minus , positive integer ) | positive integer ;
     number $ math.universal.real ::= ( minus , positive real ) | positive real ;
 
-    type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | character | string | object ;
+    type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | f32 | f64 | character | string | object ;
 
     WS ::= [ whitespace ] ;
 }$
