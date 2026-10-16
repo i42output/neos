@@ -359,9 +359,10 @@ namespace neos::language
         }
         if (t == type::F64 && integer_range(aOperand))
         {
-            // (a 32-bit integer: never -0)
+            // (a 32-bit integer: never -0; decimal)
             fragment result = materialize(aOperand, type::I32);
-            emit_call_to(result, js_runtime("javascript::int32_to_string", { type::I32 }, type::String));
+            convert(result.fragmentCode.as_std_vector(), type::I32, type::I64);
+            emit_call_to(result, js_runtime("neos::string_from_i64", { type::I64 }, type::String));
             result.valueType = type::String;
             return operand_type{ result };
         }

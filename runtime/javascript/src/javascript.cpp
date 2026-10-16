@@ -28,7 +28,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <charconv>
 #include <chrono>
 #include <limits>
 #include <random>
@@ -88,13 +87,6 @@ namespace
     // --- numbers
 
     char const* to_string(double aValue) { return result(es::number_to_string(aValue)); }
-    // (a number that is a 32-bit integer)
-    char const* int32_to_string(std::int32_t aValue)
-    {
-        char buffer[16];
-        auto const converted = std::to_chars(buffer, buffer + sizeof(buffer), aValue);
-        return result(std::string{ buffer, converted.ptr });
-    }
     // (as console.log shows a number: -0 is "-0")
     char const* inspect(double aValue) { return result(aValue == 0.0 && std::signbit(aValue) ? std::string{ "-0" } : es::number_to_string(aValue)); }
     double to_number(char const* aText) { return es::string_to_number(aText); }
@@ -404,7 +396,6 @@ namespace
     neos_rt_function const sFunctions[] =
     {
         { "to_string", NEOS_RT_FUNCTION(to_string), STR, 1u, { F64 }, 0u },
-        { "int32_to_string", NEOS_RT_FUNCTION(int32_to_string), STR, 1u, { NEOS_RT_I32 }, 0u },
         { "inspect", NEOS_RT_FUNCTION(inspect), STR, 1u, { F64 }, 0u },
         { "to_number", NEOS_RT_FUNCTION(to_number), F64, 1u, { STR }, 0u },
         { "parse_int", NEOS_RT_FUNCTION(parse_int), F64, 2u, { STR, F64 }, 0u },

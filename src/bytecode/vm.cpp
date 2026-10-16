@@ -28,6 +28,17 @@
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/bytecode/vm/jit.hpp>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 namespace neos
 {
@@ -38,6 +49,85 @@ namespace neos
             namespace
             {
                 struct trap : std::runtime_error { using std::runtime_error::runtime_error; };
+
+                // WebAssembly linear memory: its address space (up to 4 GiB) is reserved once and pages are committed as it 
+                // grows, so it never moves and growing it neither copies it nor fills it (new pages are zero)
+                class linear_memory
+                {
+                public:
+                    linear_memory() = default;
+                    linear_memory(linear_memory const&) = delete;
+                    linear_memory& operator=(linear_memory const&) = delete;
+                    ~linear_memory()
+                    {
+                        if (iBase == nullptr)
+                            return;
+#if defined(_WIN32)
+                        ::VirtualFree(iBase, 0u, MEM_RELEASE);
+#else
+                        ::munmap(iBase, iReserved);
+#endif
+                    }
+                public:
+                    std::uint8_t* data() { return iBase; }
+                    std::uint8_t const* data() const { return iBase; }
+                    std::size_t size() const { return iSize; }
+                    bool empty() const { return iSize == 0u; }
+                    std::uint8_t& operator[](std::size_t aIndex) { return iBase[aIndex]; }
+                    std::uint8_t const& operator[](std::size_t aIndex) const { return iBase[aIndex]; }
+                    void resize(std::size_t aSize)
+                    {
+                        if (aSize > iCommitted)
+                        {
+                            reserve();
+                            if (aSize > iReserved)
+                                throw trap{ "out of memory" };
+                            std::size_t constexpr Granularity = 65536u;
+                            // (at least doubling, so growing in small steps makes few system calls)
+                            auto const commit = std::min(iReserved, std::max((aSize + Granularity - 1u) / Granularity * Granularity, iCommitted * 2u));
+#if defined(_WIN32)
+                            if (::VirtualAlloc(iBase + iCommitted, commit - iCommitted, MEM_COMMIT, PAGE_READWRITE) == nullptr)
+                                throw trap{ "out of memory" };
+#else
+                            if (::mprotect(iBase + iCommitted, commit - iCommitted, PROT_READ | PROT_WRITE) != 0)
+                                throw trap{ "out of memory" };
+#endif
+                            iCommitted = commit;
+                        }
+                        else if (aSize < iSize)
+                            std::memset(iBase + aSize, 0, iSize - aSize); // (as if shrunk and grown again)
+                        iSize = aSize;
+                    }
+                private:
+                    void reserve()
+                    {
+                        if (iBase != nullptr)
+                            return;
+                        // (the most a 32-bit address can reach; less if the address space is smaller or the reservation fails)
+                        std::size_t size = sizeof(void*) >= 8u ? (std::size_t{ 1u } << 32u) : (std::size_t{ 1u } << 29u);
+                        for (; size >= (std::size_t{ 1u } << 24u); size /= 2u)
+                        {
+#if defined(_WIN32)
+                            auto const base = ::VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+                            if (base != nullptr)
+#else
+                            auto const base = ::mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                            if (base != MAP_FAILED)
+#endif
+                            {
+                                iBase = static_cast<std::uint8_t*>(base);
+                                iReserved = size;
+                                return;
+                            }
+                        }
+                        throw trap{ "out of memory" };
+                    }
+                private:
+                    std::uint8_t* iBase = nullptr;
+                    std::size_t iReserved = 0u;
+                    std::size_t iCommitted = 0u;
+                    std::size_t iSize = 0u;
+                };
 
                 using value = std::uint64_t;
 
@@ -899,7 +989,7 @@ namespace neos
                         return std::string_view{ reinterpret_cast<char const*>(&iMemory[aAddress + StringHeaderSize]), length };
                     }
                     // memory for a string (its characters are then written)
-                    std::uint32_t new_string(std::uint64_t aBytes, std::uint32_t aUtf16Units)
+                    std::uint32_t new_string(std::uint64_t aBytes, std::uint32_t aUtf16Units, std::uint32_t aCodePoints)
                     {
                         // (a string's length in bytes fits in an i32)
                         if (aBytes > 0x7FFFFFFFu)
@@ -913,7 +1003,7 @@ namespace neos
                         *iHeap = static_cast<std::uint32_t>(end);
                         if (*iHeap > iMemory.size())
                             resize_memory((*iHeap / 65536u + 1u) * 65536u);
-                        string_header const header{ static_cast<std::uint32_t>(aBytes), aUtf16Units };
+                        string_header const header{ static_cast<std::uint32_t>(aBytes), aUtf16Units, aCodePoints };
                         std::memcpy(&iMemory[address], &header, sizeof(header));
                         iMemory[address + StringHeaderSize + header.bytes] = 0u;
                         return address;
@@ -925,9 +1015,28 @@ namespace neos
                         auto const rhs = header_of(aRhs);
                         view_string(aLhs);
                         view_string(aRhs);
-                        auto const address = new_string(static_cast<std::uint64_t>(lhs.bytes) + rhs.bytes, lhs.utf16Units + rhs.utf16Units);
+                        auto const address = new_string(static_cast<std::uint64_t>(lhs.bytes) + rhs.bytes, lhs.utf16Units + rhs.utf16Units,
+                            lhs.codePoints + rhs.codePoints);
                         std::memmove(&iMemory[address + StringHeaderSize], &iMemory[aLhs + StringHeaderSize], lhs.bytes);
                         std::memmove(&iMemory[address + StringHeaderSize + lhs.bytes], &iMemory[aRhs + StringHeaderSize], rhs.bytes);
+                        return address;
+                    }
+                    // a string (if any) followed by an integer in decimal (ASCII: one byte, one UTF-16 code unit and one code point 
+                    // a digit)
+                    std::uint32_t concatenate_integer(std::optional<std::uint32_t> aString, std::int64_t aInteger)
+                    {
+                        char digits[24];
+                        auto const length = static_cast<std::uint32_t>(std::to_chars(std::begin(digits), std::end(digits), aInteger).ptr - digits);
+                        string_header lhs{};
+                        if (aString)
+                        {
+                            lhs = header_of(*aString);
+                            view_string(*aString);
+                        }
+                        auto const address = new_string(static_cast<std::uint64_t>(lhs.bytes) + length, lhs.utf16Units + length, lhs.codePoints + length);
+                        if (aString)
+                            std::memmove(&iMemory[address + StringHeaderSize], &iMemory[*aString + StringHeaderSize], lhs.bytes);
+                        std::memcpy(&iMemory[address + StringHeaderSize + lhs.bytes], digits, length);
                         return address;
                     }
                     std::uint32_t allocate_string(std::string_view aValue)
@@ -936,7 +1045,8 @@ namespace neos
                         if (!iMemory.empty() && aValue.data() >= reinterpret_cast<char const*>(iMemory.data()) &&
                             aValue.data() < reinterpret_cast<char const*>(iMemory.data() + iMemory.size()))
                             return allocate_string(std::string{ aValue });
-                        auto const address = new_string(aValue.size(), utf16_units(aValue));
+                        auto const header = string_header_of(aValue);
+                        auto const address = new_string(aValue.size(), header.utf16Units, header.codePoints);
                         std::memcpy(&iMemory[address + StringHeaderSize], aValue.data(), aValue.size());
                         return address;
                     }
@@ -952,6 +1062,8 @@ namespace neos
                         StringConcat,
                         Fmod,
                         StringCompare,
+                        StringFromI64,
+                        StringConcatI64,
                         Runtime
                     };
                     import_kind resolve_import(std::uint32_t aFunction)
@@ -965,7 +1077,9 @@ namespace neos
                             { "neo::to_string", import_kind::ToString },
                             { "neos::string_concat", import_kind::StringConcat },
                             { "neos::fmod", import_kind::Fmod },
-                            { "neos::string_compare", import_kind::StringCompare }
+                            { "neos::string_compare", import_kind::StringCompare },
+                            { "neos::string_from_i64", import_kind::StringFromI64 },
+                            { "neos::string_concat_i64", import_kind::StringConcatI64 }
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
@@ -1045,6 +1159,12 @@ namespace neos
                                 aBuffer[0] = of_i32(c < 0 ? -1 : c > 0 ? 1 : 0);
                             }
                             break;
+                        case import_kind::StringFromI64:
+                            aBuffer[0] = of_u32(concatenate_integer(std::nullopt, as_i64(aBuffer[0])));
+                            break;
+                        case import_kind::StringConcatI64:
+                            aBuffer[0] = of_u32(concatenate_integer(as_u32(aBuffer[0]), as_i64(aBuffer[1])));
+                            break;
                         case import_kind::Runtime:
                             runtime::call(*iImportRuntime[aFunction], aBuffer, iMarshaller);
                             break;
@@ -1063,7 +1183,7 @@ namespace neos
                     std::vector<std::size_t> iElses;      ///< if token -> token after its else (0 if none)
                     std::vector<function_type> iTypes;
                     std::vector<function> iFunctions;
-                    std::vector<std::uint8_t> iMemory;
+                    linear_memory iMemory;
                     jit::memory iMemoryView;   ///< (for the JIT)
                     std::vector<value> iGlobals;
                     std::vector<std::uint8_t> iGlobalTypes;

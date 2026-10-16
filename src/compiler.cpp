@@ -30,6 +30,7 @@
 #include <cctype>
 #include <limits>
 #include <cmath>
+#include <cstddef>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
@@ -662,8 +663,10 @@ namespace neos::language
             iModule.data.push_back(0u);
         auto const address = DataBase + static_cast<std::uint32_t>(iModule.data.size());
         // (see bytecode::string_header)
-        put_raw(iModule.data, static_cast<std::uint32_t>(aValue.size()));
-        put_raw(iModule.data, bytecode::utf16_units(aValue));
+        auto const header = bytecode::string_header_of(aValue);
+        put_raw(iModule.data, header.bytes);
+        put_raw(iModule.data, header.utf16Units);
+        put_raw(iModule.data, header.codePoints);
         iModule.data.insert(iModule.data.end(), aValue.begin(), aValue.end());
         iModule.data.push_back(0u); // (strings are also NUL terminated, so runtime plugins can use them in place)
         iModule.strings[aValue] = address;
@@ -1054,10 +1057,14 @@ namespace neos::language
             if (lt != rt)
                 throw std::runtime_error("cannot combine " + type_name(lt) + " and " + type_name(rt));
             append(result, materialize(*lhs, type::String));
-            append(result, materialize(rhs, type::String));
+            auto right = materialize(rhs, type::String);
+            // (a string followed by an integer formatted in decimal: the integer is formatted into the result)
+            bool const integer = (aOperation == operation::Add && strip_call(right, "string_from_i64"));
+            append(result, right);
             if (aOperation == operation::Add)
             {
-                auto const id = runtime_function("neos::string_concat", { type::String, type::String }, type::String);
+                auto const id = integer ? runtime_function("neos::string_concat_i64", { type::String, type::I64 }, type::String) :
+                    runtime_function("neos::string_concat", { type::String, type::String }, type::String);
                 put_op(code, opcode::CallFunction);
                 result.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), id });
                 code.resize(code.size() + 5u);
@@ -1612,6 +1619,21 @@ namespace neos::language
             }
         }
         auto& code = call.fragmentCode.as_std_vector();
+        if (outputs.empty() && (*chosen & DeferredCall) == 0u && inline_call(call, iModule.functions[*chosen], arguments.size()))
+        {
+            push_operand(operand_type{ call });
+            return;
+        }
+        if ((*chosen & DeferredCall) == 0u && iModule.functions[*chosen].intrinsic)
+        {
+            // (a string intrinsic: its header's field)
+            put_op(code, opcode::I32LoadMem);
+            put_u32(code, 2u);
+            put_u32(code, *iModule.functions[*chosen].intrinsic);
+            convert(code, type::I32, returnType);
+            push_operand(operand_type{ call });
+            return;
+        }
         put_op(code, opcode::CallFunction);
         call.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), *chosen });
         code.resize(code.size() + 5u);
@@ -1622,6 +1644,96 @@ namespace neos::language
             put_u32(code, o->first->index());
         }
         push_operand(operand_type{ call });
+    }
+
+    bool compiler::strip_call(fragment& aFragment, std::string_view aVmFunction)
+    {
+        // if a fragment's code ends with a call to the VM's function neos::aVmFunction, remove that call
+        auto& code = aFragment.fragmentCode.as_std_vector();
+        auto& relocations = aFragment.fragmentRelocations;
+        if (relocations.empty() || code.size() < 6u || relocations.back().first() != code.size() - 5u || code[code.size() - 6u] != 0x10u)
+            return false;
+        auto const id = relocations.back().second();
+        if ((id & (DeferredCall | BranchTarget)) != 0u || id >= iModule.functions.size())
+            return false;
+        auto const& function = iModule.functions[id];
+        bool const match = function.imported && (function.name == "neos::" + std::string{ aVmFunction } ||
+            (function.importNamespace == "neos" && function.name.starts_with("__neos_" + std::string{ aVmFunction } + "(")));
+        if (!match)
+            return false;
+        code.resize(code.size() - 6u);
+        relocations.pop_back();
+        return true;
+    }
+
+    bool compiler::inline_call(fragment& aCall, wasm_function const& aCallee, std::size_t aParameterCount)
+    {
+        // a function whose body is its parameters, in order, each used once, then code that uses no locals and does not 
+        // branch (e.g. a function that calls another with the same arguments) is inlined: its arguments are already on the 
+        // stack, so the call is replaced by that code
+        if (!aCallee.compiled || aCallee.imported || aCallee.intrinsic)
+            return false;
+        auto const& body = aCallee.body;
+        std::size_t p = 0u;
+        auto const leb = [&]() -> std::optional<std::uint64_t>
+        {
+            std::uint64_t value = 0u;
+            for (std::uint32_t shift = 0u; p < body.size() && shift < 64u; shift += 7u)
+            {
+                auto const b = body[p++];
+                value |= static_cast<std::uint64_t>(b & 0x7Fu) << shift;
+                if ((b & 0x80u) == 0u)
+                    return value;
+            }
+            return {};
+        };
+        for (std::size_t i = 0u; i < aParameterCount; ++i)
+        {
+            if (p >= body.size() || body[p++] != 0x20u || leb() != i)
+                return false;
+        }
+        auto const tail = p;
+        std::size_t end = body.size();
+        std::size_t calls = 0u;
+        while (p < body.size())
+        {
+            auto const op = body[p++];
+            if (op == 0x10u)
+            {
+                // (a call: its index is a relocation)
+                p += 5u;
+                ++calls;
+            }
+            else if (op == 0x28u)
+            {
+                // (i32.load)
+                if (!leb() || !leb())
+                    return false;
+            }
+            else if (op == 0x0Fu)
+            {
+                // (return: the end, possibly followed by unreachable)
+                end = p - 1u;
+                if (p < body.size() && body[p] == 0x00u)
+                    ++p;
+                if (p != body.size())
+                    return false;
+            }
+            else if (!(op >= 0x45u && op <= 0xC4u))
+                return false;
+        }
+        if (calls != aCallee.relocations.size())
+            return false;
+        auto& code = aCall.fragmentCode.as_std_vector();
+        auto const base = static_cast<std::uint32_t>(code.size());
+        code.insert(code.end(), body.begin() + static_cast<std::ptrdiff_t>(tail), body.begin() + static_cast<std::ptrdiff_t>(end));
+        for (auto const& r : aCallee.relocations)
+        {
+            if (r.first < tail || r.first + 5u > end)
+                return false;
+            aCall.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ base + static_cast<std::uint32_t>(r.first - tail), r.second });
+        }
+        return true;
     }
 
     void compiler::wrap_expression_body(neolib::i_string_view const& aSource)
@@ -2384,10 +2496,28 @@ namespace neos::language
         function.compiled = true;
         if (function.stub)
         {
+            // a stub named __neos_string_bytes, __neos_string_utf16_units or __neos_string_code_points (taking a string and 
+            // returning an integer) is a string's length as its header records it (see bytecode::string_header): a call to it 
+            // is a load (it is not imported)
+            static std::map<std::string, std::uint32_t> const sIntrinsics =
+            {
+                { "__neos_string_bytes", static_cast<std::uint32_t>(offsetof(bytecode::string_header, bytes)) },
+                { "__neos_string_utf16_units", static_cast<std::uint32_t>(offsetof(bytecode::string_header, utf16Units)) },
+                { "__neos_string_code_points", static_cast<std::uint32_t>(offsetof(bytecode::string_header, codePoints)) }
+            };
+            // (any other stub named __neos_f is the VM's function neos::f; see emit_module)
+            if (auto const intrinsic = sIntrinsics.find(function.name); intrinsic != sIntrinsics.end())
+            {
+                if (!signature.parameters().has_value() || signature.parameters().value().size() != 1u ||
+                    signature.parameters().value()[0].parameter_type() != type::String || !is_numeric(signature.return_type()) ||
+                    is_float(signature.return_type()) || signature.return_type() == type::Boolean)
+                    throw std::runtime_error("'" + function.name + "' takes a string and returns an integer");
+                function.intrinsic = intrinsic->second;
+            }
             // a function whose body is a stub ("...") is provided by the language's runtime plugin: import it under a name that 
             // encodes its parameter types
             function.imported = true;
-            function.importNamespace = state().unit->schema->meta().language;
+            function.importNamespace = function.name.starts_with("__neos_") ? "neos" : state().unit->schema->meta().language;
             function.name += "(";
             if (signature.parameters().has_value())
                 for (std::size_t i = 0u; i < signature.parameters().value().size(); ++i)
@@ -2405,7 +2535,7 @@ namespace neos::language
         // function index space: imports first
         std::vector<std::uint32_t> order;
         for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
-            if (iModule.functions[id].imported)
+            if (iModule.functions[id].imported && !iModule.functions[id].intrinsic)
                 order.push_back(id);
         std::uint32_t const importCount = static_cast<std::uint32_t>(order.size());
         for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
@@ -2489,7 +2619,10 @@ namespace neos::language
             {
                 put_name(section, "env");
                 auto const& function = iModule.functions[order[i]];
-                put_name(section, function.importNamespace.empty() ? function.name : function.importNamespace + "::" + function.name);
+                if (function.importNamespace == "neos" && function.name.starts_with("__neos_"))
+                    put_name(section, "neos::" + function.name.substr(7u, function.name.find('(') - 7u)); // (the VM's own function)
+                else
+                    put_name(section, function.importNamespace.empty() ? function.name : function.importNamespace + "::" + function.name);
                 section.push_back(0x00u);
                 put_u32(section, typeOf[order[i]]);
             }

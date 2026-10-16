@@ -263,6 +263,7 @@ namespace neos::language
             bool inferred = false;                      ///< parameter and return types are inferred
             bool implicitEntry = false;                 ///< the entry point formed by top-level statements
             std::string importNamespace;                ///< (an import of a stub) the runtime plugin's namespace
+            std::optional<std::uint32_t> intrinsic;     ///< (a stub that is a string intrinsic) the string header field it reads
             i_function_scope const* scope = nullptr;
             function_signature signature;
             std::vector<type> locals;
@@ -422,6 +423,8 @@ namespace neos::language
         void emit_call_to(fragment& aTarget, std::uint32_t aFunction);
         std::uint32_t js_runtime(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
         bool is_global(i_symbol_table_entry const& aSymbol) const;
+        bool inline_call(fragment& aCall, wasm_function const& aCallee, std::size_t aParameterCount);
+        bool strip_call(fragment& aFragment, std::string_view aVmFunction);
         std::optional<interval> integer_range(operand_type const& aOperand) const;
         std::optional<range_key> range_key_of(i_symbol_table_entry const& aSymbol, std::string const& aName) const;
         void observe_range(range_key const& aKey, std::optional<interval> const& aRange);
