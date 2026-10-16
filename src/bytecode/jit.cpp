@@ -2310,6 +2310,44 @@ namespace neos
                             else
                                 release(v);
                         }
+                        // local.get L; (i32|i64).const C; (i32|i64).(add|sub); local.(set|tee) L: one add/sub on the local's register 
+                        // (or slot); aNext is advanced past the sequence
+                        bool update_local(std::size_t aPosition, std::size_t& aNext)
+                        {
+                            auto const token = [&](std::size_t aIndex) { return aPosition + aIndex < iTokens.size() ? iTokens[aPosition + aIndex] : ~std::uint64_t{}; };
+                            auto const local = token(1u);
+                            auto const constant = token(2u);
+                            auto const arithmetic = token(4u);
+                            auto const store = token(5u);
+                            if (local >= iLocals.size() || token(6u) != local || (store != 0x21u && store != 0x22u))
+                                return false;
+                            auto const& l = iLocals[static_cast<std::size_t>(local)];
+                            bool const wide = (constant == 0x42u);
+                            if (!(constant == 0x41u && l.type == I32 && (arithmetic == 0x6Au || arithmetic == 0x6Bu)) &&
+                                !(wide && l.type == I64 && (arithmetic == 0x7Cu || arithmetic == 0x7Du)))
+                                return false;
+                            auto const value = static_cast<std::int64_t>(token(3u));
+                            if (wide && (value < std::numeric_limits<std::int32_t>::min() || value > std::numeric_limits<std::int32_t>::max()))
+                                return false;
+                            auto const immediate = static_cast<std::int32_t>(wide ? value : static_cast<std::int32_t>(static_cast<std::uint32_t>(value)));
+                            int const op = (arithmetic == 0x6Au || arithmetic == 0x7Cu) ? 0 : 5; // (add or sub)
+                            materialize_cond();
+                            detach_local(static_cast<std::uint32_t>(local));
+                            if (l.pinned)
+                                a.alu_ri(op, wide, l.reg, immediate);
+                            else
+                                a.alu_mi(op, wide, RBP, l.disp, immediate);
+                            if (store == 0x22u)
+                            {
+                                entry e;
+                                e.k = kind::Local;
+                                e.type = l.type;
+                                e.local = static_cast<std::uint32_t>(local);
+                                push(e);
+                            }
+                            aNext = aPosition + 7u;
+                            return true;
+                        }
                         // a load or store: [address + offset, address + offset + width) must be within linear memory
                         void memory_access(std::uint8_t aOp, std::uint64_t aOffset)
                         {
@@ -2520,6 +2558,8 @@ namespace neos
                                     else
                                         continue;
                                 }
+                                if (op == 0x20u && update_local(opPosition, p))
+                                    continue;
                                 instruction(op, opPosition, immediate);
                                 if (iControl.empty())
                                     return;
