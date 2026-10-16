@@ -69,6 +69,7 @@ namespace neos
                 language::data_type iResult;
                 std::optional<std::string> iError;
                 std::uint64_t iInstructions = 0u;
+                bool iJit = false;
                 std::chrono::steady_clock::duration iExecutionTime = {};
             };
         }

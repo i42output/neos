@@ -50,8 +50,8 @@
 }%
 
 #{
-    character literal ::= 
-        ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) $ string.utf8.character, '\'' ) ;
+    character literal $ string.utf8.character ::= 
+        ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) , '\'' ) ;
     string literal ::= 
         { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) } $ string.utf8 , '\"' , [ whitespace ] } + ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
@@ -264,7 +264,7 @@ ${
         while , WS , open expression , WS , boolean expression , WS , close expression ;
 
     do while loop $ language.statement.loop ::= 
-        do , WS , block , WS , while clause ;
+        do , WS , block , WS , while clause , [ WS , semicolon ] ;
 
     number $ math.universal.integer ::= ( minus , positive integer ) | positive integer ;
     number $ math.universal.real ::= ( minus , positive real ) | positive real ;

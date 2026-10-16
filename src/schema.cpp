@@ -451,6 +451,12 @@ namespace neos::language
                     iMeta.copyright = meta.as<neolib::rjson_string>();
                 else if (meta.name() == "version")
                     iMeta.version = meta.as<neolib::rjson_string>();
+                else if (meta.name() == "prelude")
+                {
+                    for (auto const& package : meta)
+                        iMeta.prelude.push_back(package.type() == neolib::json_type::String ? 
+                            std::string{ package.as<neolib::rjson_string>() } : std::string{ package.as<neolib::rjson_keyword>().text });
+                }
                 else if (meta.name() == "source.file.extension")
                 {
                     if (meta.type() == neolib::json_type::String)

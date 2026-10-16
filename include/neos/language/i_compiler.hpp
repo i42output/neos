@@ -107,7 +107,20 @@ namespace neos::language
         GreaterThanOrEqual,
         LogicalAnd,
         LogicalOr,
-        LogicalNot
+        LogicalNot,
+        Modulo,         ///< result has the sign of the divisor (Python semantics)
+        FloorDivide,    ///< quotient rounded towards negative infinity (Python //)
+        TrueDivide      ///< real division regardless of operand types (Python /)
+    };
+
+    enum class indented_construct : std::uint32_t
+    {
+        If,
+        ElseIf,
+        Else,
+        While,
+        For,
+        Function
     };
 
     enum class loop_type : std::uint32_t
@@ -208,7 +221,7 @@ namespace neos::language
         virtual void pop_operand(i_data_type& aOperand) = 0;
         virtual void push_operator(i_operator_type const& aOperator) = 0;
         virtual void pop_operator(i_operator_type& aOperator) = 0;
-        virtual void define_symbol(i_symbol_name const& aName, symbol_type aType) = 0;
+        virtual void define_symbol(i_symbol_name const& aName, symbol_type aType, neolib::i_string_view const& aSource) = 0;
         virtual void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const = 0;
         // code generation (WASM)
     public:
@@ -225,6 +238,16 @@ namespace neos::language
         virtual void emit_else_if(neolib::i_string_view const& aSource) = 0;
         virtual void emit_else(neolib::i_string_view const& aSource) = 0;
         virtual void emit_loop(loop_type aLoopType, neolib::i_string_view const& aSource) = 0;
+        // scoping by significant whitespace (indentation)
+    public:
+        virtual void indentation(neolib::i_string_view const& aLineBreak) = 0;
+        virtual void begin_indented(indented_construct aConstruct, neolib::i_string_view const& aSource) = 0;
+        virtual void emit_indented_statement(neolib::i_string_view const& aSource) = 0;
+        virtual void end_indented() = 0;
+        virtual void emit_binding(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) = 0;
+        virtual void emit_compound_assignment(operation aOperation, neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) = 0;
+        virtual void declare_loop_variable(neolib::i_string_view const& aName, neolib::i_string_view const& aSource) = 0;
+        virtual void declare_stub() = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;

@@ -24,6 +24,7 @@
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\opcodes.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\text.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\vm.hpp" />
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\jit.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\fwd.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\i_context.hpp" />
@@ -48,6 +49,7 @@
     </ClCompile>
     <ClCompile Include="..\..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\..\src\bytecode\vm.cpp" />
+    <ClCompile Include="..\..\..\..\src\bytecode\jit.cpp" />
     <ClCompile Include="..\..\..\..\src\compiler.cpp" />
     <ClCompile Include="..\..\..\..\src\neos.cpp" />
     <ClCompile Include="..\..\..\..\src\schema.cpp" />

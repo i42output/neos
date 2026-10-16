@@ -194,6 +194,36 @@ namespace neos::language
             std::optional<std::uint32_t> pendingFunction;
             std::optional<std::uint32_t> function;
             bool pendingEntry = false;
+            struct indented
+            {
+                indented_construct kind;
+                std::size_t indent;
+                std::size_t base;
+                std::size_t bodyBase;
+                bool suspended = false;
+                bool implicit = false;
+                std::optional<std::size_t> bodyIndent;
+                std::vector<language::fragment> conditions;
+                std::vector<language::fragment> arms;
+                std::optional<language::fragment> elseArm;
+                std::optional<language::fragment> loopCondition;
+                i_symbol_table_entry* loopVariable = nullptr;
+                std::vector<language::fragment> range;
+            };
+            std::vector<indented> indentStack;
+            bool implicitFunctionFinished = false;
+        };
+        struct symbol_info
+        {
+            char const* position = nullptr; ///< definition position (nullptr if defined at function level)
+            std::uint64_t sequence = 0u;
+            bool retired = false;
+        };
+        struct forward_declaration
+        {
+            std::string name;
+            function_signature signature;
+            bool stub = false;
         };
         struct wasm_function
         {
@@ -202,6 +232,7 @@ namespace neos::language
             bool fromImportedFragment = false;
             bool entry = false;
             bool compiled = false;
+            bool stub = false;
             i_function_scope const* scope = nullptr;
             function_signature signature;
             std::vector<type> locals;
@@ -214,7 +245,9 @@ namespace neos::language
             std::vector<wasm_function> functions;
             std::vector<std::uint8_t> data;
             std::map<std::string, std::uint32_t> strings;
+            std::vector<std::pair<std::string, std::vector<type>>> deferredCalls; ///< calls to functions defined later (resolved at emission)
         };
+        static constexpr std::uint32_t DeferredCall = 0x80000000u;
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
         compiler(i_context& aContext);
@@ -233,7 +266,7 @@ namespace neos::language
         void pop_operand(i_data_type& aOperand) final;
         void push_operator(i_operator_type const& aOperator) final;
         void pop_operator(i_operator_type& aOperator) final;
-        void define_symbol(i_symbol_name const& aName, symbol_type aType) final;
+        void define_symbol(i_symbol_name const& aName, symbol_type aType, neolib::i_string_view const& aSource) final;
         void find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const final;
     public:
         void declare_import(i_function_signature const& aSignature) final;
@@ -249,6 +282,14 @@ namespace neos::language
         void emit_else_if(neolib::i_string_view const& aSource) final;
         void emit_else(neolib::i_string_view const& aSource) final;
         void emit_loop(loop_type aLoopType, neolib::i_string_view const& aSource) final;
+        void indentation(neolib::i_string_view const& aLineBreak) final;
+        void begin_indented(indented_construct aConstruct, neolib::i_string_view const& aSource) final;
+        void emit_indented_statement(neolib::i_string_view const& aSource) final;
+        void end_indented() final;
+        void emit_binding(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) final;
+        void emit_compound_assignment(operation aOperation, neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) final;
+        void declare_loop_variable(neolib::i_string_view const& aName, neolib::i_string_view const& aSource) final;
+        void declare_stub() final;
     public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;
@@ -260,7 +301,7 @@ namespace neos::language
         const compilation_state& state() const;
         compilation_state& state();
         fold_stack& fold_stack();
-        i_symbol_table_entry* find_symbol(i_scope const& aScope, neolib::i_string_view const& aName) const;
+        i_symbol_table_entry* find_symbol(i_scope const& aScope, neolib::i_string_view const& aName, bool aThisScopeOnly = false) const;
         wasm_function& current_function();
         std::uint32_t add_function(std::string const& aName, bool aImported);
         std::uint32_t runtime_function(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
@@ -270,6 +311,16 @@ namespace neos::language
         std::vector<fragment> pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
         std::uint32_t string_literal(std::string const& aValue);
         void emit_module(program& aProgram);
+        void retire_symbols(neolib::i_string_view const& aSource);
+        std::uint32_t temporary(type aType);
+        void check_rebinding(i_symbol_table_entry const& aVariable, neolib::i_string_view const& aName, type aValueType) const;
+        std::optional<std::size_t> line_indent(neolib::i_string_view const& aSource) const;
+        void close_indented(std::size_t aIndent);
+        void finalize_suspended(std::size_t aIndent);
+        void finalize_indented();
+        void ensure_function();
+        fragment take_body(std::size_t aBodyBase);
+        void wrap_expression_body(neolib::i_string_view const& aSource);
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
@@ -281,5 +332,9 @@ namespace neos::language
         std::chrono::steady_clock::time_point iEndTime;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;
+        std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;
+        std::uint64_t iSymbolSequence = 0u;
+        bool iDeclarationPass = false;
+        std::vector<forward_declaration> iForwardDeclarations;
     };
 }

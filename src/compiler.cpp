@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <cmath>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
 #include <neos/i_context.hpp>
@@ -69,32 +70,53 @@ namespace neos::language
 
     bool compiler::compile(program& aProgram)
     {
-        for (auto& unit : aProgram.translationUnits)
-            for (auto fragment = unit.fragments.begin(); fragment != unit.fragments.end();)
-                if (fragment->imported())
-                    fragment = unit.fragments.erase(fragment);
-                else
-                    (fragment++)->set_status(compilation_status::Pending);
-
         iStartTime = std::chrono::steady_clock::now();
 
         bool ok = true;
 
-        iModule = {};
-        aProgram.text.clear();
-        aProgram.symbolTable.clear();
-        aProgram.scope.clear();
+        auto reset = [&]()
+        {
+            for (auto& unit : aProgram.translationUnits)
+                for (auto fragment = unit.fragments.begin(); fragment != unit.fragments.end();)
+                    if (fragment->imported())
+                        fragment = unit.fragments.erase(fragment);
+                    else
+                        (fragment++)->set_status(compilation_status::Pending);
+            iModule = {};
+            iSymbolInfo.clear();
+            iSymbolSequence = 0u;
+            aProgram.text.clear();
+            aProgram.symbolTable.clear();
+            aProgram.scope.clear();
+        };
 
         try
         {
+            // pass 1: declarations only (collects function signatures so that functions can be called before they are defined)
+            reset();
+            iForwardDeclarations.clear();
+            iDeclarationPass = true;
             for (auto& unit : aProgram.translationUnits)
                 if (ok)
                     ok = compile(aProgram, unit);
+            iDeclarationPass = false;
+            if (ok)
+            {
+                for (auto const& function : iModule.functions)
+                    iForwardDeclarations.push_back(forward_declaration{ function.stub ? function.name.substr(0u, function.name.find('(')) : function.name,
+                        function.scope != nullptr ? function_signature{ function.scope->function_signature() } : function.signature, function.stub });
+                // pass 2: code generation
+                reset();
+                for (auto& unit : aProgram.translationUnits)
+                    if (ok)
+                        ok = compile(aProgram, unit);
+            }
             if (ok)
                 emit_module(aProgram);
         }
         catch(...)
         {
+            iDeclarationPass = false;
             iEndTime = std::chrono::steady_clock::now();
             throw;
         }
@@ -176,6 +198,16 @@ namespace neos::language
         iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit, &aFragment));
 
         aFragment.set_status(compilation_status::Compiling);
+
+        if (!aFragment.imported())
+            for (auto const& package : aUnit.schema->meta().prelude)
+            {
+                source_fragment prelude{ neolib::string{ package } };
+                prelude.set_imported();
+                iContext.load_fragment(prelude);
+                if (!compile(prelude))
+                    throw std::runtime_error("failed to compile prelude package '" + package + "'");
+            }
 
         bool ok = false;
 
@@ -371,24 +403,33 @@ namespace neos::language
             throw std::runtime_error("No operator");
     }
 
-    void compiler::define_symbol(i_symbol_name const& aName, symbol_type aType)
+    void compiler::define_symbol(i_symbol_name const& aName, symbol_type aType, neolib::i_string_view const& aSource)
     {
         auto& symbols = state().program->symbolTable[&current_scope()];
-        auto const existing = symbols.find(aName);
-        if (existing != symbols.end() && aType != symbol_type::Function && existing->second().type() == aType && state().function)
+        i_symbol_table_entry* existing = nullptr;
+        for (auto& symbol : symbols)
+            if (symbol.first() == aName && !iSymbolInfo[&symbol.second()].retired)
+                if (existing == nullptr || iSymbolInfo[&symbol.second()].sequence > iSymbolInfo[existing].sequence)
+                    existing = &symbol.second();
+        if (existing != nullptr)
         {
-            // no block scopes yet: a local redeclared with the same type (e.g. a second loop variable) reuses the existing local
-            auto const& signature = current_function().scope->function_signature();
-            bool parameter = false;
-            if (signature.parameters().has_value())
-                for (auto const& p : signature.parameters().value())
-                    if (p.parameter_name() == aName)
-                        parameter = true;
-            if (!parameter)
-                return;
+            bool allowed = false;
+            if (aType == symbol_type::Function && existing->type() == symbol_type::Function)
+                allowed = true; // overload
+            else if (aType != symbol_type::Function && existing->type() != symbol_type::Function && state().function && !aSource.empty())
+            {
+                // a block-level local may shadow an enclosing local, but not a parameter
+                bool parameter = false;
+                auto const& signature = current_function().scope->function_signature();
+                if (signature.parameters().has_value())
+                    for (auto const& p : signature.parameters().value())
+                        if (p.parameter_name() == aName)
+                            parameter = true;
+                allowed = !parameter;
+            }
+            if (!allowed)
+                throw std::runtime_error("redefinition of '" + aName.to_std_string() + "'");
         }
-        if (existing != symbols.end() && (aType != symbol_type::Function || existing->second().type() != symbol_type::Function))
-            throw std::runtime_error("redefinition of '" + aName.to_std_string() + "'");
         std::uint32_t index = 0u;
         if (aType == symbol_type::Function)
         {
@@ -409,7 +450,7 @@ namespace neos::language
                 {
                     if (parameter.direction() == parameter_direction::Out)
                         continue;
-                    if (parameter.parameter_name() == aName)
+                    if (parameter.parameter_name() == aName && aSource.empty())
                         parameterIndex = inParameters;
                     ++inParameters;
                 }
@@ -423,9 +464,27 @@ namespace neos::language
         }
         else
             throw std::runtime_error("global variables are not supported: '" + aName.to_std_string() + "'");
-        symbols.insert(aName, symbol_table_entry{ aType, index });
+        auto& entry = symbols.insert(aName, symbol_table_entry{ aType, index })->second();
+        auto& info = iSymbolInfo[&entry];
+        info.position = aSource.empty() ? nullptr : aSource.to_std_string_view().data();
+        info.sequence = ++iSymbolSequence;
         if (trace() >= 2)
             iContext.cout() << "Defined symbol: " << current_scope().qualified_name() << "::" << aName << " : " << type_name(aType) << std::endl;
+    }
+
+    void compiler::retire_symbols(neolib::i_string_view const& aSource)
+    {
+        // symbols defined within a block go out of scope at the end of the block
+        auto const symbols = state().program->symbolTable.find(&current_scope());
+        if (symbols == state().program->symbolTable.end())
+            return;
+        auto const block = aSource.to_std_string_view();
+        for (auto& symbol : symbols->second())
+        {
+            auto& info = iSymbolInfo[&symbol.second()];
+            if (info.position != nullptr && info.position >= block.data() && info.position < block.data() + block.size())
+                info.retired = true;
+        }
     }
 
     void compiler::find_identifier(neolib::i_string_view const& aIdentifier, neolib::i_optional<i_data_type>& aResult) const
@@ -437,7 +496,7 @@ namespace neos::language
             aResult = std::nullopt;
     }
 
-    i_symbol_table_entry* compiler::find_symbol(i_scope const& aScope, neolib::i_string_view const& aName) const
+    i_symbol_table_entry* compiler::find_symbol(i_scope const& aScope, neolib::i_string_view const& aName, bool aThisScopeOnly) const
     {
         neolib::string const name{ aName };
         for (i_scope const* scope = &aScope;; scope = &scope->parent())
@@ -445,11 +504,26 @@ namespace neos::language
             auto const symbols = state().program->symbolTable.find(scope);
             if (symbols != state().program->symbolTable.end())
             {
-                auto const symbol = symbols->second().find(name);
-                if (symbol != symbols->second().end())
-                    return &symbol->second();
+                i_symbol_table_entry* best = nullptr;
+                std::uint64_t bestSequence = 0u;
+                for (auto& symbol : symbols->second())
+                {
+                    if (symbol.first() != name)
+                        continue;
+                    auto const info = iSymbolInfo.find(&symbol.second());
+                    if (info != iSymbolInfo.end() && info->second.retired)
+                        continue;
+                    auto const sequence = info != iSymbolInfo.end() ? info->second.sequence : 0u;
+                    if (best == nullptr || sequence > bestSequence)
+                    {
+                        best = &symbol.second();
+                        bestSequence = sequence;
+                    }
+                }
+                if (best != nullptr)
+                    return best;
             }
-            if (!scope->has_parent())
+            if (aThisScopeOnly || !scope->has_parent())
                 return nullptr;
         }
     }
@@ -737,6 +811,33 @@ namespace neos::language
             std::string s;
         };
 
+        // CPython's float floor division and modulo
+        std::pair<double, double> python_divmod(double aLhs, double aRhs)
+        {
+            double mod = std::fmod(aLhs, aRhs);
+            double div = (aLhs - mod) / aRhs;
+            if (mod != 0.0)
+            {
+                if ((aRhs < 0.0) != (mod < 0.0))
+                {
+                    mod += aRhs;
+                    div -= 1.0;
+                }
+            }
+            else
+                mod = std::copysign(0.0, aRhs);
+            double floorDiv;
+            if (div != 0.0)
+            {
+                floorDiv = std::floor(div);
+                if (div - floorDiv > 0.5)
+                    floorDiv += 1.0;
+            }
+            else
+                floorDiv = std::copysign(0.0, aLhs / aRhs);
+            return { floorDiv, mod };
+        }
+
         immediate get_immediate(operand_type const& aOperand)
         {
             immediate result;
@@ -761,7 +862,7 @@ namespace neos::language
                         else if constexpr (std::is_same_v<value_type, fbig>)
                         {
                             result.t = type::Fbig;
-                            result.f = std::stod(d.value().value().to_string()); // (neonumeric's operator double is not correctly rounded)
+                            result.f = static_cast<double>(d.value().value());
                         }
                         else if constexpr (std::is_same_v<value_type, string>)
                         {
@@ -864,6 +965,14 @@ namespace neos::language
     fragment compiler::materialize(operand_type const& aOperand, std::optional<type> aTargetType)
     {
         using bytecode::opcode;
+        if (iDeclarationPass)
+        {
+            fragment dummy;
+            dummy.valueType = aTargetType.value_or(type::I32);
+            if (aOperand.holds_alternative<i_fragment>())
+                dummy.fragmentKind = aOperand.get<i_fragment>().kind() == fragment_kind::Argument ? fragment_kind::Argument : fragment_kind::Value;
+            return dummy;
+        }
         if (aOperand.holds_alternative<i_fragment>())
         {
             fragment result{ aOperand.get<i_fragment>() };
@@ -983,7 +1092,7 @@ namespace neos::language
 
     void compiler::declare_import(i_function_signature const& aSignature)
     {
-        define_symbol(aSignature.name(), type::Function);
+        define_symbol(aSignature.name(), type::Function, neolib::string_view{});
         auto& function = iModule.functions[*state().pendingFunction];
         function.imported = true;
         function.signature = aSignature;
@@ -1013,6 +1122,13 @@ namespace neos::language
             lhs = state().operandStack.back();
             state().operandStack.pop_back();
         }
+        if (iDeclarationPass)
+        {
+            fragment dummy;
+            dummy.valueType = type::I32;
+            push_operand(operand_type{ dummy });
+            return;
+        }
         auto operand_type_of = [&](operand_type const& aOperand) -> type
         {
             if (aOperand.holds_alternative<i_fragment>())
@@ -1031,8 +1147,20 @@ namespace neos::language
         };
         bool const relational = (aOperation >= operation::Equal && aOperation <= operation::GreaterThanOrEqual);
         bool const logical = (aOperation >= operation::LogicalAnd && aOperation <= operation::LogicalNot);
-        // constant folding
-        if (is_immediate(rhs) && (unary || is_immediate(*lhs)))
+        bool const pythonic = (aOperation == operation::Modulo || aOperation == operation::FloorDivide || aOperation == operation::TrueDivide);
+        // constant folding (not of Python division by zero, which is an error at run time, nor if the result is 
+        // negative zero, infinite or NaN, which a literal cannot represent)
+        auto const foldable = [&]()
+        {
+            if (unary || !is_immediate(*lhs))
+                return true;
+            auto const l = get_immediate(*lhs);
+            auto const r = get_immediate(rhs);
+            if (pythonic && l.t != type::String && r.t != type::String)
+                return is_float(r.t) ? r.f != 0.0 : r.i != 0;
+            return true;
+        };
+        if (is_immediate(rhs) && (unary || is_immediate(*lhs)) && foldable())
         {
             auto const r = get_immediate(rhs);
             immediate result;
@@ -1090,7 +1218,10 @@ namespace neos::language
                     case operation::Add: result.f = lf + rf; break;
                     case operation::Subtract: result.f = lf - rf; break;
                     case operation::Multiply: result.f = lf * rf; break;
-                    case operation::Divide: result.f = lf / rf; break;
+                    case operation::Divide: 
+                    case operation::TrueDivide: result.f = lf / rf; break;
+                    case operation::FloorDivide: result.f = python_divmod(lf, rf).first; break;
+                    case operation::Modulo: result.f = python_divmod(lf, rf).second; break;
                     case operation::Equal: result.i = lf == rf; break;
                     case operation::NotEqual: result.i = lf != rf; break;
                     case operation::LessThan: result.i = lf < rf; break;
@@ -1100,11 +1231,26 @@ namespace neos::language
                     default: break;
                     }
                 }
+                else if (aOperation == operation::TrueDivide)
+                {
+                    result.t = type::Fbig;
+                    result.f = static_cast<double>(l.i) / static_cast<double>(r.i);
+                }
                 else
                 {
                     result.t = relational ? type::Boolean : type::Ibig;
+                    if ((aOperation == operation::Divide || aOperation == operation::FloorDivide || aOperation == operation::Modulo) && r.i == 0)
+                        throw std::runtime_error("division by zero");
                     switch (aOperation)
                     {
+                    case operation::FloorDivide: 
+                        result.i = l.i / r.i - ((l.i % r.i != 0 && ((l.i < 0) != (r.i < 0))) ? 1 : 0); 
+                        break;
+                    case operation::Modulo: 
+                        result.i = l.i % r.i; 
+                        if (result.i != 0 && ((result.i < 0) != (r.i < 0))) 
+                            result.i += r.i; 
+                        break;
                     case operation::Add: result.i = l.i + r.i; break;
                     case operation::Subtract: result.i = l.i - r.i; break;
                     case operation::Multiply: result.i = l.i * r.i; break;
@@ -1123,8 +1269,11 @@ namespace neos::language
                     }
                 }
             }
-            push_operand(operand_type{ make_immediate(result) });
-            return;
+            if (!(is_float(result.t) && (!std::isfinite(result.f) || (result.f == 0.0 && std::signbit(result.f)))))
+            {
+                push_operand(operand_type{ make_immediate(result) });
+                return;
+            }
         }
         fragment result;
         auto& code = result.fragmentCode.as_std_vector();
@@ -1244,8 +1393,199 @@ namespace neos::language
             }
         if (rank(common) < 3u)
             common = is_unsigned(common) ? type::U32 : type::I32;
+        if (aOperation == operation::TrueDivide || (pythonic && is_float(common)))
+            common = type::F64;
+        if (pythonic && aOperation != operation::TrueDivide)
+        {
+            // floor division / modulo with the sign of the divisor: operands are needed more than once so are held in temporaries
+            bool const f = is_float(common);
+            bool const w = is_64(common);
+            bool const u = is_unsigned(common);
+            if (!f && !u && is_immediate(rhs) && get_immediate(rhs).t != type::String && !is_float(get_immediate(rhs).t) && get_immediate(rhs).i > 0)
+            {
+                // a positive constant divisor: the remainder (of truncating division) only needs adjusting when it is negative
+                std::int64_t const divisor = get_immediate(rhs).i;
+                auto const constant = [&](std::int64_t aValue) { put_op(code, w ? opcode::I64Const : opcode::I32Const); put_s64(code, aValue); };
+                std::int64_t const signShift = w ? 63 : 31;
+                if ((divisor & (divisor - 1)) == 0)
+                {
+                    // a power of two: an arithmetic shift floors; masking gives the (non-negative) modulo
+                    std::int64_t shift = 0;
+                    while ((std::int64_t{ 1 } << shift) != divisor)
+                        ++shift;
+                    append(result, materialize(*lhs, common));
+                    if (aOperation == operation::FloorDivide)
+                    {
+                        constant(shift);
+                        put_op(code, w ? opcode::I64ShrS : opcode::I32ShrS);
+                    }
+                    else
+                    {
+                        constant(divisor - 1);
+                        put_op(code, w ? opcode::I64And : opcode::I32And);
+                    }
+                }
+                else
+                {
+                    auto const a = temporary(common);
+                    auto const get = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalGet); put_u32(code, aLocal); };
+                    append(result, materialize(*lhs, common));
+                    if (aOperation == operation::FloorDivide)
+                    {
+                        // (a / d) + ((a % d) >> sign): one less when the remainder is negative
+                        put_op(code, opcode::LocalTee);
+                        put_u32(code, a);
+                        constant(divisor);
+                        put_op(code, w ? opcode::I64DivS : opcode::I32DivS);
+                        get(a);
+                        constant(divisor);
+                        put_op(code, w ? opcode::I64RemS : opcode::I32RemS);
+                        constant(signShift);
+                        put_op(code, w ? opcode::I64ShrS : opcode::I32ShrS);
+                        put_op(code, w ? opcode::I64Add : opcode::I32Add);
+                    }
+                    else
+                    {
+                        // r + ((r >> sign) & d): d is added when the remainder is negative
+                        constant(divisor);
+                        put_op(code, w ? opcode::I64RemS : opcode::I32RemS);
+                        put_op(code, opcode::LocalTee);
+                        put_u32(code, a);
+                        get(a);
+                        constant(signShift);
+                        put_op(code, w ? opcode::I64ShrS : opcode::I32ShrS);
+                        constant(divisor);
+                        put_op(code, w ? opcode::I64And : opcode::I32And);
+                        put_op(code, w ? opcode::I64Add : opcode::I32Add);
+                    }
+                }
+                result.valueType = common;
+                push_operand(operand_type{ result });
+                return;
+            }
+            auto const a = temporary(common);
+            auto const b = temporary(common);
+            append(result, materialize(*lhs, common));
+            put_op(code, opcode::LocalSet);
+            put_u32(code, a);
+            append(result, materialize(rhs, common));
+            put_op(code, opcode::LocalSet);
+            put_u32(code, b);
+            auto get = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalGet); put_u32(code, aLocal); };
+            if (f)
+            {
+                // CPython's float floor division / modulo (based on fmod, which is exact)
+                auto const set = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalSet); put_u32(code, aLocal); };
+                auto const constant = [&](double aValue) { put_op(code, opcode::F64Const); put_raw(code, aValue); };
+                auto const m = temporary(type::F64);
+                auto const d = temporary(type::F64);
+                // division by zero
+                get(b); constant(0.0); put_op(code, opcode::F64Eq);
+                put_op(code, opcode::If);
+                code.push_back(0x40u);
+                put_op(code, opcode::Unreachable);
+                put_op(code, opcode::End);
+                // m = fmod(a, b); d = (a - m) / b
+                auto const fmod = runtime_function("neos::fmod", { type::F64, type::F64 }, type::F64);
+                get(a); get(b);
+                put_op(code, opcode::CallFunction);
+                result.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), fmod });
+                code.resize(code.size() + 5u);
+                set(m);
+                get(a); get(m); put_op(code, opcode::F64Sub); get(b); put_op(code, opcode::F64Div); set(d);
+                // if m != 0 then (if the signs of m and b differ then m += b, d -= 1) else m = copysign(0, b)
+                get(m); constant(0.0); put_op(code, opcode::F64Ne);
+                put_op(code, opcode::If);
+                code.push_back(0x40u);
+                get(b); constant(0.0); put_op(code, opcode::F64Lt);
+                get(m); constant(0.0); put_op(code, opcode::F64Lt);
+                put_op(code, opcode::I32Ne);
+                put_op(code, opcode::If);
+                code.push_back(0x40u);
+                get(m); get(b); put_op(code, opcode::F64Add); set(m);
+                get(d); constant(1.0); put_op(code, opcode::F64Sub); set(d);
+                put_op(code, opcode::End);
+                put_op(code, opcode::Else);
+                constant(0.0); get(b); put_op(code, opcode::F64CopySign); set(m);
+                put_op(code, opcode::End);
+                if (aOperation == operation::FloorDivide)
+                {
+                    // if d != 0 then floor(d) (+1 if d - floor(d) > 0.5) else copysign(0, a / b)
+                    get(d); constant(0.0); put_op(code, opcode::F64Ne);
+                    put_op(code, opcode::If);
+                    code.push_back(0x7Cu);
+                    get(d); put_op(code, opcode::F64Floor); set(m);
+                    get(m);
+                    get(d); get(m); put_op(code, opcode::F64Sub); constant(0.5); put_op(code, opcode::F64Gt);
+                    put_op(code, opcode::F64UConvertI32);
+                    put_op(code, opcode::F64Add);
+                    put_op(code, opcode::Else);
+                    constant(0.0); get(a); get(b); put_op(code, opcode::F64Div); put_op(code, opcode::F64CopySign);
+                    put_op(code, opcode::End);
+                }
+                else
+                    get(m);
+            }
+            else if (u)
+            {
+                get(a); get(b);
+                put_op(code, aOperation == operation::FloorDivide ? (w ? opcode::I64DivU : opcode::I32DivU) : (w ? opcode::I64RemU : opcode::I32RemU));
+            }
+            else
+            {
+                auto const zero = [&]() { put_op(code, w ? opcode::I64Const : opcode::I32Const); put_s64(code, 0); };
+                auto const r = temporary(common);
+                get(a); get(b);
+                put_op(code, w ? opcode::I64RemS : opcode::I32RemS);
+                put_op(code, opcode::LocalSet);
+                put_u32(code, r);
+                // adjust = (r != 0) && ((r < 0) != (b < 0))
+                auto const adjust = [&]()
+                {
+                    get(r); zero(); put_op(code, w ? opcode::I64Ne : opcode::I32Ne);
+                    get(r); get(b); put_op(code, w ? opcode::I64Xor : opcode::I32Xor); zero(); put_op(code, w ? opcode::I64LtS : opcode::I32LtS);
+                    put_op(code, opcode::I32And);
+                    if (w)
+                        put_op(code, opcode::I64UConvertI32);
+                };
+                if (aOperation == operation::FloorDivide)
+                {
+                    get(a); get(b);
+                    put_op(code, w ? opcode::I64DivS : opcode::I32DivS);
+                    adjust();
+                    put_op(code, w ? opcode::I64Sub : opcode::I32Sub);
+                }
+                else
+                {
+                    get(r);
+                    adjust();
+                    get(b);
+                    put_op(code, w ? opcode::I64Mul : opcode::I32Mul);
+                    put_op(code, w ? opcode::I64Add : opcode::I32Add);
+                }
+            }
+            result.valueType = common;
+            push_operand(operand_type{ result });
+            return;
+        }
         append(result, materialize(*lhs, common));
         append(result, materialize(rhs, common));
+        if (aOperation == operation::TrueDivide)
+        {
+            // division by zero is an error (not infinity)
+            auto const divisor = temporary(type::F64);
+            put_op(code, opcode::LocalTee);
+            put_u32(code, divisor);
+            put_op(code, opcode::F64Const);
+            put_raw(code, 0.0);
+            put_op(code, opcode::F64Eq);
+            put_op(code, opcode::If);
+            code.push_back(0x40u);
+            put_op(code, opcode::Unreachable);
+            put_op(code, opcode::End);
+            put_op(code, opcode::LocalGet);
+            put_u32(code, divisor);
+        }
         bool const f = is_float(common);
         bool const w = is_64(common);
         bool const u = is_unsigned(common);
@@ -1255,7 +1595,8 @@ namespace neos::language
         case operation::Add: op = f ? (common == type::F32 ? opcode::F32Add : opcode::F64Add) : (w ? opcode::I64Add : opcode::I32Add); break;
         case operation::Subtract: op = f ? (common == type::F32 ? opcode::F32Sub : opcode::F64Sub) : (w ? opcode::I64Sub : opcode::I32Sub); break;
         case operation::Multiply: op = f ? (common == type::F32 ? opcode::F32Mul : opcode::F64Mul) : (w ? opcode::I64Mul : opcode::I32Mul); break;
-        case operation::Divide: op = f ? (common == type::F32 ? opcode::F32Div : opcode::F64Div) : (w ? (u ? opcode::I64DivU : opcode::I64DivS) : (u ? opcode::I32DivU : opcode::I32DivS)); break;
+        case operation::Divide: 
+        case operation::TrueDivide: op = f ? (common == type::F32 ? opcode::F32Div : opcode::F64Div) : (w ? (u ? opcode::I64DivU : opcode::I64DivS) : (u ? opcode::I32DivU : opcode::I32DivS)); break;
         case operation::Equal: op = f ? (common == type::F32 ? opcode::F32Eq : opcode::F64Eq) : (w ? opcode::I64Eq : opcode::I32Eq); break;
         case operation::NotEqual: op = f ? (common == type::F32 ? opcode::F32Ne : opcode::F64Ne) : (w ? opcode::I64Ne : opcode::I32Ne); break;
         case operation::LessThan: op = f ? (common == type::F32 ? opcode::F32Lt : opcode::F64Lt) : (w ? (u ? opcode::I64LtU : opcode::I64LtS) : (u ? opcode::I32LtU : opcode::I32LtS)); break;
@@ -1299,6 +1640,7 @@ namespace neos::language
         for (auto const& statement : pop_fragments(aSource, fragment_kind::Statement))
             append(block, statement);
         push_operand(operand_type{ block });
+        retire_symbols(aSource);
     }
 
     void compiler::emit_return(neolib::i_string_view const& aSource)
@@ -1307,13 +1649,22 @@ namespace neos::language
         auto& function = current_function();
         auto const& signature = function.scope->function_signature();
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
-        if (signature.return_type() == type::Void)
+        std::string_view text = aSource.to_std_string_view();
+        while (!text.empty() && (std::isspace(static_cast<unsigned char>(text.back())) || text.back() == ';'))
+            text.remove_suffix(1u);
+        bool const bare = (text == "return");
+        if (signature.return_type() == type::Void && !bare)
             throw std::runtime_error("procedure cannot return a value");
-        if (state().operandStack.empty())
-            throw std::runtime_error("expression expected");
-        auto const operand = state().operandStack.back();
-        state().operandStack.pop_back();
-        append(statement, materialize(operand, signature.return_type()));
+        if (signature.return_type() != type::Void && bare)
+            throw std::runtime_error("function must return a value");
+        if (!bare)
+        {
+            if (state().operandStack.empty())
+                throw std::runtime_error("expression expected");
+            auto const operand = state().operandStack.back();
+            state().operandStack.pop_back();
+            append(statement, materialize(operand, signature.return_type()));
+        }
         auto& code = statement.fragmentCode.as_std_vector();
         if (signature.parameters().has_value())
             for (auto const& parameter : signature.parameters().value())
@@ -1358,10 +1709,43 @@ namespace neos::language
         push_operand(operand_type{ argument });
     }
 
+    namespace
+    {
+        // -1: not viable; otherwise the sum over arguments of 3 (same type), 2 (same category), 1 (numeric conversion)
+        std::int32_t overload_score(i_function_signature const& aSignature, std::vector<fragment> const& aArguments)
+        {
+            std::size_t const parameterCount = aSignature.parameters().has_value() ? aSignature.parameters().value().size() : 0u;
+            if (parameterCount != aArguments.size())
+                return -1;
+            std::int32_t score = 0;
+            for (std::size_t i = 0u; i < parameterCount; ++i)
+            {
+                auto const p = aSignature.parameters().value()[i].parameter_type();
+                auto const a = aArguments[i].valueType;
+                if (p == a)
+                    score += 3;
+                else if (p == type::String || a == type::String)
+                    return -1;
+                else if (is_numeric(p) && is_numeric(a))
+                    score += (is_float(p) == is_float(a) && (p == type::Boolean) == (a == type::Boolean)) ? 2 : 1;
+                else
+                    return -1;
+            }
+            return score;
+        }
+    }
+
     void compiler::emit_call(neolib::i_string_view const& aFunctionName, neolib::i_string_view const& aSource)
     {
         using bytecode::opcode;
         auto arguments = pop_fragments(aSource, fragment_kind::Argument);
+        if (iDeclarationPass)
+        {
+            fragment dummy;
+            dummy.valueType = type::I32;
+            push_operand(operand_type{ dummy });
+            return;
+        }
         std::vector<std::string> path;
         {
             std::string name = aFunctionName.to_std_string();
@@ -1378,9 +1762,16 @@ namespace neos::language
         {
             return aFunction.scope != nullptr ? aFunction.scope->function_signature() : static_cast<i_function_signature const&>(aFunction.signature);
         };
+        std::string joined;
+        for (auto const& part : path)
+            joined += (joined.empty() ? "" : "::") + part;
         std::optional<std::uint32_t> chosen;
+        std::optional<function_signature> forwardSignature;
         for (i_scope const* scope = &current_scope(); scope != nullptr && !chosen; scope = scope->has_parent() ? &scope->parent() : nullptr)
         {
+            std::optional<std::uint32_t> best;
+            std::int32_t bestScore = -1;
+            // functions already defined in this scope
             i_scope const* target = scope;
             for (std::size_t i = 0u; target != nullptr && i + 1u < path.size(); ++i)
             {
@@ -1390,38 +1781,57 @@ namespace neos::language
                         next = &*child;
                 target = next;
             }
-            if (target == nullptr)
-                continue;
-            auto const symbols = state().program->symbolTable.find(target);
-            if (symbols == state().program->symbolTable.end())
-                continue;
-            std::optional<std::uint32_t> countMatch;
-            for (auto const& symbol : symbols->second())
-            {
-                if (symbol.first().to_std_string() != path.back() || symbol.second().type() != type::Function)
-                    continue;
-                auto const& signature = signature_of(iModule.functions[symbol.second().index()]);
-                std::size_t const parameterCount = signature.parameters().has_value() ? signature.parameters().value().size() : 0u;
-                if (parameterCount != arguments.size())
-                    continue;
-                bool exact = true;
-                for (std::size_t i = 0u; i < parameterCount; ++i)
-                    if (signature.parameters().value()[i].parameter_type() != arguments[i].valueType)
-                        exact = false;
-                if (exact)
+            auto const symbols = target != nullptr ? state().program->symbolTable.find(target) : state().program->symbolTable.end();
+            if (symbols != state().program->symbolTable.end())
+                for (auto const& symbol : symbols->second())
                 {
-                    chosen = symbol.second().index();
-                    break;
+                    if (symbol.first().to_std_string() != path.back() || symbol.second().type() != type::Function)
+                        continue;
+                    auto const score = overload_score(signature_of(iModule.functions[symbol.second().index()]), arguments);
+                    // (a function defined in the program is preferred to a host function with the same parameters)
+                    if (score > bestScore || (score == bestScore && score >= 0 && best && 
+                        iModule.functions[*best].stub && !iModule.functions[symbol.second().index()].stub))
+                    {
+                        best = symbol.second().index();
+                        bestScore = score;
+                    }
                 }
-                if (!countMatch)
-                    countMatch = symbol.second().index();
+            // functions declared in this scope (collected by the declaration pass) that are a better match, i.e. defined later
+            std::string prefix = scope->qualified_name().to_std_string();
+            while (prefix.starts_with("::"))
+                prefix.erase(0, 2);
+            std::string const qualified = prefix.empty() ? joined : prefix + "::" + joined;
+            std::optional<std::size_t> forward;
+            for (std::size_t i = 0u; i < iForwardDeclarations.size(); ++i)
+            {
+                auto const& declaration = iForwardDeclarations[i];
+                if (declaration.name != qualified)
+                    continue;
+                auto const score = overload_score(declaration.signature, arguments);
+                if (score > bestScore || (score == bestScore && score >= 0 && !forward && best && 
+                    iModule.functions[*best].stub && !declaration.stub))
+                {
+                    forward = i;
+                    bestScore = score;
+                }
             }
-            if (!chosen)
-                chosen = countMatch;
+            if (forward)
+            {
+                auto const& declaration = iForwardDeclarations[*forward];
+                forwardSignature = declaration.signature;
+                std::vector<type> parameterTypes;
+                if (declaration.signature.parameters().has_value())
+                    for (auto const& p : declaration.signature.parameters().value())
+                        parameterTypes.push_back(p.parameter_type());
+                chosen = DeferredCall | static_cast<std::uint32_t>(iModule.deferredCalls.size());
+                iModule.deferredCalls.emplace_back(declaration.name, parameterTypes);
+            }
+            else if (best)
+                chosen = best;
         }
         if (!chosen)
             throw std::runtime_error("no matching function for call to '" + aFunctionName.to_std_string() + "' with " + std::to_string(arguments.size()) + " argument(s)");
-        auto const& signature = signature_of(iModule.functions[*chosen]);
+        auto const& signature = forwardSignature ? static_cast<i_function_signature const&>(*forwardSignature) : signature_of(iModule.functions[*chosen]);
         type const returnType = signature.return_type();
         auto call = make_fragment(returnType == type::Void ? fragment_kind::Statement : fragment_kind::Value, returnType, returnType == type::Void ? neolib::string_view{ aSource } : neolib::string_view{});
         std::vector<std::pair<i_symbol_table_entry*, type>> outputs;
@@ -1455,11 +1865,24 @@ namespace neos::language
         push_operand(operand_type{ call });
     }
 
+    void compiler::wrap_expression_body(neolib::i_string_view const& aSource)
+    {
+        // a body consisting of a single expression statement whose statement node was merged into its parent
+        auto& stack = state().operandStack;
+        if (stack.size() <= (state().function ? current_function().operandBase : 0u))
+            return;
+        auto const& top = stack.back();
+        if (top.holds_alternative<i_fragment>() && top.get<i_fragment>().kind() != fragment_kind::Value)
+            return;
+        emit_statement(aSource);
+    }
+
     void compiler::emit_if(neolib::i_string_view const& aSource)
     {
         using bytecode::opcode;
         auto elseArm = pop_fragments(aSource, fragment_kind::Else);
         auto elseIfArms = pop_fragments(aSource, fragment_kind::ElseIf);
+        wrap_expression_body(aSource);
         auto body = pop_fragments(aSource, fragment_kind::Statement);
         if (body.size() != 1u)
             throw std::runtime_error("if statement body expected");
@@ -1490,6 +1913,7 @@ namespace neos::language
     void compiler::emit_else_if(neolib::i_string_view const& aSource)
     {
         using bytecode::opcode;
+        wrap_expression_body(aSource);
         auto body = pop_fragments(aSource, fragment_kind::Statement);
         if (body.size() != 1u)
             throw std::runtime_error("else if statement body expected");
@@ -1507,6 +1931,7 @@ namespace neos::language
 
     void compiler::emit_else(neolib::i_string_view const& aSource)
     {
+        wrap_expression_body(aSource);
         auto arm = make_fragment(fragment_kind::Else, type::Void, aSource);
         for (auto const& statement : pop_fragments(aSource, fragment_kind::Statement))
             append(arm, statement);
@@ -1599,6 +2024,550 @@ namespace neos::language
             break;
         }
         push_operand(operand_type{ statement });
+        retire_symbols(aSource);
+    }
+
+    std::uint32_t compiler::temporary(type aType)
+    {
+        ensure_function();
+        auto& function = current_function();
+        std::uint32_t inParameters = 0u;
+        auto const& signature = function.scope->function_signature();
+        if (signature.parameters().has_value())
+            for (auto const& parameter : signature.parameters().value())
+                if (parameter.direction() != parameter_direction::Out)
+                    ++inParameters;
+        auto const index = inParameters + static_cast<std::uint32_t>(function.locals.size());
+        function.locals.push_back(aType);
+        return index;
+    }
+
+    // --- scoping by significant whitespace
+
+    std::optional<std::size_t> compiler::line_indent(neolib::i_string_view const& aSource) const
+    {
+        // the column of a construct that starts a line (nullopt if something precedes it on its line)
+        auto const fragmentSource = current_fragment().source().to_std_string_view();
+        char const* const begin = fragmentSource.data();
+        char const* position = aSource.to_std_string_view().data();
+        if (position < begin || position > begin + fragmentSource.size())
+            return std::nullopt;
+        std::size_t column = 0u;
+        char const* lineStart = position;
+        while (lineStart > begin && lineStart[-1] != '\n')
+            --lineStart;
+        for (char const* p = lineStart; p != position; ++p)
+        {
+            if (*p == ' ')
+                ++column;
+            else if (*p == '\t')
+                column = (column / 8u + 1u) * 8u;
+            else if (*p != '\r')
+                return std::nullopt;
+        }
+        return column;
+    }
+
+    fragment compiler::take_body(std::size_t aBodyBase)
+    {
+        auto& stack = state().operandStack;
+        fragment body = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+        for (auto i = aBodyBase; i < stack.size(); ++i)
+        {
+            if (!iDeclarationPass && (!stack[i].holds_alternative<i_fragment>() || stack[i].get<i_fragment>().kind() != fragment_kind::Statement))
+                throw std::runtime_error("unexpected expression in indented block");
+            if (stack[i].holds_alternative<i_fragment>())
+                append(body, stack[i].get<i_fragment>());
+        }
+        stack.resize(std::min(aBodyBase, stack.size()));
+        return body;
+    }
+
+    void compiler::finalize_indented()
+    {
+        using bytecode::opcode;
+        auto construct = std::move(state().indentStack.back());
+        state().indentStack.pop_back();
+        if (construct.kind == indented_construct::Function)
+        {
+            leave_scope(scope_type::Function); // (finish_function collects the body)
+            if (construct.implicit)
+                state().implicitFunctionFinished = true;
+            return;
+        }
+        auto statement = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+        auto& code = statement.fragmentCode.as_std_vector();
+        if (!construct.suspended && construct.kind != indented_construct::Else)
+        {
+            if (construct.kind == indented_construct::While || construct.kind == indented_construct::For)
+                construct.arms.push_back(take_body(construct.bodyBase));
+            else
+                construct.arms.push_back(take_body(construct.bodyBase));
+        }
+        else if (!construct.suspended)
+            construct.elseArm = take_body(construct.bodyBase);
+        switch (construct.kind)
+        {
+        case indented_construct::If:
+        case indented_construct::ElseIf:
+        case indented_construct::Else:
+            for (std::size_t i = 0u; i < construct.conditions.size(); ++i)
+            {
+                if (i != 0u)
+                    put_op(code, opcode::Else);
+                append(statement, construct.conditions[i]);
+                put_op(code, opcode::If);
+                code.push_back(0x40u);
+                append(statement, construct.arms[i]);
+            }
+            if (construct.elseArm)
+            {
+                put_op(code, opcode::Else);
+                append(statement, *construct.elseArm);
+            }
+            for (std::size_t i = 0u; i < construct.conditions.size(); ++i)
+                put_op(code, opcode::End);
+            break;
+        case indented_construct::While:
+            put_op(code, opcode::Block);
+            code.push_back(0x40u);
+            put_op(code, opcode::Loop);
+            code.push_back(0x40u);
+            append(statement, *construct.loopCondition);
+            put_op(code, opcode::I32Eqz);
+            put_op(code, opcode::BrIf);
+            put_u32(code, 1u);
+            append(statement, construct.arms[0]);
+            put_op(code, opcode::Br);
+            put_u32(code, 0u);
+            put_op(code, opcode::End);
+            put_op(code, opcode::End);
+            break;
+        case indented_construct::For:
+            if (!iDeclarationPass)
+            {
+                // for variable in range([start,] stop[, step])
+                // (range arguments are evaluated once, before the loop; a hidden counter drives the iteration and is copied 
+                // into the loop variable at the top of each iteration so the variable keeps its last value after the loop 
+                // and assignments to it in the body do not affect the iteration)
+                auto const variable = construct.loopVariable->index();
+                auto const t = construct.loopVariable->type();
+                bool const w = is_64(t);
+                auto const counter = temporary(t);
+                auto const stop = temporary(t);
+                auto const step = temporary(t);
+                auto const next = temporary(t);
+                auto const get = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalGet); put_u32(code, aLocal); };
+                auto const set = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalSet); put_u32(code, aLocal); };
+                auto const constant = [&](std::int64_t aValue) { put_op(code, w ? opcode::I64Const : opcode::I32Const); put_s64(code, aValue); };
+                auto& range = construct.range;
+                for (auto& argument : range)
+                    if (argument.valueType != t)
+                    {
+                        convert(argument.fragmentCode.as_std_vector(), argument.valueType, t);
+                        argument.valueType = t;
+                    }
+                // a constant step (the default, 1, or a literal) needs one comparison per test rather than a test of its sign
+                std::optional<std::int64_t> constantStep;
+                if (range.size() < 3u)
+                    constantStep = 1;
+                else if (range[2].fragmentRelocations.empty())
+                {
+                    auto const& bytes = range[2].fragmentCode.as_std_vector();
+                    if (!bytes.empty() && bytes[0] == (w ? 0x42u : 0x41u))
+                    {
+                        std::int64_t value = 0;
+                        std::uint32_t shift = 0u;
+                        std::size_t i = 1u;
+                        std::uint8_t b = 0x80u;
+                        while (i < bytes.size() && (b & 0x80u) != 0u)
+                        {
+                            b = bytes[i++];
+                            value |= static_cast<std::int64_t>(b & 0x7Fu) << shift;
+                            shift += 7u;
+                        }
+                        if ((b & 0x80u) == 0u && i == bytes.size())
+                        {
+                            if (shift < 64u && (b & 0x40u) != 0u)
+                                value |= -(std::int64_t{ 1 } << shift);
+                            if (value != 0)
+                                constantStep = value;
+                        }
+                    }
+                }
+                if (range.size() == 1u)
+                    constant(0);
+                else
+                    append(statement, range[0]);
+                set(counter);
+                append(statement, range.size() == 1u ? range[0] : range[1]);
+                set(stop);
+                if (constantStep)
+                    ; // (the step is used as a constant)
+                else if (range.size() == 3u)
+                {
+                    append(statement, range[2]);
+                    set(step);
+                    // range() arg 3 must not be zero
+                    get(step); put_op(code, w ? opcode::I64Eqz : opcode::I32Eqz);
+                    put_op(code, opcode::If);
+                    code.push_back(0x40u);
+                    put_op(code, opcode::Unreachable);
+                    put_op(code, opcode::End);
+                }
+                else
+                {
+                    constant(1);
+                    set(step);
+                }
+                put_op(code, opcode::Block);
+                code.push_back(0x40u);
+                put_op(code, opcode::Loop);
+                code.push_back(0x40u);
+                if (constantStep)
+                {
+                    get(counter); get(stop); put_op(code, *constantStep > 0 ? (w ? opcode::I64LtS : opcode::I32LtS) : (w ? opcode::I64GtS : opcode::I32GtS));
+                }
+                else
+                {
+                    get(step); constant(0); put_op(code, w ? opcode::I64GtS : opcode::I32GtS);
+                    put_op(code, opcode::If);
+                    code.push_back(0x7Fu);
+                    get(counter); get(stop); put_op(code, w ? opcode::I64LtS : opcode::I32LtS);
+                    put_op(code, opcode::Else);
+                    get(counter); get(stop); put_op(code, w ? opcode::I64GtS : opcode::I32GtS);
+                    put_op(code, opcode::End);
+                }
+                put_op(code, opcode::I32Eqz);
+                put_op(code, opcode::BrIf);
+                put_u32(code, 1u);
+                get(counter); set(variable);
+                append(statement, construct.arms[0]);
+                // next = counter + step; the loop ends if that overflows
+                if (constantStep)
+                {
+                    get(counter); constant(*constantStep); put_op(code, w ? opcode::I64Add : opcode::I32Add); set(next);
+                    get(next); get(counter); put_op(code, *constantStep > 0 ? (w ? opcode::I64LtS : opcode::I32LtS) : (w ? opcode::I64GtS : opcode::I32GtS));
+                }
+                else
+                {
+                    get(counter); get(step); put_op(code, w ? opcode::I64Add : opcode::I32Add); set(next);
+                    get(step); constant(0); put_op(code, w ? opcode::I64GtS : opcode::I32GtS);
+                    put_op(code, opcode::If);
+                    code.push_back(0x7Fu);
+                    get(next); get(counter); put_op(code, w ? opcode::I64LtS : opcode::I32LtS);
+                    put_op(code, opcode::Else);
+                    get(next); get(counter); put_op(code, w ? opcode::I64GtS : opcode::I32GtS);
+                    put_op(code, opcode::End);
+                }
+                put_op(code, opcode::BrIf);
+                put_u32(code, 1u);
+                get(next); set(counter);
+                put_op(code, opcode::Br);
+                put_u32(code, 0u);
+                put_op(code, opcode::End);
+                put_op(code, opcode::End);
+            }
+            break;
+        default:
+            break;
+        }
+        auto& stack = state().operandStack;
+        stack.insert(stack.begin() + static_cast<std::ptrdiff_t>(std::min(construct.base, stack.size())), operand_type{ statement });
+    }
+
+    void compiler::finalize_suspended(std::size_t aIndent)
+    {
+        auto& constructs = state().indentStack;
+        while (!constructs.empty() && constructs.back().suspended && constructs.back().indent >= aIndent)
+            finalize_indented();
+    }
+
+    void compiler::close_indented(std::size_t aIndent)
+    {
+        auto& constructs = state().indentStack;
+        while (!constructs.empty())
+        {
+            auto& top = constructs.back();
+            if (top.implicit)
+                break;
+            if (top.suspended)
+            {
+                if (top.indent > aIndent)
+                {
+                    finalize_indented();
+                    continue;
+                }
+                break;
+            }
+            if (top.indent < aIndent)
+                break;
+            if ((top.kind == indented_construct::If || top.kind == indented_construct::ElseIf) && top.indent == aIndent)
+            {
+                // the arm ends but an elif/else may follow at this indentation
+                top.arms.push_back(take_body(top.bodyBase));
+                top.suspended = true;
+                break;
+            }
+            finalize_indented();
+        }
+    }
+
+    void compiler::ensure_function()
+    {
+        if (state().function)
+            return;
+        if (state().implicitFunctionFinished)
+            throw std::runtime_error("top-level statements must follow function definitions");
+        // top-level statements form an implicit entry point function
+        neolib::string const name{ "__main__" };
+        define_symbol(name, type::Function, neolib::string_view{});
+        auto& scope = static_cast<i_function_scope&>(enter_scope(scope_type::Function, name));
+        function_signature signature;
+        signature.set_name(name);
+        scope.set_function_signature(signature);
+        current_function().entry = true;
+        // operands of the statement being compiled (e.g. when a temporary is needed mid-expression) belong to the implicit function
+        auto const& stack = state().operandStack;
+        auto base = stack.size();
+        while (base > 0u && !(stack[base - 1u].holds_alternative<i_fragment>() && stack[base - 1u].get<i_fragment>().kind() == fragment_kind::Statement))
+            --base;
+        current_function().operandBase = base;
+        typename compilation_state::indented construct{ indented_construct::Function, std::numeric_limits<std::size_t>::max(), base, base };
+        construct.implicit = true;
+        state().indentStack.insert(state().indentStack.begin(), construct);
+    }
+
+    void compiler::indentation(neolib::i_string_view const& aLineBreak)
+    {
+        auto const text = aLineBreak.to_std_string_view();
+        auto const lastLineBreak = text.rfind('\n');
+        std::size_t column = 0u;
+        for (auto i = (lastLineBreak == std::string_view::npos ? 0u : lastLineBreak + 1u); i < text.size(); ++i)
+            if (text[i] == ' ')
+                ++column;
+            else if (text[i] == '\t')
+                column = (column / 8u + 1u) * 8u;
+        close_indented(column);
+        // the next line must continue the innermost open block (or start the body of a block just opened)
+        auto& constructs = state().indentStack;
+        if (constructs.empty() || constructs.back().implicit)
+        {
+            if (column != 0u)
+                throw std::runtime_error("unexpected indent");
+        }
+        else if (!constructs.back().suspended)
+        {
+            auto& top = constructs.back();
+            if (!top.bodyIndent)
+                top.bodyIndent = column;
+            else if (column != *top.bodyIndent)
+                throw std::runtime_error(column > *top.bodyIndent ? "unexpected indent" : "unindent does not match any outer indentation level");
+        }
+    }
+
+    void compiler::begin_indented(indented_construct aConstruct, neolib::i_string_view const& aSource)
+    {
+        auto const column = line_indent(aSource).value_or(0u);
+        auto& stack = state().operandStack;
+        // statements following the colon on the header's own line form (the start of) the body
+        auto inlineBody = pop_fragments(aSource, fragment_kind::Statement);
+        typename compilation_state::indented construct{ aConstruct, column, 0u, 0u };
+        switch (aConstruct)
+        {
+        case indented_construct::If:
+        case indented_construct::ElseIf:
+        case indented_construct::While:
+            {
+                if (stack.empty())
+                    throw std::runtime_error("condition expected");
+                auto const condition = stack.back();
+                stack.pop_back();
+                auto conditionCode = materialize(condition, type::Boolean);
+                if (aConstruct == indented_construct::While)
+                    construct.loopCondition = conditionCode;
+                else
+                    construct.conditions.push_back(conditionCode);
+            }
+            break;
+        case indented_construct::For:
+            {
+                construct.range = pop_fragments(aSource, fragment_kind::Argument);
+                if (construct.range.empty() || construct.range.size() > 3u)
+                    throw std::runtime_error("range() takes 1 to 3 arguments");
+                if (!iDeclarationPass)
+                    for (auto const& argument : construct.range)
+                        if (is_float(argument.valueType) || !is_numeric(argument.valueType))
+                            throw std::runtime_error("range() arguments must be integers");
+                auto const text = aSource.to_std_string_view();
+                auto const begin = text.find_first_not_of(" \t", 3u);
+                auto const end = text.find_first_of(" \t", begin);
+                neolib::string const variable{ std::string{ text.substr(begin, end - begin) } };
+                declare_loop_variable(neolib::string_view{ variable }, aSource);
+                construct.loopVariable = find_symbol(current_scope(), neolib::string_view{ variable }, true);
+            }
+            break;
+        default:
+            break;
+        }
+        if (aConstruct == indented_construct::ElseIf || aConstruct == indented_construct::Else)
+        {
+            auto& constructs = state().indentStack;
+            if (constructs.empty() || !constructs.back().suspended || constructs.back().indent != column ||
+                (constructs.back().kind != indented_construct::If && constructs.back().kind != indented_construct::ElseIf))
+                throw std::runtime_error(aConstruct == indented_construct::Else ? "else without if" : "elif without if");
+            auto& top = constructs.back();
+            if (aConstruct == indented_construct::ElseIf)
+                top.conditions.push_back(construct.conditions.back());
+            top.kind = aConstruct;
+            top.suspended = false;
+            top.bodyBase = stack.size();
+        }
+        else
+        {
+            finalize_suspended(column);
+            if (aConstruct == indented_construct::Function)
+            {
+                if (state().indentStack.size() > 1u || (state().indentStack.size() == 1u && state().indentStack[0].implicit))
+                    throw std::runtime_error("function definitions must precede top-level statements and cannot be nested");
+                construct.base = construct.bodyBase = current_function().operandBase;
+            }
+            else
+            {
+                ensure_function();
+                construct.base = construct.bodyBase = stack.size();
+            }
+            state().indentStack.push_back(construct);
+        }
+        for (auto const& statement : inlineBody)
+            push_operand(operand_type{ statement });
+    }
+
+    void compiler::emit_indented_statement(neolib::i_string_view const& aSource)
+    {
+        auto& stack = state().operandStack;
+        emit_statement(aSource);
+        auto const column = line_indent(aSource);
+        if (!column)
+            return; // inline statement (the body of a header on the same line)
+        std::optional<operand_type> statement;
+        if (!stack.empty() && stack.back().holds_alternative<i_fragment>() &&
+            stack.back().get<i_fragment>().kind() == fragment_kind::Statement &&
+            within(stack.back().get<i_fragment>().source(), aSource))
+        {
+            statement = stack.back();
+            stack.pop_back();
+        }
+        finalize_suspended(*column);
+        ensure_function();
+        if (statement)
+            stack.push_back(*statement);
+    }
+
+    void compiler::end_indented()
+    {
+        // a module (other than an imported one) without top-level statements has an empty entry point
+        if (!current_fragment().imported() && !iDeclarationPass && !state().function && !state().implicitFunctionFinished)
+            ensure_function();
+        close_indented(0u);
+        finalize_suspended(0u);
+        while (!state().indentStack.empty())
+            finalize_indented();
+    }
+
+    void compiler::emit_binding(neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource)
+    {
+        if (state().operandStack.empty())
+            throw std::runtime_error("expression expected");
+        auto const value = state().operandStack.back();
+        state().operandStack.pop_back();
+        ensure_function();
+        auto const* existing = find_symbol(current_scope(), aTarget, true);
+        {
+            // the first binding defines the variable (in the function's scope); its type is inferred from the value
+            type t = type::I64;
+            if (value.holds_alternative<i_fragment>())
+                t = value.get<i_fragment>().value_type();
+            else if (value.holds_alternative<i_symbol_reference>())
+            {
+                auto const& reference = value.get<i_symbol_reference>();
+                if (auto const* symbol = find_symbol(reference.scope(), neolib::string_view{ reference.name() }))
+                    t = symbol->type();
+            }
+            else if (is_immediate(value))
+            {
+                t = get_immediate(value).t;
+                if (t == type::Ibig)
+                    t = type::I64;
+                else if (t == type::Fbig)
+                    t = type::F64;
+            }
+            else
+                t = static_cast<type>(value.get<i_data_type>().index());
+            if (t == type::Void || t == type::UNKNOWN)
+                throw std::runtime_error("cannot infer type of '" + aTarget.to_std_string() + "'");
+            if (existing == nullptr)
+                define_symbol(neolib::string{ aTarget }, t, aSource);
+            else
+                check_rebinding(*existing, aTarget, t);
+        }
+        push_operand(value);
+        emit_assignment(aTarget, aSource);
+    }
+
+    void compiler::emit_compound_assignment(operation aOperation, neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource)
+    {
+        if (state().operandStack.empty())
+            throw std::runtime_error("expression expected");
+        auto const value = state().operandStack.back();
+        state().operandStack.pop_back();
+        push_operand(operand_type{ symbol_reference{ current_scope(), neolib::string{ aTarget } } });
+        push_operand(value);
+        emit_operation(aOperation);
+        auto const* existing = find_symbol(current_scope(), aTarget, true);
+        auto const& result = state().operandStack.back();
+        if (existing != nullptr && result.holds_alternative<i_fragment>())
+            check_rebinding(*existing, aTarget, result.get<i_fragment>().value_type());
+        emit_assignment(aTarget, aSource);
+    }
+
+    void compiler::check_rebinding(i_symbol_table_entry const& aVariable, neolib::i_string_view const& aName, type aValueType) const
+    {
+        // a variable's type is fixed by its first binding so a value of another kind (int, float, bool, str) cannot be 
+        // bound to it (which would silently change the value's behaviour, e.g. how it is printed)
+        if (iDeclarationPass)
+            return; // (value types are not known)
+        auto const kind = [](type aType) -> std::string
+        {
+            if (aType == type::Boolean)
+                return "bool";
+            if (aType == type::String)
+                return "str";
+            if (is_float(aType))
+                return "float";
+            if (is_numeric(aType))
+                return "int";
+            return type_name(aType);
+        };
+        if (kind(aValueType) != kind(aVariable.type()))
+            throw std::runtime_error("cannot bind a value of type " + kind(aValueType) + " to '" + aName.to_std_string() + 
+                "' (of type " + kind(aVariable.type()) + "): variables keep the type of their first binding");
+    }
+
+    void compiler::declare_loop_variable(neolib::i_string_view const& aName, neolib::i_string_view const& aSource)
+    {
+        // a for loop's variable is bound (as an integer) before its body is compiled
+        ensure_function();
+        auto const* symbol = find_symbol(current_scope(), aName, true);
+        if (symbol == nullptr)
+            define_symbol(neolib::string{ aName }, type::I64, aSource);
+        else if (!is_numeric(symbol->type()) || is_float(symbol->type()) || symbol->type() == type::Boolean)
+            throw std::runtime_error("loop variable '" + aName.to_std_string() + "' must be an integer");
+    }
+
+    void compiler::declare_stub()
+    {
+        current_function().stub = true;
     }
 
     void compiler::finish_function()
@@ -1607,14 +2576,32 @@ namespace neos::language
         auto& function = current_function();
         auto const& signature = function.scope->function_signature();
         auto& stack = state().operandStack;
+        if (function.stub)
+        {
+            // "..." makes the function a stub only when it is the entire body (elsewhere it is an empty statement)
+            auto const sole = [&]() -> std::string_view
+            {
+                if (stack.size() != function.operandBase + 1u || !stack.back().holds_alternative<i_fragment>())
+                    return {};
+                auto text = stack.back().get<i_fragment>().source().to_std_string_view();
+                while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+                    text.remove_prefix(1u);
+                while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+                    text.remove_suffix(1u);
+                return text;
+            };
+            function.stub = (sole() == "...");
+        }
         fragment body;
         for (auto i = function.operandBase; i < stack.size(); ++i)
         {
+            if (iDeclarationPass)
+                break;
             if (!stack[i].holds_alternative<i_fragment>() || stack[i].get<i_fragment>().kind() != fragment_kind::Statement)
                 throw std::runtime_error("unexpected expression in body of '" + function.name + "'");
             append(body, stack[i].get<i_fragment>());
         }
-        stack.resize(function.operandBase);
+        stack.resize(std::min(function.operandBase, stack.size()));
         auto& code = body.fragmentCode.as_std_vector();
         if (signature.return_type() != type::Void)
             put_op(code, opcode::Unreachable);
@@ -1631,6 +2618,18 @@ namespace neos::language
             function.relocations.emplace_back(r.first(), r.second());
         function.signature = signature;
         function.compiled = true;
+        if (function.stub)
+        {
+            // a function whose body is a stub ("...") is provided by the host: import it under a name that encodes its parameter types
+            function.imported = true;
+            function.name += "(";
+            if (signature.parameters().has_value())
+                for (std::size_t i = 0u; i < signature.parameters().value().size(); ++i)
+                    function.name += (i == 0u ? "" : ",") + type_name(signature.parameters().value()[i].parameter_type());
+            function.name += ")";
+            function.body.clear();
+            function.relocations.clear();
+        }
         state().function = std::nullopt;
     }
 
@@ -1791,7 +2790,33 @@ namespace neos::language
                 }
                 auto code = function.body;
                 for (auto const& r : function.relocations)
-                    put_u32_padded(code, r.first, finalIndex[r.second]);
+                {
+                    std::uint32_t target = r.second;
+                    if (target & DeferredCall)
+                    {
+                        auto const& deferred = iModule.deferredCalls[target & ~DeferredCall];
+                        std::optional<std::uint32_t> resolved;
+                        for (std::uint32_t id = 0u; id < iModule.functions.size() && (!resolved || iModule.functions[*resolved].stub); ++id)
+                        {
+                            auto const& candidate = iModule.functions[id];
+                            std::string name = candidate.name;
+                            if (candidate.stub)
+                                name = name.substr(0u, name.find('('));
+                            if (name != deferred.first)
+                                continue;
+                            std::vector<type> parameterTypes;
+                            if (candidate.signature.parameters().has_value())
+                                for (auto const& p : candidate.signature.parameters().value())
+                                    parameterTypes.push_back(p.parameter_type());
+                            if (parameterTypes == deferred.second && (!resolved || !candidate.stub))
+                                resolved = id; // (preferring a function defined in the program to a host function)
+                        }
+                        if (!resolved)
+                            throw std::runtime_error("unresolved function '" + deferred.first + "'");
+                        target = *resolved;
+                    }
+                    put_u32_padded(code, r.first, finalIndex[target]);
+                }
                 body.insert(body.end(), code.begin(), code.end());
                 put_op(body, opcode::End);
                 put_u32(section, body.size());

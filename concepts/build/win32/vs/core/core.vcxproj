@@ -186,6 +186,7 @@
     <ClCompile Include="..\..\..\..\src\core\core.cpp" />
     <ClCompile Include="..\..\..\..\src\core\boolean.cpp" />
     <ClCompile Include="..\..\..\..\src\core\logic.cpp" />
+    <ClCompile Include="..\..\..\..\src\core\python.cpp" />
     <ClCompile Include="..\..\..\..\src\core\module.cpp" />
     <ClCompile Include="..\..\..\..\src\core\math.cpp" />
     <ClCompile Include="..\..\..\..\src\core\language.cpp" />
@@ -199,6 +200,7 @@
     <ClInclude Include="..\..\..\..\src\core\language.hpp" />
     <ClInclude Include="..\..\..\..\src\core\boolean.hpp" />
     <ClInclude Include="..\..\..\..\src\core\logic.hpp" />
+    <ClInclude Include="..\..\..\..\src\core\python.hpp" />
     <ClInclude Include="..\..\..\..\src\core\math.hpp" />
     <ClInclude Include="..\..\..\..\src\core\module.hpp" />
     <ClInclude Include="..\..\..\..\src\core\object.hpp" />

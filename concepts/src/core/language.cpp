@@ -364,7 +364,7 @@ namespace neos::concepts::core
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            return aRhs.name() == "language.namespace.name" || aRhs.name() == "language.identifier";
+            return aRhs.name() == "language.namespace.name" || aRhs.name() == "language.identifier" || aRhs.is("language.type"_sv);
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
@@ -472,15 +472,15 @@ namespace neos::concepts::core
             else if (aRhs.name() == "language.scope.open")
             {
                 auto const& signature = data<neos::language::i_function_signature>();
-                aContext.compiler().define_symbol(signature.name(), neos::language::type::Function);
+                aContext.compiler().define_symbol(signature.name(), neos::language::type::Function, neolib::string_view{});
                 auto& scope = static_cast<neos::language::i_function_scope&>(
                     aContext.compiler().enter_scope(neos::language::scope_type::Function, signature.name()));
                 scope.set_function_signature(signature);
                 if (signature.parameters().has_value())
                     for (auto const& parameter : signature.parameters().value())
-                        aContext.compiler().define_symbol(parameter.parameter_name(), parameter.parameter_type());
+                        aContext.compiler().define_symbol(parameter.parameter_name(), parameter.parameter_type(), neolib::string_view{});
                 for (auto const& local : signature.locals())
-                    aContext.compiler().define_symbol(local.parameter_name(), local.parameter_type());
+                    aContext.compiler().define_symbol(local.parameter_name(), local.parameter_type(), neolib::string_view{});
             }
         }
     };
@@ -1053,7 +1053,7 @@ namespace neos::concepts::core
                 variable.set_parameter_name(neolib::string_view{ aRhs.data<neos::language::i_function_parameter>().parameter_name() });
             if (!variable.parameter_name().empty() && variable.parameter_type() != neos::language::type::UNKNOWN)
             {
-                aContext.compiler().define_symbol(variable.parameter_name(), variable.parameter_type());
+                aContext.compiler().define_symbol(variable.parameter_name(), variable.parameter_type(), source());
                 aContext.compiler().emit_assignment(neolib::string_view{ variable.parameter_name() }, source());
             }
             else
@@ -1258,6 +1258,33 @@ namespace neos::concepts::core
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             this->data<neos::language::type>() = neos::language::type::Boolean;
+            aResult = instance();
+        }
+    };
+
+    class language_type_void : public language_type<language_type_void>
+    {
+        // concept
+    public:
+        static constexpr auto Name = "language.type.void";
+        // data
+    public:
+        using data_type = neos::language::type;
+        // construction
+    public:
+        language_type_void() :
+            language_type{}
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->data<neos::language::type>() = neos::language::type::Void;
             aResult = instance();
         }
     };
@@ -1476,6 +1503,8 @@ namespace neos::concepts::core
 //            neolib::make_ref<language_type_integer<neonumerical::xxx>>();
         concepts()[neolib::string{ language_type_boolean::Name }] =
             neolib::make_ref<language_type_boolean>();
+        concepts()[neolib::string{ language_type_void::Name }] =
+            neolib::make_ref<language_type_void>();
         concepts()[neolib::string{ language_type_character::Name }] =
             neolib::make_ref<language_type_character>();
         concepts()[neolib::string{ language_type_size<true>::Name }] =

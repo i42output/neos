@@ -86,7 +86,8 @@ namespace neos::concepts::core
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            return is_character_concept(aRhs) || aRhs.name() == "math.expression.operand";
+            // (a character literal absorbs the (escaped) character it encloses)
+            return (is_character_concept(aRhs) && aRhs.source().size() < this->source().size()) || aRhs.name() == "math.expression.operand";
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
@@ -94,7 +95,10 @@ namespace neos::concepts::core
                 aResult = this->instance();
             else
             {
-                auto const value = unescape_string(this->source().to_std_string_view());
+                auto literal = this->source().to_std_string_view();
+                if (literal.size() >= 2u && literal.front() == '\'' && literal.back() == '\'')
+                    literal = literal.substr(1u, literal.size() - 2u); // (a character literal)
+                auto const value = unescape_string(literal);
                 if (value.size() != 1u)
                     throw std::runtime_error("invalid character literal");
                 aContext.compiler().push_operand(language::data<language::u8>{ static_cast<language::u8>(value[0]) });
@@ -116,11 +120,11 @@ namespace neos::concepts::core
     public:
         bool can_fold(i_semantic_concept const& aRhs) const override
         {
-            return is_character_concept(aRhs) || aRhs.name() == "string.utf8" || aRhs.name() == "math.expression.operand";
+            return is_character_concept(aRhs) || aRhs.name() == "string.utf8" || aRhs.name() == "string.utf8.empty" || aRhs.name() == "math.expression.operand";
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            if (is_character_concept(aRhs))
+            if (is_character_concept(aRhs) || aRhs.name() == "string.utf8.empty")
             {
                 value();
                 aResult = instance();
@@ -147,6 +151,30 @@ namespace neos::concepts::core
         }
     };
 
+    class string_utf8_empty : public semantic_concept<string_utf8_empty>
+    {
+        // types
+    public:
+        typedef semantic_concept<string_utf8_empty> base_type;
+        // construction
+    public:
+        using base_type::base_type;
+        // emit
+    public:
+        bool can_fold(i_semantic_concept const& aRhs) const override
+        {
+            return aRhs.name() == "string.utf8.empty" || aRhs.name() == "math.expression.operand";
+        }
+        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            // an empty string literal (a pair of quotes), possibly concatenated with another
+            if (aRhs.name() == "string.utf8.empty")
+                aResult = instance();
+            else
+                aContext.compiler().push_operand(language::data<language::string>{ neolib::string{} });
+        }
+    };
+
     string::string(neos::language::i_concept_library& aParent) :
         neos::language::concept_library
         { 
@@ -166,6 +194,8 @@ namespace neos::concepts::core
             neolib::make_ref<neos::language::unimplemented_semantic_concept>("string.character");
         concepts()[neolib::string{ "string.utf8" }] = 
             neolib::make_ref<string_utf8>("string.utf8");
+        concepts()[neolib::string{ "string.utf8.empty" }] = 
+            neolib::make_ref<string_utf8_empty>("string.utf8.empty");
         concepts()[neolib::string{ "string.utf8.character" }] = 
             neolib::make_ref<string_utf8_character<any_char>>("string.utf8.character");
         concepts()[neolib::string{ "string.utf8.character.LF" }] = 

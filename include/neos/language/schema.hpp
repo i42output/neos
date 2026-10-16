@@ -41,6 +41,7 @@ namespace neos::language
         std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
         std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
         std::size_t parserRecursionLimit = 256u;
+        std::vector<std::string> prelude; ///< packages implicitly imported by every (non-imported) source fragment
     };
 
     namespace code_parser

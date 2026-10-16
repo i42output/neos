@@ -263,6 +263,16 @@ namespace neos
         load_fragment(aFragment, *fragmentStream);
     }
 
+    namespace
+    {
+        void terminate_last_line(neolib::string& aSource)
+        {
+            // the parser does not recognize a token at the very end of the source so ensure the last line is terminated
+            if (!aSource.empty() && aSource.to_std_string_view().back() != '\n')
+                aSource.append("\n", 1u);
+        }
+    }
+
     void context::load_fragment(language::i_source_fragment& aFragment, std::istream& aStream)
     {
         if (!aStream)
@@ -289,6 +299,7 @@ namespace neos
             source.resize(static_cast<language::source_t::size_type>(count));
             aStream.read(&source[0], count);
             source.resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            terminate_last_line(source);
             aFragment.set_source(source.to_string_view());
         }
         else
@@ -300,6 +311,7 @@ namespace neos
                 source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
                 source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+            terminate_last_line(source);
             aFragment.set_source(source.to_string_view());
         }
 
