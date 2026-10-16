@@ -1,7 +1,7 @@
 %{
     meta: {
         language: "python"
-        description: "Python (statically typed subset; types come from annotations and first assignment)"
+        description: "Python (int, float, str and bool values are native and statically typed; other values are objects of the Python object protocol)"
         source.file.extension: ".py"
         source.package.specification.file.extension: ".py"
         source.package.implementation.file.extension: ".py"
@@ -35,25 +35,13 @@
         comment
     ]
 
-    infix: [
-        math.operator.add
-        math.operator.subtract
-        math.operator.multiply
-        python.operator.divide.true
-        python.operator.divide.floor
-        python.operator.modulo
-        boolean.operator.relational.equal
-        boolean.operator.relational.notequal
-        boolean.operator.relational.lessthan
-        boolean.operator.relational.greaterthan
-        boolean.operator.relational.lessthanorequal
-        boolean.operator.relational.greaterthanorequal
-    ]
 }%
 
 #{
     string literal ::= 
-        { ( empty string , [ S ] ) |
+        { ( '\"' , '\"' , '\"' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | ( '\"' , '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\"' , '\"' , '\"' , [ S ] ) |
+          ( '\'' , '\'' , '\'' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | ( '\'' , '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) | ( '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\'' , '\'' , '\'' , [ S ] ) |
+          ( empty string , [ S ] ) |
           ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | escaped character ) } $ string.utf8 , '\"' , [ S ] ) |
           ( '\'' , { ( ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | escaped character ) } $ string.utf8 , '\'' , [ S ] ) } + ;
     empty string $ string.utf8.empty ::= ( '\"' , '\"' ) | ( '\'' , '\'' ) ;
@@ -72,32 +60,39 @@
     while $ language.keyword ::= potential keyword ::= "while" ;
     for $ language.keyword ::= potential keyword ::= "for" ;
     in $ language.keyword ::= potential keyword ::= "in" ;
+    is $ language.keyword ::= potential keyword ::= "is" ;
     range $ language.keyword ::= potential keyword ::= "range" ;
     pass $ python.pass ::= potential keyword ::= "pass" ;
+    break $ language.keyword ::= potential keyword ::= "break" ;
+    continue $ language.keyword ::= potential keyword ::= "continue" ;
+    import $ language.keyword ::= potential keyword ::= "import" ;
+    from $ language.keyword ::= potential keyword ::= "from" ;
+    as $ language.keyword ::= potential keyword ::= "as" ;
     and $ language.keyword ::= potential keyword ::= "and" ;
     or $ language.keyword ::= potential keyword ::= "or" ;
     not $ language.keyword ::= potential keyword ::= "not" ;
 
-    int $ language.type.i64 ::= potential keyword ::= "int" ;
-    float $ language.type.double ::= potential keyword ::= "float" ;
-    str $ language.type.string ::= potential keyword ::= "str" ;
-    bool $ language.type.boolean ::= potential keyword ::= "bool" ;
-    none $ language.type.void ::= potential keyword ::= "None" ;
+    int ::= potential keyword ::= "int" ;
+    float ::= potential keyword ::= "float" ;
+    str ::= potential keyword ::= "str" ;
+    bool ::= potential keyword ::= "bool" ;
+    object ::= potential keyword ::= "object" ;
+    none ::= potential keyword ::= "None" ;
 
     true $ language.object.boolean.true ::= potential keyword ::= "True" ;
     false $ language.object.boolean.false ::= potential keyword ::= "False" ;
 
     positive real ::= 
-        ( digit sequence , '.' , digit sequence , [ exponent ] ) | ( digit sequence , exponent ) ;
+        ( digit sequence , '.' , [ digit sequence ] , [ exponent ] ) | ( '.' , digit sequence , [ exponent ] ) | ( digit sequence , exponent ) ;
     exponent ::= ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ;
     positive integer ::= 
         digit sequence ;
     digit sequence ::= 
-        digit , { digit } ;
+        digit , { [ '_' ] , digit } ;
     digit ::= 
         "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
-    identifier $ language.identifier ::= name ;
+    identifier ::= name ;
     name ::= ( alpha | '_' ) , { alphanumeric | '_' } ;
     potential keyword ::= { alphanumeric | '_' } + ;
 
@@ -106,61 +101,93 @@
 
     NL $ python.indentation ::= { [ S ] , [ comment ] , newline } + , [ S ] ;
     comment $ language.comment ::= "#" , { ! U+000A .. U+000A } ;
-    S ::= { U+0020 | U+0009 } + ;
+    S ::= { U+0020 | U+0009 | ( '\\' , newline ) } + ;
     newline ::= ( U+000D , U+000A ) | U+000A ;
 
     ellipsis ::= "..." ;
     arrow ::= "->" ;
+    power assign ::= "**=" ;
     floordivide assign ::= "//=" ;
+    lshift assign ::= "<<=" ;
+    rshift assign ::= ">>=" ;
     plus assign ::= "+=" ;
     minus assign ::= "-=" ;
     multiply assign ::= "*=" ;
     divide assign ::= "/=" ;
     modulo assign ::= "%=" ;
+    matmul assign ::= "@=" ;
+    and assign ::= "&=" ;
+    or assign ::= "|=" ;
+    xor assign ::= "^=" ;
     equal ::= "==" ;
     notequal ::= "!=" ;
     lessthanorequal ::= "<=" ;
     greaterthanorequal ::= ">=" ;
+    lshift ::= "<<" ;
+    rshift ::= ">>" ;
+    power operator ::= "**" ;
+    floordivide ::= "//" ;
     lessthan ::= "<" ;
     greaterthan ::= ">" ;
-    floordivide ::= "//" ;
     assign ::= "=" ;
     plus ::= "+" ;
     minus ::= "-" ;
     multiply ::= "*" ;
     divide ::= "/" ;
     modulo ::= "%" ;
+    matmul ::= "@" ;
+    ampersand ::= "&" ;
+    bar ::= "|" ;
+    caret ::= "^" ;
+    tilde ::= "~" ;
     open paren ::= "(" ;
     close paren ::= ")" ;
+    open bracket ::= "[" ;
+    close bracket ::= "]" ;
+    open brace ::= "{" ;
+    close brace ::= "}" ;
     colon ::= ":" ;
     comma ::= "," ;
+    dot ::= "." ;
 }#
 
 ${
     file $ python.module ::= [ NL ] , { statement , NL } ;
 
-
-    statement ::= function definition | if header | elif header | else header | while header | for header | simple statement ;
+    statement ::= function definition | if header | elif header | else header | while header | for header | for in header | simple statement ;
 
     simple statement $ python.statement ::= 
-        pass | stub | return statement | augmented assignment | assignment | expression ;
+        pass | stub | break statement | continue statement | return statement | import statement | from import statement |
+        augmented assignment | assignment | expression list ;
 
     stub $ python.stub ::= ellipsis ;
+    break statement $ python.break ::= break ;
+    continue statement $ python.continue ::= continue ;
 
-    return statement $ language.function.return ::= return , [ [ S ] , expression ] ;
+    return statement $ python.return ::= return , [ [ S ] , expression list ] ;
 
-    augmented assignment $ python.assignment.augmented ::= 
-        identifier , [ S ] , ( plus assign | minus assign | multiply assign | floordivide assign | divide assign | modulo assign ) , [ S ] , expression ;
+    import statement $ python.import ::= import , S , dotted name , [ S , as , S , identifier ] ;
+    from import statement $ python.import.from ::= from , S , dotted name , S , import , S , import name , { [ S ] , comma , [ S ] , import name } ;
+    dotted name ::= identifier , { [ S ] , dot , [ S ] , identifier } ;
+    import name ::= identifier , [ S , as , S , identifier ] ;
 
-    assignment $ python.assignment ::= 
-        identifier , [ S ] , assign , [ S ] , expression ;
+    augmented assignment $ python.assign.augmented ::= 
+        target , [ S ] , ( plus assign | minus assign | multiply assign | floordivide assign | divide assign | modulo assign | power assign |
+            matmul assign | and assign | or assign | xor assign | lshift assign | rshift assign ) , [ S ] , expression list ;
+
+    assignment $ python.assign ::= target list , [ S ] , assign , [ S ] , expression list ;
+    target list ::= target , { [ S ] , comma , [ S ] , target } , [ [ S ] , comma ] ;
+    target $ python.target ::= primary ;
 
     function definition $ python.function ::= 
         def , S , def signature , [ S ] , colon $ language.scope.open , [ [ S ] , simple statement ] ;
     def signature $ language.function.signature ::= 
         function name , [ S ] , open paren , [ S ] , [ parameters ] , [ S ] , close paren , [ [ S ] , arrow , [ S ] , type $ language.function.return.type ] ;
-    parameters $ language.function.parameters ::= parameter , { [ S ] , comma , [ S ] , parameter } ;
-    parameter $ language.function.parameter ::= identifier , [ S ] , colon , [ S ] , type ;
+    parameters $ language.function.parameters ::= parameter , { [ S ] , comma , [ S ] , parameter } , [ [ S ] , comma ] ;
+    parameter $ language.function.parameter ::= id , [ [ S ] , colon , [ S ] , type ] ;
+    function name $ language.function.name ::= id | builtin id ;
+    builtin id $ language.identifier ::= int | float | str | bool | range | object ;
+    id $ language.identifier ::= identifier ;
 
     if header $ python.if ::= if , [ S ] , expression , [ S ] , colon , [ [ S ] , simple statement ] ;
     elif header $ python.elif ::= elif , [ S ] , expression , [ S ] , colon , [ [ S ] , simple statement ] ;
@@ -168,47 +195,103 @@ ${
     while header $ python.while ::= while , [ S ] , expression , [ S ] , colon , [ [ S ] , simple statement ] ;
     for header $ python.for ::= 
         for , S , for variable , S , in , S , range , [ S ] , open paren , [ S ] , argument , { [ S ] , comma , [ S ] , argument } , [ S ] , close paren , [ S ] , colon , [ [ S ] , simple statement ] ;
+    for variable $ python.for.variable ::= id ;
+    for in header $ python.for.in ::= 
+        for , S , for targets , S , in , S , expression list , [ S ] , colon , [ [ S ] , simple statement ] ;
+    for targets $ python.for.targets ::= target list ;
 
-    for variable $ python.for.variable ::= identifier ;
+    expression list ::= tuple display | expression ;
 
-    expression $ language.expression ::= boolean expression ;
+    expression $ language.expression ::= or test , [ [ S ] , conditional tail ] ;
+    conditional tail $ python.conditional ::= if , S , or test , S , else , S , expression ;
 
-    boolean expression $ boolean.expression ::= 
-        boolean term , { [ S ] , ( or , [ S ] , boolean term ) $ boolean.operator.logical.or } ;
-    boolean term ::= 
-        boolean factor , { [ S ] , ( and , [ S ] , boolean factor ) $ boolean.operator.logical.and } ;
-    boolean factor ::= 
-          ( not , [ S ] , boolean factor ) $ boolean.operator.logical.not
-        | comparison
-        | numeric expression ;
-    comparison ::= 
-          numeric expression , [ S ] , 
-          ( lessthanorequal $ boolean.operator.relational.lessthanorequal
-          | greaterthanorequal $ boolean.operator.relational.greaterthanorequal
-          | equal $ boolean.operator.relational.equal
-          | notequal $ boolean.operator.relational.notequal
-          | lessthan $ boolean.operator.relational.lessthan
-          | greaterthan $ boolean.operator.relational.greaterthan ) , 
-          [ S ] , numeric expression ;
+    or test ::= and test , { [ S ] , or tail } ;
+    or tail $ python.or ::= or , [ S ] , and test ;
+    and test ::= not test , { [ S ] , and tail } ;
+    and tail $ python.and ::= and , [ S ] , not test ;
+    not test ::= not expression | comparison ;
+    not expression $ python.not ::= not , [ S ] , not test ;
 
-    numeric expression $ math.expression ::= 
-        term , { [ S ] , ( plus $ math.operator.add | minus $ math.operator.subtract ) , [ S ] , term } ;
-    term ::= 
-        factor , { [ S ] , ( floordivide $ python.operator.divide.floor | multiply $ math.operator.multiply | divide $ python.operator.divide.true | modulo $ python.operator.modulo ) , [ S ] , factor } ;
-    factor ::= 
-        primary / ( minus , [ S ] , factor ) $ math.operator.negate ;
-    primary ::= 
-        ( open paren , [ S ] , expression , [ S ] , close paren ) | function call | true | false | math operand ;
-    math operand $ math.expression.operand ::= number | identifier | string literal ;
+    comparison ::= bitwise or , { [ S ] , comparison tail } ;
+    comparison tail ::= 
+        less equal tail | greater equal tail | equal tail | not equal tail | less tail | greater tail | not in tail | in tail | is not tail | is tail ;
+    less equal tail $ python.lessequal ::= lessthanorequal , [ S ] , bitwise or ;
+    greater equal tail $ python.greaterequal ::= greaterthanorequal , [ S ] , bitwise or ;
+    equal tail $ python.equal ::= equal , [ S ] , bitwise or ;
+    not equal tail $ python.notequal ::= notequal , [ S ] , bitwise or ;
+    less tail $ python.less ::= lessthan , [ S ] , bitwise or ;
+    greater tail $ python.greater ::= greaterthan , [ S ] , bitwise or ;
+    not in tail $ python.notin ::= not , S , in , [ S ] , bitwise or ;
+    in tail $ python.in ::= in , [ S ] , bitwise or ;
+    is not tail $ python.isnot ::= is , S , not , [ S ] , bitwise or ;
+    is tail $ python.is ::= is , [ S ] , bitwise or ;
 
-    function call $ language.function.call ::= 
-        function name , [ S ] , open paren , [ S ] , [ argument , { [ S ] , comma , [ S ] , argument } ] , [ S ] , close paren ;
-    argument $ language.function.argument ::= expression ;
-    (* builtin functions share their names with types *)
-    function name $ language.function.name ::= identifier | int | float | str | bool ;
+    bitwise or ::= bitwise xor , { [ S ] , bitor tail } ;
+    bitor tail $ python.bitor ::= bar , [ S ] , bitwise xor ;
+    bitwise xor ::= bitwise and , { [ S ] , bitxor tail } ;
+    bitxor tail $ python.bitxor ::= caret , [ S ] , bitwise and ;
+    bitwise and ::= shift expression , { [ S ] , bitand tail } ;
+    bitand tail $ python.bitand ::= ampersand , [ S ] , shift expression ;
+    shift expression ::= arithmetic , { [ S ] , ( lshift tail | rshift tail ) } ;
+    lshift tail $ python.lshift ::= lshift , [ S ] , arithmetic ;
+    rshift tail $ python.rshift ::= rshift , [ S ] , arithmetic ;
+    arithmetic ::= term , { [ S ] , ( add tail | subtract tail ) } ;
+    add tail $ python.add ::= plus , [ S ] , term ;
+    subtract tail $ python.subtract ::= minus , [ S ] , term ;
+    term ::= factor , { [ S ] , ( multiply tail | matmul tail | floordivide tail | divide tail | modulo tail ) } ;
+    multiply tail $ python.multiply ::= multiply , [ S ] , factor ;
+    matmul tail $ python.matmul ::= matmul , [ S ] , factor ;
+    floordivide tail $ python.floordivide ::= floordivide , [ S ] , factor ;
+    divide tail $ python.divide ::= divide , [ S ] , factor ;
+    modulo tail $ python.modulo ::= modulo , [ S ] , factor ;
+    factor ::= negative factor | positive factor | invert factor | power ;
+    negative factor $ python.negative ::= minus , [ S ] , factor ;
+    positive factor $ python.positive ::= plus , [ S ] , factor ;
+    invert factor $ python.invert ::= tilde , [ S ] , factor ;
+    power ::= primary , [ [ S ] , power tail ] ;
+    power tail $ python.power ::= power operator , [ S ] , factor ;
+
+    primary ::= atom , { trailer } ;
+    trailer ::= generator call trailer | call trailer | subscript trailer | attribute trailer ;
+    generator call trailer $ python.call ::= [ S ] , comprehension paren , [ S ] , generator , [ S ] , close paren ;
+    generator $ language.function.argument ::= generator expression ;
+    generator expression $ python.list.comprehension ::= expression , { [ S ] , comprehension clause } + ;
+    call trailer $ python.call ::= [ S ] , open paren , [ S ] , [ argument , { [ S ] , comma , [ S ] , argument } , [ [ S ] , comma ] ] , [ S ] , close paren ;
+    argument $ language.function.argument ::= [ keyword , [ S ] , assign , [ S ] ] , expression ;
+    keyword ::= identifier | int | float | str | bool | range | object ;
+    subscript trailer $ python.subscript ::= [ S ] , open bracket , [ S ] , subscript item , { [ S ] , comma , [ S ] , subscript item } , [ [ S ] , comma ] , [ S ] , close bracket ;
+    subscript item $ language.function.argument ::= slice | expression ;
+    slice $ python.slice ::= [ expression ] , [ S ] , colon , [ S ] , [ expression ] , [ [ S ] , colon , [ S ] , [ expression ] ] ;
+    attribute trailer $ python.attribute ::= [ S ] , dot , [ S ] , ( identifier | int | float | str | bool | range | object ) ;
+
+    atom ::= 
+        empty tuple | ( open paren , [ S ] , ( tuple display | expression ) , [ S ] , close paren ) | list comprehension | list display | dict display |
+        ellipsis value | none value | true | false | builtin name | math operand ;
+    empty tuple $ python.tuple.empty ::= open paren , [ S ] , close paren ;
+    tuple display $ python.tuple ::= item , ( ( { [ S ] , comma , [ S ] , item } + , [ [ S ] , comma ] ) | ( [ S ] , comma ) ) ;
+    list comprehension $ python.list.comprehension ::= 
+        comprehension bracket , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close bracket ;
+    comprehension bracket $ python.comprehension.start ::= open bracket ;
+    comprehension paren $ python.comprehension.start ::= open paren ;
+    comprehension clause ::= comprehension for | comprehension if ;
+    comprehension for $ python.comprehension.for ::= for , S , target list , S , in , S , or test ;
+    comprehension if $ python.comprehension.if ::= if , S , or test ;
+    list display $ python.list ::= open bracket , [ S ] , [ item , { [ S ] , comma , [ S ] , item } , [ [ S ] , comma ] ] , [ S ] , close bracket ;
+    dict display $ python.dict ::= open brace , [ S ] , [ item , [ S ] , colon , [ S ] , item , { [ S ] , comma , [ S ] , item , [ S ] , colon , [ S ] , item } , [ [ S ] , comma ] ] , [ S ] , close brace ;
+    item $ language.function.argument ::= expression ;
+    ellipsis value $ python.ellipsis ::= ellipsis ;
+    none value $ python.none ::= none ;
+    builtin name $ python.builtin ::= int | float | str | bool | range | object ;
+    math operand $ math.expression.operand ::= number | id | string literal ;
 
     number $ math.universal.real ::= positive real ;
     number $ math.universal.integer ::= positive integer ;
 
-    type ::= int | float | str | bool | none ;
+    type ::= int type | float type | str type | bool type | none type | object type ;
+    int type $ language.type.i64 ::= int ;
+    float type $ language.type.double ::= float ;
+    str type $ language.type.string ::= str ;
+    bool type $ language.type.boolean ::= bool ;
+    none type $ language.type.void ::= none ;
+    object type $ language.type.object ::= ( object | identifier ) , { [ S ] , dot , [ S ] , identifier } ;
 }$
