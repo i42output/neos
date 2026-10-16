@@ -151,6 +151,16 @@ namespace neos
         return false;
     }
 
+    bool context::restricted() const
+    {
+        return iRestricted;
+    }
+
+    void context::set_restricted(bool aRestricted)
+    {
+        iRestricted = aRestricted;
+    }
+
     void context::run()
     {
         if (text().empty())
@@ -161,7 +171,7 @@ namespace neos
                 (**t).join();
             t = iThreads.erase(t);
         }
-        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), std::cin));
+        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), std::cin, iRestricted));
         iThreads.back()->join(); // run to completion: the program reads std::cin, so the console must not read it concurrently
     }
 

@@ -850,13 +850,24 @@ namespace neos::language
                         if constexpr (std::is_same_v<value_type, ibig>)
                         {
                             result.t = type::Ibig;
+                            auto const text = d.value().value().to_string();
                             try
                             {
-                                result.i = std::stoll(d.value().value().to_string());
+                                result.i = std::stoll(text);
                             }
                             catch (std::out_of_range const&)
                             {
-                                throw std::runtime_error("integer literal out of range: " + d.value().value().to_string());
+                                // (literals up to the u64 maximum: the bits of an unsigned 64 bit value)
+                                try
+                                {
+                                    if (text.empty() || text[0] == '-')
+                                        throw std::out_of_range{ text };
+                                    result.i = static_cast<std::int64_t>(std::stoull(text));
+                                }
+                                catch (std::out_of_range const&)
+                                {
+                                    throw std::runtime_error("integer literal out of range: " + text);
+                                }
                             }
                         }
                         else if constexpr (std::is_same_v<value_type, fbig>)

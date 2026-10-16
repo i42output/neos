@@ -60,6 +60,11 @@ namespace neos
         program_t& program();
         const text& text() const;
     public:
+        // restricted mode (off by default): programs cannot call runtime plugin functions that can change the host 
+        // environment (e.g. file I/O)
+        bool restricted() const;
+        void set_restricted(bool aRestricted);
+    public:
         bool running() const final;
         void run() final;
         language::data_type evaluate(std::string const& aExpression) final;
@@ -79,5 +84,6 @@ namespace neos
         language::compiler iCompiler;
         program_t iProgram;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
+        bool iRestricted = false;
     };
 }

@@ -25,6 +25,8 @@
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\text.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\vm.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\jit.hpp" />
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\runtime_plugins.hpp" />
+    <ClInclude Include="..\..\..\..\..\include\neos\runtime\plugin.h" />
     <ClInclude Include="..\..\..\..\..\include\neos\context.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\fwd.hpp" />
     <ClInclude Include="..\..\..\..\..\include\neos\i_context.hpp" />
@@ -50,6 +52,7 @@
     <ClCompile Include="..\..\..\..\src\bytecode\text.cpp" />
     <ClCompile Include="..\..\..\..\src\bytecode\vm.cpp" />
     <ClCompile Include="..\..\..\..\src\bytecode\jit.cpp" />
+    <ClCompile Include="..\..\..\..\src\bytecode\runtime_plugins.cpp" />
     <ClCompile Include="..\..\..\..\src\compiler.cpp" />
     <ClCompile Include="..\..\..\..\src\neos.cpp" />
     <ClCompile Include="..\..\..\..\src\schema.cpp" />
@@ -66,6 +69,7 @@
     <None Include="..\..\..\..\languages\examples\Python\hello.py" />
     <None Include="..\..\..\..\languages\examples\Python\literal.py" />
     <None Include="..\..\..\..\languages\neoscript.neos" />
+    <None Include="..\..\..\..\languages\packages\neoscript\c.neo" />
     <None Include="..\..\..\..\languages\packages\neoscript\neo.stream.neo" />
     <None Include="..\..\..\..\languages\packages\neoscript\neo.string.neo" />
   </ItemGroup>

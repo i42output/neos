@@ -53,7 +53,9 @@
     character literal $ string.utf8.character ::= 
         ( '\'' , ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) , '\'' ) ;
     string literal ::= 
-        { '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' | '\'' ) ) | escaped character ) } $ string.utf8 , '\"' , [ whitespace ] } + ;
+        { ( empty string , [ whitespace ] ) | 
+          ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | escaped character ) } $ string.utf8 , '\"' , [ whitespace ] ) } + ;
+    empty string $ string.utf8.empty ::= '\"' , '\"' ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
     escaped character $ string.utf8.character.CR ::= "\\r" ;
     escaped character $ string.utf8.character.tab ::= "\\t" ;

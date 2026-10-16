@@ -53,6 +53,8 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << "lc                                       List loaded concept libraries\n"
                 << "t(race) <0|1|2|3|4|5> [<filter>]         Compiler trace\n"
                 << "m(etrics)                                Display metrics for running programs\n"
+                << "restricted [on|off]                      Restricted mode: programs cannot call runtime plugin functions\n"
+                << "                                         that can change the host environment (off by default)\n"
                 << std::flush;
         }
         else if (command == "s" || command == "schema")
@@ -112,6 +114,16 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 if (conceptLibrary.second()->depth() == 0)
                     print_concept_library(print_concept_library, *conceptLibrary.second());
         }
+        else if (command == "restricted")
+        {
+            if (parameters == "on")
+                aContext.set_restricted(true);
+            else if (parameters == "off")
+                aContext.set_restricted(false);
+            else if (!parameters.empty())
+                throw std::runtime_error("restricted: expected 'on' or 'off'");
+            std::cout << "Restricted mode: " << (aContext.restricted() ? "on" : "off") << std::endl;
+        }
         else if (command == "t" || command == "trace")
         {
             if (words.size() >= 2)
@@ -167,6 +179,8 @@ void main_loop(boost::program_options::variables_map& aOptions)
             if (aOptions.count("load"))
                 for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
                     process_command(context, interactive, "l " + p);
+            if (aOptions.count("restricted"))
+                process_command(context, interactive, "restricted on");
             if (aOptions.count("c") || aOptions.count("compile"))
                 process_command(context, interactive, "c");
         }
@@ -187,6 +201,7 @@ int main(int argc, char* argv[])
             ("schema,s", boost::program_options::value<std::string>(), "language schema")
             ("trace,t", boost::program_options::value<uint32_t>(), "compiler trace")
             ("compile,c", "compile program")
+            ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
             ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
         boost::program_options::positional_options_description positionalOptionsDescription;
         positionalOptionsDescription.add("load", -1);

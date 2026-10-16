@@ -1,0 +1,28 @@
+// neoscript example: calling the C runtime (the runtime plugin neos.runtime.c)
+
+using neo.string;
+using neo.stream;
+using c;
+
+// functions are pure
+fn millionths(x : f64) -> i32
+{
+    i32 n = c::round(x * 1000000.0);
+    return n;
+}
+
+// procedures are impure
+proc main()
+    name : string;
+{
+    neo::print("sqrt(2) = " + neo::to_string(millionths(c::sqrt(2.0))) + " millionths\n");
+    neo::print("hypot(3, 4) = " + neo::to_string(millionths(c::hypot(3.0, 4.0)) / 1000000) + "\n");
+    neo::print("atan2(1, 1) * 4 = " + neo::to_string(millionths(c::atan2(1.0, 1.0) * 4.0)) + " millionths\n");
+    neo::print("atoi(255) = " + neo::to_string(c::atoi("255")) + "\n");
+    name = "neoscript";
+    neo::print("strlen(" + name + ") = " + neo::to_string(c::strlen(name)) + "\n");
+    neo::print("strstr = " + c::strstr("the quick brown fox", "brown") + "\n");
+    neo::print("toupper('a') = " + neo::to_string(c::toupper('a')) + "\n");
+    neo::print("ctime(0) = " + c::ctime(0) + "\n");
+    c::puts("puts: hello from the C runtime");
+}

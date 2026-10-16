@@ -44,6 +44,12 @@
     <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\jit.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\bytecode\vm\runtime_plugins.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\..\..\include\neos\runtime\plugin.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\..\..\..\include\neos\language\ast.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -115,6 +121,9 @@
     <ClCompile Include="..\..\..\..\src\bytecode\jit.cpp">
       <Filter>Source Files\bytecode</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\..\..\src\bytecode\runtime_plugins.cpp">
+      <Filter>Source Files\bytecode</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\..\..\languages\Calculator.neos">
@@ -151,6 +160,9 @@
       <Filter>Languages\Examples</Filter>
     </None>
     <None Include="..\..\..\..\languages\packages\neoscript\neo.string.neo">
+      <Filter>Languages\Packages</Filter>
+    </None>
+    <None Include="..\..\..\..\languages\packages\neoscript\c.neo">
       <Filter>Languages\Packages</Filter>
     </None>
     <None Include="..\..\..\..\languages\packages\neoscript\neo.stream.neo">

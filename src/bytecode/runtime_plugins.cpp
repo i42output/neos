@@ -1,0 +1,484 @@
+/*
+  runtime_plugins.cpp
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  This program is free software: you can redistribute it and / or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include <neos/neos.hpp>
+#include <cstring>
+#include <cstdlib>
+#include <mutex>
+#include <memory>
+#include <map>
+#include <stdexcept>
+#include <filesystem>
+#include <optional>
+#define NEOS_RUNTIME_PLUGIN_HOST
+#include <neos/runtime/plugin.h>
+#include <neos/bytecode/vm/runtime_plugins.hpp>
+
+#if __has_include(<ffi.h>) && !defined(NEOS_NO_LIBFFI)
+#if defined(NEOS_LIBFFI_STATIC) // (linking libffi statically: its declarations must not be dllimport on Windows)
+#ifndef FFI_BUILDING
+#define FFI_BUILDING
+#endif
+#ifndef FFI_STATIC_BUILD
+#define FFI_STATIC_BUILD
+#endif
+#endif
+#include <ffi.h>
+#define NEOS_HAVE_LIBFFI 1
+#if defined(_MSC_VER)
+#ifndef NEOS_LIBFFI_LIB
+#define NEOS_LIBFFI_LIB "libffi.lib"
+#endif
+#pragma comment(lib, NEOS_LIBFFI_LIB)
+#endif
+#endif
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+namespace neos
+{
+    namespace bytecode
+    {
+        namespace vm
+        {
+            namespace runtime
+            {
+                struct function
+                {
+                    std::string name;
+                    neos_rt_function const* description = nullptr;
+#if defined(NEOS_HAVE_LIBFFI)
+                    std::vector<ffi_type*> parameterTypes;
+                    ffi_cif cif = {};
+#endif
+                };
+
+                namespace
+                {
+                    constexpr std::uint8_t I32 = 0x7Fu;
+                    constexpr std::uint8_t I64 = 0x7Eu;
+                    constexpr std::uint8_t F32 = 0x7Du;
+                    constexpr std::uint8_t F64 = 0x7Cu;
+
+                    // the WebAssembly value type of a plugin type (0 for void)
+                    std::uint8_t value_type(neos_rt_type aType)
+                    {
+                        switch (aType)
+                        {
+                        case NEOS_RT_VOID: return 0u;
+                        case NEOS_RT_BOOL:
+                        case NEOS_RT_CHAR:
+                        case NEOS_RT_I32:
+                        case NEOS_RT_U32:
+                        case NEOS_RT_STRING: return I32;
+                        case NEOS_RT_I64:
+                        case NEOS_RT_U64: return I64;
+                        case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? I64 : I32;
+                        case NEOS_RT_F32: return F32;
+                        case NEOS_RT_F64: return F64;
+                        }
+                        throw std::runtime_error("invalid runtime plugin type");
+                    }
+
+                    std::string type_name(std::uint8_t aValueType)
+                    {
+                        switch (aValueType)
+                        {
+                        case I32: return "i32";
+                        case I64: return "i64";
+                        case F32: return "f32";
+                        case F64: return "f64";
+                        default: return "void";
+                        }
+                    }
+
+#if defined(NEOS_HAVE_LIBFFI)
+                    ffi_type* ffi_type_of(neos_rt_type aType)
+                    {
+                        switch (aType)
+                        {
+                        case NEOS_RT_VOID: return &ffi_type_void;
+                        case NEOS_RT_BOOL: return sizeof(bool) == 1u ? &ffi_type_uint8 : &ffi_type_uint32;
+                        case NEOS_RT_CHAR: return &ffi_type_schar;
+                        case NEOS_RT_I32: return &ffi_type_sint32;
+                        case NEOS_RT_U32: return &ffi_type_uint32;
+                        case NEOS_RT_I64: return &ffi_type_sint64;
+                        case NEOS_RT_U64: return &ffi_type_uint64;
+                        case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? &ffi_type_uint64 : &ffi_type_uint32;
+                        case NEOS_RT_F32: return &ffi_type_float;
+                        case NEOS_RT_F64: return &ffi_type_double;
+                        case NEOS_RT_STRING: return &ffi_type_pointer;
+                        }
+                        throw std::runtime_error("invalid runtime plugin type");
+                    }
+#endif
+
+                    std::optional<std::string> environment_variable(char const* aName)
+                    {
+#if defined(_MSC_VER)
+                        char* buffer = nullptr;
+                        std::size_t size = 0u;
+                        if (::_dupenv_s(&buffer, &size, aName) != 0 || buffer == nullptr)
+                            return {};
+                        std::string const result{ buffer };
+                        std::free(buffer);
+                        return result;
+#else
+                        if (auto const value = std::getenv(aName))
+                            return std::string{ value };
+                        return {};
+#endif
+                    }
+
+                    std::optional<std::filesystem::path> executable_directory()
+                    {
+                        try
+                        {
+#if defined(_WIN32)
+                            std::wstring path(32768u, L'\0');
+                            auto const length = ::GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+                            if (length == 0u || length >= path.size())
+                                return {};
+                            path.resize(length);
+                            return std::filesystem::path{ path }.parent_path();
+#elif defined(__linux__)
+                            return std::filesystem::read_symlink("/proc/self/exe").parent_path();
+#else
+                            return {};
+#endif
+                        }
+                        catch (...)
+                        {
+                            return {};
+                        }
+                    }
+
+                    std::vector<std::filesystem::path> search_path()
+                    {
+                        std::vector<std::filesystem::path> result;
+                        if (auto const list = environment_variable("NEOS_RUNTIME_PLUGIN_PATH"))
+                        {
+#if defined(_WIN32)
+                            char const separator = ';';
+#else
+                            char const separator = ':';
+#endif
+                            std::size_t start = 0u;
+                            for (;;)
+                            {
+                                auto const end = list->find(separator, start);
+                                auto const entry = list->substr(start, end == std::string::npos ? std::string::npos : end - start);
+                                if (!entry.empty())
+                                    result.push_back(std::filesystem::path{ entry });
+                                if (end == std::string::npos)
+                                    break;
+                                start = end + 1u;
+                            }
+                        }
+                        if (auto const directory = executable_directory())
+                        {
+                            result.push_back(*directory);
+                            result.push_back(*directory / "plugins");
+                        }
+                        return result;
+                    }
+
+                    class library
+                    {
+                    public:
+                        explicit library(std::filesystem::path const& aPath)
+                        {
+#if defined(_WIN32)
+                            iHandle = ::LoadLibraryExW(aPath.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+#else
+                            iHandle = ::dlopen(aPath.string().c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+                        }
+                        ~library()
+                        {
+                            // (plugins stay loaded: functions may still be in use by other threads)
+                        }
+                    public:
+                        bool loaded() const
+                        {
+                            return iHandle != nullptr;
+                        }
+                        void* symbol(char const* aName) const
+                        {
+#if defined(_WIN32)
+                            return reinterpret_cast<void*>(::GetProcAddress(static_cast<HMODULE>(iHandle), aName));
+#else
+                            return ::dlsym(iHandle, aName);
+#endif
+                        }
+                    private:
+#if defined(_WIN32)
+                        HMODULE iHandle = nullptr;
+#else
+                        void* iHandle = nullptr;
+#endif
+                    };
+
+                    struct plugin
+                    {
+                        std::unique_ptr<library> lib;
+                        neos_rt_plugin const* description = nullptr;
+                        std::map<std::string, function> functions;
+                    };
+
+                    class registry
+                    {
+                    public:
+                        static registry& instance()
+                        {
+                            static registry sRegistry;
+                            return sRegistry;
+                        }
+                    public:
+                        function const& resolve(std::string const& aImport)
+                        {
+                            std::lock_guard<std::recursive_mutex> lock{ iMutex };
+                            auto const separator = aImport.rfind("::");
+                            if (separator == std::string::npos)
+                                throw std::runtime_error("unresolved import '" + aImport + "'");
+                            std::string ns = aImport.substr(0u, separator);
+                            std::string const name = aImport.substr(separator + 2u);
+                            auto& p = load(ns);
+                            auto const f = p.functions.find(name);
+                            if (f == p.functions.end())
+                                throw std::runtime_error("unresolved import '" + aImport + "': runtime plugin '" + file_stem(ns) + "' has no function '" + name + "'");
+                            return f->second;
+                        }
+                    private:
+                        static std::string file_stem(std::string const& aNamespace)
+                        {
+                            std::string stem = "neos.runtime.";
+                            for (std::size_t i = 0u; i < aNamespace.size(); ++i)
+                            {
+                                if (aNamespace.compare(i, 2u, "::") == 0)
+                                {
+                                    stem += '.';
+                                    ++i;
+                                }
+                                else
+                                    stem += aNamespace[i];
+                            }
+                            return stem;
+                        }
+                        plugin& load(std::string const& aNamespace)
+                        {
+                            auto existing = iPlugins.find(aNamespace);
+                            if (existing != iPlugins.end())
+                                return existing->second;
+#if !defined(NEOS_HAVE_LIBFFI)
+                            throw std::runtime_error("cannot load runtime plugin '" + file_stem(aNamespace) + "': neos was built without libffi");
+#else
+                            auto const stem = file_stem(aNamespace);
+#if defined(_WIN32)
+                            auto const fileName = stem + ".dll";
+#elif defined(__APPLE__)
+                            auto const fileName = stem + ".dylib";
+#else
+                            auto const fileName = stem + ".so";
+#endif
+                            for (auto const& directory : search_path())
+                            {
+                                auto const path = directory / fileName;
+                                std::error_code ec;
+                                if (!std::filesystem::is_regular_file(path, ec))
+                                    continue;
+                                auto lib = std::make_unique<library>(path);
+                                if (!lib->loaded())
+                                    throw std::runtime_error("cannot load runtime plugin '" + path.string() + "'");
+                                auto const entry = reinterpret_cast<neos_rt_plugin_entry>(lib->symbol(NEOS_RUNTIME_PLUGIN_ENTRY_NAME));
+                                if (entry == nullptr)
+                                    throw std::runtime_error("'" + path.string() + "' is not a runtime plugin (no " NEOS_RUNTIME_PLUGIN_ENTRY_NAME " export)");
+                                auto const description = entry();
+                                if (description == nullptr || description->version != NEOS_RUNTIME_PLUGIN_VERSION)
+                                    throw std::runtime_error("runtime plugin '" + path.string() + "' has an unsupported version (" + 
+                                        (description != nullptr ? std::to_string(description->version) : std::string{ "?" }) + "; neos supports " + 
+                                        std::to_string(NEOS_RUNTIME_PLUGIN_VERSION) + ")");
+                                if (description->name == nullptr || aNamespace != description->name)
+                                    throw std::runtime_error("runtime plugin '" + path.string() + "' is not for namespace '" + aNamespace + "'");
+                                plugin p;
+                                p.description = description;
+                                for (unsigned i = 0u; i < description->functionCount; ++i)
+                                {
+                                    auto const& d = description->functions[i];
+                                    if (d.name == nullptr || d.function == nullptr || d.parameterCount > NEOS_RT_MAX_PARAMETERS)
+                                        throw std::runtime_error("runtime plugin '" + path.string() + "' has an invalid function description");
+                                    function f;
+                                    f.name = aNamespace + "::" + d.name;
+                                    f.description = &d;
+                                    for (unsigned a = 0u; a < d.parameterCount; ++a)
+                                    {
+                                        if (d.parameters[a] == NEOS_RT_VOID)
+                                            throw std::runtime_error("runtime plugin function '" + f.name + "' has a void parameter");
+                                        f.parameterTypes.push_back(ffi_type_of(d.parameters[a]));
+                                    }
+                                    (void)value_type(d.result); // (validates)
+                                    auto& added = p.functions.emplace(d.name, std::move(f)).first->second;
+                                    if (::ffi_prep_cif(&added.cif, FFI_DEFAULT_ABI, d.parameterCount, ffi_type_of(d.result),
+                                        added.parameterTypes.empty() ? nullptr : added.parameterTypes.data()) != FFI_OK)
+                                        throw std::runtime_error("runtime plugin function '" + added.name + "': unsupported signature");
+                                }
+                                p.lib = std::move(lib);
+                                return iPlugins.emplace(aNamespace, std::move(p)).first->second;
+                            }
+                            throw std::runtime_error("runtime plugin '" + fileName + "' not found (searched NEOS_RUNTIME_PLUGIN_PATH and the executable's directory)");
+#endif
+                        }
+                    private:
+                        std::recursive_mutex iMutex;
+                        std::map<std::string, plugin> iPlugins;
+                    };
+                }
+
+                bool available()
+                {
+#if defined(NEOS_HAVE_LIBFFI)
+                    return true;
+#else
+                    return false;
+#endif
+                }
+
+                function const& resolve(std::string const& aImport, std::vector<std::uint8_t> const& aParameters, std::vector<std::uint8_t> const& aResults)
+                {
+                    auto const& f = registry::instance().resolve(aImport);
+                    auto const& d = *f.description;
+                    auto signature = [](std::vector<std::uint8_t> const& aParameters, std::vector<std::uint8_t> const& aResults)
+                    {
+                        std::string result = "(";
+                        for (std::size_t i = 0u; i < aParameters.size(); ++i)
+                            result += (i == 0u ? "" : ", ") + type_name(aParameters[i]);
+                        result += ") -> ";
+                        result += aResults.empty() ? "void" : type_name(aResults[0]);
+                        return result;
+                    };
+                    std::vector<std::uint8_t> parameters;
+                    for (unsigned i = 0u; i < d.parameterCount; ++i)
+                        parameters.push_back(value_type(d.parameters[i]));
+                    std::vector<std::uint8_t> results;
+                    if (d.result != NEOS_RT_VOID)
+                        results.push_back(value_type(d.result));
+                    if (parameters != aParameters || results != aResults)
+                        throw std::runtime_error("import '" + aImport + "' " + signature(aParameters, aResults) +
+                            " does not match the runtime plugin function " + signature(parameters, results));
+                    return f;
+                }
+
+                bool restricted(function const& aFunction)
+                {
+                    return (aFunction.description->flags & NEOS_RT_RESTRICTED) != 0u;
+                }
+
+                std::vector<value> call(function const& aFunction, std::vector<value> const& aArguments, marshaller const& aMarshaller)
+                {
+#if !defined(NEOS_HAVE_LIBFFI)
+                    (void)aFunction; (void)aArguments; (void)aMarshaller;
+                    throw std::runtime_error("neos was built without libffi");
+#else
+                    auto const& d = *aFunction.description;
+                    if (aArguments.size() != d.parameterCount)
+                        throw std::runtime_error("wrong number of arguments for '" + aFunction.name + "'");
+                    union argument
+                    {
+                        bool b;
+                        signed char c;
+                        std::int32_t i32;
+                        std::uint32_t u32;
+                        std::int64_t i64;
+                        std::uint64_t u64;
+                        std::size_t size;
+                        float f32;
+                        double f64;
+                        char const* string;
+                    };
+                    argument arguments[NEOS_RT_MAX_PARAMETERS];
+                    void* pointers[NEOS_RT_MAX_PARAMETERS];
+                    std::string strings[NEOS_RT_MAX_PARAMETERS];
+                    for (unsigned i = 0u; i < d.parameterCount; ++i)
+                    {
+                        auto& a = arguments[i];
+                        auto const v = aArguments[i];
+                        switch (d.parameters[i])
+                        {
+                        case NEOS_RT_BOOL: a.b = static_cast<std::uint32_t>(v) != 0u; break;
+                        case NEOS_RT_CHAR: a.c = static_cast<signed char>(static_cast<std::uint8_t>(v)); break;
+                        case NEOS_RT_I32: a.i32 = static_cast<std::int32_t>(static_cast<std::uint32_t>(v)); break;
+                        case NEOS_RT_U32: a.u32 = static_cast<std::uint32_t>(v); break;
+                        case NEOS_RT_I64: a.i64 = static_cast<std::int64_t>(v); break;
+                        case NEOS_RT_U64: a.u64 = v; break;
+                        case NEOS_RT_SIZE: a.size = static_cast<std::size_t>(v); break;
+                        case NEOS_RT_F32: { auto const bits = static_cast<std::uint32_t>(v); std::memcpy(&a.f32, &bits, sizeof(a.f32)); } break;
+                        case NEOS_RT_F64: std::memcpy(&a.f64, &v, sizeof(a.f64)); break;
+                        case NEOS_RT_STRING:
+                            strings[i] = aMarshaller.readString(static_cast<std::uint32_t>(v));
+                            a.string = strings[i].c_str();
+                            break;
+                        default:
+                            break;
+                        }
+                        pointers[i] = &a;
+                    }
+                    union result
+                    {
+                        ffi_arg integral;
+                        ffi_sarg signedIntegral;
+                        std::int64_t i64;
+                        std::uint64_t u64;
+                        float f32;
+                        double f64;
+                        char const* string;
+                        unsigned char storage[16];
+                    } r;
+                    std::memset(&r, 0, sizeof(r));
+                    ::ffi_call(const_cast<ffi_cif*>(&aFunction.cif), reinterpret_cast<void(*)(void)>(d.function), &r, pointers);
+                    switch (d.result)
+                    {
+                    case NEOS_RT_VOID: return {};
+                    case NEOS_RT_BOOL: return { static_cast<value>((r.integral & 0xFFu) != 0u ? 1u : 0u) };
+                    case NEOS_RT_CHAR: return { static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<signed char>(r.signedIntegral)))) };
+                    case NEOS_RT_I32: return { static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(r.signedIntegral))) };
+                    case NEOS_RT_U32: return { static_cast<value>(static_cast<std::uint32_t>(r.integral)) };
+                    case NEOS_RT_I64: return { static_cast<value>(sizeof(ffi_arg) >= 8u ? static_cast<std::uint64_t>(r.signedIntegral) : static_cast<std::uint64_t>(r.i64)) };
+                    case NEOS_RT_U64: return { sizeof(ffi_arg) >= 8u ? static_cast<value>(r.integral) : r.u64 };
+                    case NEOS_RT_SIZE: return { static_cast<value>(static_cast<std::size_t>(r.integral)) };
+                    case NEOS_RT_F32: { std::uint32_t bits; std::memcpy(&bits, &r.f32, sizeof(bits)); return { static_cast<value>(bits) }; }
+                    case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); return { bits }; }
+                    case NEOS_RT_STRING: return { static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string{ r.string } : std::string{})) };
+                    }
+                    return {};
+#endif
+                }
+            }
+        }
+    }
+}

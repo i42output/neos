@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/bytecode/vm/jit.hpp>
+#include <neos/bytecode/vm/runtime_plugins.hpp>
 
 namespace neos
 {
@@ -178,8 +179,8 @@ namespace neos
                 public:
                     static constexpr std::size_t MaxCallDepth = 100000u;
                 public:
-                    machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::uint64_t& aInstructions) :
-                        iOutput{ aOutput }, iInput{ aInput }, iInstructions{ aInstructions }
+                    machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::uint64_t& aInstructions, bool aRestricted) :
+                        iOutput{ aOutput }, iInput{ aInput }, iInstructions{ aInstructions }, iRestricted{ aRestricted }
                     {
                         for (auto b : aText)
                             iModule.push_back(static_cast<std::uint8_t>(b));
@@ -215,7 +216,7 @@ namespace neos
                         module.globalTypes = &iGlobalTypes;
                         return jit::compile(module, [this](std::uint32_t aFunction, std::vector<value> const& aArguments)
                         {
-                            return host(*iFunctions.at(aFunction).import, aArguments);
+                            return call_import(aFunction, aArguments);
                         });
                     }
                     function_type const& type_of(std::uint32_t aFunction) const
@@ -225,7 +226,7 @@ namespace neos
                     std::vector<value> invoke(std::uint32_t aFunction, std::vector<value> aArguments)
                     {
                         if (iFunctions.at(aFunction).import)
-                            return host(*iFunctions.at(aFunction).import, aArguments);
+                            return call_import(aFunction, aArguments);
                         std::vector<value> stack;
                         std::vector<frame> frames;
                         decoded_reader code{ iTokens };
@@ -380,7 +381,7 @@ namespace neos
                                     stack.resize(stack.size() - calleeType.parameters.size());
                                     if (iFunctions.at(callee).import)
                                     {
-                                        auto const r = host(*iFunctions.at(callee).import, arguments);
+                                        auto const r = call_import(callee, arguments);
                                         stack.insert(stack.end(), r.begin(), r.end());
                                     }
                                     else
@@ -632,6 +633,7 @@ namespace neos
                                     function f;
                                     f.type = static_cast<std::uint32_t>(r.u());
                                     f.import = field;
+                                    iImportTypes[field] = f.type;
                                     iFunctions.push_back(f);
                                 }
                                 break;
@@ -988,13 +990,53 @@ namespace neos
                         else if (aName == "abs(f64)")
                             return { of_f64(std::fabs(as_f64(aArguments.at(0)))) };
                         else
-                            throw trap{ "unresolved import '" + aName + "'" };
+                            return runtime_call(aName, aArguments);
                         return {};
+                    }
+                    // an imported function: a host function or a function of a runtime plugin (the latter is resolved 
+                    // once and then called directly)
+                    std::vector<value> call_import(std::uint32_t aFunction, std::vector<value> const& aArguments)
+                    {
+                        if (iImportRuntime.size() <= aFunction)
+                            iImportRuntime.resize(iFunctions.size(), nullptr);
+                        if (auto const runtime = iImportRuntime[aFunction])
+                            return runtime::call(*runtime, aArguments, iMarshaller);
+                        iLastRuntimeFunction = nullptr;
+                        auto result = host(*iFunctions.at(aFunction).import, aArguments);
+                        if (iLastRuntimeFunction != nullptr)
+                            iImportRuntime[aFunction] = iLastRuntimeFunction;
+                        return result;
+                    }
+                    // a function of a runtime plugin (called through libffi)
+                    std::vector<value> runtime_call(std::string const& aName, std::vector<value> const& aArguments)
+                    {
+                        auto resolved = iRuntimeFunctions.find(aName);
+                        if (resolved == iRuntimeFunctions.end())
+                        {
+                            auto const type = iImportTypes.find(aName);
+                            if (type == iImportTypes.end())
+                                throw trap{ "unresolved import '" + aName + "'" };
+                            try
+                            {
+                                auto const& t = iTypes.at(type->second);
+                                auto const& f = runtime::resolve(aName, t.parameters, t.results);
+                                if (iRestricted && runtime::restricted(f))
+                                    throw trap{ "'" + aName + "' is restricted: it can change the host environment and the program is running in restricted mode" };
+                                resolved = iRuntimeFunctions.emplace(aName, &f).first;
+                            }
+                            catch (std::exception const& e)
+                            {
+                                throw trap{ e.what() };
+                            }
+                        }
+                        iLastRuntimeFunction = resolved->second;
+                        return runtime::call(*resolved->second, aArguments, iMarshaller);
                     }
                 private:
                     std::ostream& iOutput;
                     std::istream& iInput;
                     std::uint64_t& iInstructions;
+                    bool const iRestricted; ///< runtime plugin functions that can change the host environment cannot be called
                     std::vector<std::uint8_t> iModule;
                     std::vector<std::uint64_t> iTokens;   ///< decoded function bodies
                     std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end
@@ -1004,6 +1046,15 @@ namespace neos
                     std::vector<std::uint8_t> iMemory;
                     std::vector<value> iGlobals;
                     std::vector<std::uint8_t> iGlobalTypes;
+                    std::unordered_map<std::string, std::uint32_t> iImportTypes;
+                    std::unordered_map<std::string, runtime::function const*> iRuntimeFunctions;
+                    std::vector<runtime::function const*> iImportRuntime;
+                    runtime::function const* iLastRuntimeFunction = nullptr;
+                    runtime::marshaller const iMarshaller
+                    {
+                        [this](std::uint32_t aAddress) { return read_string(aAddress); },
+                        [this](std::string const& aString) { return allocate_string(aString); }
+                    };
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
                     std::optional<std::uint32_t> iHeap;
@@ -1037,7 +1088,7 @@ namespace neos
                 {
                     if (iText.empty())
                         throw exceptions::no_text();
-                    machine m{ iText, iOutput, iInput, iInstructions };
+                    machine m{ iText, iOutput, iInput, iInstructions, iRestricted };
                     auto const entry = m.export_function("main");
                     if (!entry)
                         throw std::runtime_error("no entry point (main)");
