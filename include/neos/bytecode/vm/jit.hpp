@@ -49,15 +49,25 @@ namespace neos
                     std::size_t codeEnd = 0u;   ///< token index
                 };
 
+                // linear memory (updated by the VM when it moves or grows)
+                struct memory
+                {
+                    std::uint8_t* base = nullptr;
+                    std::uint64_t size = 0u;
+                };
+
                 struct module_description
                 {
                     std::vector<function_description> functions;
                     std::vector<std::uint64_t> const* tokens = nullptr; ///< decoded code: an opcode token followed by its immediates
                     std::vector<value>* globals = nullptr;
                     std::vector<std::uint8_t> const* globalTypes = nullptr;
+                    memory const* linearMemory = nullptr;
                 };
 
-                using host_function = std::function<std::vector<value>(std::uint32_t aFunction, std::vector<value> const& aArguments)>;
+                // (an imported function: aBuffer holds its arguments and receives its results; its size is the larger of 
+                // their counts)
+                using host_function = std::function<void(std::uint32_t aFunction, value* aBuffer)>;
 
                 class compiled_module;
                 struct compiled_module_deleter { void operator()(compiled_module* aModule) const; };

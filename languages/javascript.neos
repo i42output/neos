@@ -1,0 +1,254 @@
+%{
+    meta: {
+        language: "javascript"
+        description: "JavaScript (statically typed subset: number, string and boolean values; types are inferred)"
+        source.file.extension: ".js"
+        source.package.specification.file.extension: ".js"
+        source.package.implementation.file.extension: ".js"
+        copyright: "Copyright (C) 2026 Leigh Johnston"
+        version: "0.1.0"
+    }
+
+    stages: {
+        parser : {
+            text : [ "#{" "}#" ]
+            root : program
+        }
+    }
+
+    pipeline: [
+        parser
+    ]
+
+    libraries: [
+        neos.core
+        neos.math.universal
+    ]
+
+    discard: [
+        whitespace
+        hspace
+        comment
+        WS
+    ]
+}%
+
+#{
+    string literal ::=
+        ( '\"' , { ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | U+0009 | escape sequence } , '\"' ) |
+        ( '\'' , { ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | U+0009 | escape sequence } , '\'' ) ;
+    escape sequence ::= '\\' , ( ' ' .. '\xFF' ) ;
+
+    function $ language.keyword ::= potential keyword ::= "function" ;
+    return $ language.keyword ::= potential keyword ::= "return" ;
+    if $ language.keyword ::= potential keyword ::= "if" ;
+    else $ language.keyword ::= potential keyword ::= "else" ;
+    while $ language.keyword ::= potential keyword ::= "while" ;
+    do $ language.keyword ::= potential keyword ::= "do" ;
+    for $ language.keyword ::= potential keyword ::= "for" ;
+    break $ language.keyword ::= potential keyword ::= "break" ;
+    continue $ language.keyword ::= potential keyword ::= "continue" ;
+    let $ language.keyword ::= potential keyword ::= "let" ;
+    const $ language.keyword ::= potential keyword ::= "const" ;
+    var $ language.keyword ::= potential keyword ::= "var" ;
+    typeof $ language.keyword ::= potential keyword ::= "typeof" ;
+    switch $ language.keyword ::= potential keyword ::= "switch" ;
+    case $ language.keyword ::= potential keyword ::= "case" ;
+    default $ language.keyword ::= potential keyword ::= "default" ;
+
+    true $ language.object.boolean.true ::= potential keyword ::= "true" ;
+    false $ language.object.boolean.false ::= potential keyword ::= "false" ;
+
+    numeric literal ::= hex integer | octal integer | binary integer | decimal literal ;
+    hex integer ::= '0' , ( 'x' | 'X' ) , hex digit , { hex digit | ( '_' , hex digit ) } ;
+    octal integer ::= '0' , ( 'o' | 'O' ) , octal digit , { octal digit | ( '_' , octal digit ) } ;
+    binary integer ::= '0' , ( 'b' | 'B' ) , binary digit , { binary digit | ( '_' , binary digit ) } ;
+    decimal literal ::=
+        ( decimal digits , [ '.' , [ decimal digits ] ] , [ exponent part ] ) | ( '.' , decimal digits , [ exponent part ] ) ;
+    decimal digits ::= digit , { digit | ( '_' , digit ) } ;
+    exponent part ::= ( 'e' | 'E' ) , [ '+' | '-' ] , decimal digits ;
+    digit ::= '0' .. '9' ;
+    hex digit ::= '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' ;
+    octal digit ::= '0' .. '7' ;
+    binary digit ::= '0' | '1' ;
+
+    identifier $ language.identifier ::= name ;
+    name ::= ( alpha | '_' | '$' ) , { alphanumeric | '_' | '$' } ;
+    potential keyword ::= { alphanumeric | '_' | '$' } + ;
+
+    alpha ::= 'A' .. 'Z' | 'a' .. 'z' ;
+    alphanumeric ::= alpha | '0' .. '9' ;
+
+    comment $ language.comment ::= line comment | block comment ;
+    line comment ::= "//" , { ! U+000A .. U+000A } ;
+    block comment ::= "/*" , { ( ! U+002A .. U+002A ) | ( { '*' } + , ( ! U+002F .. U+002F ) ) } , { '*' } + , '/' ;
+    whitespace $ language.whitespace ::= { U+0020 | U+000A | U+000D | U+0009 | comment } + ;
+    hspace ::= { U+0020 | U+0009 | block comment } + ;
+
+    open paren ::= "(" ;
+    close paren ::= ")" ;
+    open brace ::= "{" ;
+    close brace ::= "}" ;
+    open bracket ::= "[" ;
+    close bracket ::= "]" ;
+    comma ::= "," ;
+    semicolon ::= ";" ;
+    colon ::= ":" ;
+    question ::= "?" ;
+    dot ::= "." ;
+    backtick ::= "`" ;
+    dollar brace ::= "${" ;
+
+    strict equal ::= "===" ;
+    strict not equal ::= "!==" ;
+    equal ::= "==" ;
+    not equal ::= "!=" ;
+    less than or equal ::= "<=" ;
+    greater than or equal ::= ">=" ;
+    less than ::= "<" ;
+    greater than ::= ">" ;
+    shift left ::= "<<" ;
+    shift right unsigned ::= ">>>" ;
+    shift right ::= ">>" ;
+    logical and ::= "&&" ;
+    logical or ::= "||" ;
+    logical not ::= "!" ;
+    bitwise and ::= "&" ;
+    bitwise or ::= "|" ;
+    bitwise xor ::= "^" ;
+    bitwise not ::= "~" ;
+    power ::= "**" ;
+    increment ::= "++" ;
+    decrement ::= "--" ;
+    plus ::= "+" ;
+    minus ::= "-" ;
+    multiply ::= "*" ;
+    divide ::= "/" ;
+    remainder ::= "%" ;
+
+    assignment operator ::=
+        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | ">>>=" | "&=" | "|=" | "^=" ;
+
+    program $ javascript.module ::= WS , { source element , WS } ;
+    source element ::= function declaration | global statement ;
+    global statement $ javascript.statement.global ::= global declaration | statement ;
+    global declaration ::=
+        ( ( let $ javascript.declaration.global.let ) | ( const $ javascript.declaration.global.const ) | ( var $ javascript.declaration.global.var ) ) ,
+        WS , declarators , terminator ;
+
+    function declaration $ language.function ::= function $ javascript.function , WS , function signature , WS , function body ;
+    function signature $ language.function.signature ::=
+        identifier $ language.function.name , WS , open paren , WS , parameters , WS , close paren ;
+    parameters $ language.function.parameters ::= [ parameter , { WS , comma , WS , parameter } ] ;
+    parameter $ language.function.parameter ::= identifier ;
+    function body $ language.function.body ::= function scope ;
+    function scope $ language.function.scope ::=
+        open brace $ language.scope.open , WS , { statement , WS } , close brace $ language.scope.close ;
+
+    statement ::=
+        block | variable statement | if statement | while statement | do statement | for statement | switch statement |
+        return statement | break statement | continue statement | empty statement | expression statement ;
+    block $ language.scope ::= open brace , WS , { statement , WS } , close brace ;
+    variable statement ::= declaration , terminator ;
+    declaration ::=
+        ( ( let $ javascript.declaration.let ) | ( const $ javascript.declaration.const ) | ( var $ javascript.declaration.var ) ) ,
+        WS , declarators ;
+    declarators ::= declarator , { WS , comma , WS , declarator } ;
+    declarator $ javascript.declarator ::= name , [ WS , "=" , WS , assignment expression ] ;
+    empty statement $ javascript.statement.empty ::= semicolon ;
+    expression statement $ javascript.statement ::= expression , terminator ;
+    if statement $ javascript.if ::=
+        if , WS , open paren , WS , expression , WS , close paren , WS , statement , [ WS , else , WS , statement ] ;
+    while statement $ javascript.while ::=
+        while , WS , open paren , WS , while test , WS , close paren , WS , statement ;
+    while test $ javascript.for.test ::= expression ;
+    do statement $ javascript.do ::=
+        do , WS , statement , WS , while , WS , open paren , WS , expression , WS , close paren , terminator ;
+    for statement $ javascript.for ::=
+        for , WS , open paren , WS , [ for init ] , WS , semicolon , WS , [ for test ] , WS , semicolon , WS , [ for update ] , WS ,
+        close paren , WS , statement ;
+    for init ::= declaration | for expression ;
+    for expression $ javascript.statement ::= expression ;
+    for test $ javascript.for.test ::= expression ;
+    for update $ javascript.statement ::= expression ;
+    switch statement $ javascript.switch ::=
+        switch , WS , open paren , WS , expression , WS , close paren , WS , open brace , WS , { ( case label | default label | statement ) , WS } , close brace ;
+    case label $ javascript.case ::= case , WS , expression , WS , colon ;
+    default label $ javascript.case.default ::= default , WS , colon ;
+    return statement $ javascript.return ::= return , [ [ hspace ] , expression ] , terminator ;
+    break statement $ javascript.break ::= break , terminator ;
+    continue statement $ javascript.continue ::= continue , terminator ;
+    terminator ::= [ WS , semicolon ] ;
+
+    expression ::= assignment expression ;
+    assignment expression ::= assignment | conditional expression ;
+    assignment $ javascript.assignment ::= name , WS , assignment operator , WS , assignment expression ;
+    conditional expression ::= conditional | logical or expression ;
+    conditional $ javascript.conditional ::= 
+        logical or expression , WS , question , WS , assignment expression , WS , colon , WS , assignment expression ;
+    logical or expression ::= logical and expression , { WS , logical or tail } ;
+    logical or tail $ javascript.operator.logical.or ::= logical or , WS , logical and expression ;
+    logical and expression ::= bitwise or expression , { WS , logical and tail } ;
+    logical and tail $ javascript.operator.logical.and ::= logical and , WS , bitwise or expression ;
+    bitwise or expression ::= bitwise xor expression , { WS , bitwise or tail } ;
+    bitwise or tail $ javascript.operator.bitwise.or ::= bitwise or , WS , bitwise xor expression ;
+    bitwise xor expression ::= bitwise and expression , { WS , bitwise xor tail } ;
+    bitwise xor tail $ javascript.operator.bitwise.xor ::= bitwise xor , WS , bitwise and expression ;
+    bitwise and expression ::= equality expression , { WS , bitwise and tail } ;
+    bitwise and tail $ javascript.operator.bitwise.and ::= bitwise and , WS , equality expression ;
+    equality expression ::= relational expression , { WS , ( strict equal tail | strict not equal tail | equal tail | not equal tail ) } ;
+    strict equal tail $ javascript.operator.equal.strict ::= strict equal , WS , relational expression ;
+    strict not equal tail $ javascript.operator.notequal.strict ::= strict not equal , WS , relational expression ;
+    equal tail $ javascript.operator.equal ::= equal , WS , relational expression ;
+    not equal tail $ javascript.operator.notequal ::= not equal , WS , relational expression ;
+    relational expression ::= shift expression , { WS , ( less than or equal tail | greater than or equal tail | less than tail | greater than tail ) } ;
+    less than or equal tail $ javascript.operator.lessthanorequal ::= less than or equal , WS , shift expression ;
+    greater than or equal tail $ javascript.operator.greaterthanorequal ::= greater than or equal , WS , shift expression ;
+    less than tail $ javascript.operator.lessthan ::= less than , WS , shift expression ;
+    greater than tail $ javascript.operator.greaterthan ::= greater than , WS , shift expression ;
+    shift expression ::= additive expression , { WS , ( shift left tail | shift right unsigned tail | shift right tail ) } ;
+    shift left tail $ javascript.operator.shift.left ::= shift left , WS , additive expression ;
+    shift right unsigned tail $ javascript.operator.shift.right.unsigned ::= shift right unsigned , WS , additive expression ;
+    shift right tail $ javascript.operator.shift.right ::= shift right , WS , additive expression ;
+    additive expression ::= multiplicative expression , { WS , ( add tail | subtract tail ) } ;
+    add tail $ javascript.operator.add ::= plus , WS , multiplicative expression ;
+    subtract tail $ javascript.operator.subtract ::= minus , WS , multiplicative expression ;
+    multiplicative expression ::= exponent expression , { WS , ( multiply tail | divide tail | remainder tail ) } ;
+    multiply tail $ javascript.operator.multiply ::= multiply , WS , exponent expression ;
+    divide tail $ javascript.operator.divide ::= divide , WS , exponent expression ;
+    remainder tail $ javascript.operator.remainder ::= remainder , WS , exponent expression ;
+    exponent expression ::= unary expression , [ WS , power tail ] ;
+    power tail $ javascript.operator.power ::= power , WS , exponent expression ;
+    unary expression ::= 
+        prefix increment | prefix decrement | not expression | bitwise not expression | negate expression | plus expression | 
+        typeof expression | postfix expression ;
+    prefix increment $ javascript.update.increment.prefix ::= increment , WS , name ;
+    prefix decrement $ javascript.update.decrement.prefix ::= decrement , WS , name ;
+    not expression $ javascript.operator.logical.not ::= logical not , WS , unary expression ;
+    bitwise not expression $ javascript.operator.bitwise.not ::= bitwise not , WS , unary expression ;
+    negate expression $ javascript.operator.negate ::= minus , WS , unary expression ;
+    plus expression $ javascript.operator.plus ::= plus , WS , unary expression ;
+    typeof expression $ javascript.operator.typeof ::= typeof , WS , unary expression ;
+    postfix expression ::= postfix increment | postfix decrement | member expression ;
+    postfix increment $ javascript.update.increment.postfix ::= name , [ hspace ] , increment ;
+    postfix decrement $ javascript.update.decrement.postfix ::= name , [ hspace ] , decrement ;
+    member expression ::= primary expression , { member suffix } ;
+    member suffix ::= member access | index access ;
+    member access $ javascript.member ::= WS , dot , WS , name , [ WS , arguments ] ;
+    index access $ javascript.index ::= WS , open bracket , WS , expression , WS , close bracket ;
+    arguments ::= open paren , WS , [ argument , { WS , comma , WS , argument } ] , WS , close paren ;
+    argument $ language.function.argument ::= assignment expression ;
+    primary expression ::=
+        ( open paren , WS , expression , WS , close paren ) | literal | template literal | call | variable ;
+    call $ javascript.call ::= name , WS , arguments ;
+    variable $ javascript.variable ::= name ;
+    literal ::= numeric literal $ javascript.number | string literal $ javascript.string | true | false ;
+    template literal ::= template start , { template text | template substitution } , backtick ;
+    template start $ javascript.template.begin ::= backtick ;
+    template text $ javascript.template.text ::= 
+        { ( ( ' ' .. '\xFF' - ( '`' | '\\' | '$' ) ) | U+0009 | U+000A | U+000D | escape sequence | template dollar ) } + ;
+    template dollar ::= '$' , { ( ' ' .. '\xFF' - ( '{' | '`' | '\\' | '$' ) ) } + ;
+    template substitution $ javascript.template.substitution ::= dollar brace , WS , expression , WS , close brace ;
+
+    WS ::= [ whitespace ] ;
+}#

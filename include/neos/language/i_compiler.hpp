@@ -108,9 +108,9 @@ namespace neos::language
         LogicalAnd,
         LogicalOr,
         LogicalNot,
-        Modulo,         ///< result has the sign of the divisor (Python semantics)
-        FloorDivide,    ///< quotient rounded towards negative infinity (Python //)
-        TrueDivide      ///< real division regardless of operand types (Python /)
+        Modulo,         ///< floored: the result has the sign of the divisor
+        FloorDivide,    ///< the quotient rounded towards negative infinity
+        TrueDivide      ///< real division regardless of the operands' types
     };
 
     enum class indented_construct : std::uint32_t
@@ -152,6 +152,10 @@ namespace neos::language
         virtual neolib::i_vector<neolib::i_pair<std::uint32_t, std::uint32_t>> const& relocations() const = 0;
         virtual neolib::i_string_view const& source() const = 0;
         virtual i_symbol_table_entry* lvalue() const = 0;
+        // (an integer value known to be within [range_low(), range_high()])
+        virtual bool has_range() const = 0;
+        virtual std::int64_t range_low() const = 0;
+        virtual std::int64_t range_high() const = 0;
     };
 
     struct fragment : i_fragment
@@ -162,6 +166,9 @@ namespace neos::language
         neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> fragmentRelocations; ///< (code offset, function id)
         neolib::string_view fragmentSource;
         i_symbol_table_entry* fragmentLvalue = nullptr;
+        bool hasRange = false;
+        std::int64_t rangeLow = 0;
+        std::int64_t rangeHigh = 0;
 
         fragment() = default;
         fragment(i_fragment const& aOther) :
@@ -170,7 +177,10 @@ namespace neos::language
             fragmentCode{ aOther.code() },
             fragmentRelocations{ aOther.relocations() },
             fragmentSource{ aOther.source() },
-            fragmentLvalue{ aOther.lvalue() } {}
+            fragmentLvalue{ aOther.lvalue() },
+            hasRange{ aOther.has_range() },
+            rangeLow{ aOther.range_low() },
+            rangeHigh{ aOther.range_high() } {}
 
         fragment_kind kind() const final { return fragmentKind; }
         type value_type() const final { return valueType; }
@@ -178,6 +188,9 @@ namespace neos::language
         neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> const& relocations() const final { return fragmentRelocations; }
         neolib::string_view const& source() const final { return fragmentSource; }
         i_symbol_table_entry* lvalue() const final { return fragmentLvalue; }
+        bool has_range() const final { return hasRange; }
+        std::int64_t range_low() const final { return rangeLow; }
+        std::int64_t range_high() const final { return rangeHigh; }
     };
 
     inline std::ostream& operator<<(std::ostream& stream, i_fragment const& operand)
@@ -248,6 +261,12 @@ namespace neos::language
         virtual void emit_compound_assignment(operation aOperation, neolib::i_string_view const& aTarget, neolib::i_string_view const& aSource) = 0;
         virtual void declare_loop_variable(neolib::i_string_view const& aName, neolib::i_string_view const& aSource) = 0;
         virtual void declare_stub() = 0;
+        // a construct (or operator) of a particular language (aConstruct is a value that language's code generation defines)
+    public:
+        virtual void emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource) = 0;
+        // the types of a function's parameters and result that are inferred
+    public:
+        virtual void complete_signature(i_function_signature& aSignature) = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;

@@ -21,6 +21,7 @@
 
 #include <filesystem>
 #include <map>
+#include <set>
 #include <neos/neos.hpp>
 #include <neolib/core/optional.hpp>
 #include <neolib/core/string.hpp>
@@ -28,6 +29,7 @@
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/ast.hpp>
+#include <neos/language/javascript.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
@@ -212,18 +214,43 @@ namespace neos::language
             };
             std::vector<indented> indentStack;
             bool implicitFunctionFinished = false;
+            // JavaScript
+            std::optional<javascript::construct> jsDeclaration;  ///< the kind of declaration being compiled
+            bool pendingInferred = false;               ///< the function being declared has inferred types
+            std::optional<std::pair<std::uint32_t, neolib::ref_ptr<i_scope>>> suspendedEntry; ///< the implicit entry point while a function is compiled
+            std::unordered_map<char const*, language::fragment> jsStatementForms; ///< assignments and updates whose values are unused
+            struct counter_loop
+            {
+                char const* test = nullptr;             ///< the loop's test
+                char const* counter = nullptr;          ///< the variable (declaration) the test bounds
+                std::optional<std::int64_t> maximum;    ///< the counter's largest value while the test is true
+                std::optional<std::int64_t> minimum;    ///< the counter's smallest value while the test is true
+            };
+            std::vector<counter_loop> counterLoops;     ///< the loops being compiled (innermost last)
+            struct counter_update
+            {
+                char const* counter;
+                char const* test;                       ///< the loop whose test bounds it
+                char const* position;
+            };
+            std::vector<counter_update> counterUpdates; ///< updates whose loop has not been compiled yet
         };
         struct symbol_info
         {
             char const* position = nullptr; ///< definition position (nullptr if defined at function level)
             std::uint64_t sequence = 0u;
             bool retired = false;
+            bool global = false;                        ///< a global variable (index is that of the WASM global)
+            bool constant = false;
+            char const* declaration = nullptr;          ///< declared without a value (its type is that of the value first assigned to it)
+            char const* site = nullptr;                 ///< (JavaScript) its declaration
         };
         struct forward_declaration
         {
             std::string name;
             function_signature signature;
             bool stub = false;
+            bool inferred = false;
         };
         struct wasm_function
         {
@@ -233,6 +260,9 @@ namespace neos::language
             bool entry = false;
             bool compiled = false;
             bool stub = false;
+            bool inferred = false;                      ///< parameter and return types are inferred
+            bool implicitEntry = false;                 ///< the entry point formed by top-level statements
+            std::string importNamespace;                ///< (an import of a stub) the runtime plugin's namespace
             i_function_scope const* scope = nullptr;
             function_signature signature;
             std::vector<type> locals;
@@ -247,6 +277,45 @@ namespace neos::language
             std::map<std::string, std::uint32_t> strings;
             std::vector<std::pair<std::string, std::vector<type>>> deferredCalls; ///< calls to functions defined later (resolved at emission)
         };
+        struct interval
+        {
+            std::int64_t low;
+            std::int64_t high;
+            bool contains(interval const& aOther) const { return aOther.low >= low && aOther.high <= high; }
+            interval join(interval const& aOther) const { return { std::min(low, aOther.low), std::max(high, aOther.high) }; }
+            bool operator==(interval const&) const = default;
+        };
+        using range_key = std::pair<char const*, std::string>;
+        // types inferred from the code (each compilation pass uses the types found by the previous one; passes are 
+        // repeated until they no longer change)
+        struct inference
+        {
+            std::map<std::string, std::vector<type>> parameters;    ///< function -> types of its arguments
+            std::map<std::string, type> results;                    ///< function -> type of the values it returns
+            std::vector<std::pair<std::string, type>> globals;     ///< global variables (in order of declaration)
+            std::map<char const*, type> declarations;               ///< variable declared without a value -> type of the value assigned to it
+            std::map<std::string, std::vector<std::optional<type>>> arguments; ///< (this pass)
+            std::map<std::string, type> returned;                   ///< (this pass)
+            std::set<std::string> functionGlobals;                  ///< (this pass) global variables used by functions
+            std::set<std::string> entryGlobals;                     ///< global variables only used by top-level code (locals of the entry point)
+            // integer ranges: a number variable (declaration) or parameter ("function#index") whose values are 32-bit integers
+            // (never -0) is an i32; the ranges of the values assigned to it must be within its range (else its range grows)
+            std::map<range_key, interval> ranges;
+            std::set<range_key> notInt32;                           ///< assigned a number that is not a 32-bit integer
+            std::map<range_key, std::uint32_t> grown;               ///< (widened after growing once)
+            std::set<range_key> narrowed;
+            std::set<char const*> notCounters;                      ///< variables that are not loop counters
+            std::map<range_key, interval> observed;                 ///< (this pass) ranges of the values assigned
+            std::map<char const*, std::uint32_t> assignments;       ///< (this pass) number of assignments to a variable
+            std::set<char const*> counters;                         ///< (this pass) variables updated as loop counters
+            std::uint32_t pass = 0u;
+            std::map<std::string, bool> declaredGlobals;            ///< (this pass) top-level declarations (true: var)
+            bool changed = false;
+        };
+    public:
+        static constexpr std::uint32_t BranchTarget = 0x40000000u;  ///< relocation: break (or continue) out of the enclosing loop
+        static constexpr std::uint32_t ContinueTarget = 0x20000000u;
+    private:
         static constexpr std::uint32_t DeferredCall = 0x80000000u;
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
@@ -291,6 +360,9 @@ namespace neos::language
         void declare_loop_variable(neolib::i_string_view const& aName, neolib::i_string_view const& aSource) final;
         void declare_stub() final;
     public:
+        void emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource) final;
+        void complete_signature(i_function_signature& aSignature) final;
+    public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;
         const std::optional<std::string>& trace_filter() const;
@@ -321,6 +393,43 @@ namespace neos::language
         void ensure_function();
         fragment take_body(std::size_t aBodyBase);
         void wrap_expression_body(neolib::i_string_view const& aSource);
+        // JavaScript
+        void emit_js(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        void emit_js_operation(javascript::construct aOperation);
+        type js_type(operand_type const& aOperand) const;
+        operand_type js_to_number(operand_type const& aOperand);
+        operand_type js_to_string(operand_type const& aOperand, bool aInspect = false);
+        fragment js_to_boolean(operand_type const& aOperand);
+        fragment js_to_int32(operand_type const& aOperand);
+        operand_type pop_operand_value();
+        void js_declarator(neolib::i_string_view const& aSource);
+        void js_assignment(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        void js_call(neolib::i_string_view const& aSource);
+        void js_member(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        bool js_builtin(std::string const& aName, std::optional<operand_type> const& aReceiver, std::vector<fragment>& aArguments, neolib::i_string_view const& aSource);
+        void js_if(neolib::i_string_view const& aSource);
+        void js_loop(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        void js_conditional(neolib::i_string_view const& aSource);
+        void js_variable(neolib::i_string_view const& aSource);
+        void js_global_statement(neolib::i_string_view const& aSource);
+        void js_statement(neolib::i_string_view const& aSource);
+        void js_branch(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        void js_case(javascript::construct aConstruct, neolib::i_string_view const& aSource);
+        void js_switch(neolib::i_string_view const& aSource);
+        void declare_globals();
+        i_symbol_table_entry& define_global(std::string const& aName, type aType);
+        void infer(std::string const& aWhat, std::optional<type> const& aOld, type aNew);
+        void emit_call_to(fragment& aTarget, std::uint32_t aFunction);
+        std::uint32_t js_runtime(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
+        bool is_global(i_symbol_table_entry const& aSymbol) const;
+        std::optional<interval> integer_range(operand_type const& aOperand) const;
+        std::optional<range_key> range_key_of(i_symbol_table_entry const& aSymbol, std::string const& aName) const;
+        void observe_range(range_key const& aKey, std::optional<interval> const& aRange);
+        void update_ranges();
+        void js_loop_test(neolib::i_string_view const& aSource);
+        std::optional<type> integer_type(operand_type const& aOperand) const;
+        void suspend_entry();
+        void resume_entry();
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
@@ -336,5 +445,10 @@ namespace neos::language
         std::uint64_t iSymbolSequence = 0u;
         bool iDeclarationPass = false;
         std::vector<forward_declaration> iForwardDeclarations;
+        std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
+        inference iInference;
+        bool iGlobalsDeclared = false;
+        std::map<void const*, std::pair<bool, std::string>> iParsed; ///< parser -> source of its last successful parse
+        std::optional<std::pair<range_key, interval>> iRangeBound;  ///< (a loop counter's range when it is updated)
     };
 }

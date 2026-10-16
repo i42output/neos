@@ -22,6 +22,7 @@
 #include <neos/neos.hpp>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <functional>
 
@@ -42,7 +43,8 @@ namespace neos
                 struct marshaller
                 {
                     std::function<std::string(std::uint32_t aAddress)> readString;
-                    std::function<std::uint32_t(std::string const& aString)> allocateString;
+                    std::function<char const*(std::uint32_t aAddress)> stringPointer; ///< (the string in place if it is NUL terminated, otherwise null)
+                    std::function<std::uint32_t(std::string_view aString)> allocateString;
                 };
 
                 // false if neos was built without libffi
@@ -53,8 +55,9 @@ namespace neos
                 function const& resolve(std::string const& aImport, std::vector<std::uint8_t> const& aParameters, std::vector<std::uint8_t> const& aResults);
                 // true if the function can change the host environment (it cannot be called in restricted mode)
                 bool restricted(function const& aFunction);
-                // call it (arguments and results are raw WebAssembly values)
-                std::vector<value> call(function const& aFunction, std::vector<value> const& aArguments, marshaller const& aMarshaller);
+                // call it (arguments and results are raw WebAssembly values: the arguments are in aBuffer; its result, if 
+                // any, replaces the first)
+                void call(function const& aFunction, value* aBuffer, marshaller const& aMarshaller);
             }
         }
     }

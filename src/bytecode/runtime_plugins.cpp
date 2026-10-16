@@ -73,6 +73,7 @@ namespace neos
                 {
                     std::string name;
                     neos_rt_function const* description = nullptr;
+                    neos_rt_plugin_error error = nullptr;   ///< (the plugin's, if it can raise errors)
 #if defined(NEOS_HAVE_LIBFFI)
                     std::vector<ffi_type*> parameterTypes;
                     ffi_cif cif = {};
@@ -328,6 +329,7 @@ namespace neos
                                     throw std::runtime_error("runtime plugin '" + path.string() + "' is not for namespace '" + aNamespace + "'");
                                 plugin p;
                                 p.description = description;
+                                auto const error = reinterpret_cast<neos_rt_plugin_error>(lib->symbol(NEOS_RUNTIME_PLUGIN_ERROR_NAME));
                                 for (unsigned i = 0u; i < description->functionCount; ++i)
                                 {
                                     auto const& d = description->functions[i];
@@ -336,6 +338,7 @@ namespace neos
                                     function f;
                                     f.name = aNamespace + "::" + d.name;
                                     f.description = &d;
+                                    f.error = error;
                                     for (unsigned a = 0u; a < d.parameterCount; ++a)
                                     {
                                         if (d.parameters[a] == NEOS_RT_VOID)
@@ -399,15 +402,13 @@ namespace neos
                     return (aFunction.description->flags & NEOS_RT_RESTRICTED) != 0u;
                 }
 
-                std::vector<value> call(function const& aFunction, std::vector<value> const& aArguments, marshaller const& aMarshaller)
+                void call(function const& aFunction, value* aBuffer, marshaller const& aMarshaller)
                 {
 #if !defined(NEOS_HAVE_LIBFFI)
-                    (void)aFunction; (void)aArguments; (void)aMarshaller;
+                    (void)aFunction; (void)aBuffer; (void)aMarshaller;
                     throw std::runtime_error("neos was built without libffi");
 #else
                     auto const& d = *aFunction.description;
-                    if (aArguments.size() != d.parameterCount)
-                        throw std::runtime_error("wrong number of arguments for '" + aFunction.name + "'");
                     union argument
                     {
                         bool b;
@@ -423,11 +424,11 @@ namespace neos
                     };
                     argument arguments[NEOS_RT_MAX_PARAMETERS];
                     void* pointers[NEOS_RT_MAX_PARAMETERS];
-                    std::string strings[NEOS_RT_MAX_PARAMETERS];
+                    std::vector<std::string> strings; // (copies of strings that cannot be used in place)
                     for (unsigned i = 0u; i < d.parameterCount; ++i)
                     {
                         auto& a = arguments[i];
-                        auto const v = aArguments[i];
+                        auto const v = aBuffer[i];
                         switch (d.parameters[i])
                         {
                         case NEOS_RT_BOOL: a.b = static_cast<std::uint32_t>(v) != 0u; break;
@@ -440,8 +441,14 @@ namespace neos
                         case NEOS_RT_F32: { auto const bits = static_cast<std::uint32_t>(v); std::memcpy(&a.f32, &bits, sizeof(a.f32)); } break;
                         case NEOS_RT_F64: std::memcpy(&a.f64, &v, sizeof(a.f64)); break;
                         case NEOS_RT_STRING:
-                            strings[i] = aMarshaller.readString(static_cast<std::uint32_t>(v));
-                            a.string = strings[i].c_str();
+                            // (in place if possible)
+                            a.string = aMarshaller.stringPointer(static_cast<std::uint32_t>(v));
+                            if (a.string == nullptr)
+                            {
+                                strings.reserve(NEOS_RT_MAX_PARAMETERS);
+                                strings.push_back(aMarshaller.readString(static_cast<std::uint32_t>(v)));
+                                a.string = strings.back().c_str();
+                            }
                             break;
                         default:
                             break;
@@ -461,21 +468,23 @@ namespace neos
                     } r;
                     std::memset(&r, 0, sizeof(r));
                     ::ffi_call(const_cast<ffi_cif*>(&aFunction.cif), reinterpret_cast<void(*)(void)>(d.function), &r, pointers);
+                    if (aFunction.error != nullptr)
+                        if (auto const error = aFunction.error())
+                            throw std::runtime_error(error);
                     switch (d.result)
                     {
-                    case NEOS_RT_VOID: return {};
-                    case NEOS_RT_BOOL: return { static_cast<value>((r.integral & 0xFFu) != 0u ? 1u : 0u) };
-                    case NEOS_RT_CHAR: return { static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<signed char>(r.signedIntegral)))) };
-                    case NEOS_RT_I32: return { static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(r.signedIntegral))) };
-                    case NEOS_RT_U32: return { static_cast<value>(static_cast<std::uint32_t>(r.integral)) };
-                    case NEOS_RT_I64: return { static_cast<value>(sizeof(ffi_arg) >= 8u ? static_cast<std::uint64_t>(r.signedIntegral) : static_cast<std::uint64_t>(r.i64)) };
-                    case NEOS_RT_U64: return { sizeof(ffi_arg) >= 8u ? static_cast<value>(r.integral) : r.u64 };
-                    case NEOS_RT_SIZE: return { static_cast<value>(static_cast<std::size_t>(r.integral)) };
-                    case NEOS_RT_F32: { std::uint32_t bits; std::memcpy(&bits, &r.f32, sizeof(bits)); return { static_cast<value>(bits) }; }
-                    case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); return { bits }; }
-                    case NEOS_RT_STRING: return { static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string{ r.string } : std::string{})) };
+                    case NEOS_RT_VOID: break;
+                    case NEOS_RT_BOOL: aBuffer[0] = static_cast<value>((r.integral & 0xFFu) != 0u ? 1u : 0u); break;
+                    case NEOS_RT_CHAR: aBuffer[0] = static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<signed char>(r.signedIntegral)))); break;
+                    case NEOS_RT_I32: aBuffer[0] = static_cast<value>(static_cast<std::uint32_t>(static_cast<std::int32_t>(r.signedIntegral))); break;
+                    case NEOS_RT_U32: aBuffer[0] = static_cast<value>(static_cast<std::uint32_t>(r.integral)); break;
+                    case NEOS_RT_I64: aBuffer[0] = static_cast<value>(sizeof(ffi_arg) >= 8u ? static_cast<std::uint64_t>(r.signedIntegral) : static_cast<std::uint64_t>(r.i64)); break;
+                    case NEOS_RT_U64: aBuffer[0] = sizeof(ffi_arg) >= 8u ? static_cast<value>(r.integral) : r.u64; break;
+                    case NEOS_RT_SIZE: aBuffer[0] = static_cast<value>(static_cast<std::size_t>(r.integral)); break;
+                    case NEOS_RT_F32: { std::uint32_t bits; std::memcpy(&bits, &r.f32, sizeof(bits)); aBuffer[0] = static_cast<value>(bits); break; }
+                    case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); aBuffer[0] = bits; break; }
+                    case NEOS_RT_STRING: aBuffer[0] = static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string_view{ r.string } : std::string_view{})); break;
                     }
-                    return {};
 #endif
                 }
             }

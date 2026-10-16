@@ -214,9 +214,10 @@ namespace neos
                         module.tokens = &iTokens;
                         module.globals = &iGlobals;
                         module.globalTypes = &iGlobalTypes;
-                        return jit::compile(module, [this](std::uint32_t aFunction, std::vector<value> const& aArguments)
+                        module.linearMemory = &iMemoryView;
+                        return jit::compile(module, [this](std::uint32_t aFunction, value* aBuffer)
                         {
-                            return call_import(aFunction, aArguments);
+                            call_import(aFunction, aBuffer);
                         });
                     }
                     function_type const& type_of(std::uint32_t aFunction) const
@@ -226,7 +227,13 @@ namespace neos
                     std::vector<value> invoke(std::uint32_t aFunction, std::vector<value> aArguments)
                     {
                         if (iFunctions.at(aFunction).import)
-                            return call_import(aFunction, aArguments);
+                        {
+                            auto const& type = type_of(aFunction);
+                            aArguments.resize(std::max(aArguments.size(), type.results.size()));
+                            call_import(aFunction, aArguments.data());
+                            aArguments.resize(type.results.size());
+                            return aArguments;
+                        }
                         std::vector<value> stack;
                         std::vector<frame> frames;
                         decoded_reader code{ iTokens };
@@ -377,15 +384,20 @@ namespace neos
                                     auto const& calleeType = type_of(callee);
                                     if (stack.size() < current.base + calleeType.parameters.size())
                                         throw trap{ "stack underflow" };
-                                    std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(calleeType.parameters.size()), stack.end() };
-                                    stack.resize(stack.size() - calleeType.parameters.size());
+                                    auto const parameterCount = calleeType.parameters.size();
                                     if (iFunctions.at(callee).import)
                                     {
-                                        auto const r = call_import(callee, arguments);
-                                        stack.insert(stack.end(), r.begin(), r.end());
+                                        // (the arguments are replaced by the results)
+                                        auto const resultCount = calleeType.results.size();
+                                        auto const base = stack.size() - parameterCount;
+                                        stack.resize(base + std::max(parameterCount, resultCount));
+                                        call_import(callee, stack.data() + base);
+                                        stack.resize(base + resultCount);
                                     }
                                     else
                                     {
+                                        std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
+                                        stack.resize(stack.size() - parameterCount);
                                         current.pc = code.position();
                                         enter(callee, std::move(arguments)); // note: invalidates 'current'
                                     }
@@ -398,6 +410,44 @@ namespace neos
                                     auto const b = pop();
                                     auto const a = pop();
                                     stack.push_back(condition != 0 ? a : b);
+                                }
+                                break;
+                            // memory (align, offset): [address + offset, address + offset + width) must be within memory
+                            case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E: case 0x2F:
+                            case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
+                                {
+                                    static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
+                                    code.u();
+                                    auto const offset = code.u();
+                                    auto const width = sWidths[op - 0x28u];
+                                    auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                    if (address + width > iMemory.size())
+                                        throw trap{ "out of bounds memory access" };
+                                    std::uint64_t bits = 0u;
+                                    std::memcpy(&bits, &iMemory[address], width);
+                                    switch (op)
+                                    {
+                                    case 0x2C: bits = of_i32(static_cast<std::int8_t>(bits)); break;
+                                    case 0x2E: bits = of_i32(static_cast<std::int16_t>(bits)); break;
+                                    case 0x30: bits = of_i64(static_cast<std::int8_t>(bits)); break;
+                                    case 0x32: bits = of_i64(static_cast<std::int16_t>(bits)); break;
+                                    case 0x34: bits = of_i64(static_cast<std::int32_t>(bits)); break;
+                                    default: break;
+                                    }
+                                    stack.push_back(bits);
+                                }
+                                break;
+                            case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
+                                {
+                                    static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 2, 1, 2, 4 };
+                                    code.u();
+                                    auto const offset = code.u();
+                                    auto const width = sWidths[op - 0x36u];
+                                    auto const bits = pop();
+                                    auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                    if (address + width > iMemory.size())
+                                        throw trap{ "out of bounds memory access" };
+                                    std::memcpy(&iMemory[address], &bits, width);
                                 }
                                 break;
                             case 0x20: stack.push_back(locals.at(code.u())); break;
@@ -470,6 +520,16 @@ namespace neos
                             case 0x74: binary([](value a, value b) { return of_u32(as_u32(a) << (as_u32(b) & 31u)); }); break;
                             case 0x75: binary([](value a, value b) { return of_i32(as_i32(a) >> (as_u32(b) & 31u)); }); break;
                             case 0x76: binary([](value a, value b) { return of_u32(as_u32(a) >> (as_u32(b) & 31u)); }); break;
+                            case 0x67: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (0x80000000u >> n)) == 0u) ++n; return of_u32(n); }); break;
+                            case 0x68: unary([](value a) { std::uint32_t n = 0u; while (n < 32u && (as_u32(a) & (1u << n)) == 0u) ++n; return of_u32(n); }); break;
+                            case 0x69: unary([](value a) { std::uint32_t n = 0u; for (auto x = as_u32(a); x != 0u; x &= x - 1u) ++n; return of_u32(n); }); break;
+                            case 0x77: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) << s) | (as_u32(a) >> (32u - s))); }); break;
+                            case 0x78: binary([](value a, value b) { auto const s = as_u32(b) & 31u; return of_u32(s == 0u ? as_u32(a) : (as_u32(a) >> s) | (as_u32(a) << (32u - s))); }); break;
+                            case 0x79: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (0x8000000000000000ull >> n)) == 0u) ++n; return value{ n }; }); break;
+                            case 0x7A: unary([](value a) { std::uint64_t n = 0u; while (n < 64u && (a & (1ull << n)) == 0u) ++n; return value{ n }; }); break;
+                            case 0x7B: unary([](value a) { std::uint64_t n = 0u; for (auto x = a; x != 0u; x &= x - 1u) ++n; return value{ n }; }); break;
+                            case 0x89: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a << s) | (a >> (64u - s)) }; }); break;
+                            case 0x8A: binary([](value a, value b) { auto const s = b & 63u; return value{ s == 0u ? a : (a >> s) | (a << (64u - s)) }; }); break;
                             // i64 arithmetic
                             case 0x7C: binary([](value a, value b) { return a + b; }); break;
                             case 0x7D: binary([](value a, value b) { return a - b; }); break;
@@ -546,12 +606,18 @@ namespace neos
                             case 0xB9: unary([](value a) { return of_f64(static_cast<double>(as_i64(a))); }); break;
                             case 0xBA: unary([](value a) { return of_f64(static_cast<double>(a)); }); break;
                             case 0xBB: unary([](value a) { return of_f64(static_cast<double>(as_f32(a))); }); break;
+                            case 0xBC: case 0xBD: case 0xBE: case 0xBF: break; // (reinterpretations: values are their bits)
                             case 0xC0: unary([](value a) { return of_i32(static_cast<std::int8_t>(as_u32(a))); }); break;
                             case 0xC1: unary([](value a) { return of_i32(static_cast<std::int16_t>(as_u32(a))); }); break;
                             default:
                                 throw trap{ "unsupported instruction 0x" + to_hex(op) };
                             }
                         }
+                    }
+                    void resize_memory(std::size_t aSize)
+                    {
+                        iMemory.resize(aSize);
+                        iMemoryView = jit::memory{ iMemory.data(), iMemory.size() };
                     }
                     std::uint32_t global(std::string const& aName) const
                     {
@@ -645,7 +711,7 @@ namespace neos
                                 for (auto n = r.u(); n > 0u; --n)
                                 {
                                     auto const flags = r.byte();
-                                    iMemory.resize(static_cast<std::size_t>(r.u()) * 65536u);
+                                    resize_memory(static_cast<std::size_t>(r.u()) * 65536u);
                                     if (flags & 1u)
                                         r.u();
                                 }
@@ -807,230 +873,184 @@ namespace neos
                     // host functions (module "env")
                     std::string read_string(std::uint32_t aAddress)
                     {
-                        if (aAddress + 4u > iMemory.size())
-                            throw trap{ "out of bounds memory access" };
-                        std::uint32_t length;
-                        std::memcpy(&length, &iMemory[aAddress], sizeof(length));
-                        if (aAddress + 4u + length > iMemory.size())
-                            throw trap{ "out of bounds memory access" };
-                        return std::string{ reinterpret_cast<char const*>(&iMemory[aAddress + 4u]), length };
+                        return std::string{ view_string(aAddress) };
                     }
-                    std::uint32_t allocate_string(std::string const& aValue)
+                    // a string in memory as a NUL terminated string (if it is one; valid until memory is next allocated)
+                    char const* string_pointer(std::uint32_t aAddress) const
                     {
+                        auto const text = view_string(aAddress);
+                        auto const end = static_cast<std::size_t>(aAddress) + StringHeaderSize + text.size();
+                        return end < iMemory.size() && iMemory[end] == 0u ? text.data() : nullptr;
+                    }
+                    string_header header_of(std::uint32_t aAddress) const
+                    {
+                        if (static_cast<std::size_t>(aAddress) + StringHeaderSize > iMemory.size())
+                            throw trap{ "out of bounds memory access" };
+                        string_header header;
+                        std::memcpy(&header, &iMemory[aAddress], sizeof(header));
+                        return header;
+                    }
+                    // a string in memory (valid until memory is next allocated)
+                    std::string_view view_string(std::uint32_t aAddress) const
+                    {
+                        auto const length = header_of(aAddress).bytes;
+                        if (static_cast<std::size_t>(aAddress) + StringHeaderSize + length > iMemory.size())
+                            throw trap{ "out of bounds memory access" };
+                        return std::string_view{ reinterpret_cast<char const*>(&iMemory[aAddress + StringHeaderSize]), length };
+                    }
+                    // memory for a string (its characters are then written)
+                    std::uint32_t new_string(std::uint64_t aBytes, std::uint32_t aUtf16Units)
+                    {
+                        // (a string's length in bytes fits in an i32)
+                        if (aBytes > 0x7FFFFFFFu)
+                            throw trap{ "string too long" };
                         if (!iHeap)
                             iHeap = global("__heap_base");
                         auto const address = *iHeap;
-                        auto const size = 4u + static_cast<std::uint32_t>(aValue.size());
-                        *iHeap = (address + size + 7u) & ~7u;
+                        auto const end = (static_cast<std::uint64_t>(address) + StringHeaderSize + aBytes + 1u + 7u) & ~std::uint64_t{ 7u };
+                        if (end > 0xFFFFFFFFu)
+                            throw trap{ "out of memory" };
+                        *iHeap = static_cast<std::uint32_t>(end);
                         if (*iHeap > iMemory.size())
-                            iMemory.resize((*iHeap / 65536u + 1u) * 65536u);
-                        auto const length = static_cast<std::uint32_t>(aValue.size());
-                        std::memcpy(&iMemory[address], &length, sizeof(length));
-                        std::memcpy(&iMemory[address + 4u], aValue.data(), aValue.size());
+                            resize_memory((*iHeap / 65536u + 1u) * 65536u);
+                        string_header const header{ static_cast<std::uint32_t>(aBytes), aUtf16Units };
+                        std::memcpy(&iMemory[address], &header, sizeof(header));
+                        iMemory[address + StringHeaderSize + header.bytes] = 0u;
                         return address;
                     }
-                    std::vector<value> host(std::string const& aName, std::vector<value> const& aArguments)
+                    // the concatenation of two strings in memory
+                    std::uint32_t concatenate_strings(std::uint32_t aLhs, std::uint32_t aRhs)
                     {
-                        if (aName == "neo::print")
+                        auto const lhs = header_of(aLhs);
+                        auto const rhs = header_of(aRhs);
+                        view_string(aLhs);
+                        view_string(aRhs);
+                        auto const address = new_string(static_cast<std::uint64_t>(lhs.bytes) + rhs.bytes, lhs.utf16Units + rhs.utf16Units);
+                        std::memmove(&iMemory[address + StringHeaderSize], &iMemory[aLhs + StringHeaderSize], lhs.bytes);
+                        std::memmove(&iMemory[address + StringHeaderSize + lhs.bytes], &iMemory[aRhs + StringHeaderSize], rhs.bytes);
+                        return address;
+                    }
+                    std::uint32_t allocate_string(std::string_view aValue)
+                    {
+                        // (a value in memory is copied first: memory can move when it grows)
+                        if (!iMemory.empty() && aValue.data() >= reinterpret_cast<char const*>(iMemory.data()) &&
+                            aValue.data() < reinterpret_cast<char const*>(iMemory.data() + iMemory.size()))
+                            return allocate_string(std::string{ aValue });
+                        auto const address = new_string(aValue.size(), utf16_units(aValue));
+                        std::memcpy(&iMemory[address + StringHeaderSize], aValue.data(), aValue.size());
+                        return address;
+                    }
+                    // the imported functions the VM provides (any other import is a runtime plugin's)
+                    enum class import_kind : std::uint8_t
+                    {
+                        Unresolved,
+                        Print,
+                        Input,
+                        Length,
+                        ToInteger,
+                        ToString,
+                        StringConcat,
+                        Fmod,
+                        StringCompare,
+                        Runtime
+                    };
+                    import_kind resolve_import(std::uint32_t aFunction)
+                    {
+                        static std::unordered_map<std::string_view, import_kind> const sHostFunctions =
                         {
-                            iOutput << read_string(as_u32(aArguments.at(0))) << std::flush;
-                            return {};
+                            { "neo::print", import_kind::Print },
+                            { "neo::input", import_kind::Input },
+                            { "neo::length", import_kind::Length },
+                            { "neo::to_integer", import_kind::ToInteger },
+                            { "neo::to_string", import_kind::ToString },
+                            { "neos::string_concat", import_kind::StringConcat },
+                            { "neos::fmod", import_kind::Fmod },
+                            { "neos::string_compare", import_kind::StringCompare }
+                        };
+                        auto const& name = *iFunctions.at(aFunction).import;
+                        if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
+                            return host->second;
+                        // a function of a runtime plugin (called through libffi)
+                        auto const type = iImportTypes.find(name);
+                        if (type == iImportTypes.end())
+                            throw trap{ "unresolved import '" + name + "'" };
+                        try
+                        {
+                            auto const& t = iTypes.at(type->second);
+                            auto const& f = runtime::resolve(name, t.parameters, t.results);
+                            if (iRestricted && runtime::restricted(f))
+                                throw trap{ "'" + name + "' is restricted: it can change the host environment and the program is running in restricted mode" };
+                            iImportRuntime[aFunction] = &f;
                         }
-                        else if (aName == "neo::input")
+                        catch (trap const&)
                         {
-                            std::string line;
-                            std::getline(iInput, line);
-                            if (!line.empty() && line.back() == '\r')
-                                line.pop_back();
-                            return { of_u32(allocate_string(line)) };
+                            throw;
                         }
-                        else if (aName == "neo::length")
-                            return { of_u32(static_cast<std::uint32_t>(read_string(as_u32(aArguments.at(0))).size())) };
-                        else if (aName == "neo::to_integer")
+                        catch (std::exception const& e)
                         {
+                            throw trap{ e.what() };
+                        }
+                        return import_kind::Runtime;
+                    }
+                    // an imported function (resolved on its first call): aBuffer holds its arguments and receives its result
+                    void call_import(std::uint32_t aFunction, value* aBuffer)
+                    {
+                        if (iImportKinds.size() <= aFunction)
+                        {
+                            iImportKinds.resize(iFunctions.size(), import_kind::Unresolved);
+                            iImportRuntime.resize(iFunctions.size(), nullptr);
+                        }
+                        auto kind = iImportKinds[aFunction];
+                        if (kind == import_kind::Unresolved)
+                            iImportKinds[aFunction] = kind = resolve_import(aFunction);
+                        switch (kind)
+                        {
+                        case import_kind::Print:
+                            iOutput << view_string(as_u32(aBuffer[0])) << std::flush;
+                            break;
+                        case import_kind::Input:
+                            {
+                                std::string line;
+                                std::getline(iInput, line);
+                                if (!line.empty() && line.back() == '\r')
+                                    line.pop_back();
+                                aBuffer[0] = of_u32(allocate_string(line));
+                            }
+                            break;
+                        case import_kind::Length:
+                            aBuffer[0] = of_u32(static_cast<std::uint32_t>(view_string(as_u32(aBuffer[0])).size()));
+                            break;
+                        case import_kind::ToInteger:
                             try
                             {
-                                return { of_i32(std::stoi(read_string(as_u32(aArguments.at(0))))) };
+                                aBuffer[0] = of_i32(std::stoi(read_string(as_u32(aBuffer[0]))));
                             }
                             catch (...)
                             {
-                                return { of_i32(0) };
+                                aBuffer[0] = of_i32(0);
                             }
-                        }
-                        else if (aName == "neo::to_string")
-                            return { of_u32(allocate_string(std::to_string(as_i32(aArguments.at(0))))) };
-                        else if (aName == "neos::string_concat")
-                            return { of_u32(allocate_string(read_string(as_u32(aArguments.at(0))) + read_string(as_u32(aArguments.at(1))))) };
-                        else if (aName == "neos::fmod")
-                            return { of_f64(std::fmod(as_f64(aArguments.at(0)), as_f64(aArguments.at(1)))) };
-                        else if (aName == "neos::string_compare")
-                        {
-                            auto const c = read_string(as_u32(aArguments.at(0))).compare(read_string(as_u32(aArguments.at(1))));
-                            return { of_i32(c < 0 ? -1 : c > 0 ? 1 : 0) };
-                        }
-                        // python builtins (see packages/python/builtins.py)
-                        auto const python_float = [](double aValue)
-                        {
-                            if (std::isnan(aValue))
-                                return std::string{ "nan" };
-                            if (std::isinf(aValue))
-                                return std::string{ aValue < 0.0 ? "-inf" : "inf" };
-                            // repr(): the shortest round-tripping digits; scientific notation if the exponent is < -4 or >= 16
-                            char buffer[64];
-                            auto const result = std::to_chars(buffer, buffer + sizeof(buffer), aValue, std::chars_format::scientific);
-                            std::string_view const scientific{ buffer, result.ptr };
-                            std::string text = std::signbit(aValue) ? "-" : "";
-                            auto const mantissa = scientific.substr(text.size(), scientific.find('e') - text.size());
-                            int const exponent = std::stoi(std::string{ scientific.substr(scientific.find('e') + 1u) });
-                            std::string digits;
-                            for (auto c : mantissa)
-                                if (c != '.')
-                                    digits += c;
-                            if (exponent < -4 || exponent >= 16)
+                            break;
+                        case import_kind::ToString:
+                            aBuffer[0] = of_u32(allocate_string(std::to_string(as_i32(aBuffer[0]))));
+                            break;
+                        case import_kind::StringConcat:
+                            aBuffer[0] = of_u32(concatenate_strings(as_u32(aBuffer[0]), as_u32(aBuffer[1])));
+                            break;
+                        case import_kind::Fmod:
+                            aBuffer[0] = of_f64(std::fmod(as_f64(aBuffer[0]), as_f64(aBuffer[1])));
+                            break;
+                        case import_kind::StringCompare:
                             {
-                                text += digits.substr(0u, 1u);
-                                if (digits.size() > 1u)
-                                    text += "." + digits.substr(1u);
-                                auto const e = std::to_string(std::abs(exponent));
-                                text += std::string{ "e" } + (exponent < 0 ? "-" : "+") + (e.size() < 2u ? "0" : "") + e;
+                                auto const c = view_string(as_u32(aBuffer[0])).compare(view_string(as_u32(aBuffer[1])));
+                                aBuffer[0] = of_i32(c < 0 ? -1 : c > 0 ? 1 : 0);
                             }
-                            else if (exponent < 0)
-                                text += "0." + std::string(static_cast<std::size_t>(-exponent - 1), '0') + digits;
-                            else
-                            {
-                                auto const integral = static_cast<std::size_t>(exponent) + 1u;
-                                if (digits.size() < integral)
-                                    digits.append(integral - digits.size(), '0');
-                                text += digits.substr(0u, integral) + "." + (digits.size() > integral ? digits.substr(integral) : "0");
-                            }
-                            return text;
-                        };
-                        auto const trimmed = [](std::string const& aText)
-                        {
-                            auto const begin = aText.find_first_not_of(" \t\r\n\f\v");
-                            auto const end = aText.find_last_not_of(" \t\r\n\f\v");
-                            return begin == std::string::npos ? std::string{} : aText.substr(begin, end - begin + 1u);
-                        };
-                        auto const python_bool = [](value aValue) { return std::string{ as_i32(aValue) != 0 ? "True" : "False" }; };
-                        if (aName == "print(string)")
-                            iOutput << read_string(as_u32(aArguments.at(0))) << std::endl;
-                        else if (aName == "print(i64)")
-                            iOutput << as_i64(aArguments.at(0)) << std::endl;
-                        else if (aName == "print(f64)")
-                            iOutput << python_float(as_f64(aArguments.at(0))) << std::endl;
-                        else if (aName == "print(bool)")
-                            iOutput << python_bool(aArguments.at(0)) << std::endl;
-                        else if (aName == "input()")
-                        {
-                            std::string line;
-                            std::getline(iInput, line);
-                            if (!line.empty() && line.back() == '\r')
-                                line.pop_back();
-                            return { of_u32(allocate_string(line)) };
+                            break;
+                        case import_kind::Runtime:
+                            runtime::call(*iImportRuntime[aFunction], aBuffer, iMarshaller);
+                            break;
+                        default:
+                            break;
                         }
-                        else if (aName == "str(i64)")
-                            return { of_u32(allocate_string(std::to_string(as_i64(aArguments.at(0))))) };
-                        else if (aName == "str(f64)")
-                            return { of_u32(allocate_string(python_float(as_f64(aArguments.at(0))))) };
-                        else if (aName == "str(bool)")
-                            return { of_u32(allocate_string(python_bool(aArguments.at(0)))) };
-                        else if (aName == "int(string)")
-                        {
-                            // [whitespace] [sign] digits (with optional single underscores between digits) [whitespace]
-                            auto const text = trimmed(read_string(as_u32(aArguments.at(0))));
-                            std::string digits;
-                            std::size_t i = (!text.empty() && (text[0] == '+' || text[0] == '-')) ? 1u : 0u;
-                            for (bool digitBefore = false; i < text.size(); ++i)
-                            {
-                                if (text[i] >= '0' && text[i] <= '9')
-                                    digits += text[i], digitBefore = true;
-                                else if (text[i] == '_' && digitBefore && i + 1u < text.size() && text[i + 1u] >= '0' && text[i + 1u] <= '9')
-                                    digitBefore = false;
-                                else
-                                    throw trap{ "invalid literal for int() with base 10: '" + text + "'" };
-                            }
-                            if (!text.empty() && text[0] == '-')
-                                digits.insert(digits.begin(), '-');
-                            std::int64_t result = 0;
-                            if (digits.empty() || digits == "-" || std::from_chars(digits.data(), digits.data() + digits.size(), result).ec != std::errc{})
-                                throw trap{ "int() result out of range or invalid literal: '" + text + "'" };
-                            return { of_i64(result) };
-                        }
-                        else if (aName == "float(string)")
-                        {
-                            // the whole of the (trimmed) string must be a number (single underscores may separate digits)
-                            auto text = trimmed(read_string(as_u32(aArguments.at(0))));
-                            auto const digit = [&](std::size_t aIndex) { return aIndex < text.size() && text[aIndex] >= '0' && text[aIndex] <= '9'; };
-                            for (std::size_t i = 0u; i < text.size(); ++i)
-                                if (text[i] == '_' && i > 0u && digit(i - 1u) && digit(i + 1u))
-                                    text.erase(i--, 1u);
-                            if (text.find_first_of("_(") != std::string::npos)
-                                throw trap{ "could not convert string to float: '" + text + "'" };
-                            auto const sign = (!text.empty() && (text[0] == '+' || text[0] == '-')) ? 1u : 0u;
-                            double result = 0.0;
-                            auto const converted = std::from_chars(text.data() + sign, text.data() + text.size(), result);
-                            if (sign == text.size() || text[sign] == '+' || text[sign] == '-' || 
-                                converted.ec == std::errc::invalid_argument || converted.ptr != text.data() + text.size())
-                                throw trap{ "could not convert string to float: '" + text + "'" };
-                            if (converted.ec == std::errc::result_out_of_range)
-                                result = std::strtod(text.c_str() + sign, nullptr);
-                            return { of_f64(text[0] == '-' ? -result : result) };
-                        }
-                        else if (aName == "len(string)")
-                        {
-                            // code points
-                            std::int64_t length = 0;
-                            for (auto c : read_string(as_u32(aArguments.at(0))))
-                                if ((static_cast<unsigned char>(c) & 0xC0u) != 0x80u)
-                                    ++length;
-                            return { of_i64(length) };
-                        }
-                        else if (aName == "abs(i64)")
-                            return { of_i64(as_i64(aArguments.at(0)) < 0 ? -as_i64(aArguments.at(0)) : as_i64(aArguments.at(0))) };
-                        else if (aName == "abs(f64)")
-                            return { of_f64(std::fabs(as_f64(aArguments.at(0)))) };
-                        else
-                            return runtime_call(aName, aArguments);
-                        return {};
-                    }
-                    // an imported function: a host function or a function of a runtime plugin (the latter is resolved 
-                    // once and then called directly)
-                    std::vector<value> call_import(std::uint32_t aFunction, std::vector<value> const& aArguments)
-                    {
-                        if (iImportRuntime.size() <= aFunction)
-                            iImportRuntime.resize(iFunctions.size(), nullptr);
-                        if (auto const runtime = iImportRuntime[aFunction])
-                            return runtime::call(*runtime, aArguments, iMarshaller);
-                        iLastRuntimeFunction = nullptr;
-                        auto result = host(*iFunctions.at(aFunction).import, aArguments);
-                        if (iLastRuntimeFunction != nullptr)
-                            iImportRuntime[aFunction] = iLastRuntimeFunction;
-                        return result;
-                    }
-                    // a function of a runtime plugin (called through libffi)
-                    std::vector<value> runtime_call(std::string const& aName, std::vector<value> const& aArguments)
-                    {
-                        auto resolved = iRuntimeFunctions.find(aName);
-                        if (resolved == iRuntimeFunctions.end())
-                        {
-                            auto const type = iImportTypes.find(aName);
-                            if (type == iImportTypes.end())
-                                throw trap{ "unresolved import '" + aName + "'" };
-                            try
-                            {
-                                auto const& t = iTypes.at(type->second);
-                                auto const& f = runtime::resolve(aName, t.parameters, t.results);
-                                if (iRestricted && runtime::restricted(f))
-                                    throw trap{ "'" + aName + "' is restricted: it can change the host environment and the program is running in restricted mode" };
-                                resolved = iRuntimeFunctions.emplace(aName, &f).first;
-                            }
-                            catch (std::exception const& e)
-                            {
-                                throw trap{ e.what() };
-                            }
-                        }
-                        iLastRuntimeFunction = resolved->second;
-                        return runtime::call(*resolved->second, aArguments, iMarshaller);
                     }
                 private:
                     std::ostream& iOutput;
@@ -1044,16 +1064,17 @@ namespace neos
                     std::vector<function_type> iTypes;
                     std::vector<function> iFunctions;
                     std::vector<std::uint8_t> iMemory;
+                    jit::memory iMemoryView;   ///< (for the JIT)
                     std::vector<value> iGlobals;
                     std::vector<std::uint8_t> iGlobalTypes;
                     std::unordered_map<std::string, std::uint32_t> iImportTypes;
-                    std::unordered_map<std::string, runtime::function const*> iRuntimeFunctions;
+                    std::vector<import_kind> iImportKinds;
                     std::vector<runtime::function const*> iImportRuntime;
-                    runtime::function const* iLastRuntimeFunction = nullptr;
                     runtime::marshaller const iMarshaller
                     {
                         [this](std::uint32_t aAddress) { return read_string(aAddress); },
-                        [this](std::string const& aString) { return allocate_string(aString); }
+                        [this](std::uint32_t aAddress) { return string_pointer(aAddress); },
+                        [this](std::string_view aString) { return allocate_string(aString); }
                     };
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;

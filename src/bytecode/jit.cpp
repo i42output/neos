@@ -87,6 +87,7 @@ namespace neos
                         TrapInvalidConversion = 4,
                         TrapStackExhausted = 5,
                         TrapHostException = 6,
+                        TrapOutOfBounds = 7,
                         TrapCount
                     };
 
@@ -99,6 +100,7 @@ namespace neos
                         case TrapIntegerOverflow: return "integer overflow";
                         case TrapInvalidConversion: return "invalid conversion to integer";
                         case TrapStackExhausted: return "call stack exhausted";
+                        case TrapOutOfBounds: return "out of bounds memory access";
                         default: return "trap";
                         }
                     }
@@ -113,6 +115,7 @@ namespace neos
                         std::uint32_t argumentCount;
                         value const* arguments;
                         value* globals;
+                        memory const* linearMemory;
                         compiled_module* module;
                         value results[MaxResults];
                     };
@@ -123,6 +126,9 @@ namespace neos
                     constexpr std::int32_t ContextArgumentCount = static_cast<std::int32_t>(offsetof(context, argumentCount));
                     constexpr std::int32_t ContextArguments = static_cast<std::int32_t>(offsetof(context, arguments));
                     constexpr std::int32_t ContextGlobals = static_cast<std::int32_t>(offsetof(context, globals));
+                    constexpr std::int32_t ContextMemory = static_cast<std::int32_t>(offsetof(context, linearMemory));
+                    constexpr std::int32_t MemoryBase = static_cast<std::int32_t>(offsetof(memory, base));
+                    constexpr std::int32_t MemorySize = static_cast<std::int32_t>(offsetof(memory, size));
                     constexpr std::int32_t ContextResults = static_cast<std::int32_t>(offsetof(context, results));
 
                     // value types
@@ -471,6 +477,16 @@ namespace neos
                             return std::signbit(aLhs) ? aRhs : aLhs;
                         return aLhs > aRhs ? aLhs : aRhs;
                     }
+                    std::uint32_t i32_clz(std::uint32_t a) { std::uint32_t n = 0u; while (n < 32u && (a & (0x80000000u >> n)) == 0u) ++n; return n; }
+                    std::uint32_t i32_ctz(std::uint32_t a) { std::uint32_t n = 0u; while (n < 32u && (a & (1u << n)) == 0u) ++n; return n; }
+                    std::uint32_t i32_popcnt(std::uint32_t a) { std::uint32_t n = 0u; for (; a != 0u; a &= a - 1u) ++n; return n; }
+                    std::uint32_t i32_rotl(std::uint32_t a, std::uint32_t b) { b &= 31u; return b == 0u ? a : (a << b) | (a >> (32u - b)); }
+                    std::uint32_t i32_rotr(std::uint32_t a, std::uint32_t b) { b &= 31u; return b == 0u ? a : (a >> b) | (a << (32u - b)); }
+                    std::uint64_t i64_clz(std::uint64_t a) { std::uint64_t n = 0u; while (n < 64u && (a & (0x8000000000000000ull >> n)) == 0u) ++n; return n; }
+                    std::uint64_t i64_ctz(std::uint64_t a) { std::uint64_t n = 0u; while (n < 64u && (a & (1ull << n)) == 0u) ++n; return n; }
+                    std::uint64_t i64_popcnt(std::uint64_t a) { std::uint64_t n = 0u; for (; a != 0u; a &= a - 1u) ++n; return n; }
+                    std::uint64_t i64_rotl(std::uint64_t a, std::uint64_t b) { b &= 63u; return b == 0u ? a : (a << b) | (a >> (64u - b)); }
+                    std::uint64_t i64_rotr(std::uint64_t a, std::uint64_t b) { b &= 63u; return b == 0u ? a : (a >> b) | (a << (64u - b)); }
                     double f64_min(double a, double b) { return wasm_min(a, b); }
                     double f64_max(double a, double b) { return wasm_max(a, b); }
                     float f32_min(float a, float b) { return wasm_min(a, b); }
@@ -520,13 +536,7 @@ namespace neos
                     {
                         try
                         {
-                            auto& module = *aContext->module;
-                            auto const& function = module.description.functions[aFunction];
-                            std::vector<value> const arguments{ aBuffer, aBuffer + function.parameters->size() };
-                            auto const results = module.host(aFunction, arguments);
-                            if (results.size() != function.results->size())
-                                throw std::runtime_error("host function returned the wrong number of results");
-                            std::copy(results.begin(), results.end(), aBuffer);
+                            aContext->module->host(aFunction, aBuffer);
                             return 0u;
                         }
                         catch (...)
@@ -635,6 +645,12 @@ namespace neos
                             std::size_t elseLabel = 0u;
                             bool hasElse = false;
                             bool branched = false;
+                            // (a loop whose code up to its first exit (br_if out of it) has no control flow: that code is 
+                            // repeated at the branch back to the loop, which then continues after the exit (the loop is 
+                            // rotated: one branch an iteration))
+                            std::size_t headBegin = 0u;
+                            std::size_t headEnd = 0u;           ///< (the exit; 0 if none)
+                            std::optional<std::size_t> bodyLabel;
                         };
                     public:
                         code_generator(module_description const& aModule) :
@@ -1506,6 +1522,59 @@ namespace neos
                                 release(e);
                             }
                         }
+                        // a loop's code up to its first exit (see control::headBegin)
+                        void find_loop_head(control& aLoop, std::size_t aPosition)
+                        {
+                            std::size_t constexpr MaxHead = 48u; // (tokens)
+                            auto const begin = aPosition + 1u + immediate_count(0x03, iTokens, aPosition);
+                            for (std::size_t p = begin; p < iFunction->codeEnd && p - begin < MaxHead;)
+                            {
+                                auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                switch (op)
+                                {
+                                case 0x0D:
+                                    if (p > begin && iTokens[p + 1u] >= 1u)
+                                    {
+                                        aLoop.headBegin = begin;
+                                        aLoop.headEnd = p;
+                                    }
+                                    return;
+                                case 0x00: case 0x02: case 0x03: case 0x04: case 0x05: case 0x0B: case 0x0C: case 0x0E: case 0x0F: 
+                                case 0x11:
+                                    return;
+                                default:
+                                    break;
+                                }
+                                p += 1u + immediate_count(op, iTokens, p);
+                            }
+                        }
+                        // a branch back to a rotated loop: its head is repeated here, then the loop continues after its exit
+                        bool rotate_loop(std::size_t aDepth)
+                        {
+                            if (aDepth >= iControl.size())
+                                return false;
+                            auto const& loop = iControl[iControl.size() - 1u - aDepth];
+                            if (loop.kind != control::Loop || !loop.bodyLabel || iStack.size() != loop.base)
+                                return false;
+                            auto const exitDepth = static_cast<std::size_t>(iTokens[loop.headEnd + 1u]) + aDepth;
+                            if (exitDepth >= iControl.size())
+                                return false;
+                            if (auto const& exit = iControl[iControl.size() - 1u - exitDepth]; exit.result || exit.kind == control::Function)
+                                return false;
+                            auto const bodyLabel = *loop.bodyLabel;
+                            for (std::size_t p = loop.headBegin; p < loop.headEnd;)
+                            {
+                                auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                auto const position = p;
+                                p += 1u + immediate_count(op, iTokens, p);
+                                instruction(op, position, [&](std::size_t aIndex) { return iTokens[position + 1u + aIndex]; });
+                            }
+                            // (continue unless the exit is taken)
+                            auto const condition = pop();
+                            jump_unless(condition, bodyLabel, false);
+                            branch(exitDepth);
+                            return true;
+                        }
                         void branch(std::size_t aDepth)
                         {
                             if (aDepth >= iControl.size())
@@ -2014,17 +2083,16 @@ namespace neos
                             else
                                 push_cond(aRelation == 0 ? E : NE, true);
                         }
-                        void float_sign(bool aDouble, int aDigit) // btr 6 (abs), btc 7 (neg)
+                        void float_sign(bool aDouble, int aDigit) // abs (6): and with ~sign, neg (7): xor with sign
                         {
                             materialize_cond();
                             auto v = pop();
-                            auto const t = alloc(false);
-                            load_gpr(v, t);
-                            release(v);
-                            a.bt_ri(aDigit, aDouble, t, aDouble ? 63 : 31);
-                            auto const x = alloc(true);
-                            a.movq_xg(aDouble, x, t);
-                            release_reg(false, t);
+                            auto const x = to_xmm(v);
+                            auto const m = alloc(true);
+                            std::uint64_t const sign = aDouble ? 0x8000000000000000ull : 0x80000000ull;
+                            a.sse_rip(aDouble ? 0xF2 : 0xF3, 0x10, m, a.constant(aDigit == 6 ? (aDouble ? ~sign : (~sign & 0xFFFFFFFFull)) : sign));
+                            a.sse_rr(aDouble ? 0x66 : -1, aDigit == 6 ? 0x54 : 0x57, false, x, m);
+                            release_reg(true, m);
                             push_reg(aDouble ? F64 : F32, x);
                         }
                         void float_copysign(bool aDouble)
@@ -2032,22 +2100,20 @@ namespace neos
                             materialize_cond();
                             auto rhs = pop();
                             auto lhs = pop();
-                            auto const l = alloc(false);
-                            load_gpr(lhs, l);
-                            release(lhs);
-                            auto const r = alloc(false);
-                            load_gpr(rhs, r);
-                            release(rhs);
-                            std::uint8_t const top = aDouble ? 63 : 31;
-                            a.bt_ri(6, aDouble, l, top);
-                            a.shift_ri(5, aDouble, r, top);
-                            a.shift_ri(4, aDouble, r, top);
-                            a.alu_rr(1, aDouble, l, r);
-                            release_reg(false, r);
-                            auto const x = alloc(true);
-                            a.movq_xg(aDouble, x, l);
-                            release_reg(false, l);
-                            push_reg(aDouble ? F64 : F32, x);
+                            auto const l = to_xmm(lhs);
+                            auto const r = to_xmm(rhs);
+                            auto const m = alloc(true);
+                            std::uint64_t const sign = aDouble ? 0x8000000000000000ull : 0x80000000ull;
+                            int const prefix = aDouble ? 0x66 : -1;
+                            // l = (l & ~sign) | (r & sign)
+                            a.sse_rip(aDouble ? 0xF2 : 0xF3, 0x10, m, a.constant(aDouble ? ~sign : (~sign & 0xFFFFFFFFull)));
+                            a.sse_rr(prefix, 0x54, false, l, m);
+                            a.sse_rip(aDouble ? 0xF2 : 0xF3, 0x10, m, a.constant(sign));
+                            a.sse_rr(prefix, 0x54, false, r, m);
+                            a.sse_rr(prefix, 0x56, false, l, r);
+                            release_reg(true, m);
+                            release_reg(true, r);
+                            push_reg(aDouble ? F64 : F32, l);
                         }
                         void float_unary_sse(bool aDouble, std::uint8_t aOp) // sqrt
                         {
@@ -2244,6 +2310,85 @@ namespace neos
                             else
                                 release(v);
                         }
+                        // a load or store: [address + offset, address + offset + width) must be within linear memory
+                        void memory_access(std::uint8_t aOp, std::uint64_t aOffset)
+                        {
+                            struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
+                            static access const sAccesses[] =
+                            {
+                                { 4, I32, 0x8B, 0, false, -1 }, { 8, I64, 0x8B, 0, true, -1 }, { 4, F32, 0, 0, false, -1 }, { 8, F64, 0, 0, false, -1 },
+                                { 1, I32, 0x0F, 0xBE, false, -1 }, { 1, I32, 0x0F, 0xB6, false, -1 },
+                                { 2, I32, 0x0F, 0xBF, false, -1 }, { 2, I32, 0x0F, 0xB7, false, -1 },
+                                { 1, I64, 0x0F, 0xBE, true, -1 }, { 1, I64, 0x0F, 0xB6, false, -1 },
+                                { 2, I64, 0x0F, 0xBF, true, -1 }, { 2, I64, 0x0F, 0xB7, false, -1 },
+                                { 4, I64, 0x63, 0, true, -1 }, { 4, I64, 0x8B, 0, false, -1 },
+                                { 4, I32, 0x89, 0, false, -1 }, { 8, I64, 0x89, 0, true, -1 }, { 4, F32, 0, 0, false, -1 }, { 8, F64, 0, 0, false, -1 },
+                                { 1, I32, 0x88, 0, false, -1 }, { 2, I32, 0x89, 0, false, 0x66 },
+                                { 1, I64, 0x88, 0, false, -1 }, { 2, I64, 0x89, 0, false, 0x66 }, { 4, I64, 0x89, 0, false, -1 }
+                            };
+                            auto const& x = sAccesses[aOp - 0x28u];
+                            bool const store = (aOp >= 0x36u);
+                            if (aOffset + x.width > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
+                                throw unsupported{ "memory offset too large" };
+                            auto const disp = static_cast<std::int32_t>(aOffset);
+                            materialize_cond();
+                            // the value stored (byte stores use AL, CL, DL, BL or R8B-R15B)
+                            std::uint32_t constexpr NotByteRegisters = (1u << RSP) | (1u << RBP) | (1u << RSI) | (1u << RDI);
+                            std::optional<entry> value;
+                            int v = -1;
+                            if (store)
+                            {
+                                value = pop();
+                                v = is_float(x.type) ? to_xmm(*value) : to_gpr(*value, x.width == 1u ? NotByteRegisters : 0u);
+                            }
+                            std::uint32_t const keep = (!store || is_float(x.type)) ? 0u : (1u << v);
+                            auto const address = pop();
+                            auto const g = to_gpr(address, keep);
+                            a.mov_rr(false, g, g); // (zero extend)
+                            auto const m = alloc(false, keep | (1u << g));
+                            auto const e = alloc(false, keep | (1u << g) | (1u << m));
+                            a.load(true, m, R15, ContextMemory);
+                            a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
+                            a.alu_rm(7, true, e, m, MemorySize); // cmp
+                            a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                            release_reg(false, e);
+                            a.load(true, m, m, MemoryBase);
+                            a.alu_rr(0, true, m, g); // add
+                            release_reg(false, g);
+                            if (store)
+                            {
+                                if (is_float(x.type))
+                                {
+                                    a.movf_store(x.type == F64, m, disp, v);
+                                    if (value->k == kind::Reg)
+                                        release(*value);
+                                    else
+                                        release_reg(true, v);
+                                }
+                                else
+                                {
+                                    a.op_rm({ x.opcode0 }, x.w, v, m, disp, x.prefix);
+                                    release_reg(false, v);
+                                }
+                                release_reg(false, m);
+                                return;
+                            }
+                            if (is_float(x.type))
+                            {
+                                auto const f = alloc(true);
+                                a.movf_load(x.type == F64, f, m, disp);
+                                release_reg(false, m);
+                                push_reg(x.type, f);
+                            }
+                            else
+                            {
+                                if (x.opcode1 != 0u)
+                                    a.op_rm({ x.opcode0, x.opcode1 }, x.w, m, m, disp, x.prefix);
+                                else
+                                    a.op_rm({ x.opcode0 }, x.w, m, m, disp, x.prefix);
+                                push_reg(x.type, m);
+                            }
+                        }
                         void get_global(std::uint32_t aIndex)
                         {
                             materialize_cond();
@@ -2422,7 +2567,11 @@ namespace neos
                                     c.base = iStack.size();
                                     c.label = a.new_label();
                                     if (aOp == 0x03)
+                                    {
                                         a.bind(c.label);
+                                        if (!c.result)
+                                            find_loop_head(c, aPosition);
+                                    }
                                     iControl.push_back(c);
                                 }
                                 break;
@@ -2497,12 +2646,23 @@ namespace neos
                                 break;
                             case 0x0C:
                                 materialize_cond();
+                                if (rotate_loop(static_cast<std::size_t>(aImmediate(0))))
+                                {
+                                    unwind(iControl.back().base);
+                                    iReachable = false;
+                                    break;
+                                }
                                 branch(static_cast<std::size_t>(aImmediate(0)));
                                 unwind(iControl.back().base);
                                 iReachable = false;
                                 break;
                             case 0x0D:
                                 conditional_branch(static_cast<std::size_t>(aImmediate(0)));
+                                if (auto& c = iControl.back(); c.kind == control::Loop && c.headEnd == aPosition && !c.bodyLabel)
+                                {
+                                    c.bodyLabel = a.new_label();
+                                    a.bind(*c.bodyLabel);
+                                }
                                 break;
                             case 0x0F:
                                 materialize_cond();
@@ -2547,6 +2707,11 @@ namespace neos
                                 break;
                             case 0x41:
                                 constant(I32, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(aImmediate(0)))));
+                                break;
+                            case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E: case 0x2F:
+                            case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
+                            case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
+                                memory_access(static_cast<std::uint8_t>(aOp), aImmediate(1));
                                 break;
                             case 0x42:
                                 constant(I64, aImmediate(0));
@@ -2602,6 +2767,11 @@ namespace neos
                             case 0x74: shift(4, false); break;
                             case 0x75: shift(7, false); break;
                             case 0x76: shift(5, false); break;
+                            case 0x67: helper(reinterpret_cast<void const*>(&i32_clz), 1u, I32, I32, false); break;
+                            case 0x68: helper(reinterpret_cast<void const*>(&i32_ctz), 1u, I32, I32, false); break;
+                            case 0x69: helper(reinterpret_cast<void const*>(&i32_popcnt), 1u, I32, I32, false); break;
+                            case 0x77: helper(reinterpret_cast<void const*>(&i32_rotl), 2u, I32, I32, false); break;
+                            case 0x78: helper(reinterpret_cast<void const*>(&i32_rotr), 2u, I32, I32, false); break;
                             // i64 arithmetic
                             case 0x7C: int_binary(0, true, true); break;
                             case 0x7D: int_binary(5, true, false); break;
@@ -2616,6 +2786,11 @@ namespace neos
                             case 0x86: shift(4, true); break;
                             case 0x87: shift(7, true); break;
                             case 0x88: shift(5, true); break;
+                            case 0x79: helper(reinterpret_cast<void const*>(&i64_clz), 1u, I64, I64, false); break;
+                            case 0x7A: helper(reinterpret_cast<void const*>(&i64_ctz), 1u, I64, I64, false); break;
+                            case 0x7B: helper(reinterpret_cast<void const*>(&i64_popcnt), 1u, I64, I64, false); break;
+                            case 0x89: helper(reinterpret_cast<void const*>(&i64_rotl), 2u, I64, I64, false); break;
+                            case 0x8A: helper(reinterpret_cast<void const*>(&i64_rotr), 2u, I64, I64, false); break;
                             // f32 arithmetic
                             case 0x8B: float_sign(false, 6); break;
                             case 0x8C: float_sign(false, 7); break;
@@ -2706,6 +2881,30 @@ namespace neos
                                     auto const x = to_xmm(v);
                                     a.sse_rr(0xF3, 0x5A, false, x, x);
                                     push_reg(F64, x);
+                                }
+                                break;
+                            case 0xBC: // i32.reinterpret_f32
+                            case 0xBD: // i64.reinterpret_f64
+                                {
+                                    materialize_cond();
+                                    auto v = pop();
+                                    auto const x = to_xmm(v);
+                                    auto const g = alloc(false);
+                                    a.movq_gx(aOp == 0xBD, g, x);
+                                    release_reg(true, x);
+                                    push_reg(aOp == 0xBD ? I64 : I32, g);
+                                }
+                                break;
+                            case 0xBE: // f32.reinterpret_i32
+                            case 0xBF: // f64.reinterpret_i64
+                                {
+                                    materialize_cond();
+                                    auto v = pop();
+                                    auto const g = to_gpr(v);
+                                    auto const x = alloc(true);
+                                    a.movq_xg(aOp == 0xBF, x, g);
+                                    release_reg(false, g);
+                                    push_reg(aOp == 0xBF ? F64 : F32, x);
                                 }
                                 break;
                             case 0xC0: // i32.extend8_s
@@ -2911,13 +3110,20 @@ namespace neos
                 {
                     auto const& function = aModule.description.functions.at(aFunction);
                     if (function.imported)
-                        return aModule.host(aFunction, aArguments);
+                    {
+                        std::vector<value> buffer{ aArguments };
+                        buffer.resize(std::max(buffer.size(), function.results->size()));
+                        aModule.host(aFunction, buffer.data());
+                        buffer.resize(function.results->size());
+                        return buffer;
+                    }
                     if (aArguments.size() != function.parameters->size())
                         throw std::runtime_error("wrong number of arguments");
                     context c = {};
                     c.arguments = aArguments.data();
                     c.argumentCount = static_cast<std::uint32_t>(aArguments.size());
                     c.globals = aModule.description.globals->data();
+                    c.linearMemory = aModule.description.linearMemory;
                     c.module = &aModule;
                     auto const status = run(aModule, c, static_cast<std::uint8_t const*>(aModule.code) + aModule.functionOffsets[aFunction]);
                     if (status != NoTrap)

@@ -30,10 +30,12 @@
 #include <cctype>
 #include <limits>
 #include <cmath>
+#include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
 #include <neos/i_context.hpp>
 #include <neos/language/compiler.hpp>
+#include "compiler.emit.hpp"
 
 namespace neos::language
 {
@@ -88,11 +90,23 @@ namespace neos::language
             aProgram.text.clear();
             aProgram.symbolTable.clear();
             aProgram.scope.clear();
+            iCompilationStateStack.clear();
+            iGlobalsDeclared = false;
+            iInference.arguments.clear();
+            iInference.returned.clear();
+            iInference.functionGlobals.clear();
+            iInference.observed.clear();
+            iInference.assignments.clear();
+            iInference.counters.clear();
+            iRangeBound = std::nullopt;
+            iInference.declaredGlobals.clear();
+            iInference.changed = false;
         };
 
         try
         {
             // pass 1: declarations only (collects function signatures so that functions can be called before they are defined)
+            iInference = {};
             reset();
             iForwardDeclarations.clear();
             iDeclarationPass = true;
@@ -102,14 +116,65 @@ namespace neos::language
             iDeclarationPass = false;
             if (ok)
             {
+                iDeclaredFunctions.clear();
                 for (auto const& function : iModule.functions)
-                    iForwardDeclarations.push_back(forward_declaration{ function.stub ? function.name.substr(0u, function.name.find('(')) : function.name,
-                        function.scope != nullptr ? function_signature{ function.scope->function_signature() } : function.signature, function.stub });
-                // pass 2: code generation
-                reset();
-                for (auto& unit : aProgram.translationUnits)
-                    if (ok)
-                        ok = compile(aProgram, unit);
+                    iDeclaredFunctions.push_back(forward_declaration{ function.stub ? function.name.substr(0u, function.name.find('(')) : function.name,
+                        function.scope != nullptr ? function_signature{ function.scope->function_signature() } : function.signature, function.stub, 
+                        function.inferred });
+                // pass 2: code generation (repeated while the types that are inferred change: each pass uses those found by 
+                // the previous one; an error is only an error if they did not change)
+                std::uint32_t constexpr MaxPasses = 32u;
+                for (std::uint32_t pass = 1u;; ++pass)
+                {
+                    iForwardDeclarations = iDeclaredFunctions;
+                    for (auto& declaration : iForwardDeclarations)
+                        if (declaration.inferred)
+                        {
+                            auto& signature = declaration.signature;
+                            if (signature.parameters().has_value())
+                                for (std::size_t i = 0u; i < signature.parameters().value().size(); ++i)
+                                {
+                                    auto const facts = iInference.parameters.find(declaration.name);
+                                    auto t = facts != iInference.parameters.end() && i < facts->second.size() ? facts->second[i] : type::F64;
+                                    // (a number parameter only passed 32-bit integers is an i32)
+                                    if (t == type::F64 && iInference.ranges.contains(range_key{ nullptr, declaration.name + "#" + std::to_string(i) }))
+                                        t = type::I32;
+                                    signature.parameters().value()[i].set_parameter_type(t);
+                                }
+                            auto const result = iInference.results.find(declaration.name);
+                            signature.set_return_type(result != iInference.results.end() ? result->second : type::Void);
+                        }
+                    reset();
+                    iInference.pass = pass;
+                    try
+                    {
+                        for (auto& unit : aProgram.translationUnits)
+                            if (ok)
+                                ok = compile(aProgram, unit);
+                        // global variables that no function uses can be locals of the entry point
+                        std::set<std::string> entryGlobals;
+                        for (auto const& global : iInference.globals)
+                            if (!iInference.functionGlobals.contains(global.first))
+                                entryGlobals.insert(global.first);
+                        if (ok && entryGlobals != iInference.entryGlobals)
+                        {
+                            iInference.entryGlobals = entryGlobals;
+                            iInference.changed = true;
+                        }
+                        // number variables and parameters only assigned 32-bit integers can be i32
+                        if (ok)
+                            update_ranges();
+                    }
+                    catch (...)
+                    {
+                        if (!iInference.changed || pass == MaxPasses)
+                            throw;
+                    }
+                    if (!ok || !iInference.changed)
+                        break;
+                    if (pass == MaxPasses)
+                        throw std::runtime_error("types could not be inferred");
+                }
             }
             if (ok)
                 emit_module(aProgram);
@@ -199,6 +264,9 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
+        if (!aFragment.imported() && !iDeclarationPass)
+            declare_globals();
+
         if (!aFragment.imported())
             for (auto const& package : aUnit.schema->meta().prelude)
             {
@@ -218,15 +286,26 @@ namespace neos::language
             for (auto const& discard : *stage->discard)
                 parser.ignore(stage->symbolMap->at(discard));
             parser.set_debug_output(std::cerr, false, false);
-            if (stage->root)
-                ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
+            // (a source parsed by the previous compilation pass need not be parsed again)
+            auto& parsed = iParsed[&parser];
+            if (parsed.first && parsed.second == aFragment.source().to_std_string_view())
+                ok = true;
             else
-                ok = parser.parse(aFragment.source().to_std_string_view());
+            {
+                parsed = {};
+                if (stage->root)
+                    ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
+                else
+                    ok = parser.parse(aFragment.source().to_std_string_view());
+                if (ok && last)
+                    parser.create_ast();
+                if (ok)
+                    parsed = { true, aFragment.source().to_std_string() };
+            }
             if (!ok)
                 break;
             if (last)
             {
-                parser.create_ast();
                 auto& unitRoot = *aUnit.ast.root();
                 unitRoot.children().push_back(neolib::make_ref<ast_node>(std::monostate{}, unitRoot)); // each fragment gets its own root
                 walk_ast(iContext, aUnit.ast, fold_stack(), parser.ast(), *unitRoot.children().back());
@@ -322,6 +401,8 @@ namespace neos::language
             {
                 finish_function();
                 state().scopeStack.pop_back();
+                if (state().suspendedEntry)
+                    resume_entry();
             }
             else
                 throw std::runtime_error("Unmatched function scopes");
@@ -405,6 +486,9 @@ namespace neos::language
 
     void compiler::define_symbol(i_symbol_name const& aName, symbol_type aType, neolib::i_string_view const& aSource)
     {
+        // (a function declared after top-level statements is not part of the entry point that they form)
+        if (aType == symbol_type::Function && state().function && current_function().implicitEntry)
+            suspend_entry();
         auto& symbols = state().program->symbolTable[&current_scope()];
         i_symbol_table_entry* existing = nullptr;
         for (auto& symbol : symbols)
@@ -438,6 +522,8 @@ namespace neos::language
                 qualifiedName.erase(0, 2);
             index = add_function(qualifiedName, false);
             state().pendingFunction = index;
+            iModule.functions[index].inferred = state().pendingInferred;
+            state().pendingInferred = false;
         }
         else if (state().function)
         {
@@ -530,399 +616,7 @@ namespace neos::language
 
     // --- WASM code generation
 
-    namespace
-    {
-        using bytes = std::vector<std::uint8_t>;
-
-        constexpr std::uint32_t DataBase = 16u;
-
-        void put_op(bytes& aCode, bytecode::opcode aOpcode)
-        {
-            text t;
-            t << aOpcode;
-            for (auto b : t)
-                aCode.push_back(static_cast<std::uint8_t>(b));
-        }
-
-        void put_u32(bytes& aCode, std::uint64_t aValue)
-        {
-            do
-            {
-                std::uint8_t b = aValue & 0x7Fu;
-                aValue >>= 7u;
-                if (aValue != 0u)
-                    b |= 0x80u;
-                aCode.push_back(b);
-            } while (aValue != 0u);
-        }
-
-        void put_s64(bytes& aCode, std::int64_t aValue)
-        {
-            bool more = true;
-            while (more)
-            {
-                std::uint8_t b = aValue & 0x7F;
-                aValue >>= 7;
-                if ((aValue == 0 && (b & 0x40u) == 0u) || (aValue == -1 && (b & 0x40u) != 0u))
-                    more = false;
-                else
-                    b |= 0x80u;
-                aCode.push_back(b);
-            }
-        }
-
-        void put_u32_padded(bytes& aCode, std::size_t aOffset, std::uint32_t aValue)
-        {
-            for (std::size_t i = 0u; i < 5u; ++i)
-            {
-                std::uint8_t b = aValue & 0x7Fu;
-                aValue >>= 7u;
-                if (i < 4u)
-                    b |= 0x80u;
-                aCode[aOffset + i] = b;
-            }
-        }
-
-        void put_name(bytes& aCode, std::string const& aName)
-        {
-            put_u32(aCode, aName.size());
-            aCode.insert(aCode.end(), aName.begin(), aName.end());
-        }
-
-        template <typename T>
-        void put_raw(bytes& aCode, T aValue)
-        {
-            auto const* p = reinterpret_cast<std::uint8_t const*>(&aValue);
-            aCode.insert(aCode.end(), p, p + sizeof(T));
-        }
-
-        void put_section(bytes& aModule, std::uint8_t aId, bytes const& aContents)
-        {
-            aModule.push_back(aId);
-            put_u32(aModule, aContents.size());
-            aModule.insert(aModule.end(), aContents.begin(), aContents.end());
-        }
-
-        bool is_float(type aType)
-        {
-            return aType == type::F32 || aType == type::F64 || aType == type::Fbig;
-        }
-
-        bool is_64(type aType)
-        {
-            return aType == type::I64 || aType == type::U64 || aType == type::Ibig;
-        }
-
-        bool is_unsigned(type aType)
-        {
-            return aType == type::U8 || aType == type::U16 || aType == type::U32 || aType == type::U64 || aType == type::Boolean;
-        }
-
-        bool is_numeric(type aType)
-        {
-            return (aType >= type::Boolean && aType <= type::Fbig);
-        }
-
-        bool is_flexible(type aType)
-        {
-            return aType == type::Ibig || aType == type::Fbig;
-        }
-
-        std::optional<std::uint8_t> wasm_type(type aType)
-        {
-            switch (aType)
-            {
-            case type::Void:
-                return std::nullopt;
-            case type::I64:
-            case type::U64:
-            case type::Ibig:
-                return 0x7Eu;
-            case type::F32:
-                return 0x7Du;
-            case type::F64:
-            case type::Fbig:
-                return 0x7Cu;
-            case type::UNKNOWN:
-                throw std::runtime_error("type unknown (type inference not supported)");
-            default:
-                return 0x7Fu;
-            }
-        }
-
-        std::uint32_t rank(type aType)
-        {
-            switch (aType)
-            {
-            case type::Boolean: return 0u;
-            case type::I8: case type::U8: return 1u;
-            case type::I16: case type::U16: return 2u;
-            case type::I32: case type::U32: return 3u;
-            case type::I64: case type::U64: return 4u;
-            case type::F32: return 5u;
-            case type::F64: return 6u;
-            default: return 3u;
-            }
-        }
-
-        void convert(bytes& aCode, type aFrom, type aTo)
-        {
-            using bytecode::opcode;
-            if (aFrom == aTo)
-                return;
-            if (aFrom == type::String || aTo == type::String)
-                throw std::runtime_error("cannot convert " + type_name(aFrom) + " to " + type_name(aTo));
-            if (!is_numeric(aFrom) || !is_numeric(aTo))
-                throw std::runtime_error("cannot convert " + type_name(aFrom) + " to " + type_name(aTo));
-            if (aTo == type::Boolean)
-            {
-                // compare against zero in the source type
-                if (aFrom == type::F32)
-                {
-                    put_op(aCode, opcode::F32Const);
-                    put_raw(aCode, 0.0f);
-                    put_op(aCode, opcode::F32Ne);
-                }
-                else if (is_float(aFrom))
-                {
-                    put_op(aCode, opcode::F64Const);
-                    put_raw(aCode, 0.0);
-                    put_op(aCode, opcode::F64Ne);
-                }
-                else if (is_64(aFrom))
-                {
-                    put_op(aCode, opcode::I64Const);
-                    put_s64(aCode, 0);
-                    put_op(aCode, opcode::I64Ne);
-                }
-                else
-                {
-                    put_op(aCode, opcode::I32Const);
-                    put_s64(aCode, 0);
-                    put_op(aCode, opcode::I32Ne);
-                }
-                return;
-            }
-            bool const fromFloat = is_float(aFrom);
-            bool const toFloat = is_float(aTo);
-            bool const fromUnsigned = is_unsigned(aFrom);
-            bool const toUnsigned = is_unsigned(aTo);
-            if (!fromFloat && !toFloat)
-            {
-                if (is_64(aFrom) && !is_64(aTo))
-                    put_op(aCode, opcode::I32ConvertI64);
-                else if (!is_64(aFrom) && is_64(aTo))
-                    put_op(aCode, fromUnsigned ? opcode::I64UConvertI32 : opcode::I64SConvertI32);
-            }
-            else if (!fromFloat && toFloat)
-            {
-                if (aTo == type::F32)
-                    put_op(aCode, is_64(aFrom) ? (fromUnsigned ? opcode::F32UConvertI64 : opcode::F32SConvertI64) : (fromUnsigned ? opcode::F32UConvertI32 : opcode::F32SConvertI32));
-                else
-                    put_op(aCode, is_64(aFrom) ? (fromUnsigned ? opcode::F64UConvertI64 : opcode::F64SConvertI64) : (fromUnsigned ? opcode::F64UConvertI32 : opcode::F64SConvertI32));
-                return;
-            }
-            else if (fromFloat && toFloat)
-            {
-                if (aFrom == type::F32 && aTo != type::F32)
-                    put_op(aCode, opcode::F64ConvertF32);
-                else if (aFrom != type::F32 && aTo == type::F32)
-                    put_op(aCode, opcode::F32ConvertF64);
-                return;
-            }
-            else
-            {
-                if (aFrom == type::F32)
-                    put_op(aCode, is_64(aTo) ? (toUnsigned ? opcode::I64UConvertF32 : opcode::I64SConvertF32) : (toUnsigned ? opcode::I32UConvertF32 : opcode::I32SConvertF32));
-                else
-                    put_op(aCode, is_64(aTo) ? (toUnsigned ? opcode::I64UConvertF64 : opcode::I64SConvertF64) : (toUnsigned ? opcode::I32UConvertF64 : opcode::I32SConvertF64));
-            }
-            switch (aTo)
-            {
-            case type::I8:
-                put_op(aCode, opcode::I32SExtendI8);
-                break;
-            case type::I16:
-                put_op(aCode, opcode::I32SExtendI16);
-                break;
-            case type::U8:
-                put_op(aCode, opcode::I32Const);
-                put_s64(aCode, 0xFF);
-                put_op(aCode, opcode::I32And);
-                break;
-            case type::U16:
-                put_op(aCode, opcode::I32Const);
-                put_s64(aCode, 0xFFFF);
-                put_op(aCode, opcode::I32And);
-                break;
-            default:
-                break;
-            }
-        }
-
-        void append(fragment& aTarget, i_fragment const& aSource)
-        {
-            auto& code = aTarget.fragmentCode.as_std_vector();
-            auto const offset = static_cast<std::uint32_t>(code.size());
-            for (auto const& r : aSource.relocations())
-                aTarget.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ r.first() + offset, r.second() });
-            for (auto b : aSource.code())
-                code.push_back(b);
-        }
-
-        bool within(neolib::i_string_view const& aInner, neolib::i_string_view const& aOuter)
-        {
-            if (aInner.empty())
-                return false;
-            auto const inner = aInner.to_std_string_view();
-            auto const outer = aOuter.to_std_string_view();
-            return inner.data() >= outer.data() && inner.data() + inner.size() <= outer.data() + outer.size();
-        }
-
-        fragment make_fragment(fragment_kind aKind, type aType, neolib::i_string_view const& aSource)
-        {
-            fragment result;
-            result.fragmentKind = aKind;
-            result.valueType = aType;
-            result.fragmentSource = aSource;
-            return result;
-        }
-
-        bool is_immediate(operand_type const& aOperand)
-        {
-            if (!aOperand.holds_alternative<i_data_type>())
-                return false;
-            bool result = false;
-            std::visit([&](auto const& d)
-                {
-                    using vt = std::decay_t<decltype(d)>;
-                    if constexpr (!std::is_same_v<vt, std::monostate>)
-                        result = !d.symbol().has_value() && d.value().has_value();
-                }, std::get<data_type>(aOperand));
-            return result;
-        }
-
-        // immediate value as a scalar: integer (as int64), real (as double), boolean or string
-        struct immediate
-        {
-            type t = type::UNKNOWN;
-            std::int64_t i = 0;
-            double f = 0.0;
-            std::string s;
-        };
-
-        // CPython's float floor division and modulo
-        std::pair<double, double> python_divmod(double aLhs, double aRhs)
-        {
-            double mod = std::fmod(aLhs, aRhs);
-            double div = (aLhs - mod) / aRhs;
-            if (mod != 0.0)
-            {
-                if ((aRhs < 0.0) != (mod < 0.0))
-                {
-                    mod += aRhs;
-                    div -= 1.0;
-                }
-            }
-            else
-                mod = std::copysign(0.0, aRhs);
-            double floorDiv;
-            if (div != 0.0)
-            {
-                floorDiv = std::floor(div);
-                if (div - floorDiv > 0.5)
-                    floorDiv += 1.0;
-            }
-            else
-                floorDiv = std::copysign(0.0, aLhs / aRhs);
-            return { floorDiv, mod };
-        }
-
-        immediate get_immediate(operand_type const& aOperand)
-        {
-            immediate result;
-            std::visit([&](auto const& d)
-                {
-                    using vt = std::decay_t<decltype(d)>;
-                    if constexpr (!std::is_same_v<vt, std::monostate>)
-                    {
-                        using value_type = typename vt::type;
-                        if constexpr (std::is_same_v<value_type, ibig>)
-                        {
-                            result.t = type::Ibig;
-                            auto const text = d.value().value().to_string();
-                            try
-                            {
-                                result.i = std::stoll(text);
-                            }
-                            catch (std::out_of_range const&)
-                            {
-                                // (literals up to the u64 maximum: the bits of an unsigned 64 bit value)
-                                try
-                                {
-                                    if (text.empty() || text[0] == '-')
-                                        throw std::out_of_range{ text };
-                                    result.i = static_cast<std::int64_t>(std::stoull(text));
-                                }
-                                catch (std::out_of_range const&)
-                                {
-                                    throw std::runtime_error("integer literal out of range: " + text);
-                                }
-                            }
-                        }
-                        else if constexpr (std::is_same_v<value_type, fbig>)
-                        {
-                            result.t = type::Fbig;
-                            result.f = static_cast<double>(d.value().value());
-                        }
-                        else if constexpr (std::is_same_v<value_type, string>)
-                        {
-                            result.t = type::String;
-                            result.s = d.value().value().to_std_string();
-                        }
-                        else if constexpr (std::is_same_v<value_type, boolean>)
-                        {
-                            result.t = type::Boolean;
-                            result.i = d.value().value() ? 1 : 0;
-                        }
-                        else if constexpr (std::is_floating_point_v<value_type>)
-                        {
-                            result.t = type_to_enum_v<value_type>;
-                            result.f = static_cast<double>(d.value().value());
-                        }
-                        else if constexpr (std::is_integral_v<value_type>)
-                        {
-                            result.t = type_to_enum_v<value_type>;
-                            result.i = static_cast<std::int64_t>(d.value().value());
-                        }
-                        else
-                            throw std::runtime_error("unsupported immediate value");
-                    }
-                }, std::get<data_type>(aOperand));
-            return result;
-        }
-
-        data_type make_immediate(immediate const& aValue)
-        {
-            switch (aValue.t)
-            {
-            case type::Boolean:
-                return data<boolean>{ aValue.i != 0 };
-            case type::String:
-                return data<string>{ string{ aValue.s } };
-            case type::F32:
-            case type::F64:
-            case type::Fbig:
-                {
-                    std::ostringstream oss;
-                    oss << std::setprecision(17) << aValue.f;
-                    return data<fbig>{ fbig{ oss.str() } };
-                }
-            default:
-                return data<ibig>{ ibig{ std::to_string(aValue.i) } };
-            }
-        }
-    }
+    using namespace emitter;
 
     compiler::wasm_function& compiler::current_function()
     {
@@ -967,8 +661,11 @@ namespace neos::language
         while (iModule.data.size() % 4u != 0u)
             iModule.data.push_back(0u);
         auto const address = DataBase + static_cast<std::uint32_t>(iModule.data.size());
+        // (see bytecode::string_header)
         put_raw(iModule.data, static_cast<std::uint32_t>(aValue.size()));
+        put_raw(iModule.data, bytecode::utf16_units(aValue));
         iModule.data.insert(iModule.data.end(), aValue.begin(), aValue.end());
+        iModule.data.push_back(0u); // (strings are also NUL terminated, so runtime plugins can use them in place)
         iModule.strings[aValue] = address;
         return address;
     }
@@ -1020,7 +717,7 @@ namespace neos::language
         {
             if (symbol->type() == type::Function)
                 throw std::runtime_error("function used as a value");
-            put_op(code, opcode::LocalGet);
+            put_op(code, is_global(*symbol) ? opcode::GlobalGet : opcode::LocalGet);
             put_u32(code, symbol->index());
             result.valueType = symbol->type();
             result.fragmentLvalue = symbol;
@@ -1117,6 +814,14 @@ namespace neos::language
             current_function().entry = true;
         else
             state().pendingEntry = true;
+    }
+
+    void compiler::emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource)
+    {
+        if (aLanguage.to_std_string_view() == javascript::Language)
+            emit_js(static_cast<javascript::construct>(aConstruct), aSource);
+        else
+            throw std::runtime_error("no code generation for constructs of language '" + aLanguage.to_std_string() + "'");
     }
 
     void compiler::emit_operation(operation aOperation)
@@ -1664,6 +1369,43 @@ namespace neos::language
         while (!text.empty() && (std::isspace(static_cast<unsigned char>(text.back())) || text.back() == ';'))
             text.remove_suffix(1u);
         bool const bare = (text == "return");
+        if (function.inferred)
+        {
+            // the type of a function's result is that of the values it returns
+            if (iDeclarationPass)
+            {
+                if (!bare && !iInference.results.contains(function.name))
+                    iInference.results[function.name] = type::F64;
+                if (!bare)
+                    state().operandStack.pop_back();
+                push_operand(operand_type{ statement });
+                return;
+            }
+            auto const t = bare ? type::Void : js_type(state().operandStack.back());
+            auto const returned = iInference.returned.find(function.name);
+            auto const describe = [](type aType) -> std::string
+            {
+                return aType == type::Void ? "no value" : aType == type::String ? "a string" : aType == type::Boolean ? "a boolean" : "a number";
+            };
+            if (returned != iInference.returned.end() && returned->second != t)
+                throw std::runtime_error("'" + function.name + "' returns " + describe(returned->second) + " and " + describe(t));
+            iInference.returned[function.name] = t;
+            auto const result = iInference.results.find(function.name);
+            if (result == iInference.results.end() || result->second != t)
+            {
+                infer("result of '" + function.name + "'", result != iInference.results.end() ? std::optional<type>{ result->second } : std::nullopt, t);
+                iInference.results[function.name] = t;
+            }
+            if (signature.return_type() != t)
+            {
+                // (code compiled with types that have since changed is replaced by the next compilation pass)
+                if (!bare)
+                    state().operandStack.pop_back();
+                put_op(statement.fragmentCode.as_std_vector(), opcode::Unreachable);
+                push_operand(operand_type{ statement });
+                return;
+            }
+        }
         if (signature.return_type() == type::Void && !bare)
             throw std::runtime_error("procedure cannot return a value");
         if (signature.return_type() != type::Void && bare)
@@ -1700,8 +1442,10 @@ namespace neos::language
         auto const operand = state().operandStack.back();
         state().operandStack.pop_back();
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
+        if (iSymbolInfo[symbol].constant)
+            throw std::runtime_error("assignment to constant variable '" + aTarget.to_std_string() + "'");
         append(statement, materialize(operand, symbol->type()));
-        put_op(statement.fragmentCode.as_std_vector(), bytecode::opcode::LocalSet);
+        put_op(statement.fragmentCode.as_std_vector(), is_global(*symbol) ? bytecode::opcode::GlobalSet : bytecode::opcode::LocalSet);
         put_u32(statement.fragmentCode.as_std_vector(), symbol->index());
         push_operand(operand_type{ statement });
     }
@@ -1714,8 +1458,12 @@ namespace neos::language
         if (operand.holds_alternative<i_fragment>() && operand.get<i_fragment>().kind() != fragment_kind::Value)
             throw std::runtime_error("argument expected");
         state().operandStack.pop_back();
+        auto const range = integer_range(operand);
         auto argument = materialize(operand);
         argument.fragmentKind = fragment_kind::Argument;
+        argument.hasRange = range.has_value();
+        argument.rangeLow = range ? range->low : 0;
+        argument.rangeHigh = range ? range->high : 0;
         argument.fragmentSource = aSource;
         push_operand(operand_type{ argument });
     }
@@ -2338,6 +2086,7 @@ namespace neos::language
         signature.set_name(name);
         scope.set_function_signature(signature);
         current_function().entry = true;
+        current_function().implicitEntry = true;
         // operands of the statement being compiled (e.g. when a temporary is needed mid-expression) belong to the implicit function
         auto const& stack = state().operandStack;
         auto base = stack.size();
@@ -2626,13 +2375,19 @@ namespace neos::language
         function.body = code;
         function.relocations.clear();
         for (auto const& r : body.relocations())
+        {
+            if ((r.second() & BranchTarget) != 0u && (r.second() & DeferredCall) == 0u)
+                throw std::runtime_error(std::string{ (r.second() & ContinueTarget) != 0u ? "continue" : "break" } + " outside a loop");
             function.relocations.emplace_back(r.first(), r.second());
+        }
         function.signature = signature;
         function.compiled = true;
         if (function.stub)
         {
-            // a function whose body is a stub ("...") is provided by the host: import it under a name that encodes its parameter types
+            // a function whose body is a stub ("...") is provided by the language's runtime plugin: import it under a name that 
+            // encodes its parameter types
             function.imported = true;
+            function.importNamespace = state().unit->schema->meta().language;
             function.name += "(";
             if (signature.parameters().has_value())
                 for (std::size_t i = 0u; i < signature.parameters().value().size(); ++i)
@@ -2714,6 +2469,9 @@ namespace neos::language
             for (auto id : order)
                 if (iModule.functions[id].entry)
                     entry = id;
+        for (auto const& global : iInference.globals)
+            if (global.second == type::String)
+                string_literal(""); // (the initial value of a string global)
         std::uint32_t const heapBase = (DataBase + static_cast<std::uint32_t>(iModule.data.size()) + 7u) & ~7u;
         bytes module = { 0x00u, 0x61u, 0x73u, 0x6Du, 0x01u, 0x00u, 0x00u, 0x00u };
         {
@@ -2730,7 +2488,8 @@ namespace neos::language
             for (std::uint32_t i = 0u; i < importCount; ++i)
             {
                 put_name(section, "env");
-                put_name(section, iModule.functions[order[i]].name);
+                auto const& function = iModule.functions[order[i]];
+                put_name(section, function.importNamespace.empty() ? function.name : function.importNamespace + "::" + function.name);
                 section.push_back(0x00u);
                 put_u32(section, typeOf[order[i]]);
             }
@@ -2751,13 +2510,28 @@ namespace neos::language
             put_section(module, 5u, section);
         }
         {
+            // __heap_base and (mutable) global variables
             bytes section;
-            put_u32(section, 1u);
+            put_u32(section, 1u + iInference.globals.size());
             section.push_back(0x7Fu);
             section.push_back(0x00u);
             put_op(section, opcode::I32Const);
             put_s64(section, static_cast<std::int32_t>(heapBase));
             put_op(section, opcode::End);
+            for (auto const& global : iInference.globals)
+            {
+                auto const t = *wasm_type(global.second);
+                section.push_back(t);
+                section.push_back(0x01u);
+                switch (t)
+                {
+                case 0x7Cu: put_op(section, opcode::F64Const); put_raw(section, 0.0); break;
+                case 0x7Du: put_op(section, opcode::F32Const); put_raw(section, 0.0f); break;
+                case 0x7Eu: put_op(section, opcode::I64Const); put_s64(section, 0); break;
+                default: put_op(section, opcode::I32Const); put_s64(section, global.second == type::String ? static_cast<std::int32_t>(string_literal("")) : 0); break;
+                }
+                put_op(section, opcode::End);
+            }
             put_section(module, 6u, section);
         }
         {
