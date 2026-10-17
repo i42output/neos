@@ -256,6 +256,17 @@ namespace
     };
 }
 
+neos_rt_host const*& neos::python_runtime::host()
+{
+    static neos_rt_host const* sHost = nullptr;
+    return sHost;
+}
+
+NEOS_RUNTIME_PLUGIN_SET_HOST
+{
+    neos::python_runtime::host() = aHost;
+}
+
 NEOS_RUNTIME_PLUGIN_ENTRY
 {
     return &sPlugin;

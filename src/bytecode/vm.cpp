@@ -28,6 +28,8 @@
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/bytecode/vm/jit.hpp>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
+#define NEOS_RUNTIME_PLUGIN_HOST
+#include <neos/runtime/plugin.h>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -275,6 +277,17 @@ namespace neos
                         for (auto b : aText)
                             iModule.push_back(static_cast<std::uint8_t>(b));
                         parse();
+                    }
+                    ~machine()
+                    {
+                        // (objects that the program did not release)
+                        for (auto& slot : iObjects)
+                            if (slot.count != 0u)
+                            {
+                                auto* const object = static_cast<neos_rt_object*>(slot.object);
+                                slot = {};
+                                object->type->release(object);
+                            }
                     }
                 public:
                     std::optional<std::uint32_t> export_function(std::string const& aName) const
@@ -1039,6 +1052,47 @@ namespace neos
                         std::memcpy(&iMemory[address + StringHeaderSize + lhs.bytes], digits, length);
                         return address;
                     }
+                    // objects (see neos/runtime/plugin.h): a handle is the index of a slot that counts the references the 
+                    // program holds to it (the slot holds one reference to the object)
+                    void* object_pointer(std::uint32_t aHandle) const
+                    {
+                        if (aHandle == 0u)
+                            return nullptr;
+                        if (aHandle >= iObjects.size() || iObjects[aHandle].count == 0u)
+                            throw trap{ "invalid object handle" };
+                        return iObjects[aHandle].object;
+                    }
+                    std::uint32_t object_handle(void* aObject)
+                    {
+                        if (aObject == nullptr)
+                            return 0u;
+                        std::uint32_t handle;
+                        if (!iFreeObjects.empty())
+                        {
+                            handle = iFreeObjects.back();
+                            iFreeObjects.pop_back();
+                        }
+                        else
+                        {
+                            if (iObjects.size() > 0x7FFFFFFFu)
+                                throw trap{ "too many objects" };
+                            handle = static_cast<std::uint32_t>(iObjects.size());
+                            iObjects.emplace_back();
+                        }
+                        iObjects[handle] = object_slot{ aObject, 1u };
+                        return handle;
+                    }
+                    void release_object(std::uint32_t aHandle)
+                    {
+                        if (aHandle == 0u)
+                            return;
+                        auto* const object = static_cast<neos_rt_object*>(object_pointer(aHandle));
+                        if (--iObjects[aHandle].count != 0u)
+                            return;
+                        iObjects[aHandle] = {};
+                        iFreeObjects.push_back(aHandle);
+                        object->type->release(object);
+                    }
                     std::uint32_t allocate_string(std::string_view aValue)
                     {
                         // (a value in memory is copied first: memory can move when it grows)
@@ -1050,6 +1104,101 @@ namespace neos
                         std::memcpy(&iMemory[address + StringHeaderSize], aValue.data(), aValue.size());
                         return address;
                     }
+                public:
+                    // a program that handles the errors of runtime plugins exports a global (an i32) named __neos_error: a 
+                    // plugin's error is stored there (as a string) rather than trapping, and the plugin call's result is zero
+                    std::optional<std::uint32_t> error_global() const
+                    {
+                        auto const existing = iGlobalExports.find("__neos_error");
+                        if (existing == iGlobalExports.end() || existing->second >= iGlobals.size())
+                            return {};
+                        return existing->second;
+                    }
+                    // a call of a function of the program by a runtime plugin (see neos/runtime/plugin.h: neos_rt_host)
+                    char const* call_from_plugin(jit::compiled_module* aNative, unsigned aFunction, unsigned aCount, neos_rt_type const* aParameters,
+                        neos_rt_value const* aArguments, neos_rt_type aResult, neos_rt_value* aResultValue)
+                    {
+                        thread_local std::string tMessage;
+                        thread_local std::string tString;
+                        std::vector<value> arguments;
+                        std::vector<std::uint32_t> handles;
+                        try
+                        {
+                            for (unsigned i = 0u; i < aCount; ++i)
+                            {
+                                auto const& a = aArguments[i];
+                                switch (aParameters[i])
+                                {
+                                case NEOS_RT_BOOL: arguments.push_back(of_bool(a.b != 0)); break;
+                                case NEOS_RT_CHAR:
+                                case NEOS_RT_I32: arguments.push_back(of_i32(a.i32)); break;
+                                case NEOS_RT_U32: arguments.push_back(of_u32(a.u32)); break;
+                                case NEOS_RT_I64: arguments.push_back(of_i64(a.i64)); break;
+                                case NEOS_RT_U64:
+                                case NEOS_RT_SIZE: arguments.push_back(a.u64); break;
+                                case NEOS_RT_F32: arguments.push_back(of_f32(a.f32)); break;
+                                case NEOS_RT_F64: arguments.push_back(of_f64(a.f64)); break;
+                                case NEOS_RT_STRING: arguments.push_back(of_u32(allocate_string(a.string != nullptr ? std::string_view{ a.string } : std::string_view{}))); break;
+                                case NEOS_RT_OBJECT:
+                                    // (a handle of its own for the call)
+                                    if (a.object != nullptr)
+                                        a.object->type->retain(a.object);
+                                    handles.push_back(object_handle(a.object));
+                                    arguments.push_back(of_u32(handles.back()));
+                                    break;
+                                default:
+                                    throw trap{ "invalid argument type" };
+                                }
+                            }
+                            if (aFunction >= iFunctions.size() || type_of(aFunction).parameters.size() != arguments.size())
+                                throw trap{ "invalid callback" };
+                            auto const results = aNative != nullptr ? jit::invoke(*aNative, aFunction, arguments) : invoke(aFunction, arguments);
+                            for (auto const h : handles)
+                                release_object(h);
+                            handles.clear();
+                            // (an error that the program did not handle is the call's)
+                            if (auto const g = error_global(); g && as_u32(iGlobals[*g]) != 0u)
+                            {
+                                tMessage = read_string(as_u32(iGlobals[*g]));
+                                iGlobals[*g] = 0u;
+                                return tMessage.c_str();
+                            }
+                            value const r = results.empty() ? 0u : results[0];
+                            switch (aResult)
+                            {
+                            case NEOS_RT_VOID: break;
+                            case NEOS_RT_BOOL: aResultValue->b = static_cast<std::uint32_t>(r) != 0u ? 1 : 0; break;
+                            case NEOS_RT_CHAR:
+                            case NEOS_RT_I32: aResultValue->i32 = as_i32(r); break;
+                            case NEOS_RT_U32: aResultValue->u32 = as_u32(r); break;
+                            case NEOS_RT_I64: aResultValue->i64 = as_i64(r); break;
+                            case NEOS_RT_U64:
+                            case NEOS_RT_SIZE: aResultValue->u64 = r; break;
+                            case NEOS_RT_F32: aResultValue->f32 = as_f32(r); break;
+                            case NEOS_RT_F64: aResultValue->f64 = as_f64(r); break;
+                            case NEOS_RT_STRING: tString = read_string(as_u32(r)); aResultValue->string = tString.c_str(); break;
+                            case NEOS_RT_OBJECT:
+                                {
+                                    // (the program's new reference becomes the plugin's)
+                                    auto* const object = static_cast<neos_rt_object*>(object_pointer(as_u32(r)));
+                                    if (object != nullptr)
+                                        object->type->retain(object);
+                                    release_object(as_u32(r));
+                                    aResultValue->object = object;
+                                }
+                                break;
+                            }
+                            return nullptr;
+                        }
+                        catch (std::exception const& e)
+                        {
+                            for (auto const h : handles)
+                                release_object(h);
+                            tMessage = e.what();
+                            return tMessage.c_str();
+                        }
+                    }
+                private:
                     // the imported functions the VM provides (any other import is a runtime plugin's)
                     enum class import_kind : std::uint8_t
                     {
@@ -1064,6 +1213,9 @@ namespace neos
                         StringCompare,
                         StringFromI64,
                         StringConcatI64,
+                        ObjectRetain,
+                        ObjectRelease,
+                        Raise,
                         Runtime
                     };
                     import_kind resolve_import(std::uint32_t aFunction)
@@ -1079,7 +1231,10 @@ namespace neos
                             { "neos::fmod", import_kind::Fmod },
                             { "neos::string_compare", import_kind::StringCompare },
                             { "neos::string_from_i64", import_kind::StringFromI64 },
-                            { "neos::string_concat_i64", import_kind::StringConcatI64 }
+                            { "neos::string_concat_i64", import_kind::StringConcatI64 },
+                            { "neos::object_retain", import_kind::ObjectRetain },
+                            { "neos::object_release", import_kind::ObjectRelease },
+                            { "neos::raise", import_kind::Raise }   // (an error: the program stops)
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
@@ -1165,9 +1320,34 @@ namespace neos
                         case import_kind::StringConcatI64:
                             aBuffer[0] = of_u32(concatenate_integer(as_u32(aBuffer[0]), as_i64(aBuffer[1])));
                             break;
-                        case import_kind::Runtime:
-                            runtime::call(*iImportRuntime[aFunction], aBuffer, iMarshaller);
+                        case import_kind::ObjectRetain:
+                            if (auto const handle = as_u32(aBuffer[0]); handle != 0u)
+                            {
+                                object_pointer(handle);
+                                ++iObjects[handle].count;
+                            }
                             break;
+                        case import_kind::ObjectRelease:
+                            release_object(as_u32(aBuffer[0]));
+                            break;
+                        case import_kind::Runtime:
+                            try
+                            {
+                                runtime::call(*iImportRuntime[aFunction], aBuffer, iMarshaller);
+                            }
+                            catch (runtime::plugin_error const& e)
+                            {
+                                auto const g = error_global();
+                                if (!g)
+                                    throw;
+                                if (as_u32(iGlobals[*g]) == 0u)
+                                    iGlobals[*g] = of_u32(allocate_string(e.what()));
+                                if (!type_of(aFunction).results.empty())
+                                    aBuffer[0] = 0u;
+                            }
+                            break;
+                        case import_kind::Raise:
+                            throw trap{ read_string(as_u32(aBuffer[0])) };
                         default:
                             break;
                         }
@@ -1194,8 +1374,17 @@ namespace neos
                     {
                         [this](std::uint32_t aAddress) { return read_string(aAddress); },
                         [this](std::uint32_t aAddress) { return string_pointer(aAddress); },
-                        [this](std::string_view aString) { return allocate_string(aString); }
+                        [this](std::string_view aString) { return allocate_string(aString); },
+                        [this](std::uint32_t aHandle) { return object_pointer(aHandle); },
+                        [this](void* aObject) { return object_handle(aObject); }
                     };
+                    struct object_slot
+                    {
+                        void* object = nullptr;
+                        std::uint32_t count = 0u;
+                    };
+                    std::vector<object_slot> iObjects = std::vector<object_slot>(1u); ///< (0 is no object)
+                    std::vector<std::uint32_t> iFreeObjects;
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
                     std::optional<std::uint32_t> iHeap;
@@ -1222,6 +1411,32 @@ namespace neos
                 }
             }
 
+            namespace
+            {
+                // (the program that the thread is running: plugins call its functions)
+                struct running
+                {
+                    machine* program = nullptr;
+                    jit::compiled_module* native = nullptr;
+                };
+                thread_local running tRunning;
+
+                char const* host_call(unsigned aFunction, unsigned aCount, neos_rt_type const* aParameters, neos_rt_value const* aArguments,
+                    neos_rt_type aResult, neos_rt_value* aResultValue)
+                {
+                    if (tRunning.program == nullptr)
+                        return "no program is running";
+                    return tRunning.program->call_from_plugin(tRunning.native, aFunction, aCount, aParameters, aArguments, aResult, aResultValue);
+                }
+
+                neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call };
+            }
+
+            void const* runtime::host()
+            {
+                return &sHost;
+            }
+
             void thread::execute()
             {
                 auto const start = std::chrono::steady_clock::now();
@@ -1245,6 +1460,9 @@ namespace neos
                     if (useJit)
                         native = m.compile();
                     iJit = static_cast<bool>(native);
+                    auto const previous = tRunning;
+                    tRunning = running{ &m, native.get() };
+                    struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };
                     auto const results = native ? jit::invoke(*native, *entry, {}) : m.invoke(*entry, {});
                     auto const& type = m.type_of(*entry);
                     if (!results.empty())

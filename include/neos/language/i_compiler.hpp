@@ -120,7 +120,11 @@ namespace neos::language
         Else,
         While,
         For,
-        Function
+        Function,
+        Try,        ///< try: (its handlers (Except), Else and Finally follow it)
+        Except,
+        Finally,
+        With        ///< with manager [as target]: (the manager's exit follows its body)
     };
 
     enum class loop_type : std::uint32_t
@@ -264,9 +268,9 @@ namespace neos::language
         // a construct (or operator) of a particular language (aConstruct is a value that language's code generation defines)
     public:
         virtual void emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource) = 0;
-        // the types of a function's parameters and result that are inferred
+        // the types of a function's parameters and result that are inferred (aSource: the signature)
     public:
-        virtual void complete_signature(i_function_signature& aSignature) = 0;
+        virtual void complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource) = 0;
     public:
         virtual void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) = 0;
         virtual std::uint32_t trace() const = 0;

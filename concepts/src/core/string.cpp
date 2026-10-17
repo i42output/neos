@@ -37,11 +37,38 @@ namespace neos::concepts::core
 
     namespace
     {
+        void append_utf8(std::string& aResult, std::uint32_t c)
+        {
+            if (c < 0x80u)
+                aResult += static_cast<char>(c);
+            else if (c < 0x800u)
+            {
+                aResult += static_cast<char>(0xC0u | (c >> 6));
+                aResult += static_cast<char>(0x80u | (c & 0x3Fu));
+            }
+            else if (c < 0x10000u)
+            {
+                aResult += static_cast<char>(0xE0u | (c >> 12));
+                aResult += static_cast<char>(0x80u | ((c >> 6) & 0x3Fu));
+                aResult += static_cast<char>(0x80u | (c & 0x3Fu));
+            }
+            else
+            {
+                aResult += static_cast<char>(0xF0u | (c >> 18));
+                aResult += static_cast<char>(0x80u | ((c >> 12) & 0x3Fu));
+                aResult += static_cast<char>(0x80u | ((c >> 6) & 0x3Fu));
+                aResult += static_cast<char>(0x80u | (c & 0x3Fu));
+            }
+        }
+
         std::string unescape_string(std::string_view const& aSource)
         {
             std::string result;
             for (std::size_t i = 0u; i < aSource.size(); ++i)
             {
+                // (a line break in the source is a line feed)
+                if (aSource[i] == '\r' && i + 1u < aSource.size() && aSource[i + 1u] == '\n')
+                    continue;
                 if (aSource[i] != '\\' || i + 1u == aSource.size())
                 {
                     result += aSource[i];
@@ -52,11 +79,35 @@ namespace neos::concepts::core
                 case 'n': result += '\n'; break;
                 case 'r': result += '\r'; break;
                 case 't': result += '\t'; break;
+                case '\r': if (i + 1u < aSource.size() && aSource[i + 1u] == '\n') ++i; break; // (a backslash continues the line)
+                case '\n': break;
+                case 'a': result += '\a'; break;
+                case 'b': result += '\b'; break;
+                case 'f': result += '\f'; break;
+                case 'v': result += '\v'; break;
                 case 'x':
-                    if (i + 2u < aSource.size())
+                case 'u':
+                case 'U':
                     {
-                        result += static_cast<char>(std::stoi(std::string{ aSource.substr(i + 1u, 2u) }, nullptr, 16));
-                        i += 2u;
+                        // (a code point: \xhh, \uhhhh or \Uhhhhhhhh, as UTF-8)
+                        std::size_t const digits = aSource[i] == 'x' ? 2u : aSource[i] == 'u' ? 4u : 8u;
+                        if (i + digits < aSource.size())
+                        {
+                            auto const c = static_cast<std::uint32_t>(std::stoul(std::string{ aSource.substr(i + 1u, digits) }, nullptr, 16));
+                            i += digits;
+                            append_utf8(result, c);
+                        }
+                    }
+                    break;
+                case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+                    {
+                        // (an octal escape: up to three digits)
+                        std::uint32_t c = 0u;
+                        std::size_t n = 0u;
+                        for (; n < 3u && i < aSource.size() && aSource[i] >= '0' && aSource[i] <= '7'; ++n, ++i)
+                            c = c * 8u + static_cast<std::uint32_t>(aSource[i] - '0');
+                        --i;
+                        append_utf8(result, c);
                     }
                     break;
                 default: result += aSource[i]; break;

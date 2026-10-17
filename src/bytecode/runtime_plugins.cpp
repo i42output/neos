@@ -97,7 +97,8 @@ namespace neos
                         case NEOS_RT_CHAR:
                         case NEOS_RT_I32:
                         case NEOS_RT_U32:
-                        case NEOS_RT_STRING: return I32;
+                        case NEOS_RT_STRING:
+                        case NEOS_RT_OBJECT: return I32;
                         case NEOS_RT_I64:
                         case NEOS_RT_U64: return I64;
                         case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? I64 : I32;
@@ -134,7 +135,8 @@ namespace neos
                         case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? &ffi_type_uint64 : &ffi_type_uint32;
                         case NEOS_RT_F32: return &ffi_type_float;
                         case NEOS_RT_F64: return &ffi_type_double;
-                        case NEOS_RT_STRING: return &ffi_type_pointer;
+                        case NEOS_RT_STRING:
+                        case NEOS_RT_OBJECT: return &ffi_type_pointer;
                         }
                         throw std::runtime_error("invalid runtime plugin type");
                     }
@@ -329,6 +331,8 @@ namespace neos
                                     throw std::runtime_error("runtime plugin '" + path.string() + "' is not for namespace '" + aNamespace + "'");
                                 plugin p;
                                 p.description = description;
+                                if (auto const setHost = reinterpret_cast<neos_rt_plugin_set_host>(lib->symbol(NEOS_RUNTIME_PLUGIN_SET_HOST_NAME)))
+                                    setHost(static_cast<neos_rt_host const*>(host()));
                                 auto const error = reinterpret_cast<neos_rt_plugin_error>(lib->symbol(NEOS_RUNTIME_PLUGIN_ERROR_NAME));
                                 for (unsigned i = 0u; i < description->functionCount; ++i)
                                 {
@@ -421,6 +425,7 @@ namespace neos
                         float f32;
                         double f64;
                         char const* string;
+                        void* object;
                     };
                     argument arguments[NEOS_RT_MAX_PARAMETERS];
                     void* pointers[NEOS_RT_MAX_PARAMETERS];
@@ -450,6 +455,9 @@ namespace neos
                                 a.string = strings.back().c_str();
                             }
                             break;
+                        case NEOS_RT_OBJECT:
+                            a.object = aMarshaller.objectPointer(static_cast<std::uint32_t>(v));
+                            break;
                         default:
                             break;
                         }
@@ -464,13 +472,14 @@ namespace neos
                         float f32;
                         double f64;
                         char const* string;
+                        void* object;
                         unsigned char storage[16];
                     } r;
                     std::memset(&r, 0, sizeof(r));
                     ::ffi_call(const_cast<ffi_cif*>(&aFunction.cif), reinterpret_cast<void(*)(void)>(d.function), &r, pointers);
                     if (aFunction.error != nullptr)
                         if (auto const error = aFunction.error())
-                            throw std::runtime_error(error);
+                            throw plugin_error(error);
                     switch (d.result)
                     {
                     case NEOS_RT_VOID: break;
@@ -484,6 +493,7 @@ namespace neos
                     case NEOS_RT_F32: { std::uint32_t bits; std::memcpy(&bits, &r.f32, sizeof(bits)); aBuffer[0] = static_cast<value>(bits); break; }
                     case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); aBuffer[0] = bits; break; }
                     case NEOS_RT_STRING: aBuffer[0] = static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string_view{ r.string } : std::string_view{})); break;
+                    case NEOS_RT_OBJECT: aBuffer[0] = static_cast<value>(aMarshaller.objectHandle(r.object)); break;
                     }
 #endif
                 }

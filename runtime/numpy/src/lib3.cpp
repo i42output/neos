@@ -2315,6 +2315,63 @@ namespace neos::numpy
             return make_int(old);
         }
 
+        // (a context manager: aEnter's result is what with binds; aExit undoes it)
+        value context_manager(std::string const& aTypeName, std::function<value()> aEnter, std::function<void()> aExit)
+        {
+            auto* const i = new_instance(aTypeName);
+            auto* const self = &i->base;
+            i->reprText = "<numpy." + aTypeName + " object at " + object_address(self) + ">";
+            i->getattr = [aEnter, aExit](char const* aName) -> value
+            {
+                std::string_view const name{ aName };
+                if (name == "__enter__")
+                    return callable("__enter__", [aEnter](value const&, value const&) { return aEnter(); });
+                if (name == "__exit__")
+                    return callable("__exit__", [aExit](value const&, value const&) { aExit(); return value{ false }; });
+                return {};
+            };
+            return instance_value(i);
+        }
+
+        // (a function of the module called with a dict of keyword arguments)
+        value call_with_kwargs(char const* aFunction, value const& aKwargs)
+        {
+            auto const f = np(aFunction);
+            auto const args = tuple({});
+            return value::steal(ctx->call(ctx, f.get(), args.get(), aKwargs.empty() ? nullptr : aKwargs.get()));
+        }
+
+        object* f_errstate(object* aArgs, object* aKwargs)
+        {
+            arguments args{ "errstate", aArgs, aKwargs, { "*call", "*all", "*divide", "*over", "*under", "*invalid" } };
+            if (!args.ok())
+                return nullptr;
+            auto const kwargs = value::borrow(aKwargs);
+            auto const saved = std::make_shared<value>();
+            return context_manager("errstate", [kwargs, saved]() { *saved = np("geterr")(); call_with_kwargs("seterr", kwargs); return py::none(); },
+                [saved]() { if (!saved->empty()) call_with_kwargs("seterr", *saved); }).release();
+        }
+
+        object* f_printoptions(object* aArgs, object* aKwargs)
+        {
+            if (!sequence_items(aArgs).empty())
+                raise("TypeError", "printoptions() takes keyword arguments only");
+            auto const kwargs = value::borrow(aKwargs);
+            auto const saved = std::make_shared<value>();
+            return context_manager("printoptions", [kwargs, saved]()
+                {
+                    *saved = np("get_printoptions")();
+                    call_with_kwargs("set_printoptions", kwargs);
+                    return np("get_printoptions")();
+                },
+                [saved]()
+                {
+                    if (saved->empty())
+                        return;
+                    call_with_kwargs("set_printoptions", *saved);
+                }).release();
+        }
+
         int ufunc_instancecheck(neos_py_context*, void*, object* aObject)
         {
             return type_name(aObject) == "ufunc" ? 1 : 0;
@@ -2380,7 +2437,8 @@ namespace neos::numpy
             { "apply_over_axes", f_apply_over_axes }, { "fromfunction", f_fromfunction }, { "fromiter", f_fromiter }, { "vectorize", f_vectorize },
             { "ndindex", f_ndindex }, { "ndenumerate", f_ndenumerate }, { "pad", f_pad }, { "packbits", f_packbits }, { "unpackbits", f_unpackbits },
             { "bitwise_count", f_bitwise_count }, { "nditer", f_nditer }, { "broadcast", f_broadcast }, { "astype", f_astype },
-            { "mask_indices", f_mask_indices }, { "geterrcall", f_geterrcall }, { "seterrcall", f_seterrcall }, { "setbufsize", f_setbufsize }
+            { "mask_indices", f_mask_indices }, { "geterrcall", f_geterrcall }, { "seterrcall", f_seterrcall }, { "setbufsize", f_setbufsize },
+            { "errstate", f_errstate }, { "printoptions", f_printoptions }
         });
     }
 }

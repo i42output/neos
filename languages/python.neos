@@ -39,11 +39,11 @@
 
 #{
     string literal ::= 
-        { ( '\"' , '\"' , '\"' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | ( '\"' , '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\"' , '\"' , '\"' , [ S ] ) |
-          ( '\'' , '\'' , '\'' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | ( '\'' , '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) | ( '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\'' , '\'' , '\'' , [ S ] ) |
+        { ( '\"' , '\"' , '\"' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | other escape | ( '\"' , '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\"' , '\"' , '\"' , [ S ] ) |
+          ( '\'' , '\'' , '\'' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | other escape | ( '\'' , '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) | ( '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) ) } $ string.utf8 , '\'' , '\'' , '\'' , [ S ] ) |
           ( empty string , [ S ] ) |
-          ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | escaped character ) } $ string.utf8 , '\"' , [ S ] ) |
-          ( '\'' , { ( ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | escaped character ) } $ string.utf8 , '\'' , [ S ] ) } + ;
+          ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | other escape ) } $ string.utf8 , '\"' , [ S ] ) |
+          ( '\'' , { ( ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | other escape ) } $ string.utf8 , '\'' , [ S ] ) } + ;
     empty string $ string.utf8.empty ::= ( '\"' , '\"' ) | ( '\'' , '\'' ) ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
     escaped character $ string.utf8.character.CR ::= "\\r" ;
@@ -51,6 +51,8 @@
     escaped character $ string.utf8.character.singlequote ::= "\\\'" ;
     escaped character $ string.utf8.character.doublequote ::= "\\\"" ;
     escaped character $ string.utf8.character.backslash ::= "\\\\" ;
+    other escape ::= '\\' , ( U+0001 .. '\xFF' ) ;
+    other escape ::= '\\' , ( U+0001 .. '\xFF' ) ;
 
     def $ language.keyword ::= potential keyword ::= "def" ;
     return $ language.keyword ::= potential keyword ::= "return" ;
@@ -71,6 +73,13 @@
     and $ language.keyword ::= potential keyword ::= "and" ;
     or $ language.keyword ::= potential keyword ::= "or" ;
     not $ language.keyword ::= potential keyword ::= "not" ;
+    try $ language.keyword ::= potential keyword ::= "try" ;
+    except $ language.keyword ::= potential keyword ::= "except" ;
+    finally $ language.keyword ::= potential keyword ::= "finally" ;
+    raise $ language.keyword ::= potential keyword ::= "raise" ;
+    assert $ language.keyword ::= potential keyword ::= "assert" ;
+    global $ language.keyword ::= potential keyword ::= "global" ;
+    with $ language.keyword ::= potential keyword ::= "with" ;
 
     int ::= potential keyword ::= "int" ;
     float ::= potential keyword ::= "float" ;
@@ -82,6 +91,7 @@
     true $ language.object.boolean.true ::= potential keyword ::= "True" ;
     false $ language.object.boolean.false ::= potential keyword ::= "False" ;
 
+    imaginary $ python.imaginary ::= ( positive real | digit sequence ) , ( 'j' | 'J' ) ;
     positive real ::= 
         ( digit sequence , '.' , [ digit sequence ] , [ exponent ] ) | ( '.' , digit sequence , [ exponent ] ) | ( digit sequence , exponent ) ;
     exponent ::= ( "e" | "E" ) , [ "+" | "-" ] , digit sequence ;
@@ -154,10 +164,11 @@
 ${
     file $ python.module ::= [ NL ] , { statement , NL } ;
 
-    statement ::= function definition | if header | elif header | else header | while header | for header | for in header | simple statement ;
+    statement ::= function definition | if header | elif header | else header | while header | for header | for in header | 
+        try header | except header | finally header | with header | simple statement ;
 
     simple statement $ python.statement ::= 
-        pass | stub | break statement | continue statement | return statement | import statement | from import statement |
+        pass | stub | break statement | continue statement | return statement | raise statement | assert statement | global statement | import statement | from import statement |
         augmented assignment | assignment | expression list ;
 
     stub $ python.stub ::= ellipsis ;
@@ -165,6 +176,14 @@ ${
     continue statement $ python.continue ::= continue ;
 
     return statement $ python.return ::= return , [ [ S ] , expression list ] ;
+    raise statement $ python.raise ::= raise , [ S , expression , [ S , from , S , expression ] ] ;
+    global statement $ python.global ::= global , S , identifier , { [ S ] , comma , [ S ] , identifier } ;
+    assert statement $ python.assert ::= assert , S , expression , [ [ S ] , comma , [ S ] , expression ] ;
+
+    try header $ python.try ::= try , [ S ] , colon , [ [ S ] , simple statement ] ;
+    except header $ python.except ::= except , [ S , expression , [ S , as , S , identifier ] ] , [ S ] , colon , [ [ S ] , simple statement ] ;
+    finally header $ python.finally ::= finally , [ S ] , colon , [ [ S ] , simple statement ] ;
+    with header $ python.with ::= with , S , expression , [ S , as , S , identifier ] , [ S ] , colon , [ [ S ] , simple statement ] ;
 
     import statement $ python.import ::= import , S , dotted name , [ S , as , S , identifier ] ;
     from import statement $ python.import.from ::= from , S , dotted name , S , import , S , import name , { [ S ] , comma , [ S ] , import name } ;
@@ -183,8 +202,11 @@ ${
         def , S , def signature , [ S ] , colon $ language.scope.open , [ [ S ] , simple statement ] ;
     def signature $ language.function.signature ::= 
         function name , [ S ] , open paren , [ S ] , [ parameters ] , [ S ] , close paren , [ [ S ] , arrow , [ S ] , type $ language.function.return.type ] ;
-    parameters $ language.function.parameters ::= parameter , { [ S ] , comma , [ S ] , parameter } , [ [ S ] , comma ] ;
-    parameter $ language.function.parameter ::= id , [ [ S ] , colon , [ S ] , type ] ;
+    parameters $ language.function.parameters ::= parameter item , { [ S ] , comma , [ S ] , parameter item } , [ [ S ] , comma ] ;
+    parameter item ::= parameter | multiply ;
+    parameter $ language.function.parameter ::= 
+        [ ( power operator | multiply ) , [ S ] ] , id , [ [ S ] , colon , [ S ] , type ] , [ [ S ] , assign , [ S ] , parameter default ] ;
+    parameter default $ python.parameter.default ::= expression ;
     function name $ language.function.name ::= id | builtin id ;
     builtin id $ language.identifier ::= int | float | str | bool | range | object ;
     id $ language.identifier ::= identifier ;
@@ -257,7 +279,7 @@ ${
     generator $ language.function.argument ::= generator expression ;
     generator expression $ python.list.comprehension ::= expression , { [ S ] , comprehension clause } + ;
     call trailer $ python.call ::= [ S ] , open paren , [ S ] , [ argument , { [ S ] , comma , [ S ] , argument } , [ [ S ] , comma ] ] , [ S ] , close paren ;
-    argument $ language.function.argument ::= [ keyword , [ S ] , assign , [ S ] ] , expression ;
+    argument $ language.function.argument ::= ( ( power operator | multiply ) , [ S ] , expression ) | ( [ keyword , [ S ] , assign , [ S ] ] , expression ) ;
     keyword ::= identifier | int | float | str | bool | range | object ;
     subscript trailer $ python.subscript ::= [ S ] , open bracket , [ S ] , subscript item , { [ S ] , comma , [ S ] , subscript item } , [ [ S ] , comma ] , [ S ] , close bracket ;
     subscript item $ language.function.argument ::= slice | expression ;
@@ -265,12 +287,15 @@ ${
     attribute trailer $ python.attribute ::= [ S ] , dot , [ S ] , ( identifier | int | float | str | bool | range | object ) ;
 
     atom ::= 
-        empty tuple | ( open paren , [ S ] , ( tuple display | expression ) , [ S ] , close paren ) | list comprehension | list display | dict display |
-        ellipsis value | none value | true | false | builtin name | math operand ;
+        empty tuple | ( open paren , [ S ] , ( tuple display | expression ) , [ S ] , close paren ) | list comprehension | list display | dict comprehension | dict display |
+        ellipsis value | none value | true | false | builtin name | imaginary | math operand ;
     empty tuple $ python.tuple.empty ::= open paren , [ S ] , close paren ;
     tuple display $ python.tuple ::= item , ( ( { [ S ] , comma , [ S ] , item } + , [ [ S ] , comma ] ) | ( [ S ] , comma ) ) ;
     list comprehension $ python.list.comprehension ::= 
         comprehension bracket , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close bracket ;
+    dict comprehension $ python.dict.comprehension ::= 
+        comprehension brace , [ S ] , expression , [ S ] , colon , [ S ] , expression , { [ S ] , comprehension clause } + , [ S ] , close brace ;
+    comprehension brace $ python.comprehension.start ::= open brace ;
     comprehension bracket $ python.comprehension.start ::= open bracket ;
     comprehension paren $ python.comprehension.start ::= open paren ;
     comprehension clause ::= comprehension for | comprehension if ;

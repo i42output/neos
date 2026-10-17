@@ -37,6 +37,8 @@ namespace neos::python_runtime
     char const* error_text();   // (the exception raised: "type: message")
     // a string result (valid until the next call on this thread)
     char const* result(std::string aValue);
+    // the host (for calls of the program's functions)
+    neos_rt_host const*& host();
     // the functions of the object protocol (objects.cpp)
     std::vector<neos_rt_function> const& object_functions();
 }

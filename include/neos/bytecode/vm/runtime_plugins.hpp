@@ -25,6 +25,7 @@
 #include <string_view>
 #include <vector>
 #include <functional>
+#include <stdexcept>
 
 namespace neos
 {
@@ -45,10 +46,19 @@ namespace neos
                     std::function<std::string(std::uint32_t aAddress)> readString;
                     std::function<char const*(std::uint32_t aAddress)> stringPointer; ///< (the string in place if it is NUL terminated, otherwise null)
                     std::function<std::uint32_t(std::string_view aString)> allocateString;
+                    std::function<void*(std::uint32_t aHandle)> objectPointer;  ///< (the object of a handle; null for 0)
+                    std::function<std::uint32_t(void* aObject)> objectHandle;   ///< (a handle for a new reference; 0 for null)
                 };
 
+                // the error a runtime plugin function reports
+                struct plugin_error : std::runtime_error
+                {
+                    using std::runtime_error::runtime_error;
+                };
                 // false if neos was built without libffi
                 bool available();
+                // the host's functions that plugins call (see neos/runtime/plugin.h: neos_rt_host; defined by the VM)
+                void const* host();
                 // the function an import named "x::f" refers to (the runtime plugin for "x" is loaded on first use);
                 // throws std::runtime_error if there is none or if its type differs from the import's (WebAssembly
                 // value types)

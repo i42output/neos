@@ -213,6 +213,20 @@ namespace neos::numpy
         }
     }
 
+    // (NumPy's convert_shape_to_string: no spaces; leading negative dimensions are omitted, others are "newaxis")
+    std::string shape_string(shape_t const& aShape)
+    {
+        std::size_t i = 0u;
+        while (i < aShape.size() && aShape[i] < 0)
+            ++i;
+        if (i == aShape.size())
+            return "()";
+        std::string result = "(" + std::to_string(aShape[i]);
+        for (++i; i < aShape.size(); ++i)
+            result += aShape[i] < 0 ? std::string{ ",newaxis" } : "," + std::to_string(aShape[i]);
+        return result + (aShape.size() == 1u ? ",)" : ")");
+    }
+
     bool resolve_shape(shape_t& aShape, std::int64_t aSize)
     {
         std::optional<std::size_t> unknown;
@@ -235,15 +249,14 @@ namespace neos::numpy
         {
             if (known == 0 || aSize % known != 0)
             {
-                shape_t display = aShape;
-                error("ValueError", "cannot reshape array of size " + std::to_string(aSize) + " into shape " + shape_repr(display));
+                error("ValueError", "cannot reshape array of size " + std::to_string(aSize) + " into shape " + shape_string(aShape));
                 return false;
             }
             aShape[*unknown] = aSize / known;
         }
         else if (known != aSize)
         {
-            error("ValueError", "cannot reshape array of size " + std::to_string(aSize) + " into shape " + shape_repr(aShape));
+            error("ValueError", "cannot reshape array of size " + std::to_string(aSize) + " into shape " + shape_string(aShape));
             return false;
         }
         return true;

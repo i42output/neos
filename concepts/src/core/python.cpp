@@ -20,12 +20,21 @@
 #include <neos/i_context.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include "python.hpp"
+#include <neos/language/python.hpp>
 
 // Python specific concepts: scoping by significant whitespace (indentation), name binding by assignment, 
 // Python's division/modulo operators, stub ("...") function bodies
 
 namespace neos::concepts::core
-{   
+{
+    namespace
+    {
+        void emit(i_context& aContext, language::python::construct aConstruct, neolib::i_string_view const& aSource)
+        {
+            aContext.compiler().emit_language_construct(neolib::string_view{ language::python::Language }, static_cast<std::uint32_t>(aConstruct), aSource);
+        }
+    }
+   
     class python_module : public semantic_concept<python_module>
     {
         // concept
@@ -93,81 +102,8 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
+            emit(aContext, language::python::construct::Statement, source());
             aContext.compiler().emit_indented_statement(source());
-        }
-    };
-
-    namespace
-    {
-        std::string_view assignment_target(std::string_view const& aSource)
-        {
-            auto const end = aSource.find_first_of(" \t+-*/%=");
-            return aSource.substr(0u, end);
-        }
-    }
-
-    class python_assignment : public semantic_concept<python_assignment>
-    {
-        // concept
-    public:
-        static constexpr auto Name = "python.assignment";
-        // construction
-    public:
-        python_assignment() :
-            semantic_concept{ neos::language::emit_type::Infix }
-        {
-        }
-        // emit
-    public:
-        bool can_fold(i_semantic_concept const& aRhs) const override
-        {
-            return aRhs.is("language.identifier"_sv);
-        }
-        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-            // binding a name: defines the variable (type inferred from the value) if it does not yet exist
-            aContext.compiler().emit_binding(aRhs.source(), source());
-        }
-    };
-
-    class python_assignment_augmented : public semantic_concept<python_assignment_augmented>
-    {
-        // concept
-    public:
-        static constexpr auto Name = "python.assignment.augmented";
-        // construction
-    public:
-        python_assignment_augmented() :
-            semantic_concept{ neos::language::emit_type::Infix }
-        {
-        }
-        // emit
-    public:
-        bool can_fold(i_semantic_concept const& aRhs) const override
-        {
-            return aRhs.is("language.identifier"_sv);
-        }
-        void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
-        {
-            auto const text = source().to_std_string_view();
-            auto const target = assignment_target(text);
-            auto const op = text.substr(text.find_first_not_of(" \t", target.size()));
-            language::operation operation;
-            if (op.starts_with("+="))
-                operation = language::operation::Add;
-            else if (op.starts_with("-="))
-                operation = language::operation::Subtract;
-            else if (op.starts_with("*="))
-                operation = language::operation::Multiply;
-            else if (op.starts_with("//="))
-                operation = language::operation::FloorDivide;
-            else if (op.starts_with("/="))
-                operation = language::operation::TrueDivide;
-            else if (op.starts_with("%="))
-                operation = language::operation::Modulo;
-            else
-                throw std::runtime_error("unsupported augmented assignment");
-            aContext.compiler().emit_compound_assignment(operation, neolib::string_view{ target }, source());
         }
     };
 
@@ -180,6 +116,10 @@ namespace neos::concepts::core
         template <> struct indented_name<language::indented_construct::While> { static constexpr auto Name = "python.while"; };
         template <> struct indented_name<language::indented_construct::For> { static constexpr auto Name = "python.for"; };
         template <> struct indented_name<language::indented_construct::Function> { static constexpr auto Name = "python.function"; };
+        template <> struct indented_name<language::indented_construct::Try> { static constexpr auto Name = "python.try"; };
+        template <> struct indented_name<language::indented_construct::Except> { static constexpr auto Name = "python.except"; };
+        template <> struct indented_name<language::indented_construct::Finally> { static constexpr auto Name = "python.finally"; };
+        template <> struct indented_name<language::indented_construct::With> { static constexpr auto Name = "python.with"; };
     }
 
     template <language::indented_construct Construct>
@@ -203,7 +143,12 @@ namespace neos::concepts::core
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
             // a header ending in ':' opens a block whose extent is determined by indentation
+            if constexpr (Construct == language::indented_construct::If || Construct == language::indented_construct::ElseIf ||
+                Construct == language::indented_construct::While)
+                emit(aContext, language::python::construct::Condition, this->source());
             aContext.compiler().begin_indented(Construct, this->source());
+            if constexpr (Construct == language::indented_construct::Function)
+                emit(aContext, language::python::construct::Function, this->source());
         }
     };
 
@@ -283,22 +228,82 @@ namespace neos::concepts::core
 
     namespace
     {
-        template <language::operation Operation> struct python_operator_name;
-        template <> struct python_operator_name<language::operation::TrueDivide> { static constexpr auto Name = "python.operator.divide.true"; };
-        template <> struct python_operator_name<language::operation::FloorDivide> { static constexpr auto Name = "python.operator.divide.floor"; };
-        template <> struct python_operator_name<language::operation::Modulo> { static constexpr auto Name = "python.operator.modulo"; };
+        using language::python::construct;
+        template <construct Construct> struct python_construct_name;
+        template <> struct python_construct_name<construct::Return> { static constexpr auto Name = "python.return"; };
+        template <> struct python_construct_name<construct::Break> { static constexpr auto Name = "python.break"; };
+        template <> struct python_construct_name<construct::Continue> { static constexpr auto Name = "python.continue"; };
+        template <> struct python_construct_name<construct::Import> { static constexpr auto Name = "python.import"; };
+        template <> struct python_construct_name<construct::ImportFrom> { static constexpr auto Name = "python.import.from"; };
+        template <> struct python_construct_name<construct::Assign> { static constexpr auto Name = "python.assign"; };
+        template <> struct python_construct_name<construct::AugmentedAssign> { static constexpr auto Name = "python.assign.augmented"; };
+        template <> struct python_construct_name<construct::Target> { static constexpr auto Name = "python.target"; };
+        template <> struct python_construct_name<construct::ForTargets> { static constexpr auto Name = "python.for.targets"; };
+        template <> struct python_construct_name<construct::ForIn> { static constexpr auto Name = "python.for.in"; };
+        template <> struct python_construct_name<construct::Conditional> { static constexpr auto Name = "python.conditional"; };
+        template <> struct python_construct_name<construct::Or> { static constexpr auto Name = "python.or"; };
+        template <> struct python_construct_name<construct::And> { static constexpr auto Name = "python.and"; };
+        template <> struct python_construct_name<construct::Not> { static constexpr auto Name = "python.not"; };
+        template <> struct python_construct_name<construct::LessEqual> { static constexpr auto Name = "python.lessequal"; };
+        template <> struct python_construct_name<construct::GreaterEqual> { static constexpr auto Name = "python.greaterequal"; };
+        template <> struct python_construct_name<construct::Equal> { static constexpr auto Name = "python.equal"; };
+        template <> struct python_construct_name<construct::NotEqual> { static constexpr auto Name = "python.notequal"; };
+        template <> struct python_construct_name<construct::Less> { static constexpr auto Name = "python.less"; };
+        template <> struct python_construct_name<construct::Greater> { static constexpr auto Name = "python.greater"; };
+        template <> struct python_construct_name<construct::NotIn> { static constexpr auto Name = "python.notin"; };
+        template <> struct python_construct_name<construct::In> { static constexpr auto Name = "python.in"; };
+        template <> struct python_construct_name<construct::IsNot> { static constexpr auto Name = "python.isnot"; };
+        template <> struct python_construct_name<construct::Is> { static constexpr auto Name = "python.is"; };
+        template <> struct python_construct_name<construct::BitOr> { static constexpr auto Name = "python.bitor"; };
+        template <> struct python_construct_name<construct::BitXor> { static constexpr auto Name = "python.bitxor"; };
+        template <> struct python_construct_name<construct::BitAnd> { static constexpr auto Name = "python.bitand"; };
+        template <> struct python_construct_name<construct::LeftShift> { static constexpr auto Name = "python.lshift"; };
+        template <> struct python_construct_name<construct::RightShift> { static constexpr auto Name = "python.rshift"; };
+        template <> struct python_construct_name<construct::Add> { static constexpr auto Name = "python.add"; };
+        template <> struct python_construct_name<construct::Subtract> { static constexpr auto Name = "python.subtract"; };
+        template <> struct python_construct_name<construct::Multiply> { static constexpr auto Name = "python.multiply"; };
+        template <> struct python_construct_name<construct::MatMul> { static constexpr auto Name = "python.matmul"; };
+        template <> struct python_construct_name<construct::FloorDivide> { static constexpr auto Name = "python.floordivide"; };
+        template <> struct python_construct_name<construct::Divide> { static constexpr auto Name = "python.divide"; };
+        template <> struct python_construct_name<construct::Modulo> { static constexpr auto Name = "python.modulo"; };
+        template <> struct python_construct_name<construct::Negative> { static constexpr auto Name = "python.negative"; };
+        template <> struct python_construct_name<construct::Positive> { static constexpr auto Name = "python.positive"; };
+        template <> struct python_construct_name<construct::Invert> { static constexpr auto Name = "python.invert"; };
+        template <> struct python_construct_name<construct::Power> { static constexpr auto Name = "python.power"; };
+        template <> struct python_construct_name<construct::Call> { static constexpr auto Name = "python.call"; };
+        template <> struct python_construct_name<construct::Subscript> { static constexpr auto Name = "python.subscript"; };
+        template <> struct python_construct_name<construct::Slice> { static constexpr auto Name = "python.slice"; };
+        template <> struct python_construct_name<construct::Attribute> { static constexpr auto Name = "python.attribute"; };
+        template <> struct python_construct_name<construct::EmptyTuple> { static constexpr auto Name = "python.tuple.empty"; };
+        template <> struct python_construct_name<construct::Tuple> { static constexpr auto Name = "python.tuple"; };
+        template <> struct python_construct_name<construct::List> { static constexpr auto Name = "python.list"; };
+        template <> struct python_construct_name<construct::Dict> { static constexpr auto Name = "python.dict"; };
+        template <> struct python_construct_name<construct::Ellipsis> { static constexpr auto Name = "python.ellipsis"; };
+        template <> struct python_construct_name<construct::None> { static constexpr auto Name = "python.none"; };
+        template <> struct python_construct_name<construct::Builtin> { static constexpr auto Name = "python.builtin"; };
+        template <> struct python_construct_name<construct::ComprehensionStart> { static constexpr auto Name = "python.comprehension.start"; };
+        template <> struct python_construct_name<construct::ComprehensionFor> { static constexpr auto Name = "python.comprehension.for"; };
+        template <> struct python_construct_name<construct::ComprehensionIf> { static constexpr auto Name = "python.comprehension.if"; };
+        template <> struct python_construct_name<construct::ListComprehension> { static constexpr auto Name = "python.list.comprehension"; };
+        template <> struct python_construct_name<construct::ParameterDefault> { static constexpr auto Name = "python.parameter.default"; };
+        template <> struct python_construct_name<construct::Raise> { static constexpr auto Name = "python.raise"; };
+        template <> struct python_construct_name<construct::Assert> { static constexpr auto Name = "python.assert"; };
+        template <> struct python_construct_name<construct::Imaginary> { static constexpr auto Name = "python.imaginary"; };
+        template <> struct python_construct_name<construct::Global> { static constexpr auto Name = "python.global"; };
+        template <> struct python_construct_name<construct::DictComprehension> { static constexpr auto Name = "python.dict.comprehension"; };
     }
 
-    template <language::operation Operation>
-    class python_operator : public semantic_concept<python_operator<Operation>>
+    // a construct whose code the compiler generates once its parts have been compiled
+    template <construct Construct>
+    class python_construct : public semantic_concept<python_construct<Construct>>
     {
         // concept
     public:
-        static constexpr auto Name = python_operator_name<Operation>::Name;
+        static constexpr auto Name = python_construct_name<Construct>::Name;
         // construction
     public:
-        python_operator() :
-            semantic_concept<python_operator<Operation>>{ neos::language::emit_type::Infix }
+        python_construct() :
+            semantic_concept<python_construct<Construct>>{ neos::language::emit_type::Infix }
         {
         }
         // emit
@@ -309,9 +314,18 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            aContext.compiler().emit_operation(Operation);
+            emit(aContext, Construct, this->source());
         }
     };
+
+    namespace
+    {
+        template <construct... Constructs>
+        void add_constructs(language::concept_library::concepts_t& aConcepts)
+        {
+            ((aConcepts[neolib::string{ python_construct<Constructs>::Name }] = neolib::make_ref<python_construct<Constructs>>()), ...);
+        }
+    }
 
     python::python(language::i_concept_library& aParent) :
         neos::language::concept_library
@@ -328,8 +342,6 @@ namespace neos::concepts::core
         concepts()[neolib::string{ python_module::Name }] = neolib::make_ref<python_module>();
         concepts()[neolib::string{ python_indentation::Name }] = neolib::make_ref<python_indentation>();
         concepts()[neolib::string{ python_statement::Name }] = neolib::make_ref<python_statement>();
-        concepts()[neolib::string{ python_assignment::Name }] = neolib::make_ref<python_assignment>();
-        concepts()[neolib::string{ python_assignment_augmented::Name }] = neolib::make_ref<python_assignment_augmented>();
         concepts()[neolib::string{ python_compound_statement<language::indented_construct::If>::Name }] = 
             neolib::make_ref<python_compound_statement<language::indented_construct::If>>();
         concepts()[neolib::string{ python_compound_statement<language::indented_construct::ElseIf>::Name }] = 
@@ -342,15 +354,19 @@ namespace neos::concepts::core
             neolib::make_ref<python_compound_statement<language::indented_construct::For>>();
         concepts()[neolib::string{ python_compound_statement<language::indented_construct::Function>::Name }] = 
             neolib::make_ref<python_compound_statement<language::indented_construct::Function>>();
+        concepts()[neolib::string{ python_compound_statement<language::indented_construct::Try>::Name }] = 
+            neolib::make_ref<python_compound_statement<language::indented_construct::Try>>();
+        concepts()[neolib::string{ python_compound_statement<language::indented_construct::Except>::Name }] = 
+            neolib::make_ref<python_compound_statement<language::indented_construct::Except>>();
+        concepts()[neolib::string{ python_compound_statement<language::indented_construct::Finally>::Name }] = 
+            neolib::make_ref<python_compound_statement<language::indented_construct::Finally>>();
+        concepts()[neolib::string{ python_compound_statement<language::indented_construct::With>::Name }] = 
+            neolib::make_ref<python_compound_statement<language::indented_construct::With>>();
         concepts()[neolib::string{ python_for_variable::Name }] = neolib::make_ref<python_for_variable>();
         concepts()[neolib::string{ python_pass::Name }] = neolib::make_ref<python_pass>();
         concepts()[neolib::string{ python_stub::Name }] = neolib::make_ref<python_stub>();
-        concepts()[neolib::string{ python_operator<language::operation::TrueDivide>::Name }] = 
-            neolib::make_ref<python_operator<language::operation::TrueDivide>>();
-        concepts()[neolib::string{ python_operator<language::operation::FloorDivide>::Name }] = 
-            neolib::make_ref<python_operator<language::operation::FloorDivide>>();
-        concepts()[neolib::string{ python_operator<language::operation::Modulo>::Name }] = 
-            neolib::make_ref<python_operator<language::operation::Modulo>>();
+        add_constructs<construct::Return, construct::Break, construct::Continue, construct::Import, construct::ImportFrom, construct::Assign, construct::AugmentedAssign, construct::Target, construct::ForTargets, construct::ForIn, construct::Conditional, construct::Or, construct::And, construct::Not, construct::LessEqual, construct::GreaterEqual, construct::Equal, construct::NotEqual, construct::Less, construct::Greater, construct::NotIn, construct::In, construct::IsNot, construct::Is, construct::BitOr, construct::BitXor, construct::BitAnd, construct::LeftShift, construct::RightShift, construct::Add, construct::Subtract, construct::Multiply, construct::MatMul, construct::FloorDivide, construct::Divide, construct::Modulo, construct::Negative, construct::Positive, construct::Invert, construct::Power, construct::Call, construct::Subscript, construct::Slice, construct::Attribute, construct::EmptyTuple, construct::Tuple, construct::List, construct::Dict, construct::Ellipsis, construct::None, construct::Builtin,
+            construct::ComprehensionStart, construct::ComprehensionFor, construct::ComprehensionIf, construct::ListComprehension, construct::ParameterDefault, construct::Raise, construct::Assert, construct::Imaginary, construct::Global, construct::DictComprehension>(concepts());
     }
 
     const std::string& python::library_name()

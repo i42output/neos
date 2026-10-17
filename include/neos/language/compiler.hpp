@@ -30,6 +30,7 @@
 #include <neos/language/schema.hpp>
 #include <neos/language/ast.hpp>
 #include <neos/language/javascript.hpp>
+#include <neos/language/python.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
@@ -211,6 +212,12 @@ namespace neos::language
                 std::optional<language::fragment> loopCondition;
                 i_symbol_table_entry* loopVariable = nullptr;
                 std::vector<language::fragment> range;
+                std::optional<language::fragment> epilogue;   ///< (a while loop) code that follows the loop
+                // (try: the handlers' exception types (conditions; none: any) and the names they bind, and finally's body)
+                std::vector<std::optional<language::fragment>> handlerTypes;
+                std::vector<std::optional<std::string>> handlerNames;
+                std::optional<language::fragment> finallyArm;
+                bool tryElse = false;   ///< (else follows the handlers)
             };
             std::vector<indented> indentStack;
             bool implicitFunctionFinished = false;
@@ -234,6 +241,34 @@ namespace neos::language
                 char const* position;
             };
             std::vector<counter_update> counterUpdates; ///< updates whose loop has not been compiled yet
+            // Python
+            struct py_target
+            {
+                enum class kind_t { Name, Item, Attribute } kind = kind_t::Name;
+                std::string name;                           ///< (Name: the variable; Attribute: the attribute)
+                std::optional<language::fragment> receiver; ///< (Item and Attribute)
+                std::optional<language::fragment> key;      ///< (Item)
+                char const* position = nullptr;             ///< (its source)
+            };
+            std::vector<py_target> pyTargets;               ///< assignment targets (the assignment that follows them pops them)
+            struct py_access
+            {
+                language::fragment receiver;
+                std::optional<language::fragment> key;      ///< (a subscript)
+                std::string attribute;                      ///< (an attribute)
+            };
+            std::map<char const*, py_access> pyAccesses;    ///< subscripts and attributes (by their source), which can be targets
+            std::map<char const*, std::vector<language::fragment>> pyTuples; ///< tuple displays (by their source): their items
+            std::vector<std::size_t> pyComprehensions;      ///< comprehensions being compiled: the number of the statement's temporaries before them
+            struct py_clause
+            {
+                std::vector<py_target> targets;             ///< (for)
+                language::fragment value;                   ///< the iterable (for) or the condition (if)
+                char const* position = nullptr;
+            };
+            std::vector<py_clause> pyClauses;               ///< the for and if clauses of comprehensions
+            std::map<char const*, std::pair<std::uint32_t, type>> pyChains; ///< comparisons (by their source) that a chained comparison follows: 
+                                                                    ///< the local that holds their right operand
         };
         struct symbol_info
         {
@@ -270,6 +305,12 @@ namespace neos::language
             std::vector<std::uint8_t> body;
             std::vector<std::pair<std::uint32_t, std::uint32_t>> relocations;
             std::size_t operandBase = 0u;
+            // (Python)
+            std::vector<std::uint32_t> pendingObjects;  ///< object temporaries of the statement being compiled (released at its end)
+            std::vector<std::uint32_t> freeObjects;     ///< object temporaries that can be reused
+            std::vector<std::uint32_t> objectVariables; ///< locals and parameters that hold objects (released when the function returns)
+            bool returns = false;                       ///< a return statement has been compiled
+            std::set<std::uint32_t> objectTemporaries;  ///< (Python) all the locals used as object temporaries
         };
         struct wasm_module
         {
@@ -311,6 +352,12 @@ namespace neos::language
             std::set<char const*> counters;                         ///< (this pass) variables updated as loop counters
             std::uint32_t pass = 0u;
             std::map<std::string, bool> declaredGlobals;            ///< (this pass) top-level declarations (true: var)
+            // (Python)
+            std::map<std::string, std::map<std::string, type>> pyLocals;  ///< function -> variables declared at its start (variables
+                                                                    ///< that hold objects or whose type changes)
+            std::set<std::string> pyFree;                           ///< names that functions use but do not bind
+            std::set<std::string> pyModuleNames;                    ///< names that top-level statements bind
+            std::map<std::string, std::set<std::string>> pyGlobals; ///< function -> names it declares global
             bool changed = false;
         };
     public:
@@ -362,7 +409,7 @@ namespace neos::language
         void declare_stub() final;
     public:
         void emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource) final;
-        void complete_signature(i_function_signature& aSignature) final;
+        void complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource) final;
     public:
         void throw_error(source_iterator aSourcePos, neolib::i_string const& aError, neolib::i_string const& aErrorType = "error"_s) final;
         std::uint32_t trace() const final;
@@ -433,6 +480,42 @@ namespace neos::language
         std::optional<type> integer_type(operand_type const& aOperand) const;
         void suspend_entry();
         void resume_entry();
+        void coerce(fragment& aValue, type aTarget);
+        // Python
+        bool is_python() const;
+        void emit_python(python::construct aConstruct, neolib::i_string_view const& aSource);
+        void py_join_lines(i_source_fragment& aFragment);
+        void py_complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource);
+        operand_type py_pop();
+        type py_type(operand_type const& aOperand) const;
+        fragment py_object(operand_type const& aOperand);
+        fragment py_owned(fragment aValue);
+        fragment py_flush();
+        fragment py_release_variables(bool aTemporaries);
+        void py_coerce(fragment& aValue, type aTarget);
+        fragment py_name(std::string const& aName);
+        fragment py_runtime_call(std::string const& aName, std::vector<type> const& aParameters, type aResult, std::vector<fragment> const& aArguments);
+        fragment py_string(std::string const& aValue);
+        void py_operation(python::construct aConstruct, bool aInplace = false, neolib::i_string_view const* aSource = nullptr);
+        void py_bind(compilation_state::py_target const& aTarget, operand_type const& aValue, fragment& aStatement);
+        void py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement);
+        i_symbol_table_entry& py_variable(std::string const& aName, type aType);
+        void py_kind_change(std::string const& aName);
+        void py_call(neolib::i_string_view const& aSource);
+        std::optional<std::vector<fragment>> py_bind_arguments(std::string const& aFunction, std::vector<fragment> const& aArguments,
+            std::vector<std::optional<std::string>> const& aKeywords);
+        void py_assign(python::construct aConstruct, neolib::i_string_view const& aSource);
+        void py_import(python::construct aConstruct, neolib::i_string_view const& aSource);
+        void py_return(neolib::i_string_view const& aSource);
+        void py_for_in(neolib::i_string_view const& aSource);
+        void py_function_start();
+        void py_comprehension(neolib::i_string_view const& aSource, bool aDict = false);
+        std::uint32_t py_try_depth(bool aLoop);
+        fragment py_function_end(bool aImplicit);
+        void py_try(compilation_state::indented& aConstruct, fragment& aStatement);
+        void py_with(compilation_state::indented& aConstruct, fragment& aStatement);
+        void py_error_checks(wasm_function& aFunction);
+        std::uint32_t py_error_global();
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
@@ -448,6 +531,14 @@ namespace neos::language
         std::uint64_t iSymbolSequence = 0u;
         bool iDeclarationPass = false;
         std::vector<forward_declaration> iForwardDeclarations;
+        // (Python: the parameters of the program's functions)
+        struct py_parameter
+        {
+            enum kind_t { Positional, KeywordOnly, VarArgs, VarKeywords } kind = Positional;
+            std::string name;
+            bool hasDefault = false;
+        };
+        std::map<std::string, std::vector<py_parameter>> iPyParameters;
         std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
         inference iInference;
         bool iGlobalsDeclared = false;
