@@ -25,13 +25,14 @@
 
 #include <neolib/core/string_utf.hpp>
 #include <neolib/app/application.hpp>
+#include <neolib/file/file.hpp>
 #include <neos/context.hpp>
 
 namespace neos
 {
     context::context(std::ostream& aCout) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -40,7 +41,7 @@ namespace neos
 
     context::context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }, aServiceProvider) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }, aServiceProvider) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
