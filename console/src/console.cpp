@@ -186,7 +186,11 @@ void main_loop(boost::program_options::variables_map& aOptions)
         }
         std::string line;
         std::cout << (context.schema_loaded() ? context.running() || interactive ? context.schema().meta().language + "> " : context.schema().meta().language + "] " : "] ");
-        std::getline(std::cin, line);
+        if (!std::getline(std::cin, line)) // (end of input: quit)
+        {
+            std::cout << std::endl;
+            return;
+        }
         if (!process_command(context, interactive, line))
             return;
     }

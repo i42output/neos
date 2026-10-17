@@ -403,11 +403,12 @@ namespace neos::language
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("pipeline").as<neolib::rjson_array>())
         {
             auto const& stageName = stage->text();
+            std::string const stageKey{ stageName.to_std_string_view() };
             auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, code_parser::symbol>>() : iPipeline.back()->symbolMap;
             if (iPipeline.empty())
-                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, infix, discard, symbolMap, std::make_shared<parser>()));
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>()));
             else
-                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, infix, discard, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
         }
 
         for (auto const& stagePtr : iPipeline)

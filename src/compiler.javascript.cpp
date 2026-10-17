@@ -128,39 +128,6 @@ namespace neos::language
             aCode.push_back(aResult ? *wasm_type(*aResult) : 0x40u);
         }
 
-        // a statement nested in a WASM block: breaks out of a loop that encloses it must pass one more label
-        void append_nested(fragment& aTarget, i_fragment const& aSource)
-        {
-            auto const before = aTarget.fragmentRelocations.size();
-            append(aTarget, aSource);
-            for (auto i = before; i < aTarget.fragmentRelocations.size(); ++i)
-            {
-                auto& r = aTarget.fragmentRelocations[i];
-                if ((r.second() & compiler::BranchTarget) != 0u && (r.second() & 0x80000000u) == 0u)
-                    r.second() = r.second() + 1u;
-            }
-        }
-
-        // breaks and continues within a loop's body (which is within aBreakDepth labels of the loop's exit and
-        // aContinueDepth labels of the end of the current iteration)
-        void resolve_branches(fragment& aBody, std::uint32_t aBreakDepth, std::uint32_t aContinueDepth)
-        {
-            auto& code = aBody.fragmentCode.as_std_vector();
-            neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> remaining;
-            for (auto const& r : aBody.fragmentRelocations)
-            {
-                if ((r.second() & compiler::BranchTarget) != 0u && (r.second() & 0x80000000u) == 0u)
-                {
-                    bool const isContinue = (r.second() & compiler::ContinueTarget) != 0u;
-                    auto const depth = r.second() & ~(compiler::BranchTarget | compiler::ContinueTarget);
-                    put_u32_padded(code, r.first(), depth + (isContinue ? aContinueDepth : aBreakDepth));
-                }
-                else
-                    remaining.push_back(r);
-            }
-            aBody.fragmentRelocations = remaining;
-        }
-
         // the regions of a for statement: [ init, test, update, body ] (positions within the statement)
         std::array<std::pair<std::size_t, std::size_t>, 4u> for_regions(std::string_view aText)
         {
@@ -1020,8 +987,13 @@ namespace neos::language
         }
     }
 
-    void compiler::complete_signature(i_function_signature& aSignature)
+    void compiler::complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource)
     {
+        if (is_python())
+        {
+            py_complete_signature(aSignature, aSource);
+            return;
+        }
         if (!state().pendingInferred)
             return;
         // (a function declared after top-level statements is not part of the entry point that they form)

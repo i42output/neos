@@ -496,6 +496,7 @@ namespace neos::language
         fragment py_name(std::string const& aName);
         fragment py_runtime_call(std::string const& aName, std::vector<type> const& aParameters, type aResult, std::vector<fragment> const& aArguments);
         fragment py_string(std::string const& aValue);
+        std::optional<fragment> py_big_literal(operand_type const& aOperand);
         void py_operation(python::construct aConstruct, bool aInplace = false, neolib::i_string_view const* aSource = nullptr);
         void py_bind(compilation_state::py_target const& aTarget, operand_type const& aValue, fragment& aStatement);
         void py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement);

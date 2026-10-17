@@ -47,7 +47,8 @@ namespace neos
             Reference, Pointer, 
             Array, Tuple, Struct, 
             Function,
-            Custom
+            Custom,
+            Object      ///< an object of a runtime plugin (a handle; see neos/runtime/plugin.h)
         };
 
         using custom_type_id = neolib::uuid;
@@ -79,6 +80,7 @@ namespace neos
             case type::Struct:    return "struct";
             case type::Function:  return "function";
             case type::Custom:    return "custom";
+            case type::Object:    return "object";
             default:              return "unknown";
             }
         }
@@ -108,7 +110,8 @@ namespace neos
                 { "tuple",     type::Tuple },
                 { "struct",    type::Struct },
                 { "function",  type::Function },
-                { "custom",    type::Custom }
+                { "custom",    type::Custom },
+                { "object",    type::Object }
             };
             try
             {
@@ -201,7 +204,7 @@ namespace neos
                 v{ value } {}
             data(type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
                 d{ descriptor } {}
-            data(type_descriptor const& descriptor) requires !std::is_default_constructible_v<type_descriptor> :
+            data(type_descriptor const& descriptor) requires (!std::is_default_constructible_v<type_descriptor>) :
                 d{ descriptor } {}
             data(abstract_type const& other) :
                 d{ other.descriptor() },

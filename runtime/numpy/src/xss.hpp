@@ -25,6 +25,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#if !defined(NEOS_NUMPY_NO_XSS)
+
 #define NEOS_XSS_DECLARE(ISA, T) \
     void qsort(T* aArray, std::size_t aSize); \
     void qselect(T* aArray, std::size_t aKth, std::size_t aSize); \
@@ -36,6 +38,23 @@
     void qselect(T* aArray, std::size_t aKth, std::size_t aSize); \
     void qsort_half(std::uint16_t* aArray, std::size_t aSize); \
     void qselect_half(std::uint16_t* aArray, std::size_t aKth, std::size_t aSize);
+
+#else
+
+// (built without x86-simd-sort (not x86, or not GCC or Clang): the CPU's features are not detected so these are never called)
+#define NEOS_XSS_DECLARE(ISA, T) \
+    inline void qsort(T*, std::size_t) {} \
+    inline void qselect(T*, std::size_t, std::size_t) {} \
+    inline void argsort(T const*, std::size_t*, std::size_t) {} \
+    inline void argselect(T const*, std::size_t*, std::size_t, std::size_t) {}
+
+#define NEOS_XSS_DECLARE_16(T) \
+    inline void qsort(T*, std::size_t) {} \
+    inline void qselect(T*, std::size_t, std::size_t) {} \
+    inline void qsort_half(std::uint16_t*, std::size_t) {} \
+    inline void qselect_half(std::uint16_t*, std::size_t, std::size_t) {}
+
+#endif
 
 namespace neos::numpy::xss
 {

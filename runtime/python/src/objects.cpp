@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <complex>
@@ -41,6 +42,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <memory>
+#include <neonumeric/integer.hpp>
 #include <neos/runtime/python/object.h>
 #include "python.hpp"
 
@@ -116,7 +119,9 @@ namespace neos::python_runtime
             return type;
         }
 
-        struct int_object { header h; long long value; };
+        using big_integer = neonumeric::integer<0u>;
+        using big_detail = neonumeric::xinteger_detail<big_integer>;
+        struct int_object { header h; long long value; std::unique_ptr<big_integer> big; }; // (big: the value if it is not a 64-bit integer)
         struct float_object { header h; double value; };
         struct complex_object { header h; double real; double imag; };
         struct str_object { header h; std::string value; };
@@ -224,6 +229,164 @@ namespace neos::python_runtime
             return aObject->type->name;
         }
 
+        // --- integers beyond 64 bits (neonumeric's arbitrary precision integers)
+
+        bool is_big(object* aObject)
+        {
+            return aObject != nullptr && aObject->type == &sIntType.base && as<int_object>(aObject)->big != nullptr;
+        }
+
+        big_integer const& big_of(object* aObject)
+        {
+            return *as<int_object>(aObject)->big;
+        }
+
+        // (a 64-bit integer if it fits)
+        object* make_int(big_integer aValue)
+        {
+            if (big_detail::magnitude(aValue) == 1u)
+                return make_int(static_cast<long long>(big_detail::cword(aValue, 0u)));
+            auto* const result = new int_object{ { { &sIntType.base } }, 0 };
+            result->big = std::make_unique<big_integer>(std::move(aValue));
+            return &result->h.base;
+        }
+
+        bool big_negative(big_integer const& aValue)
+        {
+            return big_detail::is_negative(aValue);
+        }
+
+        bool big_zero(big_integer const& aValue)
+        {
+            return big_detail::magnitude(aValue) == 1u && big_detail::cword(aValue, 0u) == 0u;
+        }
+
+        big_integer big_abs(big_integer const& aValue)
+        {
+            return big_negative(aValue) ? -aValue : aValue;
+        }
+
+        std::uint64_t big_bit_length(big_integer const& aValue)
+        {
+            return big_detail::magnitude_in_bits(big_abs(aValue));
+        }
+
+        // (bit aIndex of the magnitude)
+        bool big_bit(big_integer const& aMagnitude, std::uint64_t aIndex)
+        {
+            return ((big_detail::cword(aMagnitude, static_cast<std::uint32_t>(aIndex / 64u)) >> (aIndex % 64u)) & 1u) != 0u;
+        }
+
+        // aMagnitude * 2^aExponent (the magnitude non-negative; aSticky: bits below it are set) correctly rounded to a double
+        // (round half to even); false if it overflows
+        bool big_to_double(big_integer const& aMagnitude, std::int64_t aExponent, bool aSticky, bool aNegative, double& aResult)
+        {
+            auto const bits = static_cast<std::int64_t>(big_detail::magnitude_in_bits(aMagnitude));
+            if (bits == 0)
+            {
+                aResult = aNegative ? -0.0 : 0.0;
+                return true;
+            }
+            auto const leading = bits - 1;
+            auto const e = leading + aExponent; // (binary exponent of the leading bit)
+            std::uint64_t top = 0u;
+            for (std::int64_t i = 0; i < 64; ++i)
+            {
+                top <<= 1;
+                if (leading - i >= 0 && big_bit(aMagnitude, static_cast<std::uint64_t>(leading - i)))
+                    top |= 1u;
+            }
+            bool sticky = aSticky;
+            for (std::int64_t position = leading - 64; position >= 0 && !sticky; --position)
+                sticky = big_bit(aMagnitude, static_cast<std::uint64_t>(position));
+            double result = 0.0;
+            if (e > 1023)
+                return false;
+            std::int64_t const precision = (e >= -1022 ? 53 : 53 - (-1022 - e));
+            if (precision == 0)
+                result = (top != (1ull << 63) || sticky) ? std::ldexp(1.0, -1074) : 0.0;
+            else if (precision > 0)
+            {
+                auto const shift = static_cast<int>(64 - precision);
+                std::uint64_t keep = top >> shift;
+                std::uint64_t const rest = top & ((1ull << shift) - 1u);
+                std::uint64_t const half = 1ull << (shift - 1);
+                if (rest > half || (rest == half && (sticky || (keep & 1u))))
+                    ++keep;
+                result = std::ldexp(static_cast<double>(keep), static_cast<int>(e - (precision - 1)));
+                if (std::isinf(result))
+                    return false;
+            }
+            aResult = aNegative ? -result : result;
+            return true;
+        }
+
+        bool big_to_double(big_integer const& aValue, double& aResult)
+        {
+            return big_to_double(big_abs(aValue), 0, false, big_negative(aValue), aResult);
+        }
+
+        // the integer part of a finite double, exactly
+        big_integer big_from_double(double aValue)
+        {
+            int exponent = 0;
+            double const m = std::frexp(std::trunc(std::fabs(aValue)), &exponent); // (|value| = m * 2^exponent, 0.5 <= m < 1)
+            if (m == 0.0)
+                return big_integer{ 0 };
+            auto const mantissa = static_cast<long long>(std::ldexp(m, 53)); // (53 bits)
+            big_integer result{ mantissa };
+            if (exponent >= 53)
+                result = result << static_cast<std::int64_t>(exponent - 53);
+            else
+                result = result >> static_cast<std::int64_t>(53 - exponent);
+            return aValue < 0.0 ? -result : result;
+        }
+
+        // Python's floor division and modulo (neonumeric's truncate)
+        void big_divmod(big_integer const& a, big_integer const& b, big_integer& q, big_integer& r)
+        {
+            q = a / b;
+            r = a - q * b;
+            if (!big_zero(r) && big_negative(r) != big_negative(b))
+            {
+                q = q - big_integer{ 1 };
+                r = r + b;
+            }
+        }
+
+        // sys.set_int_max_str_digits (CPython's limit on conversions between int and decimal strings)
+        long long sIntMaxStrDigits = 4300;
+
+        object* int_max_str_digits_error(std::size_t aDigits, bool aParsing)
+        {
+            return error("ValueError", "Exceeds the limit (" + std::to_string(sIntMaxStrDigits) + " digits) for integer string conversion" +
+                (aParsing ? ": value has " + std::to_string(aDigits) + " digits" : std::string{}) + "; use sys.set_int_max_str_digits() to increase the limit");
+        }
+
+        // a big integer's digits in a base (2 to 36: lower case), without sign
+        std::string big_digits(big_integer const& aValue, int aBase)
+        {
+            auto digits = big_abs(aValue).to_string(static_cast<std::uint32_t>(aBase));
+            for (auto& c : digits)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return digits;
+        }
+
+        // str(big): false (ValueError) beyond the digit limit
+        bool big_str(big_integer const& aValue, std::string& aResult)
+        {
+            auto digits = big_digits(aValue, 10);
+            if (sIntMaxStrDigits > 0 && digits.size() > static_cast<std::size_t>(sIntMaxStrDigits))
+            {
+                int_max_str_digits_error(digits.size(), false);
+                return false;
+            }
+            aResult = (big_negative(aValue) ? "-" : "") + digits;
+            return true;
+        }
+
+        object* big_binary(int aOperation, big_integer const& a, big_integer const& b);
+
         // --- conversions
 
         bool is_int_like(object* aObject)
@@ -232,13 +395,27 @@ namespace neos::python_runtime
             return k == NEOS_PY_INT || k == NEOS_PY_BOOL;
         }
 
+        // (an integer beyond 64 bits: OverflowError (check failed()))
         long long int_value(object* aObject)
         {
+            if (is_big(aObject))
+                return (error("OverflowError", "Python int too large to convert to C long"), 0);
             return kind_of(aObject) == NEOS_PY_BOOL ? (aObject == &sTrue.base ? 1 : 0) : as<int_object>(aObject)->value;
+        }
+
+        // (any int as a big integer)
+        big_integer big_value(object* aObject)
+        {
+            return is_big(aObject) ? big_of(aObject) : big_integer{ kind_of(aObject) == NEOS_PY_BOOL ? (aObject == &sTrue.base ? 1ll : 0ll) : as<int_object>(aObject)->value };
         }
 
         bool to_index(object* aObject, long long& aResult)
         {
+            if (is_big(aObject))
+            {
+                error("OverflowError", "cannot fit 'int' into an index-sized integer");
+                return false;
+            }
             if (is_int_like(aObject))
             {
                 aResult = int_value(aObject);
@@ -256,6 +433,15 @@ namespace neos::python_runtime
             {
             case NEOS_PY_BOOL:
             case NEOS_PY_INT:
+                if (is_big(aObject))
+                {
+                    if (!big_to_double(big_of(aObject), aResult))
+                    {
+                        error("OverflowError", "int too large to convert to float");
+                        return false;
+                    }
+                    return true;
+                }
                 aResult = static_cast<double>(int_value(aObject));
                 return true;
             case NEOS_PY_FLOAT:
@@ -333,7 +519,11 @@ namespace neos::python_runtime
             case NEOS_PY_NOT_IMPLEMENTED: aResult = "NotImplemented"; return true;
             case NEOS_PY_ELLIPSIS: aResult = "Ellipsis"; return true;
             case NEOS_PY_BOOL: aResult = aObject == &sTrue.base ? "True" : "False"; return true;
-            case NEOS_PY_INT: aResult = std::to_string(as<int_object>(aObject)->value); return true;
+            case NEOS_PY_INT: 
+                if (is_big(aObject))
+                    return big_str(big_of(aObject), aResult);
+                aResult = std::to_string(as<int_object>(aObject)->value); 
+                return true;
             case NEOS_PY_FLOAT: aResult = python_float(as<float_object>(aObject)->value); return true;
             case NEOS_PY_COMPLEX:
                 {
@@ -341,7 +531,7 @@ namespace neos::python_runtime
                     if (c.real == 0.0 && !std::signbit(c.real))
                         aResult = complex_part(c.imag) + "j";
                     else
-                        aResult = "(" + complex_part(c.real) + (c.imag < 0.0 || (c.imag == 0.0 && std::signbit(c.imag)) || std::isnan(c.imag) && std::signbit(c.imag) ? "" : "+") +
+                        aResult = "(" + complex_part(c.real) + (c.imag < 0.0 || (c.imag == 0.0 && std::signbit(c.imag)) ? "" : "+") +
                             complex_part(c.imag) + "j)";
                 }
                 return true;
@@ -529,16 +719,19 @@ namespace neos::python_runtime
             switch (aOperation)
             {
             case NEOS_PY_ADD:
-                if (add_overflow(a, b, &r)) return int_overflow();
+                if (add_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                 return make_int(r);
             case NEOS_PY_SUBTRACT:
-                if (subtract_overflow(a, b, &r)) return int_overflow();
+                if (subtract_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                 return make_int(r);
             case NEOS_PY_MULTIPLY:
-                if (multiply_overflow(a, b, &r)) return int_overflow();
+                if (multiply_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                 return make_int(r);
             case NEOS_PY_TRUE_DIVIDE:
                 if (b == 0) return error("ZeroDivisionError", "division by zero");
+                // (exact as doubles: correctly rounded; else as CPython, from the integers)
+                if (a > (1ll << 53) || a < -(1ll << 53) || b > (1ll << 53) || b < -(1ll << 53))
+                    return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                 return make_float(static_cast<double>(a) / static_cast<double>(b));
             case NEOS_PY_FLOOR_DIVIDE:
             case NEOS_PY_REMAINDER:
@@ -546,7 +739,7 @@ namespace neos::python_runtime
                     if (b == 0)
                         return error("ZeroDivisionError", aOperation == NEOS_PY_FLOOR_DIVIDE ? "integer division or modulo by zero" : "integer modulo by zero");
                     if (a == std::numeric_limits<long long>::min() && b == -1)
-                        return aOperation == NEOS_PY_FLOOR_DIVIDE ? int_overflow() : make_int(0);
+                        return aOperation == NEOS_PY_FLOOR_DIVIDE ? big_binary(aOperation, big_integer{ a }, big_integer{ b }) : make_int(0);
                     long long q = a / b;
                     long long m = a % b;
                     if (m != 0 && ((m < 0) != (b < 0)))
@@ -569,9 +762,9 @@ namespace neos::python_runtime
                     for (long long e = b; e > 0; e >>= 1)
                     {
                         if ((e & 1) != 0 && multiply_overflow(result, base, &result))
-                            return int_overflow();
+                            return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                         if (e > 1 && multiply_overflow(base, base, &base))
-                            return int_overflow();
+                            return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                     }
                     return make_int(result);
                 }
@@ -579,11 +772,118 @@ namespace neos::python_runtime
                 if (b < 0) return error("ValueError", "negative shift count");
                 if (a == 0) return make_int(0);
                 if (b >= 63 || (a > 0 ? a > (std::numeric_limits<long long>::max() >> b) : a < (std::numeric_limits<long long>::min() >> b)))
-                    return int_overflow();
+                    return big_binary(aOperation, big_integer{ a }, big_integer{ b });
                 return make_int(static_cast<long long>(static_cast<unsigned long long>(a) << b));
             case NEOS_PY_RSHIFT:
                 if (b < 0) return error("ValueError", "negative shift count");
                 return make_int(b >= 63 ? (a < 0 ? -1 : 0) : a >> b);
+            case NEOS_PY_AND: return make_int(a & b);
+            case NEOS_PY_OR: return make_int(a | b);
+            case NEOS_PY_XOR: return make_int(a ^ b);
+            default:
+                return not_implemented();
+            }
+        }
+
+        // the operations on integers beyond 64 bits (as CPython's Objects/longobject.c)
+        object* big_binary(int aOperation, big_integer const& a, big_integer const& b)
+        {
+            switch (aOperation)
+            {
+            case NEOS_PY_ADD: return make_int(a + b);
+            case NEOS_PY_SUBTRACT: return make_int(a - b);
+            case NEOS_PY_MULTIPLY: return make_int(a * b);
+            case NEOS_PY_TRUE_DIVIDE:
+                {
+                    if (big_zero(b))
+                        return error("ZeroDivisionError", "division by zero");
+                    bool const negative = big_negative(a) != big_negative(b);
+                    if (big_zero(a))
+                        return make_float(negative ? -0.0 : 0.0);
+                    auto const x = big_abs(a);
+                    auto const y = big_abs(b);
+                    auto const shift = static_cast<std::int64_t>(big_detail::magnitude_in_bits(x)) - static_cast<std::int64_t>(big_detail::magnitude_in_bits(y)) - 55;
+                    if (shift > 1100)
+                        return error("OverflowError", "integer division result too large for a float");
+                    if (shift < -1200)
+                        return make_float(negative ? -0.0 : 0.0);
+                    // (x / y = q * 2^shift (+ the remainder): q has 55 or 56 bits)
+                    big_integer const n = shift < 0 ? x << -shift : x;
+                    big_integer const d = shift > 0 ? y << shift : y;
+                    big_integer const q = n / d;
+                    big_integer const r = n - q * d;
+                    double result = 0.0;
+                    if (!big_to_double(q, shift, !big_zero(r), negative, result))
+                        return error("OverflowError", "integer division result too large for a float");
+                    return make_float(result);
+                }
+            case NEOS_PY_FLOOR_DIVIDE:
+            case NEOS_PY_REMAINDER:
+                {
+                    if (big_zero(b))
+                        return error("ZeroDivisionError", aOperation == NEOS_PY_FLOOR_DIVIDE ? "integer division or modulo by zero" : "integer modulo by zero");
+                    big_integer q, r;
+                    big_divmod(a, b, q, r);
+                    return make_int(aOperation == NEOS_PY_FLOOR_DIVIDE ? q : r);
+                }
+            case NEOS_PY_POWER:
+                {
+                    if (big_negative(b))
+                    {
+                        if (big_zero(a))
+                            return error("ZeroDivisionError", "0.0 cannot be raised to a negative power");
+                        double x = 0.0, y = 0.0;
+                        if (!big_to_double(a, x) || !big_to_double(b, y))
+                            return error("OverflowError", "int too large to convert to float");
+                        return make_float(std::pow(x, y));
+                    }
+                    if (big_detail::magnitude(b) > 1u)
+                    {
+                        // (an exponent beyond 64 bits: only 0, 1 and -1 have a result that fits in memory)
+                        if (big_zero(a) || a == big_integer{ 1 })
+                            return make_int(a);
+                        if (a == big_integer{ -1 })
+                            return make_int(big_bit(b, 0u) ? -1ll : 1ll);
+                        return error("MemoryError", "");
+                    }
+                    auto e = static_cast<std::uint64_t>(big_detail::cword(b, 0u));
+                    big_integer result{ 1 };
+                    big_integer base = a;
+                    for (; e != 0u; e >>= 1)
+                    {
+                        if ((e & 1u) != 0u)
+                            result = result * base;
+                        if (e > 1u)
+                            base = base * base;
+                    }
+                    return make_int(std::move(result));
+                }
+            case NEOS_PY_LSHIFT:
+                {
+                    if (big_negative(b))
+                        return error("ValueError", "negative shift count");
+                    if (big_zero(a))
+                        return make_int(0);
+                    if (big_detail::magnitude(b) > 1u)
+                        return error("OverflowError", "too many digits in integer");
+                    auto n = static_cast<std::uint64_t>(big_detail::cword(b, 0u));
+                    if (n > (std::uint64_t{ 1 } << 40))
+                        return error("OverflowError", "too many digits in integer");
+                    big_integer result = a;
+                    // (neonumeric shifts at most 0xFFFF00 bits at once)
+                    for (std::uint64_t constexpr chunk = 0x800000u; n > 0u; n -= std::min(n, chunk))
+                        result = result << static_cast<std::int64_t>(std::min(n, chunk));
+                    return make_int(std::move(result));
+                }
+            case NEOS_PY_RSHIFT:
+                {
+                    if (big_negative(b))
+                        return error("ValueError", "negative shift count");
+                    auto const bits = big_bit_length(a);
+                    if (big_detail::magnitude(b) > 1u || static_cast<std::uint64_t>(big_detail::cword(b, 0u)) > bits)
+                        return make_int(big_negative(a) ? -1ll : 0ll);
+                    return make_int(a >> static_cast<std::int64_t>(big_detail::cword(b, 0u)));
+                }
             case NEOS_PY_AND: return make_int(a & b);
             case NEOS_PY_OR: return make_int(a | b);
             case NEOS_PY_XOR: return make_int(a ^ b);
@@ -722,7 +1022,12 @@ namespace neos::python_runtime
             long long count = 0;
             if (!is_int_like(aCount))
                 return false;
-            count = std::max(0ll, int_value(aCount));
+            if (is_big(aCount) && !big_negative(big_of(aCount)))
+            {
+                error("OverflowError", "cannot fit 'int' into an index-sized integer");
+                return true;
+            }
+            count = is_big(aCount) ? 0 : std::max(0ll, int_value(aCount));
             for (long long i = 0; i < count; ++i)
                 for (auto item : aItems)
                 {
@@ -759,21 +1064,25 @@ namespace neos::python_runtime
                     {
                         if (aKind == NEOS_PY_COMPLEX)
                             return { as<complex_object>(aObject)->real, as<complex_object>(aObject)->imag };
-                        if (aKind == NEOS_PY_FLOAT)
-                            return { as<float_object>(aObject)->value, 0.0 };
-                        return { static_cast<double>(int_value(aObject)), 0.0 };
+                        double x = 0.0;
+                        to_double(aObject, x);
+                        return { x, 0.0 };
                     };
                     if (aOperation == NEOS_PY_FLOOR_DIVIDE || aOperation == NEOS_PY_REMAINDER)
                         return error("TypeError", std::string{ "unsupported operand type(s) for " } + operator_symbol(aOperation) + ": '" + type_name(aLhs) + "' and '" + type_name(aRhs) + "'");
-                    return complex_binary(aOperation, value(aLhs, lk), value(aRhs, rk));
+                    auto const l = value(aLhs, lk);
+                    auto const r = value(aRhs, rk);
+                    if (failed())
+                        return nullptr;
+                    return complex_binary(aOperation, l, r);
                 }
                 if (lk == NEOS_PY_FLOAT || rk == NEOS_PY_FLOAT)
                 {
                     if (aOperation >= NEOS_PY_MATMUL)
                         return not_implemented();
                     double a = 0.0, b = 0.0;
-                    to_double(aLhs, a);
-                    to_double(aRhs, b);
+                    if (!to_double(aLhs, a) || !to_double(aRhs, b))
+                        return nullptr;
                     return float_binary(aOperation, a, b);
                 }
                 if (lk == NEOS_PY_BOOL && rk == NEOS_PY_BOOL && (aOperation == NEOS_PY_AND || aOperation == NEOS_PY_OR || aOperation == NEOS_PY_XOR))
@@ -781,6 +1090,8 @@ namespace neos::python_runtime
                     bool const a = aLhs == &sTrue.base, b = aRhs == &sTrue.base;
                     return make_bool(aOperation == NEOS_PY_AND ? a && b : aOperation == NEOS_PY_OR ? a || b : a != b);
                 }
+                if (is_big(aLhs) || is_big(aRhs))
+                    return big_binary(aOperation, big_value(aLhs), big_value(aRhs));
                 return int_binary(aOperation, int_value(aLhs), int_value(aRhs));
             }
             if (aOperation == NEOS_PY_REMAINDER && lk == NEOS_PY_STR)
@@ -811,6 +1122,8 @@ namespace neos::python_runtime
                 {
                     if (aKind == NEOS_PY_STR && is_int_like(aCount))
                     {
+                        if (is_big(aCount))
+                            return big_negative(big_of(aCount)) ? make_str("") : error("OverflowError", "cannot fit 'int' into an index-sized integer");
                         std::string result;
                         for (long long i = 0; i < int_value(aCount); ++i)
                             result += as<str_object>(aSequence)->value;
@@ -818,15 +1131,19 @@ namespace neos::python_runtime
                     }
                     std::vector<object*> items;
                     if (aKind == NEOS_PY_LIST && sequence_repeat(as<list_object>(aSequence)->items, aCount, items))
-                        return make_list(std::move(items));
+                        return failed() ? nullptr : make_list(std::move(items));
                     if (aKind == NEOS_PY_TUPLE && sequence_repeat(as<tuple_object>(aSequence)->items, aCount, items))
-                        return make_tuple(std::move(items));
+                        return failed() ? nullptr : make_tuple(std::move(items));
                     return nullptr;
                 };
                 if (auto const result = repeat(aLhs, lk, aRhs))
                     return result;
+                if (failed())
+                    return nullptr;
                 if (auto const result = repeat(aRhs, rk, aLhs))
                     return result;
+                if (failed())
+                    return nullptr;
             }
             return not_implemented();
         }
@@ -869,13 +1186,25 @@ namespace neos::python_runtime
             case NEOS_PY_BOOL:
             case NEOS_PY_INT:
                 {
+                    if (is_big(aObject))
+                    {
+                        auto const& v = big_of(aObject);
+                        switch (aOperation)
+                        {
+                        case NEOS_PY_NEGATIVE: return make_int(-v);
+                        case NEOS_PY_POSITIVE: return make_int(v);
+                        case NEOS_PY_INVERT: return make_int(~v);
+                        case NEOS_PY_ABSOLUTE: return make_int(big_abs(v));
+                        }
+                        break;
+                    }
                     auto const v = int_value(aObject);
                     switch (aOperation)
                     {
-                    case NEOS_PY_NEGATIVE: if (v == std::numeric_limits<long long>::min()) return int_overflow(); return make_int(-v);
+                    case NEOS_PY_NEGATIVE: if (v == std::numeric_limits<long long>::min()) return make_int(-big_integer{ v }); return make_int(-v);
                     case NEOS_PY_POSITIVE: return make_int(v);
                     case NEOS_PY_INVERT: return make_int(~v);
-                    case NEOS_PY_ABSOLUTE: if (v == std::numeric_limits<long long>::min()) return int_overflow(); return make_int(v < 0 ? -v : v);
+                    case NEOS_PY_ABSOLUTE: if (v == std::numeric_limits<long long>::min()) return make_int(-big_integer{ v }); return make_int(v < 0 ? -v : v);
                     }
                 }
                 break;
@@ -947,6 +1276,11 @@ namespace neos::python_runtime
             {
                 if (lk != NEOS_PY_FLOAT && rk != NEOS_PY_FLOAT)
                 {
+                    if (is_big(aLhs) || is_big(aRhs))
+                    {
+                        auto const a = big_value(aLhs), b = big_value(aRhs);
+                        return a < b ? -1 : b < a ? 1 : 0;
+                    }
                     auto const a = int_value(aLhs), b = int_value(aRhs);
                     return a < b ? -1 : a > b ? 1 : 0;
                 }
@@ -958,10 +1292,24 @@ namespace neos::python_runtime
                 // (an int and a float: exactly)
                 bool const floatLeft = (lk == NEOS_PY_FLOAT);
                 double const f = floatLeft ? as<float_object>(aLhs)->value : as<float_object>(aRhs)->value;
-                long long const i = floatLeft ? int_value(aRhs) : int_value(aLhs);
-                int order;
                 if (std::isnan(f))
                     return 2;
+                if (is_big(floatLeft ? aRhs : aLhs))
+                {
+                    // (the float's integer part exactly; a float beyond 2^53 has no fractional part)
+                    auto const& i = big_of(floatLeft ? aRhs : aLhs);
+                    int order = 0;
+                    if (std::isinf(f))
+                        order = f > 0.0 ? 1 : -1;
+                    else
+                    {
+                        auto const t = big_from_double(f);
+                        order = t < i ? -1 : i < t ? 1 : (f > std::trunc(f) ? 1 : f < std::trunc(f) ? -1 : 0);
+                    }
+                    return floatLeft ? order : -order;
+                }
+                long long const i = floatLeft ? int_value(aRhs) : int_value(aLhs);
+                int order;
                 if (f >= 9223372036854775808.0)
                     order = 1;
                 else if (f < -9223372036854775808.0)
@@ -1105,7 +1453,7 @@ namespace neos::python_runtime
             {
             case NEOS_PY_NONE: return 0;
             case NEOS_PY_BOOL: return aObject == &sTrue.base ? 1 : 0;
-            case NEOS_PY_INT: return as<int_object>(aObject)->value != 0 ? 1 : 0;
+            case NEOS_PY_INT: return is_big(aObject) || as<int_object>(aObject)->value != 0 ? 1 : 0;
             case NEOS_PY_FLOAT: return as<float_object>(aObject)->value != 0.0 ? 1 : 0;
             case NEOS_PY_COMPLEX: return as<complex_object>(aObject)->real != 0.0 || as<complex_object>(aObject)->imag != 0.0 ? 1 : 0;
             case NEOS_PY_STR: return as<str_object>(aObject)->value.empty() ? 0 : 1;
@@ -1901,6 +2249,74 @@ namespace neos::python_runtime
             return make_str(std::move(result));
         }
 
+        // int's and float's methods
+        object* int_bit_length(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "int.bit_length"))
+                return nullptr;
+            return make_int(static_cast<long long>(big_bit_length(big_value(aSelf))));
+        }
+        object* int_bit_count(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "int.bit_count"))
+                return nullptr;
+            auto const magnitude = big_abs(big_value(aSelf));
+            long long count = 0;
+            for (std::uint32_t i = 0u; i < big_detail::magnitude(magnitude); ++i)
+                count += std::popcount(static_cast<std::uint64_t>(big_detail::cword(magnitude, i)));
+            return make_int(count);
+        }
+        object* int_conjugate(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "int.conjugate"))
+                return nullptr;
+            return is_big(aSelf) ? (retain(aSelf), aSelf) : make_int(int_value(aSelf));
+        }
+        object* int_as_integer_ratio(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "int.as_integer_ratio"))
+                return nullptr;
+            return make_tuple({ is_big(aSelf) ? (retain(aSelf), aSelf) : make_int(int_value(aSelf)), make_int(1) });
+        }
+        object* int_is_integer(object*, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "int.is_integer"))
+                return nullptr;
+            return make_bool(true);
+        }
+        object* float_is_integer(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "float.is_integer"))
+                return nullptr;
+            auto const x = as<float_object>(aSelf)->value;
+            return make_bool(std::isfinite(x) && std::floor(x) == x);
+        }
+        object* float_as_integer_ratio(object* aSelf, std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "float.as_integer_ratio"))
+                return nullptr;
+            auto const x = as<float_object>(aSelf)->value;
+            if (std::isinf(x))
+                return error("OverflowError", "cannot convert Infinity to integer ratio");
+            if (std::isnan(x))
+                return error("ValueError", "cannot convert NaN to integer ratio");
+            int e = 0;
+            auto m = std::frexp(x, &e);
+            // (the mantissa as an integer: x = m * 2^e exactly)
+            for (int i = 0; i < 300 && m != std::floor(m); ++i)
+            {
+                m *= 2.0;
+                --e;
+            }
+            big_integer numerator{ static_cast<long long>(m) };
+            big_integer denominator{ 1 };
+            if (e > 0)
+                numerator = numerator << static_cast<std::int64_t>(e);
+            else
+                denominator = denominator << static_cast<std::int64_t>(-e);
+            return make_tuple({ make_int(std::move(numerator)), make_int(std::move(denominator)) });
+        }
+
         struct method_entry
         {
             int kind;
@@ -1934,7 +2350,19 @@ namespace neos::python_runtime
             { NEOS_PY_STR, "startswith", { str_startswith } },
             { NEOS_PY_STR, "endswith", { str_endswith } },
             { NEOS_PY_STR, "find", { str_find } },
-            { NEOS_PY_STR, "format", { str_format } }
+            { NEOS_PY_STR, "format", { str_format } },
+            { NEOS_PY_INT, "bit_length", { int_bit_length } },
+            { NEOS_PY_INT, "bit_count", { int_bit_count } },
+            { NEOS_PY_INT, "conjugate", { int_conjugate } },
+            { NEOS_PY_INT, "as_integer_ratio", { int_as_integer_ratio } },
+            { NEOS_PY_INT, "is_integer", { int_is_integer } },
+            { NEOS_PY_BOOL, "bit_length", { int_bit_length } },
+            { NEOS_PY_BOOL, "bit_count", { int_bit_count } },
+            { NEOS_PY_BOOL, "conjugate", { int_conjugate } },
+            { NEOS_PY_BOOL, "as_integer_ratio", { int_as_integer_ratio } },
+            { NEOS_PY_BOOL, "is_integer", { int_is_integer } },
+            { NEOS_PY_FLOAT, "is_integer", { float_is_integer } },
+            { NEOS_PY_FLOAT, "as_integer_ratio", { float_as_integer_ratio } }
         };
 
         object* call_method(neos_py_context*, void* aData, neos_py_object* aArgs, neos_py_object* aKwargs)
@@ -1976,8 +2404,20 @@ namespace neos::python_runtime
                 }
                 if ((k == NEOS_PY_INT || k == NEOS_PY_BOOL || k == NEOS_PY_FLOAT) && (std::strcmp(aName, "real") == 0 || std::strcmp(aName, "imag") == 0))
                 {
-                    if (std::strcmp(aName, "real") == 0) { retain(aObject); return aObject; }
+                    if (std::strcmp(aName, "real") == 0) 
+                    { 
+                        if (k == NEOS_PY_BOOL)
+                            return make_int(int_value(aObject));
+                        retain(aObject); 
+                        return aObject; 
+                    }
                     return k == NEOS_PY_FLOAT ? make_float(0.0) : make_int(0);
+                }
+                if ((k == NEOS_PY_INT || k == NEOS_PY_BOOL) && (std::strcmp(aName, "numerator") == 0 || std::strcmp(aName, "denominator") == 0))
+                {
+                    if (std::strcmp(aName, "denominator") == 0)
+                        return make_int(1);
+                    return k == NEOS_PY_BOOL ? make_int(int_value(aObject)) : (retain(aObject), aObject);
                 }
             }
             return error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
@@ -2297,11 +2737,20 @@ namespace neos::python_runtime
             return true;
         }
 
-        bool format_int(long long aValue, format_spec const& aSpec, std::string& aResult)
+        // (aBig: the value if it is beyond 64 bits)
+        bool format_int(long long aValue, format_spec const& aSpec, std::string& aResult, big_integer const* aBig = nullptr)
         {
             auto const type = aSpec.type;
             if (type == 'e' || type == 'E' || type == 'f' || type == 'F' || type == 'g' || type == 'G' || type == '%')
-                return format_float(static_cast<double>(aValue), aSpec, aResult);
+            {
+                double x = static_cast<double>(aValue);
+                if (aBig != nullptr && !big_to_double(*aBig, x))
+                {
+                    error("OverflowError", "int too large to convert to float");
+                    return false;
+                }
+                return format_float(x, aSpec, aResult);
+            }
             if (type != 0 && std::string_view{ "bcdoxXn" }.find(type) == std::string_view::npos)
             {
                 error("ValueError", std::string{ "Unknown format code '" } + type + "' for object of type 'int'");
@@ -2324,7 +2773,7 @@ namespace neos::python_runtime
                     error("ValueError", "Sign not allowed with integer format specifier 'c'");
                     return false;
                 }
-                if (aValue < 0 || aValue > 0x10FFFF)
+                if (aBig != nullptr || aValue < 0 || aValue > 0x10FFFF)
                 {
                     error("OverflowError", "%c arg not in range(0x110000)");
                     return false;
@@ -2338,7 +2787,7 @@ namespace neos::python_runtime
                 aResult = pad_formatted("", body, aSpec, '<');
                 return true;
             }
-            bool const negative = aValue < 0;
+            bool const negative = aBig != nullptr ? big_negative(*aBig) : aValue < 0;
             auto const magnitude = negative ? 0ull - static_cast<unsigned long long>(aValue) : static_cast<unsigned long long>(aValue);
             int base = 10;
             std::string prefix;
@@ -2353,6 +2802,15 @@ namespace neos::python_runtime
             char buffer[80];
             auto const converted = std::to_chars(buffer, buffer + sizeof(buffer), magnitude, base);
             std::string digits{ buffer, static_cast<std::size_t>(converted.ptr - buffer) };
+            if (aBig != nullptr)
+            {
+                digits = big_digits(*aBig, base);
+                if (base == 10 && sIntMaxStrDigits > 0 && digits.size() > static_cast<std::size_t>(sIntMaxStrDigits))
+                {
+                    int_max_str_digits_error(digits.size(), false);
+                    return false;
+                }
+            }
             if (type == 'X')
                 for (auto& c : digits)
                     c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -2410,7 +2868,7 @@ namespace neos::python_runtime
             {
             case NEOS_PY_BOOL:
             case NEOS_PY_INT:
-                return parse_format_spec(aSpec, spec, "int") && format_int(int_value(aValue), spec, aResult);
+                return parse_format_spec(aSpec, spec, "int") && format_int(is_big(aValue) ? 0 : int_value(aValue), spec, aResult, is_big(aValue) ? &big_of(aValue) : nullptr);
             case NEOS_PY_FLOAT:
                 return parse_format_spec(aSpec, spec, "float") && format_float(as<float_object>(aValue)->value, spec, aResult);
             case NEOS_PY_STR:
@@ -2831,7 +3289,10 @@ namespace neos::python_runtime
                 case 'X':
                     {
                         long long v = 0;
-                        if (is_int_like(value))
+                        std::optional<big_integer> big; // (beyond 64 bits)
+                        if (is_big(value))
+                            big = big_of(value);
+                        else if (is_int_like(value))
                             v = int_value(value);
                         else if ((type == 'd' || type == 'i' || type == 'u') && (kind_of(value) == NEOS_PY_FLOAT || kind_of(value) == NEOS_PY_OTHER))
                         {
@@ -2846,7 +3307,12 @@ namespace neos::python_runtime
                                     clear_error();
                                     return error("TypeError", std::string{ "%" } + type + " format: a real number is required, not " + type_name(value));
                                 }
-                                v = static_cast<long long>(std::trunc(d));
+                                if (!std::isfinite(d))
+                                    return error(std::isnan(d) ? "ValueError" : "OverflowError", std::isnan(d) ? "cannot convert float NaN to integer" : "cannot convert float infinity to integer");
+                                if (d >= 9223372036854775808.0 || d < -9223372036854775808.0)
+                                    big = big_from_double(d);
+                                else
+                                    v = static_cast<long long>(std::trunc(d));
                             }
                         }
                         else if (!to_index(value, v))
@@ -2855,12 +3321,18 @@ namespace neos::python_runtime
                             return error("TypeError", std::string{ "%" } + type + " format: " + (type == 'd' || type == 'i' || type == 'u' ? "a real number" : "an integer") +
                                 " is required, not " + type_name(value));
                         }
-                        bool const negative = v < 0;
+                        bool const negative = big ? big_negative(*big) : v < 0;
                         auto const magnitude = negative ? 0ull - static_cast<unsigned long long>(v) : static_cast<unsigned long long>(v);
                         char buffer[80];
                         auto const base = type == 'o' ? 8 : (type == 'x' || type == 'X') ? 16 : 10;
                         auto const converted = std::to_chars(buffer, buffer + sizeof(buffer), magnitude, base);
                         body.assign(buffer, converted.ptr);
+                        if (big)
+                        {
+                            body = big_digits(*big, base);
+                            if (base == 10 && sIntMaxStrDigits > 0 && body.size() > static_cast<std::size_t>(sIntMaxStrDigits))
+                                return int_max_str_digits_error(body.size(), false);
+                        }
                         if (type == 'X')
                             for (auto& c : body)
                                 c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -3373,54 +3845,122 @@ namespace neos::python_runtime
                 return "";
             return result(std::move(text));
         }
-        std::int64_t fn_to_int(object* aObject)
+        // int(x) and int(x, base) (aBase: -1 if not given); null if it fails
+        object* int_from(object* aObject, long long aBase)
         {
-            // int(x)
-            switch (kind_of(aObject))
+            auto const k = kind_of(aObject);
+            if (aBase != -1 && k != NEOS_PY_STR)
+                return error("TypeError", "int() can't convert non-string with explicit base");
+            if (aBase != -1 && aBase != 0 && (aBase < 2 || aBase > 36))
+                return error("ValueError", "int() base must be >= 2 and <= 36, or 0");
+            switch (k)
             {
             case NEOS_PY_FLOAT:
                 {
                     auto const v = as<float_object>(aObject)->value;
                     if (std::isnan(v))
-                        return (error("ValueError", "cannot convert float NaN to integer"), 0);
+                        return error("ValueError", "cannot convert float NaN to integer");
                     if (std::isinf(v))
-                        return (error("OverflowError", "cannot convert float infinity to integer"), 0);
+                        return error("OverflowError", "cannot convert float infinity to integer");
                     if (v >= 9223372036854775808.0 || v < -9223372036854775808.0)
-                        return (int_overflow(), 0);
-                    return static_cast<std::int64_t>(v);
+                        return make_int(big_from_double(v));
+                    return make_int(static_cast<long long>(v));
                 }
             case NEOS_PY_STR:
                 {
-                    auto text = as<str_object>(aObject)->value;
+                    // (as CPython: surrounding whitespace, a sign, a prefix that matches the base (any if it is 0), single
+                    // underscores between digits)
+                    auto const& text = as<str_object>(aObject)->value;
+                    long long const givenBase = aBase == -1 ? 10 : aBase;
+                    auto const invalid = [&]()
+                    {
+                        return error("ValueError", "invalid literal for int() with base " + std::to_string(givenBase) + ": " + str_repr(text));
+                    };
                     auto const begin = text.find_first_not_of(" \t\n\r\f\v");
-                    auto const end = text.find_last_not_of(" \t\n\r\f\v");
+                    if (begin == std::string::npos)
+                        return invalid();
+                    auto const end = text.find_last_not_of(" \t\n\r\f\v") + 1u;
+                    std::string_view body{ text.data() + begin, end - begin };
+                    bool negative = false;
+                    if (!body.empty() && (body[0] == '+' || body[0] == '-'))
+                    {
+                        negative = body[0] == '-';
+                        body.remove_prefix(1u);
+                    }
+                    long long base = givenBase;
+                    bool prefixed = false;
+                    if (body.size() >= 2u && body[0] == '0')
+                    {
+                        auto const p = static_cast<char>(std::tolower(static_cast<unsigned char>(body[1])));
+                        long long const prefixBase = p == 'x' ? 16 : p == 'o' ? 8 : p == 'b' ? 2 : 0;
+                        if (prefixBase != 0 && (base == 0 || base == prefixBase))
+                        {
+                            base = prefixBase;
+                            body.remove_prefix(2u);
+                            prefixed = true;
+                        }
+                    }
+                    if (base == 0)
+                        base = 10;
                     std::string digits;
-                    if (begin != std::string::npos)
-                        for (auto i = begin; i <= end; ++i)
-                            if (text[i] != '_')
-                                digits += text[i];
-                    long long value = 0;
-                    auto const start = digits.data() + (!digits.empty() && digits[0] == '+' ? 1 : 0);
-                    auto const converted = std::from_chars(start, digits.data() + digits.size(), value);
-                    if (digits.empty() || converted.ec != std::errc{} || converted.ptr != digits.data() + digits.size())
-                        return (error("ValueError", "invalid literal for int() with base 10: " + str_repr(text)), 0);
-                    return value;
+                    bool underscore = prefixed; // (an underscore may follow a prefix)
+                    for (auto c : body)
+                    {
+                        if (c == '_')
+                        {
+                            if (underscore || (digits.empty() && !prefixed))
+                                return invalid();
+                            underscore = true;
+                            continue;
+                        }
+                        int const d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c >= 'A' && c <= 'Z' ? c - 'A' + 10 : 99;
+                        if (d >= base)
+                            return invalid();
+                        digits += c;
+                        underscore = false;
+                    }
+                    if (digits.empty() || underscore)
+                        return invalid();
+                    // (base 0: a decimal number other than zero cannot have leading zeros)
+                    if (aBase == 0 && !prefixed && digits.size() > 1u && digits[0] == '0' && digits.find_first_not_of('0') != std::string::npos)
+                        return invalid();
+                    if ((base & (base - 1)) != 0 && sIntMaxStrDigits > 0 && digits.size() > static_cast<std::size_t>(sIntMaxStrDigits))
+                        return int_max_str_digits_error(digits.size(), true);
+                    unsigned long long value = 0u;
+                    auto const converted = std::from_chars(digits.data(), digits.data() + digits.size(), value, static_cast<int>(base));
+                    if (converted.ec == std::errc{} && converted.ptr == digits.data() + digits.size() && value <= 9223372036854775807ull)
+                        return make_int(negative ? -static_cast<long long>(value) : static_cast<long long>(value));
+                    auto big = big_integer::from_string(digits, static_cast<std::uint32_t>(base));
+                    return make_int(negative ? -big : big);
                 }
             case NEOS_PY_BOOL:
+                return make_int(int_value(aObject));
             case NEOS_PY_INT:
-                return int_value(aObject);
+                retain(aObject);
+                return aObject;
             case NEOS_PY_OTHER:
                 if (auto const type = python_type(aObject); type != nullptr && (type->to_int != nullptr || type->index != nullptr))
                 {
                     long long value = 0;
-                    return (type->to_int != nullptr ? type->to_int(context(), aObject, &value) : type->index(context(), aObject, &value)) == 0 ? value : 0;
+                    if ((type->to_int != nullptr ? type->to_int(context(), aObject, &value) : type->index(context(), aObject, &value)) != 0)
+                        return nullptr;
+                    return make_int(value);
                 }
                 [[fallthrough]];
             default:
-                error("TypeError", std::string{ "int() argument must be a string, a bytes-like object or a real number, not '" } + type_name(aObject) + "'");
-                return 0;
+                return error("TypeError", std::string{ "int() argument must be a string, a bytes-like object or a real number, not '" } + type_name(aObject) + "'");
             }
         }
+
+        std::int64_t fn_to_int(object* aObject)
+        {
+            // int(x) (a native int: OverflowError beyond 64 bits)
+            ref const value{ int_from(aObject, -1) };
+            if (!value)
+                return 0;
+            return int_value(value.get());
+        }
+
         double fn_to_float(object* aObject)
         {
             if (kind_of(aObject) == NEOS_PY_STR)
@@ -3441,6 +3981,8 @@ namespace neos::python_runtime
             }
             return value;
         }
+        // (an int literal beyond 64 bits)
+        object* fn_int_from_string(char const* aText) { return make_int(big_integer::from_string(std::string{ aText })); }
         object* fn_binary(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(binary(aOperation, aLhs, aRhs, false)); }
         object* fn_inplace(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(binary(aOperation, aLhs, aRhs, true)); }
         object* fn_unary(std::int32_t aOperation, object* aObject) { return checked(unary(aOperation, aObject)); }
@@ -4119,14 +4661,21 @@ namespace neos::python_runtime
         std::int64_t fn_to_int(object* aObject);
         double fn_to_float(object* aObject);
 
+        object* int_from(object* aObject, long long aBase);
+
         object* b_int(std::vector<object*> const& aArgs, object* aKwargs)
         {
-            if (!no_keywords(aKwargs, "int") || !arity(aArgs, 0u, 1u, "int"))
+            object* base = nullptr;
+            if (!keywords(aKwargs, { { "base", &base } }, "int") || !arity(aArgs, 0u, 2u, "int"))
                 return nullptr;
+            if (aArgs.size() == 2u)
+                base = aArgs[1];
             if (aArgs.empty())
-                return make_int(0);
-            auto const value = fn_to_int(aArgs[0]);
-            return failed() ? nullptr : make_int(value);
+                return base != nullptr ? error("TypeError", "int() missing string argument") : make_int(0);
+            long long b = -1;
+            if (base != nullptr && !to_index(base, b))
+                return nullptr;
+            return int_from(aArgs[0], b);
         }
 
         object* b_float(std::vector<object*> const& aArgs, object* aKwargs)
@@ -4169,7 +4718,12 @@ namespace neos::python_runtime
                 return nullptr;
             if (aArgs.size() > 1u && !parts(aArgs[1], re2, im2))
                 return nullptr;
-            return make_complex(re - im2, im + re2);
+            // (as CPython: only complex parts are added (so that the signs of zeros are kept))
+            if (aArgs.size() > 1u && kind_of(aArgs[1]) == NEOS_PY_COMPLEX)
+                re -= im2;
+            if (aArgs.size() > 1u && kind_of(aArgs[0]) == NEOS_PY_COMPLEX)
+                re2 += im;
+            return make_complex(re, aArgs.size() > 1u ? re2 : im);
         }
 
         object* b_abs(std::vector<object*> const& aArgs, object* aKwargs)
@@ -4472,17 +5026,28 @@ namespace neos::python_runtime
                 std::size_t i = 0u;
                 // integers first (exactly), then floats (Neumaier)
                 long long integer = 0;
+                std::optional<big_integer> big; // (the integers' sum beyond 64 bits)
                 bool isFloat = kind_of(total.get()) == NEOS_PY_FLOAT;
                 if (!isFloat)
                 {
-                    integer = int_value(total.get());
+                    if (is_big(total.get()))
+                        big = big_of(total.get());
+                    else
+                        integer = int_value(total.get());
                     for (; i < items.size() && kind_of(items[i].get()) != NEOS_PY_FLOAT; ++i)
-                        if (add_overflow(integer, int_value(items[i].get()), &integer))
-                            return int_overflow();
+                    {
+                        auto const item = items[i].get();
+                        if (!big && (is_big(item) || add_overflow(integer, int_value(item), &integer)))
+                            big = big_integer{ integer } + big_value(item);
+                        else if (big)
+                            *big = *big + big_value(item);
+                    }
                     if (i == items.size())
-                        return make_int(integer);
+                        return big ? make_int(*big) : make_int(integer);
                 }
                 double sum = isFloat ? as<float_object>(total.get())->value : static_cast<double>(integer);
+                if (big && !big_to_double(*big, sum))
+                    return error("OverflowError", "int too large to convert to float");
                 double c = 0.0;
                 for (; i < items.size(); ++i)
                 {
@@ -5605,20 +6170,20 @@ namespace neos::python_runtime
             auto const k = kind_of(aArgs[0]);
             if (k == NEOS_PY_INT || k == NEOS_PY_BOOL)
             {
-                auto const value = int_value(aArgs[0]);
                 if (none || n >= 0)
-                    return make_int(value);
-                if (n < -18)
+                    return k == NEOS_PY_INT ? (retain(aArgs[0]), aArgs[0]) : make_int(int_value(aArgs[0]));
+                // (round half to even to a multiple of 10^-n)
+                auto const value = big_value(aArgs[0]);
+                if (-n > 2 * static_cast<long long>(big_bit_length(value)) + 2)
                     return make_int(0);
-                long long p = 1;
+                big_integer p{ 1 };
                 for (long long i = 0; i < -n; ++i)
-                    p *= 10;
-                // (round half to even)
-                auto q = value / p;
-                auto r = value % p;
-                if (r < 0) { r += p; --q; }
-                if (2 * r > p || (2 * r == p && (q % 2) != 0))
-                    ++q;
+                    p = p * big_integer{ 10 };
+                big_integer q, r;
+                big_divmod(value, p, q, r);
+                auto const twice = r + r;
+                if (p < twice || (twice == p && big_bit(big_abs(q), 0u)))
+                    q = q + big_integer{ 1 };
                 return make_int(q * p);
             }
             if (k == NEOS_PY_FLOAT)
@@ -5630,7 +6195,7 @@ namespace neos::python_runtime
                         return error(std::isnan(x) ? "ValueError" : "OverflowError", std::isnan(x) ? "cannot convert float NaN to integer" : "cannot convert float infinity to integer");
                     auto const r = std::nearbyint(x); // (round half to even)
                     if (r >= 9223372036854775808.0 || r < -9223372036854775808.0)
-                        return int_overflow();
+                        return make_int(big_from_double(r));
                     return make_int(static_cast<long long>(r));
                 }
                 if (!std::isfinite(x) || x == 0.0)
@@ -5695,11 +6260,51 @@ namespace neos::python_runtime
             long long b = 0, e = 0, m = 0;
             if (!is_int_like(aArgs[0]) || !is_int_like(aArgs[1]) || !is_int_like(aArgs[2]))
                 return error("TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
+            if (is_big(aArgs[0]) || is_big(aArgs[1]) || is_big(aArgs[2]) || int_value(aArgs[1]) < 0)
+            {
+                // (beyond 64 bits, or a negative exponent (the inverse of the base): with big integers)
+                auto const floor_mod = [](big_integer const& a, big_integer const& n) { big_integer q, r; big_divmod(a, n, q, r); return r; };
+                auto B = big_value(aArgs[0]);
+                auto E = big_value(aArgs[1]);
+                auto M = big_value(aArgs[2]);
+                if (big_zero(M))
+                    return error("ValueError", "pow() 3rd argument cannot be 0");
+                bool const negativeModulus = big_negative(M);
+                M = big_abs(M);
+                if (big_negative(E))
+                {
+                    // (extended Euclid: the inverse of B modulo M)
+                    big_integer r0 = floor_mod(B, M), r1 = M, s0{ 1 }, s1{ 0 };
+                    while (!big_zero(r1))
+                    {
+                        big_integer q, r;
+                        big_divmod(r0, r1, q, r);
+                        r0 = r1; r1 = r;
+                        auto const s2 = s0 - q * s1;
+                        s0 = s1; s1 = s2;
+                    }
+                    if (r0 != big_integer{ 1 } && !(M == big_integer{ 1 }))
+                        return error("ValueError", "base is not invertible for the given modulus");
+                    B = s0;
+                    E = -E;
+                }
+                big_integer result = floor_mod(big_integer{ 1 }, M);
+                big_integer base = floor_mod(B, M);
+                auto const bits = big_bit_length(E);
+                for (std::uint64_t i = 0u; i < bits; ++i)
+                {
+                    if (big_bit(E, i))
+                        result = floor_mod(result * base, M);
+                    if (i + 1u < bits)
+                        base = floor_mod(base * base, M);
+                }
+                if (negativeModulus && !big_zero(result))
+                    result = result - M;
+                return make_int(std::move(result));
+            }
             b = int_value(aArgs[0]); e = int_value(aArgs[1]); m = int_value(aArgs[2]);
             if (m == 0)
                 return error("ValueError", "pow() 3rd argument cannot be 0");
-            if (e < 0)
-                return error("ValueError", "base is not invertible for the given modulus");
             auto const modulus = static_cast<unsigned long long>(m < 0 ? -m : m);
             // (a * b % modulus without overflow)
             auto const multiply_mod = [modulus](unsigned long long a, unsigned long long b)
@@ -5772,6 +6377,8 @@ namespace neos::python_runtime
             if (!no_keywords(aKwargs, aName) || !arity(aArgs, 1u, 1u, aName))
                 return nullptr;
             long long v = 0;
+            if (is_big(aArgs[0]))
+                return make_str(std::string{ big_negative(big_of(aArgs[0])) ? "-" : "" } + aPrefix + big_digits(big_of(aArgs[0]), aBase));
             if (!to_index(aArgs[0], v))
                 return nullptr;
             unsigned long long u = v < 0 ? 0ull - static_cast<unsigned long long>(v) : static_cast<unsigned long long>(v);
@@ -6391,7 +6998,7 @@ namespace neos::python_runtime
                 if (std::isinf(x))
                     return error("OverflowError", "cannot convert float infinity to integer");
                 if (x >= 9223372036854775808.0 || x < -9223372036854775808.0)
-                    return int_overflow();
+                    return make_int(big_from_double(x));
                 return make_int(static_cast<long long>(x));
             }
 
@@ -6400,6 +7007,8 @@ namespace neos::python_runtime
                 if (!arity(aArgs, 1u, 1u, aName))
                     return nullptr;
                 auto const x = aArgs[0];
+                if (is_big(x))
+                    return (retain(x), x);
                 if (is_int_like(x))
                     return make_int(int_value(x));
                 if (kind_of(x) != NEOS_PY_FLOAT)
@@ -6540,12 +7149,21 @@ namespace neos::python_runtime
             // (log of an int or a float: a domain error if it is not positive)
             bool loghelper(object* aArg, double (*aFunction)(double), double& aResult)
             {
-                if (is_int_like(aArg) && int_value(aArg) <= 0)
+                if (is_int_like(aArg) && (is_big(aArg) ? big_negative(big_of(aArg)) : int_value(aArg) <= 0))
                 {
                     error("ValueError", "math domain error");
                     return false;
                 }
                 double x = 0.0;
+                if (is_big(aArg) && !big_to_double(big_of(aArg), x))
+                {
+                    // (as CPython: too large for a double: x = m * 2^e (0.5 <= m < 1), log(x) = log(m) + log(2) * e)
+                    auto const e = static_cast<std::int64_t>(big_bit_length(big_of(aArg)));
+                    double m = 0.0;
+                    big_to_double(big_abs(big_of(aArg)), -e, false, false, m);
+                    aResult = aFunction(m) + aFunction(2.0) * static_cast<double>(e);
+                    return true;
+                }
                 if (!to_double(aArg, x))
                     return false;
                 auto const r = aFunction(x);
@@ -6603,7 +7221,7 @@ namespace neos::python_runtime
                     return nullptr;
                 if (!is_int_like(aArgs[1]))
                     return error("TypeError", "Expected an int as second argument to ldexp.");
-                auto const e = int_value(aArgs[1]);
+                auto const e = is_big(aArgs[1]) ? (big_negative(big_of(aArgs[1])) ? std::numeric_limits<long long>::min() : std::numeric_limits<long long>::max()) : int_value(aArgs[1]);
                 double r;
                 if (x == 0.0 || !std::isfinite(x))
                     r = x;
@@ -6794,7 +7412,7 @@ namespace neos::python_runtime
                     object* const qi = finished ? nullptr : q[i].get();
                     if (intEnabled)
                     {
-                        if (!finished && kind_of(pi) == NEOS_PY_INT && kind_of(qi) == NEOS_PY_INT)
+                        if (!finished && kind_of(pi) == NEOS_PY_INT && kind_of(qi) == NEOS_PY_INT && !is_big(pi) && !is_big(qi))
                         {
                             long long product = 0, sum = 0;
                             if (!multiply_overflow(int_value(pi), int_value(qi), &product) && !add_overflow(intTotal, product, &sum))
@@ -6821,7 +7439,7 @@ namespace neos::python_runtime
                             bool const pf = kind_of(pi) == NEOS_PY_FLOAT, qf = kind_of(qi) == NEOS_PY_FLOAT;
                             bool const pInt = kind_of(pi) == NEOS_PY_INT || kind_of(pi) == NEOS_PY_BOOL;
                             bool const qInt = kind_of(qi) == NEOS_PY_INT || kind_of(qi) == NEOS_PY_BOOL;
-                            if ((pf && qf) || (pf && qInt) || (qf && pInt))
+                            if (((pf && qf) || (pf && qInt) || (qf && pInt)) && !is_big(pi) && !is_big(qi))
                             {
                                 double fp = 0.0, fq = 0.0;
                                 to_double(pi, fp);
@@ -6891,20 +7509,44 @@ namespace neos::python_runtime
             object* m_isinf(std::vector<object*> const& a, object*) { return predicate(a, "isinf", [](double x) { return std::isinf(x); }); }
             object* m_isfinite(std::vector<object*> const& a, object*) { return predicate(a, "isfinite", [](double x) { return std::isfinite(x); }); }
 
+            // the product of the integers from aFirst to aLast (binary splitting: the factors' sizes balanced)
+            big_integer range_product(long long aFirst, long long aLast)
+            {
+                if (aLast - aFirst < 16)
+                {
+                    big_integer result{ 1 };
+                    long long chunk = 1;
+                    for (long long i = aFirst; i <= aLast; ++i)
+                    {
+                        long long product = 0;
+                        if (multiply_overflow(chunk, i, &product))
+                        {
+                            result = result * big_integer{ chunk };
+                            chunk = i;
+                        }
+                        else
+                            chunk = product;
+                    }
+                    return result * big_integer{ chunk };
+                }
+                auto const middle = aFirst + (aLast - aFirst) / 2;
+                return range_product(aFirst, middle) * range_product(middle + 1, aLast);
+            }
+
             object* m_factorial(std::vector<object*> const& aArgs, object*)
             {
                 if (!arity(aArgs, 1u, 1u, "factorial"))
                     return nullptr;
+                if (is_big(aArgs[0]) && !big_negative(big_of(aArgs[0])))
+                    return error("OverflowError", "factorial() argument should not exceed 9223372036854775807");
                 long long n = 0;
-                if (!arg_index(aArgs, 0, n))
+                if (!is_big(aArgs[0]) && !arg_index(aArgs, 0, n))
                     return nullptr;
-                if (n < 0)
+                if (n < 0 || is_big(aArgs[0]))
                     return error("ValueError", "factorial() not defined for negative values");
-                long long r = 1;
-                for (long long i = 2; i <= n; ++i)
-                    if (multiply_overflow(r, i, &r))
-                        return int_overflow();
-                return make_int(r);
+                if (n < 2)
+                    return make_int(1);
+                return make_int(range_product(2, n));
             }
 
             object* m_isqrt(std::vector<object*> const& aArgs, object*)
@@ -6912,6 +7554,23 @@ namespace neos::python_runtime
                 if (!arity(aArgs, 1u, 1u, "isqrt"))
                     return nullptr;
                 long long n = 0;
+                if (is_big(aArgs[0]))
+                {
+                    auto const& v = big_of(aArgs[0]);
+                    if (big_negative(v))
+                        return error("ValueError", "isqrt() argument must be nonnegative");
+                    // (Newton's method from above)
+                    auto const bits = big_bit_length(v);
+                    big_integer x = big_integer{ 1 } << static_cast<std::int64_t>((bits + 1u) / 2u);
+                    for (;;)
+                    {
+                        auto const y = (x + v / x) >> std::int64_t{ 1 };
+                        if (!(y < x))
+                            break;
+                        x = y;
+                    }
+                    return make_int(std::move(x));
+                }
                 if (!arg_index(aArgs, 0, n))
                     return nullptr;
                 if (n < 0)
@@ -6922,6 +7581,19 @@ namespace neos::python_runtime
                 while ((r + 1u) * (r + 1u) <= static_cast<unsigned long long>(n))
                     ++r;
                 return make_int(static_cast<long long>(r));
+            }
+
+            big_integer big_gcd(big_integer a, big_integer b)
+            {
+                a = big_abs(a);
+                b = big_abs(b);
+                while (!big_zero(b))
+                {
+                    auto const t = a % b;
+                    a = b;
+                    b = t;
+                }
+                return a;
             }
 
             long long gcd_of(long long a, long long b)
@@ -6937,80 +7609,86 @@ namespace neos::python_runtime
                 return a;
             }
 
+            // (an int, or an object with __index__)
+            big_integer index_value(object* aObject)
+            {
+                if (is_int_like(aObject))
+                    return big_value(aObject);
+                long long v = 0;
+                to_index(aObject, v);
+                return big_integer{ v };
+            }
+
+            // (the arguments must be ints)
+            bool int_arguments(std::vector<object*> const& aArgs)
+            {
+                for (auto arg : aArgs)
+                    if (!is_int_like(arg))
+                    {
+                        long long ignored = 0;
+                        if (!to_index(arg, ignored))
+                            return false;
+                    }
+                return true;
+            }
+
             object* m_gcd(std::vector<object*> const& aArgs, object*)
             {
-                long long r = 0;
-                for (std::size_t i = 0u; i < aArgs.size(); ++i)
-                {
-                    long long v = 0;
-                    if (!arg_index(aArgs, i, v))
-                        return nullptr;
-                    r = gcd_of(r, v);
-                }
-                return make_int(r);
+                if (!int_arguments(aArgs))
+                    return nullptr;
+                big_integer r{ 0 };
+                for (auto arg : aArgs)
+                    r = big_gcd(r, index_value(arg));
+                return make_int(std::move(r));
             }
 
             object* m_lcm(std::vector<object*> const& aArgs, object*)
             {
-                long long r = 1;
-                for (std::size_t i = 0u; i < aArgs.size(); ++i)
+                if (!int_arguments(aArgs))
+                    return nullptr;
+                big_integer r{ 1 };
+                for (auto arg : aArgs)
                 {
-                    long long v = 0;
-                    if (!arg_index(aArgs, i, v))
-                        return nullptr;
-                    if (r == 0 || v == 0)
+                    auto const v = index_value(arg);
+                    if (big_zero(r) || big_zero(v))
                     {
-                        r = 0;
+                        r = big_integer{ 0 };
                         continue;
                     }
-                    auto const g = gcd_of(r, v);
-                    long long m = 0;
-                    if (multiply_overflow(r / g, v, &m))
-                        return int_overflow();
-                    r = m < 0 ? -m : m;
+                    r = big_abs(r / big_gcd(r, v) * v);
                 }
-                return make_int(r);
+                return make_int(std::move(r));
             }
 
             object* combinatorial(std::vector<object*> const& aArgs, char const* aName, bool aComb)
             {
                 if (!arity(aArgs, aComb ? 2u : 1u, 2u, aName))
                     return nullptr;
-                long long n = 0, k = 0;
-                if (!arg_index(aArgs, 0, n))
-                    return nullptr;
                 bool const all = aArgs.size() == 1u || kind_of(aArgs[1]) == NEOS_PY_NONE;
-                if (!all && !arg_index(aArgs, 1, k))
+                if (!int_arguments(all ? std::vector<object*>{ aArgs[0] } : std::vector<object*>{ aArgs[0], aArgs[1] }))
                     return nullptr;
-                if (n < 0)
+                auto const n = index_value(aArgs[0]);
+                auto k = all ? n : index_value(aArgs[1]);
+                if (big_negative(n))
                     return error("ValueError", "n must be a non-negative integer");
-                if (all)
-                    k = n;
-                if (k < 0)
+                if (big_negative(k))
                     return error("ValueError", "k must be a non-negative integer");
-                if (k > n)
+                if (n < k)
                     return make_int(0);
-                if (aComb)
+                if (aComb && n - k < k)
+                    k = n - k;
+                if (big_detail::magnitude(k) > 1u)
+                    return error("OverflowError", std::string{ aComb ? "min(n - k, k)" : "k" } + " must not exceed 9223372036854775807");
+                auto const count = static_cast<long long>(big_detail::cword(k, 0u));
+                // (perm: n (n - 1) ... (n - k + 1); comb: each partial product of i factors is divisible by i!)
+                big_integer r{ 1 };
+                for (long long i = 0; i < count; ++i)
                 {
-                    k = std::min(k, n - k);
-                    // (r * (n - k + i) is divisible by i: divided by their common factors first)
-                    long long r = 1;
-                    for (long long i = 1; i <= k; ++i)
-                    {
-                        auto const g = gcd_of(r, i);
-                        auto const divisor = i / g;
-                        long long product = 0;
-                        if (multiply_overflow(r / g, (n - k + i) / divisor, &product))
-                            return int_overflow();
-                        r = product;
-                    }
-                    return make_int(r);
+                    r = r * (n - big_integer{ i });
+                    if (aComb)
+                        r = r / big_integer{ i + 1 };
                 }
-                long long r = 1;
-                for (long long i = 0; i < k; ++i)
-                    if (multiply_overflow(r, n - i, &r))
-                        return int_overflow();
-                return make_int(r);
+                return make_int(std::move(r));
             }
 
             object* m_comb(std::vector<object*> const& a, object*) { return combinatorial(a, "comb", true); }
@@ -7071,6 +7749,750 @@ namespace neos::python_runtime
             };
         }
 
+        // (cmath: the algorithms of CPython's Modules/cmathmodule.c (Python Software Foundation License))
+        namespace cmath_module
+        {
+            struct pc { double real; double imag; };
+            enum { ok = 0, edom = 1, erange = 2 };
+            thread_local int sErrno = ok;
+
+            double constexpr PI = 3.141592653589793238462643383279502884197;
+            double constexpr E = 2.718281828459045235360287471352662497757;
+            double constexpr LN2 = 0.6931471805599453094;
+            double constexpr LN10 = 2.302585092994045684;
+            double const LARGE_DOUBLE = std::numeric_limits<double>::max() / 4.0;
+            double const SQRT_LARGE_DOUBLE = std::sqrt(LARGE_DOUBLE);
+            double const LOG_LARGE_DOUBLE = std::log(LARGE_DOUBLE);
+            double const SQRT_DBL_MIN = std::sqrt(std::numeric_limits<double>::min());
+            int constexpr SCALE_UP = 2 * (std::numeric_limits<double>::digits / 2) + 1;
+            int constexpr SCALE_DOWN = -(SCALE_UP + 1) / 2;
+            double constexpr INF = std::numeric_limits<double>::infinity();
+            double constexpr N = std::numeric_limits<double>::quiet_NaN();
+            double constexpr U = -9.5426319407711027e33; // (unlikely value, used as placeholder)
+            double constexpr P = PI, P14 = 0.25 * PI, P12 = 0.5 * PI, P34 = 0.75 * PI;
+
+            enum special_types { ST_NINF, ST_NEG, ST_NZERO, ST_PZERO, ST_POS, ST_PINF, ST_NAN };
+
+            special_types special_type(double d)
+            {
+                if (std::isfinite(d))
+                {
+                    if (d != 0)
+                        return std::copysign(1., d) == 1. ? ST_POS : ST_NEG;
+                    return std::copysign(1., d) == 1. ? ST_PZERO : ST_NZERO;
+                }
+                if (std::isnan(d))
+                    return ST_NAN;
+                return std::copysign(1., d) == 1. ? ST_PINF : ST_NINF;
+            }
+
+            using table = pc[7][7];
+
+            table const acos_special_values = {
+              { {P34,INF}, {P,INF},  {P,INF},  {P,-INF},  {P,-INF},  {P34,-INF}, {N,INF} },
+              { {P12,INF}, {U,U},    {U,U},    {U,U},     {U,U},     {P12,-INF}, {N,N} },
+              { {P12,INF}, {U,U},    {P12,0.}, {P12,-0.}, {U,U},     {P12,-INF}, {P12,N} },
+              { {P12,INF}, {U,U},    {P12,0.}, {P12,-0.}, {U,U},     {P12,-INF}, {P12,N} },
+              { {P12,INF}, {U,U},    {U,U},    {U,U},     {U,U},     {P12,-INF}, {N,N} },
+              { {P14,INF}, {0.,INF}, {0.,INF}, {0.,-INF}, {0.,-INF}, {P14,-INF}, {N,INF} },
+              { {N,INF},   {N,N},    {N,N},    {N,N},     {N,N},     {N,-INF},   {N,N} } };
+            table const acosh_special_values = {
+              { {INF,-P34}, {INF,-P},  {INF,-P},  {INF,P},  {INF,P},  {INF,P34}, {INF,N} },
+              { {INF,-P12}, {U,U},     {U,U},     {U,U},    {U,U},    {INF,P12}, {N,N} },
+              { {INF,-P12}, {U,U},     {0.,-P12}, {0.,P12}, {U,U},    {INF,P12}, {N,N} },
+              { {INF,-P12}, {U,U},     {0.,-P12}, {0.,P12}, {U,U},    {INF,P12}, {N,N} },
+              { {INF,-P12}, {U,U},     {U,U},     {U,U},    {U,U},    {INF,P12}, {N,N} },
+              { {INF,-P14}, {INF,-0.}, {INF,-0.}, {INF,0.}, {INF,0.}, {INF,P14}, {INF,N} },
+              { {INF,N},    {N,N},     {N,N},     {N,N},    {N,N},    {INF,N},   {N,N} } };
+            table const asinh_special_values = {
+              { {-INF,-P14}, {-INF,-0.}, {-INF,-0.}, {-INF,0.}, {-INF,0.}, {-INF,P14}, {-INF,N} },
+              { {-INF,-P12}, {U,U},      {U,U},      {U,U},     {U,U},     {-INF,P12}, {N,N} },
+              { {-INF,-P12}, {U,U},      {-0.,-0.},  {-0.,0.},  {U,U},     {-INF,P12}, {N,N} },
+              { {INF,-P12},  {U,U},      {0.,-0.},   {0.,0.},   {U,U},     {INF,P12},  {N,N} },
+              { {INF,-P12},  {U,U},      {U,U},      {U,U},     {U,U},     {INF,P12},  {N,N} },
+              { {INF,-P14},  {INF,-0.},  {INF,-0.},  {INF,0.},  {INF,0.},  {INF,P14},  {INF,N} },
+              { {INF,N},     {N,N},      {N,-0.},    {N,0.},    {N,N},     {INF,N},    {N,N} } };
+            table const atanh_special_values = {
+              { {-0.,-P12}, {-0.,-P12}, {-0.,-P12}, {-0.,P12}, {-0.,P12}, {-0.,P12}, {-0.,N} },
+              { {-0.,-P12}, {U,U},      {U,U},      {U,U},     {U,U},     {-0.,P12}, {N,N} },
+              { {-0.,-P12}, {U,U},      {-0.,-0.},  {-0.,0.},  {U,U},     {-0.,P12}, {-0.,N} },
+              { {0.,-P12},  {U,U},      {0.,-0.},   {0.,0.},   {U,U},     {0.,P12},  {0.,N} },
+              { {0.,-P12},  {U,U},      {U,U},      {U,U},     {U,U},     {0.,P12},  {N,N} },
+              { {0.,-P12},  {0.,-P12},  {0.,-P12},  {0.,P12},  {0.,P12},  {0.,P12},  {0.,N} },
+              { {0.,-P12},  {N,N},      {N,N},      {N,N},     {N,N},     {0.,P12},  {N,N} } };
+            table const cosh_special_values = {
+              { {INF,N}, {U,U}, {INF,0.},  {INF,-0.}, {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {U,U}, {U,U},     {U,U},     {U,U}, {N,N},   {N,N} },
+              { {N,0.},  {U,U}, {1.,0.},   {1.,-0.},  {U,U}, {N,0.},  {N,0.} },
+              { {N,0.},  {U,U}, {1.,-0.},  {1.,0.},   {U,U}, {N,0.},  {N,0.} },
+              { {N,N},   {U,U}, {U,U},     {U,U},     {U,U}, {N,N},   {N,N} },
+              { {INF,N}, {U,U}, {INF,-0.}, {INF,0.},  {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {N,N}, {N,0.},    {N,0.},    {N,N}, {N,N},   {N,N} } };
+            table const exp_special_values = {
+              { {0.,0.}, {U,U}, {0.,-0.},  {0.,0.},  {U,U}, {0.,0.}, {0.,0.} },
+              { {N,N},   {U,U}, {U,U},     {U,U},    {U,U}, {N,N},   {N,N} },
+              { {N,N},   {U,U}, {1.,-0.},  {1.,0.},  {U,U}, {N,N},   {N,N} },
+              { {N,N},   {U,U}, {1.,-0.},  {1.,0.},  {U,U}, {N,N},   {N,N} },
+              { {N,N},   {U,U}, {U,U},     {U,U},    {U,U}, {N,N},   {N,N} },
+              { {INF,N}, {U,U}, {INF,-0.}, {INF,0.}, {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {N,N}, {N,-0.},   {N,0.},   {N,N}, {N,N},   {N,N} } };
+            table const log_special_values = {
+              { {INF,-P34}, {INF,-P},  {INF,-P},   {INF,P},   {INF,P},  {INF,P34},  {INF,N} },
+              { {INF,-P12}, {U,U},     {U,U},      {U,U},     {U,U},    {INF,P12},  {N,N} },
+              { {INF,-P12}, {U,U},     {-INF,-P},  {-INF,P},  {U,U},    {INF,P12},  {N,N} },
+              { {INF,-P12}, {U,U},     {-INF,-0.}, {-INF,0.}, {U,U},    {INF,P12},  {N,N} },
+              { {INF,-P12}, {U,U},     {U,U},      {U,U},     {U,U},    {INF,P12},  {N,N} },
+              { {INF,-P14}, {INF,-0.}, {INF,-0.},  {INF,0.},  {INF,0.}, {INF,P14},  {INF,N} },
+              { {INF,N},    {N,N},     {N,N},      {N,N},     {N,N},    {INF,N},    {N,N} } };
+            table const sinh_special_values = {
+              { {INF,N}, {U,U}, {-INF,-0.}, {-INF,0.}, {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {U,U}, {U,U},      {U,U},     {U,U}, {N,N},   {N,N} },
+              { {0.,N},  {U,U}, {-0.,-0.},  {-0.,0.},  {U,U}, {0.,N},  {0.,N} },
+              { {0.,N},  {U,U}, {0.,-0.},   {0.,0.},   {U,U}, {0.,N},  {0.,N} },
+              { {N,N},   {U,U}, {U,U},      {U,U},     {U,U}, {N,N},   {N,N} },
+              { {INF,N}, {U,U}, {INF,-0.},  {INF,0.},  {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {N,N}, {N,-0.},    {N,0.},    {N,N}, {N,N},   {N,N} } };
+            table const sqrt_special_values = {
+              { {INF,-INF}, {0.,-INF}, {0.,-INF}, {0.,INF}, {0.,INF}, {INF,INF}, {N,INF} },
+              { {INF,-INF}, {U,U},     {U,U},     {U,U},    {U,U},    {INF,INF}, {N,N} },
+              { {INF,-INF}, {U,U},     {0.,-0.},  {0.,0.},  {U,U},    {INF,INF}, {N,N} },
+              { {INF,-INF}, {U,U},     {0.,-0.},  {0.,0.},  {U,U},    {INF,INF}, {N,N} },
+              { {INF,-INF}, {U,U},     {U,U},     {U,U},    {U,U},    {INF,INF}, {N,N} },
+              { {INF,-INF}, {INF,-0.}, {INF,-0.}, {INF,0.}, {INF,0.}, {INF,INF}, {INF,N} },
+              { {INF,-INF}, {N,N},     {N,N},     {N,N},    {N,N},    {INF,INF}, {N,N} } };
+            table const tanh_special_values = {
+              { {-1.,0.}, {U,U}, {-1.,-0.}, {-1.,0.}, {U,U}, {-1.,0.}, {-1.,0.} },
+              { {N,N},    {U,U}, {U,U},     {U,U},    {U,U}, {N,N},    {N,N} },
+              { {N,N},    {U,U}, {-0.,-0.}, {-0.,0.}, {U,U}, {N,N},    {N,N} },
+              { {N,N},    {U,U}, {0.,-0.},  {0.,0.},  {U,U}, {N,N},    {N,N} },
+              { {N,N},    {U,U}, {U,U},     {U,U},    {U,U}, {N,N},    {N,N} },
+              { {1.,0.},  {U,U}, {1.,-0.},  {1.,0.},  {U,U}, {1.,0.},  {1.,0.} },
+              { {N,N},    {N,N}, {N,-0.},   {N,0.},   {N,N}, {N,N},    {N,N} } };
+            table const rect_special_values = {
+              { {INF,N}, {U,U}, {-INF,0.}, {-INF,-0.}, {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {U,U}, {U,U},     {U,U},      {U,U}, {N,N},   {N,N} },
+              { {0.,0.}, {U,U}, {-0.,0.},  {-0.,-0.},  {U,U}, {0.,0.}, {0.,0.} },
+              { {0.,0.}, {U,U}, {0.,-0.},  {0.,0.},    {U,U}, {0.,0.}, {0.,0.} },
+              { {N,N},   {U,U}, {U,U},     {U,U},      {U,U}, {N,N},   {N,N} },
+              { {INF,N}, {U,U}, {INF,-0.}, {INF,0.},   {U,U}, {INF,N}, {INF,N} },
+              { {N,N},   {N,N}, {N,0.},    {N,0.},     {N,N}, {N,N},   {N,N} } };
+
+            bool special(pc z, table const& aTable, pc& aResult)
+            {
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    sErrno = ok;
+                    aResult = aTable[special_type(z.real)][special_type(z.imag)];
+                    return true;
+                }
+                return false;
+            }
+
+            pc neg(pc z) { return { -z.real, -z.imag }; }
+
+            pc c_sqrt(pc z)
+            {
+                pc r;
+                if (special(z, sqrt_special_values, r))
+                    return r;
+                if (z.real == 0. && z.imag == 0.)
+                {
+                    sErrno = ok;
+                    return { 0., z.imag };
+                }
+                double ax = std::fabs(z.real), ay = std::fabs(z.imag), s = 0.0;
+                if (ax < std::numeric_limits<double>::min() && ay < std::numeric_limits<double>::min())
+                {
+                    ax = std::ldexp(ax, SCALE_UP);
+                    s = std::ldexp(std::sqrt(ax + std::hypot(ax, std::ldexp(ay, SCALE_UP))), SCALE_DOWN);
+                }
+                else
+                {
+                    ax /= 8.;
+                    s = 2. * std::sqrt(ax + std::hypot(ax, ay / 8.));
+                }
+                double const d = ay / (2. * s);
+                if (z.real >= 0.)
+                    r = { s, std::copysign(d, z.imag) };
+                else
+                    r = { d, std::copysign(s, z.imag) };
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_acos(pc z)
+            {
+                pc r;
+                if (special(z, acos_special_values, r))
+                    return r;
+                if (std::fabs(z.real) > LARGE_DOUBLE || std::fabs(z.imag) > LARGE_DOUBLE)
+                {
+                    r.real = std::atan2(std::fabs(z.imag), z.real);
+                    if (z.real < 0.)
+                        r.imag = -std::copysign(std::log(std::hypot(z.real / 2., z.imag / 2.)) + LN2 * 2., z.imag);
+                    else
+                        r.imag = std::copysign(std::log(std::hypot(z.real / 2., z.imag / 2.)) + LN2 * 2., -z.imag);
+                }
+                else
+                {
+                    auto const s1 = c_sqrt({ 1. - z.real, -z.imag });
+                    auto const s2 = c_sqrt({ 1. + z.real, z.imag });
+                    r.real = 2. * std::atan2(s1.real, s2.real);
+                    r.imag = std::asinh(s2.real * s1.imag - s2.imag * s1.real);
+                }
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_acosh(pc z)
+            {
+                pc r;
+                if (special(z, acosh_special_values, r))
+                    return r;
+                if (std::fabs(z.real) > LARGE_DOUBLE || std::fabs(z.imag) > LARGE_DOUBLE)
+                {
+                    r.real = std::log(std::hypot(z.real / 2., z.imag / 2.)) + LN2 * 2.;
+                    r.imag = std::atan2(z.imag, z.real);
+                }
+                else
+                {
+                    auto const s1 = c_sqrt({ z.real - 1., z.imag });
+                    auto const s2 = c_sqrt({ z.real + 1., z.imag });
+                    r.real = std::asinh(s1.real * s2.real + s1.imag * s2.imag);
+                    r.imag = 2. * std::atan2(s1.imag, s2.real);
+                }
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_asinh(pc z)
+            {
+                pc r;
+                if (special(z, asinh_special_values, r))
+                    return r;
+                if (std::fabs(z.real) > LARGE_DOUBLE || std::fabs(z.imag) > LARGE_DOUBLE)
+                {
+                    if (z.imag >= 0.)
+                        r.real = std::copysign(std::log(std::hypot(z.real / 2., z.imag / 2.)) + LN2 * 2., z.real);
+                    else
+                        r.real = -std::copysign(std::log(std::hypot(z.real / 2., z.imag / 2.)) + LN2 * 2., -z.real);
+                    r.imag = std::atan2(z.imag, std::fabs(z.real));
+                }
+                else
+                {
+                    auto const s1 = c_sqrt({ 1. + z.imag, -z.real });
+                    auto const s2 = c_sqrt({ 1. - z.imag, z.real });
+                    r.real = std::asinh(s1.real * s2.imag - s2.real * s1.imag);
+                    r.imag = std::atan2(z.imag, s1.real * s2.real - s1.imag * s2.imag);
+                }
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_asin(pc z)
+            {
+                // (asin(z) = -i asinh(iz))
+                auto const s = c_asinh({ -z.imag, z.real });
+                return { s.imag, -s.real };
+            }
+
+            pc c_atanh(pc z)
+            {
+                pc r;
+                if (special(z, atanh_special_values, r))
+                    return r;
+                if (z.real < 0.)
+                    return neg(c_atanh(neg(z)));
+                double const ay = std::fabs(z.imag);
+                if (z.real > SQRT_LARGE_DOUBLE || ay > SQRT_LARGE_DOUBLE)
+                {
+                    double const h = std::hypot(z.real / 2., z.imag / 2.);
+                    r.real = z.real / 4. / h / h;
+                    r.imag = -std::copysign(PI / 2., -z.imag);
+                    sErrno = ok;
+                }
+                else if (z.real == 1. && ay < SQRT_DBL_MIN)
+                {
+                    if (ay == 0.)
+                    {
+                        r.real = INF;
+                        r.imag = z.imag;
+                        sErrno = edom;
+                    }
+                    else
+                    {
+                        r.real = -std::log(std::sqrt(ay) / std::sqrt(std::hypot(ay, 2.)));
+                        r.imag = std::copysign(std::atan2(2., -ay) / 2, z.imag);
+                        sErrno = ok;
+                    }
+                }
+                else
+                {
+                    r.real = std::log1p(4. * z.real / ((1 - z.real) * (1 - z.real) + ay * ay)) / 4.;
+                    r.imag = -std::atan2(-2. * z.imag, (1 - z.real) * (1 + z.real) - ay * ay) / 2.;
+                    sErrno = ok;
+                }
+                return r;
+            }
+
+            pc c_atan(pc z)
+            {
+                // (atan(z) = -i atanh(iz))
+                auto const s = c_atanh({ -z.imag, z.real });
+                return { s.imag, -s.real };
+            }
+
+            double c_atan2(pc z)
+            {
+                if (std::isnan(z.real) || std::isnan(z.imag))
+                    return N;
+                if (std::isinf(z.imag))
+                {
+                    if (std::isinf(z.real))
+                        return std::copysign(std::copysign(1., z.real) == 1. ? 0.25 * PI : 0.75 * PI, z.imag);
+                    return std::copysign(0.5 * PI, z.imag);
+                }
+                if (std::isinf(z.real) || z.imag == 0.)
+                    return std::copysign(std::copysign(1., z.real) == 1. ? 0. : PI, z.imag);
+                return std::atan2(z.imag, z.real);
+            }
+
+            pc c_cosh(pc z)
+            {
+                pc r;
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    if (std::isinf(z.real) && std::isfinite(z.imag) && z.imag != 0.)
+                    {
+                        if (z.real > 0)
+                            r = { std::copysign(INF, std::cos(z.imag)), std::copysign(INF, std::sin(z.imag)) };
+                        else
+                            r = { std::copysign(INF, std::cos(z.imag)), -std::copysign(INF, std::sin(z.imag)) };
+                    }
+                    else
+                        r = cosh_special_values[special_type(z.real)][special_type(z.imag)];
+                    sErrno = std::isinf(z.imag) && !std::isnan(z.real) ? edom : ok;
+                    return r;
+                }
+                if (std::fabs(z.real) > LOG_LARGE_DOUBLE)
+                {
+                    double const x_minus_one = z.real - std::copysign(1., z.real);
+                    r = { std::cos(z.imag) * std::cosh(x_minus_one) * E, std::sin(z.imag) * std::sinh(x_minus_one) * E };
+                }
+                else
+                    r = { std::cos(z.imag) * std::cosh(z.real), std::sin(z.imag) * std::sinh(z.real) };
+                sErrno = std::isinf(r.real) || std::isinf(r.imag) ? erange : ok;
+                return r;
+            }
+
+            pc c_cos(pc z)
+            {
+                // (cos(z) = cosh(iz))
+                return c_cosh({ -z.imag, z.real });
+            }
+
+            pc c_exp(pc z)
+            {
+                pc r;
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    if (std::isinf(z.real) && std::isfinite(z.imag) && z.imag != 0.)
+                    {
+                        if (z.real > 0)
+                            r = { std::copysign(INF, std::cos(z.imag)), std::copysign(INF, std::sin(z.imag)) };
+                        else
+                            r = { std::copysign(0., std::cos(z.imag)), std::copysign(0., std::sin(z.imag)) };
+                    }
+                    else
+                        r = exp_special_values[special_type(z.real)][special_type(z.imag)];
+                    sErrno = std::isinf(z.imag) && (std::isfinite(z.real) || (std::isinf(z.real) && z.real > 0)) ? edom : ok;
+                    return r;
+                }
+                if (z.real > LOG_LARGE_DOUBLE)
+                {
+                    double const l = std::exp(z.real - 1.);
+                    r = { l * std::cos(z.imag) * E, l * std::sin(z.imag) * E };
+                }
+                else
+                {
+                    double const l = std::exp(z.real);
+                    r = { l * std::cos(z.imag), l * std::sin(z.imag) };
+                }
+                sErrno = std::isinf(r.real) || std::isinf(r.imag) ? erange : ok;
+                return r;
+            }
+
+            pc c_log(pc z)
+            {
+                pc r;
+                if (special(z, log_special_values, r))
+                    return r;
+                double const ax = std::fabs(z.real), ay = std::fabs(z.imag);
+                double constexpr dblMin = std::numeric_limits<double>::min();
+                int constexpr mantDig = std::numeric_limits<double>::digits;
+                if (ax > LARGE_DOUBLE || ay > LARGE_DOUBLE)
+                    r.real = std::log(std::hypot(ax / 2., ay / 2.)) + LN2;
+                else if (ax < dblMin && ay < dblMin)
+                {
+                    if (ax > 0. || ay > 0.)
+                        r.real = std::log(std::hypot(std::ldexp(ax, mantDig), std::ldexp(ay, mantDig))) - mantDig * LN2;
+                    else
+                    {
+                        r.real = -INF;
+                        r.imag = std::atan2(z.imag, z.real);
+                        sErrno = edom;
+                        return r;
+                    }
+                }
+                else
+                {
+                    double const h = std::hypot(ax, ay);
+                    if (0.71 <= h && h <= 1.73)
+                    {
+                        double const am = ax > ay ? ax : ay;
+                        double const an = ax > ay ? ay : ax;
+                        r.real = std::log1p((am - 1) * (am + 1) + an * an) / 2.;
+                    }
+                    else
+                        r.real = std::log(h);
+                }
+                r.imag = std::atan2(z.imag, z.real);
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_log10(pc z)
+            {
+                auto r = c_log(z);
+                r.real = r.real / LN10;
+                r.imag = r.imag / LN10;
+                return r;
+            }
+
+            pc c_sinh(pc z)
+            {
+                pc r;
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    if (std::isinf(z.real) && std::isfinite(z.imag) && z.imag != 0.)
+                    {
+                        if (z.real > 0)
+                            r = { std::copysign(INF, std::cos(z.imag)), std::copysign(INF, std::sin(z.imag)) };
+                        else
+                            r = { -std::copysign(INF, std::cos(z.imag)), std::copysign(INF, std::sin(z.imag)) };
+                    }
+                    else
+                        r = sinh_special_values[special_type(z.real)][special_type(z.imag)];
+                    sErrno = std::isinf(z.imag) && !std::isnan(z.real) ? edom : ok;
+                    return r;
+                }
+                if (std::fabs(z.real) > LOG_LARGE_DOUBLE)
+                {
+                    double const x_minus_one = z.real - std::copysign(1., z.real);
+                    r = { std::cos(z.imag) * std::sinh(x_minus_one) * E, std::sin(z.imag) * std::cosh(x_minus_one) * E };
+                }
+                else
+                    r = { std::cos(z.imag) * std::sinh(z.real), std::sin(z.imag) * std::cosh(z.real) };
+                sErrno = std::isinf(r.real) || std::isinf(r.imag) ? erange : ok;
+                return r;
+            }
+
+            pc c_sin(pc z)
+            {
+                // (sin(z) = -i sinh(iz))
+                auto const s = c_sinh({ -z.imag, z.real });
+                return { s.imag, -s.real };
+            }
+
+            pc c_tanh(pc z)
+            {
+                pc r;
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    if (std::isinf(z.real) && std::isfinite(z.imag) && z.imag != 0.)
+                        r = { z.real > 0 ? 1.0 : -1.0, std::copysign(0., 2. * std::sin(z.imag) * std::cos(z.imag)) };
+                    else
+                        r = tanh_special_values[special_type(z.real)][special_type(z.imag)];
+                    sErrno = std::isinf(z.imag) && std::isfinite(z.real) ? edom : ok;
+                    return r;
+                }
+                if (std::fabs(z.real) > LOG_LARGE_DOUBLE)
+                {
+                    r.real = std::copysign(1., z.real);
+                    r.imag = 4. * std::sin(z.imag) * std::cos(z.imag) * std::exp(-2. * std::fabs(z.real));
+                }
+                else
+                {
+                    double const tx = std::tanh(z.real);
+                    double const ty = std::tan(z.imag);
+                    double const cx = 1. / std::cosh(z.real);
+                    double const txty = tx * ty;
+                    double const denom = 1. + txty * txty;
+                    r.real = tx * (1. + ty * ty) / denom;
+                    r.imag = ((ty / denom) * cx) * cx;
+                }
+                sErrno = ok;
+                return r;
+            }
+
+            pc c_tan(pc z)
+            {
+                // (tan(z) = -i tanh(iz))
+                auto const s = c_tanh({ -z.imag, z.real });
+                return { s.imag, -s.real };
+            }
+
+            // (_Py_c_abs: errno ERANGE if it overflows)
+            double c_abs(pc z)
+            {
+                if (!std::isfinite(z.real) || !std::isfinite(z.imag))
+                {
+                    sErrno = ok;
+                    if (std::isinf(z.real))
+                        return std::fabs(z.real);
+                    if (std::isinf(z.imag))
+                        return std::fabs(z.imag);
+                    return N;
+                }
+                double const result = std::hypot(z.real, z.imag);
+                sErrno = std::isfinite(result) ? ok : erange;
+                return result;
+            }
+
+            // (_Py_c_quot: errno EDOM if the divisor is zero)
+            pc c_quot_(pc a, pc b)
+            {
+                cpx r{};
+                if (!c_quot({ a.real, a.imag }, { b.real, b.imag }, r))
+                {
+                    sErrno = edom;
+                    return { 0.0, 0.0 };
+                }
+                return { r.real, r.imag };
+            }
+
+            object* math_error()
+            {
+                if (sErrno == edom)
+                    return error("ValueError", "math domain error");
+                return error("OverflowError", "math range error");
+            }
+
+            // (PyComplex_AsCComplex)
+            bool arg_complex(object* aArg, pc& aResult)
+            {
+                if (kind_of(aArg) == NEOS_PY_COMPLEX)
+                {
+                    aResult = { as<complex_object>(aArg)->real, as<complex_object>(aArg)->imag };
+                    return true;
+                }
+                aResult.imag = 0.0;
+                return to_double(aArg, aResult.real);
+            }
+
+            bool one_argument(std::vector<object*> const& aArgs, char const* aName, pc& aResult)
+            {
+                if (aArgs.size() != 1u)
+                {
+                    error("TypeError", std::string{ "cmath." } + aName + "() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
+                    return false;
+                }
+                return arg_complex(aArgs[0], aResult);
+            }
+
+            template <pc (*Function)(pc)>
+            object* function_1(std::vector<object*> const& aArgs, char const* aName)
+            {
+                pc z;
+                if (!one_argument(aArgs, aName, z))
+                    return nullptr;
+                sErrno = ok;
+                auto const r = Function(z);
+                if (sErrno != ok)
+                    return math_error();
+                return make_complex(r.real, r.imag);
+            }
+
+            object* cm_acos(std::vector<object*> const& a, object*) { return function_1<c_acos>(a, "acos"); }
+            object* cm_acosh(std::vector<object*> const& a, object*) { return function_1<c_acosh>(a, "acosh"); }
+            object* cm_asin(std::vector<object*> const& a, object*) { return function_1<c_asin>(a, "asin"); }
+            object* cm_asinh(std::vector<object*> const& a, object*) { return function_1<c_asinh>(a, "asinh"); }
+            object* cm_atan(std::vector<object*> const& a, object*) { return function_1<c_atan>(a, "atan"); }
+            object* cm_atanh(std::vector<object*> const& a, object*) { return function_1<c_atanh>(a, "atanh"); }
+            object* cm_cos(std::vector<object*> const& a, object*) { return function_1<c_cos>(a, "cos"); }
+            object* cm_cosh(std::vector<object*> const& a, object*) { return function_1<c_cosh>(a, "cosh"); }
+            object* cm_exp(std::vector<object*> const& a, object*) { return function_1<c_exp>(a, "exp"); }
+            object* cm_log10(std::vector<object*> const& a, object*) { return function_1<c_log10>(a, "log10"); }
+            object* cm_sin(std::vector<object*> const& a, object*) { return function_1<c_sin>(a, "sin"); }
+            object* cm_sinh(std::vector<object*> const& a, object*) { return function_1<c_sinh>(a, "sinh"); }
+            object* cm_sqrt(std::vector<object*> const& a, object*) { return function_1<c_sqrt>(a, "sqrt"); }
+            object* cm_tan(std::vector<object*> const& a, object*) { return function_1<c_tan>(a, "tan"); }
+            object* cm_tanh(std::vector<object*> const& a, object*) { return function_1<c_tanh>(a, "tanh"); }
+
+            object* cm_log(std::vector<object*> const& aArgs, object*)
+            {
+                if (aArgs.empty())
+                    return error("TypeError", "log expected at least 1 argument, got 0");
+                if (aArgs.size() > 2u)
+                    return error("TypeError", "log expected at most 2 arguments, got " + std::to_string(aArgs.size()));
+                pc x, y;
+                if (!arg_complex(aArgs[0], x))
+                    return nullptr;
+                sErrno = ok;
+                x = c_log(x);
+                if (aArgs.size() == 2u)
+                {
+                    auto const savedErrno = sErrno;
+                    if (!arg_complex(aArgs[1], y))
+                        return nullptr;
+                    y = c_log(y);
+                    x = c_quot_(x, y);
+                    if (sErrno == ok)
+                        sErrno = savedErrno;
+                }
+                if (sErrno != ok)
+                    return math_error();
+                return make_complex(x.real, x.imag);
+            }
+
+            object* cm_phase(std::vector<object*> const& aArgs, object*)
+            {
+                pc z;
+                if (!one_argument(aArgs, "phase", z))
+                    return nullptr;
+                return make_float(c_atan2(z));
+            }
+
+            object* cm_polar(std::vector<object*> const& aArgs, object*)
+            {
+                pc z;
+                if (!one_argument(aArgs, "polar", z))
+                    return nullptr;
+                double const phi = c_atan2(z);
+                sErrno = ok;
+                double const r = c_abs(z);
+                if (sErrno != ok)
+                    return math_error();
+                return make_tuple({ make_float(r), make_float(phi) });
+            }
+
+            object* cm_rect(std::vector<object*> const& aArgs, object*)
+            {
+                if (aArgs.size() != 2u)
+                    return error("TypeError", "rect expected 2 arguments, got " + std::to_string(aArgs.size()));
+                double r = 0.0, phi = 0.0;
+                if (!to_double(aArgs[0], r) || !to_double(aArgs[1], phi))
+                    return nullptr;
+                pc z;
+                sErrno = ok;
+                if (!std::isfinite(r) || !std::isfinite(phi))
+                {
+                    if (std::isinf(r) && std::isfinite(phi) && phi != 0.)
+                    {
+                        if (r > 0)
+                            z = { std::copysign(INF, std::cos(phi)), std::copysign(INF, std::sin(phi)) };
+                        else
+                            z = { -std::copysign(INF, std::cos(phi)), -std::copysign(INF, std::sin(phi)) };
+                    }
+                    else
+                        z = rect_special_values[special_type(r)][special_type(phi)];
+                    sErrno = r != 0. && !std::isnan(r) && std::isinf(phi) ? edom : ok;
+                }
+                else if (phi == 0.0)
+                    z = { r, r * phi };
+                else
+                    z = { r * std::cos(phi), r * std::sin(phi) };
+                if (sErrno != ok)
+                    return math_error();
+                return make_complex(z.real, z.imag);
+            }
+
+            object* cm_isfinite(std::vector<object*> const& aArgs, object*)
+            {
+                pc z;
+                if (!one_argument(aArgs, "isfinite", z))
+                    return nullptr;
+                return make_bool(std::isfinite(z.real) && std::isfinite(z.imag));
+            }
+
+            object* cm_isnan(std::vector<object*> const& aArgs, object*)
+            {
+                pc z;
+                if (!one_argument(aArgs, "isnan", z))
+                    return nullptr;
+                return make_bool(std::isnan(z.real) || std::isnan(z.imag));
+            }
+
+            object* cm_isinf(std::vector<object*> const& aArgs, object*)
+            {
+                pc z;
+                if (!one_argument(aArgs, "isinf", z))
+                    return nullptr;
+                return make_bool(std::isinf(z.real) || std::isinf(z.imag));
+            }
+
+            object* cm_isclose(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                object* relTolObject = nullptr;
+                object* absTolObject = nullptr;
+                if (!keywords(aKwargs, { { "rel_tol", &relTolObject }, { "abs_tol", &absTolObject } }, "isclose"))
+                    return nullptr;
+                if (aArgs.size() != 2u)
+                    return error("TypeError", "isclose() takes exactly 2 positional arguments (" + std::to_string(aArgs.size()) + " given)");
+                pc a, b;
+                double relTol = 1e-09, absTol = 0.0;
+                if (!arg_complex(aArgs[0], a) || !arg_complex(aArgs[1], b) || (relTolObject != nullptr && !to_double(relTolObject, relTol)) ||
+                    (absTolObject != nullptr && !to_double(absTolObject, absTol)))
+                    return nullptr;
+                if (relTol < 0.0 || absTol < 0.0)
+                    return error("ValueError", "tolerances must be non-negative");
+                if (a.real == b.real && a.imag == b.imag)
+                    return make_bool(true);
+                if (std::isinf(a.real) || std::isinf(a.imag) || std::isinf(b.real) || std::isinf(b.imag))
+                    return make_bool(false);
+                double const diff = c_abs({ a.real - b.real, a.imag - b.imag });
+                return make_bool((diff <= relTol * c_abs(b)) || (diff <= relTol * c_abs(a)) || (diff <= absTol));
+            }
+
+            builtin_entry const sFunctions[] =
+            {
+                { "acos", cm_acos }, { "acosh", cm_acosh }, { "asin", cm_asin }, { "asinh", cm_asinh }, { "atan", cm_atan }, { "atanh", cm_atanh },
+                { "cos", cm_cos }, { "cosh", cm_cosh }, { "exp", cm_exp }, { "isclose", cm_isclose }, { "isfinite", cm_isfinite },
+                { "isinf", cm_isinf }, { "isnan", cm_isnan }, { "log", cm_log }, { "log10", cm_log10 }, { "phase", cm_phase },
+                { "polar", cm_polar }, { "rect", cm_rect }, { "sin", cm_sin }, { "sinh", cm_sinh }, { "sqrt", cm_sqrt }, { "tan", cm_tan },
+                { "tanh", cm_tanh }
+            };
+        }
+
+        // sys.set_int_max_str_digits, sys.get_int_max_str_digits
+        object* sys_set_int_max_str_digits(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            object* maxdigits = nullptr;
+            if (!keywords(aKwargs, { { "maxdigits", &maxdigits } }, "set_int_max_str_digits") || !arity(aArgs, aKwargs != nullptr ? 0u : 1u, 1u, "set_int_max_str_digits"))
+                return nullptr;
+            if (!aArgs.empty())
+                maxdigits = aArgs[0];
+            if (maxdigits == nullptr)
+                return error("TypeError", "set_int_max_str_digits() missing required argument 'maxdigits' (pos 1)");
+            long long n = 0;
+            if (!to_index(maxdigits, n))
+                return nullptr;
+            if (n != 0 && n < 640)
+                return error("ValueError", "maxdigits must be >= 640 or 0 for unlimited");
+            sIntMaxStrDigits = n;
+            return (retain(none()), none());
+        }
+        object* sys_get_int_max_str_digits(std::vector<object*> const& aArgs, object*)
+        {
+            if (!arity(aArgs, 0u, 0u, "get_int_max_str_digits"))
+                return nullptr;
+            return make_int(sIntMaxStrDigits);
+        }
+        builtin_entry const sSysFunctions[] =
+        {
+            { "set_int_max_str_digits", sys_set_int_max_str_digits }, { "get_int_max_str_digits", sys_get_int_max_str_digits }
+        };
+
         object* make_module(std::string const& aName)
         {
             auto* const m = new module_object{ { { &sModuleType.base } }, aName, {} };
@@ -7084,6 +8506,18 @@ namespace neos::python_runtime
                 m->attributes.emplace_back("tau", make_float(6.283185307179586));
                 m->attributes.emplace_back("inf", make_float(std::numeric_limits<double>::infinity()));
                 m->attributes.emplace_back("nan", make_float(std::numeric_limits<double>::quiet_NaN()));
+            }
+            else if (aName == "cmath")
+            {
+                for (auto const& f : cmath_module::sFunctions)
+                    m->attributes.emplace_back(f.name, make_function(f.name, call_builtin, const_cast<builtin_entry*>(&f)));
+                m->attributes.emplace_back("pi", make_float(3.141592653589793));
+                m->attributes.emplace_back("e", make_float(2.718281828459045));
+                m->attributes.emplace_back("tau", make_float(6.283185307179586));
+                m->attributes.emplace_back("inf", make_float(std::numeric_limits<double>::infinity()));
+                m->attributes.emplace_back("infj", make_complex(0.0, std::numeric_limits<double>::infinity()));
+                m->attributes.emplace_back("nan", make_float(std::numeric_limits<double>::quiet_NaN()));
+                m->attributes.emplace_back("nanj", make_complex(0.0, std::numeric_limits<double>::quiet_NaN()));
             }
             else if (aName == "sys")
             {
@@ -7100,6 +8534,8 @@ namespace neos::python_runtime
                 m->attributes.emplace_back("version", make_str("3.13 (neos)"));
                 m->attributes.emplace_back("version_info", make_tuple({ make_int(3), make_int(13), make_int(0), make_str("final"), make_int(0) }));
                 m->attributes.emplace_back("float_repr_style", make_str("short"));
+                for (auto const& f : sSysFunctions)
+                    m->attributes.emplace_back(f.name, make_function(f.name, call_builtin, const_cast<builtin_entry*>(&f)));
             }
             else
                 return error("ModuleNotFoundError", "No module named '" + aName + "'");
@@ -7265,6 +8701,7 @@ namespace neos::python_runtime
             { "to_int", NEOS_RT_FUNCTION(fn_to_int), I64, 1u, { OBJ }, 0u },
             { "to_float", NEOS_RT_FUNCTION(fn_to_float), F64, 1u, { OBJ }, 0u },
             { "binary", NEOS_RT_FUNCTION(fn_binary), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
+            { "int_from_string", NEOS_RT_FUNCTION(fn_int_from_string), OBJ, 1u, { STR }, 0u },
             { "inplace", NEOS_RT_FUNCTION(fn_inplace), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
             { "unary", NEOS_RT_FUNCTION(fn_unary), OBJ, 2u, { I32, OBJ }, 0u },
             { "compare", NEOS_RT_FUNCTION(fn_compare), OBJ, 3u, { I32, OBJ, OBJ }, 0u },

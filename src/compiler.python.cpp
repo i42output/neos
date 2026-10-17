@@ -1401,6 +1401,36 @@ namespace neos::language
         return operand;
     }
 
+    // an int literal beyond 64 bits: an int object (python::int_from_string)
+    std::optional<fragment> compiler::py_big_literal(operand_type const& aOperand)
+    {
+        if (!is_immediate(aOperand))
+            return {};
+        std::string text;
+        std::visit([&](auto const& d)
+            {
+                using vt = std::decay_t<decltype(d)>;
+                if constexpr (!std::is_same_v<vt, std::monostate>)
+                    if constexpr (std::is_same_v<typename vt::type, ibig>)
+                        text = d.value().value().to_string();
+            }, std::get<data_type>(aOperand));
+        if (text.empty())
+            return {};
+        try
+        {
+            (void)std::stoll(text);
+            return {};
+        }
+        catch (std::out_of_range const&)
+        {
+        }
+        fragment result;
+        result.valueType = type::Object;
+        if (iDeclarationPass)
+            return result;
+        return py_owned(py_runtime_call("python::int_from_string", { type::String }, type::Object, { py_string(text) }));
+    }
+
     fragment compiler::py_string(std::string const& aValue)
     {
         fragment result;

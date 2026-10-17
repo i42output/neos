@@ -63,7 +63,7 @@ namespace neos::numpy
             static cpu_features const sFeatures = []()
             {
                 cpu_features f;
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(NEOS_NUMPY_NO_XSS)
                 __builtin_cpu_init();
                 f.x86v3 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2");
                 f.x86v4 = f.x86v3 && __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512cd") && __builtin_cpu_supports("avx512vl") &&

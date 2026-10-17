@@ -33,7 +33,7 @@ namespace neos::concepts::core
 
     template <char8_t First, char8_t Last = First>
     using specific_char = string_utf8_character_range<First, Last>;
-    using any_char = string_utf8_character_range<'\x00', '\xFF'>;
+    using any_char = string_utf8_character_range<char8_t{ 0x00 }, char8_t{ 0xFF }>;
 
     namespace
     {

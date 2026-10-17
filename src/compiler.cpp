@@ -438,6 +438,13 @@ namespace neos::language
 
     void compiler::push_operand(i_operand_type const& aOperand)
     {
+        if (is_python())
+            if (auto const big = py_big_literal(operand_type{ aOperand }))
+            {
+                // (an int literal beyond 64 bits: an int object)
+                state().operandStack.push_back(operand_type{ *big });
+                return;
+            }
         state().operandStack.push_back(aOperand);
         if (trace() >= 2)
             iContext.cout() << "Pushed operand: " << aOperand << std::endl;

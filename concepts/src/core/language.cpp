@@ -471,7 +471,8 @@ namespace neos::concepts::core
             }
             else if (aRhs.name() == "language.scope.open")
             {
-                auto const& signature = data<neos::language::i_function_signature>();
+                auto& signature = data<neos::language::i_function_signature>();
+                aContext.compiler().complete_signature(signature, source()); // (types that are inferred)
                 aContext.compiler().define_symbol(signature.name(), neos::language::type::Function, neolib::string_view{});
                 auto& scope = static_cast<neos::language::i_function_scope&>(
                     aContext.compiler().enter_scope(neos::language::scope_type::Function, signature.name()));
@@ -1126,7 +1127,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Tuple;
+            this->template data<neos::language::type>() = neos::language::type::Tuple;
             aResult = instance();
         }
     };
@@ -1161,7 +1162,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type_to_enum_v<Float>;
+            this->template data<neos::language::type>() = neos::language::type_to_enum_v<Float>;
             aResult = this->instance();
         }
     };
@@ -1202,7 +1203,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type_to_enum_v<Integer>;
+            this->template data<neos::language::type>() = neos::language::type_to_enum_v<Integer>;
             aResult = this->instance();
         }
     };
@@ -1230,7 +1231,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::String;
+            this->template data<neos::language::type>() = neos::language::type::String;
             aResult = this->instance();
         }
     };
@@ -1257,7 +1258,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Boolean;
+            this->template data<neos::language::type>() = neos::language::type::Boolean;
             aResult = instance();
         }
     };
@@ -1284,7 +1285,34 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Void;
+            this->template data<neos::language::type>() = neos::language::type::Void;
+            aResult = instance();
+        }
+    };
+
+    class language_type_object : public language_type<language_type_object>
+    {
+        // concept
+    public:
+        static constexpr auto Name = "language.type.object";
+        // data
+    public:
+        using data_type = neos::language::type;
+        // construction
+    public:
+        language_type_object() :
+            language_type{}
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return !this->holds_data();
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            this->template data<neos::language::type>() = neos::language::type::Object;
             aResult = instance();
         }
     };
@@ -1311,7 +1339,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::U8;
+            this->template data<neos::language::type>() = neos::language::type::U8;
             aResult = instance();
         }
     };
@@ -1366,7 +1394,7 @@ namespace neos::concepts::core
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
         {
-            this->data<neos::language::type>() = neos::language::type::Struct;
+            this->template data<neos::language::type>() = neos::language::type::Struct;
             aResult = instance();
         }
     };
@@ -1505,6 +1533,8 @@ namespace neos::concepts::core
             neolib::make_ref<language_type_boolean>();
         concepts()[neolib::string{ language_type_void::Name }] =
             neolib::make_ref<language_type_void>();
+        concepts()[neolib::string{ language_type_object::Name }] =
+            neolib::make_ref<language_type_object>();
         concepts()[neolib::string{ language_type_character::Name }] =
             neolib::make_ref<language_type_character>();
         concepts()[neolib::string{ language_type_size<true>::Name }] =
