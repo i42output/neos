@@ -1247,6 +1247,15 @@ namespace neos::language
         bool changed = false;
         std::string text = rewrite_fstrings(std::string{ source }, changed);
         int depth = 0;
+        // (the open brackets (and their positions): a bracket that is never closed, or a closing bracket that does not match,
+        // is a syntax error (CPython's messages))
+        std::vector<std::size_t> open;
+        // (the line of a position: in the source (line breaks within brackets become spaces in the text))
+        auto const line_of = [&](std::size_t aPosition) { return 1 + std::count(source.begin(), source.begin() + static_cast<std::ptrdiff_t>(std::min(aPosition, source.size())), '\n'); };
+        auto const syntax_error = [&](std::size_t aPosition, std::string const& aMessage)
+        {
+            throw_error(aFragment.source().begin() + static_cast<std::ptrdiff_t>(aPosition), neolib::string{ aMessage }, "syntax error"_s);
+        };
         for (std::size_t i = 0u; i < text.size(); ++i)
         {
             char const c = text[i];
@@ -1278,15 +1287,29 @@ namespace neos::language
                 continue;
             }
             if (c == '(' || c == '[' || c == '{')
+            {
                 ++depth;
-            else if ((c == ')' || c == ']' || c == '}') && depth > 0)
+                open.push_back(i);
+            }
+            else if (c == ')' || c == ']' || c == '}')
+            {
+                if (open.empty())
+                    syntax_error(i, std::string{ "unmatched '" } + c + "'");
+                char const opening = text[open.back()];
+                if ((opening == '(' ? ')' : opening == '[' ? ']' : '}') != c)
+                    syntax_error(i, std::string{ "closing parenthesis '" } + c + "' does not match opening parenthesis '" + opening + "'" +
+                        (line_of(open.back()) != line_of(i) ? " on line " + std::to_string(line_of(open.back())) : std::string{}));
+                open.pop_back();
                 --depth;
+            }
             else if (depth > 0 && (c == '\n' || c == '\r'))
             {
                 text[i] = ' ';
                 changed = true;
             }
         }
+        if (!open.empty())
+            syntax_error(open.back(), std::string{ "'" } + text[open.back()] + "' was never closed");
         // class statements (see rewrite_classes)
         {
             std::size_t classes = 0u;

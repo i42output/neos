@@ -388,6 +388,7 @@ namespace neos::numpy
                     return T(a.real() / m, a.imag() / m);
                 }
                 else if constexpr (std::is_floating_point_v<T>) return std::isnan(a) ? a : a > 0 ? T(1) : a < 0 ? T(-1) : T(0);
+                else if constexpr (is_bool_v<T>) return a;
                 else if constexpr (std::is_unsigned_v<T>) return a > 0 ? 1 : 0;
                 else return static_cast<T>(a > 0 ? 1 : a < 0 ? -1 : 0);
             }

@@ -29,7 +29,9 @@
 */
 
 #if defined(_MSC_VER)
+#ifndef _CRT_SECURE_NO_WARNINGS /* (the CMake build defines it) */
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #elif !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L /* (setenv) */
 #endif

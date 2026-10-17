@@ -20,7 +20,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
 if(MSVC)
-    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/std:c++latest> /bigobj /utf-8 /Zc:__cplusplus)
+    # (C and C++ options only: the bundled libffi's assembly is assembled by MASM, which rejects them)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest;/Zc:__cplusplus>" "$<$<COMPILE_LANGUAGE:C,CXX>:/bigobj;/utf-8>")
     set(CMAKE_DEBUG_POSTFIX "d")
     add_definitions(-D_UNICODE)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -65,21 +66,25 @@ if(WIN32)
 endif()
 find_package(Boost REQUIRED COMPONENTS program_options)
 
-# libffi: the VM calls runtime plugins' functions with it (without it neos runs scripts that do not use runtime plugins)
+# libffi: the VM calls runtime plugins' functions with it (without it neos runs scripts that do not use runtime plugins);
+# if there is no libffi to be found (e.g. on Windows) the bundled one (3rdparty/libffi-3.4.8) is built (a static library)
 option(NEOS_LIBFFI "Call runtime plugin functions with libffi" ON)
 option(NEOS_LIBFFI_STATIC "libffi is a static library" OFF)
-if(NEOS_LIBFFI)
+option(NEOS_LIBFFI_BUNDLED "Build the bundled libffi (3rdparty/libffi-3.4.8) rather than use an installed one" OFF)
+if(NEOS_LIBFFI AND NOT NEOS_LIBFFI_BUNDLED)
     find_package(PkgConfig QUIET)
     if(PKG_CONFIG_FOUND)
         pkg_check_modules(PC_LIBFFI QUIET libffi)
     endif()
-    find_path(LIBFFI_INCLUDE_DIR ffi.h HINTS ${PC_LIBFFI_INCLUDE_DIRS}
-        "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libffi-3.3/include" PATH_SUFFIXES ffi)
+    find_path(LIBFFI_INCLUDE_DIR ffi.h HINTS ${PC_LIBFFI_INCLUDE_DIRS} PATH_SUFFIXES ffi)
     find_library(LIBFFI_LIBRARY NAMES ffi libffi HINTS ${PC_LIBFFI_LIBRARY_DIRS})
     if(NOT LIBFFI_INCLUDE_DIR OR NOT LIBFFI_LIBRARY)
-        message(WARNING "libffi not found (set LIBFFI_INCLUDE_DIR and LIBFFI_LIBRARY): neos is built without runtime plugin calls")
-        set(NEOS_LIBFFI OFF)
+        message(STATUS "libffi not found (LIBFFI_INCLUDE_DIR and LIBFFI_LIBRARY): the bundled libffi is built")
+        set(NEOS_LIBFFI_BUNDLED ON)
     endif()
+endif()
+if(NEOS_LIBFFI AND NEOS_LIBFFI_BUNDLED)
+    add_subdirectory(3rdparty/libffi-3.4.8 "${CMAKE_BINARY_DIR}/libffi")
 endif()
 
 # x86-simd-sort (the NumPy runtime plugin's SIMD sorts): x86-64 with GCC or Clang
@@ -102,7 +107,10 @@ target_compile_definitions(neos PUBLIC NEOLIB_HOSTED_ENVIRONMENT)
 target_link_libraries(neos PUBLIC ${NEOS_NEOLIB_TARGET} neonumeric::neonumeric PRIVATE ${CMAKE_DL_LIBS})
 set_property(TARGET neos PROPERTY POSITION_INDEPENDENT_CODE ON) # (linked into the concept libraries)
 set_property(TARGET neos PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-if(NEOS_LIBFFI)
+if(NEOS_LIBFFI AND NEOS_LIBFFI_BUNDLED)
+    target_link_libraries(neos PRIVATE libffi::libffi)
+    target_compile_definitions(neos PRIVATE NEOS_LIBFFI_STATIC "NEOS_LIBFFI_LIB=\"$<TARGET_FILE:libffi::libffi>\"")
+elseif(NEOS_LIBFFI)
     target_include_directories(neos PRIVATE "${LIBFFI_INCLUDE_DIR}")
     target_link_libraries(neos PRIVATE "${LIBFFI_LIBRARY}")
     if(MSVC)
@@ -133,18 +141,25 @@ add_neos_concept_library(core
     concepts/src/core/bitwise.cpp
     concepts/src/core/boolean.cpp
     concepts/src/core/core.cpp
-    concepts/src/core/javascript.cpp
     concepts/src/core/language.cpp
     concepts/src/core/logic.cpp
     concepts/src/core/math.cpp
     concepts/src/core/module.cpp
     concepts/src/core/object.cpp
-    concepts/src/core/python.cpp
     concepts/src/core/string.cpp)
 add_neos_concept_library(core.math.universal
     concepts/src/common/dllmain.cpp
     concepts/src/core/plugin.math.universal.cpp
     concepts/src/core/math.universal.cpp)
+# (the concepts of a language: a library of its own)
+add_neos_concept_library(python.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/python/plugin.cpp
+    concepts/src/python/python.cpp)
+add_neos_concept_library(javascript.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/javascript/plugin.cpp
+    concepts/src/javascript/javascript.cpp)
 
 # console (the neos executable)
 add_executable(neos_console console/src/console.cpp)
@@ -152,7 +167,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal)
+add_dependencies(neos_console core core.math.universal python.core javascript.core)
 
 # runtime plugins (C ABI: include/neos/runtime/plugin.h)
 function(add_neos_runtime_plugin TARGET)

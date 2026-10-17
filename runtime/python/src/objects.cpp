@@ -6503,12 +6503,16 @@ namespace neos::python_runtime
             }
             std::string line;
             char buffer[256];
+            bool read = false;
             while (std::fgets(buffer, sizeof(buffer), stdin) != nullptr)
             {
+                read = true;
                 line += buffer;
                 if (!line.empty() && line.back() == '\n')
                     break;
             }
+            if (!read)
+                return error("EOFError", "EOF when reading a line");
             while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
                 line.pop_back();
             return make_str(std::move(line));

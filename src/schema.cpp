@@ -345,7 +345,7 @@ namespace neos::language
         }
     }
 
-    schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
+    schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries, bool aShowParseTimes) :
         iPath{ aPath },
         iConceptLibraries{ aConceptLibraries }
     {
@@ -373,6 +373,9 @@ namespace neos::language
         neolib::rjson metaContents{ metaSource };
         auto const& meta = metaContents.root().as<neolib::rjson_object>().at("meta");
         parse_meta(meta);
+        // (the concept libraries the schema's language uses: each must be loaded)
+        if (metaContents.root().as<neolib::rjson_object>().has("libraries"))
+            parse_meta(metaContents.root().as<neolib::rjson_object>().at("libraries"));
 
         std::map<std::string, std::pair<std::string_view, std::optional<std::string>>> stages;
 
@@ -417,7 +420,9 @@ namespace neos::language
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
             parser.set_debug_output(std::cerr, false, false);
+            parser.set_debug_timing(aShowParseTimes);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
+            iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
             parser.create_ast();
             walk_ast(parser, parser.ast(), stage);
         }
@@ -426,6 +431,11 @@ namespace neos::language
     std::string const& schema::path() const
     {
         return iPath;
+    }
+
+    std::chrono::steady_clock::duration schema::parse_time() const
+    {
+        return iParseTime;
     }
 
     language::meta const& schema::meta() const

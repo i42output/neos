@@ -94,7 +94,7 @@ namespace neos
             throw no_schema_path_specified();
         cout() << "Loading schema '" + schemaPath + "'..." << std::endl;
         iSchema.reset();
-        iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries());
+        iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries(), compiler().show_parse_times());
         for (auto& unit : program().translationUnits)
             unit.schema = iSchema;
     }

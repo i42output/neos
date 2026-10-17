@@ -20,6 +20,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <boost/functional/hash.hpp>
@@ -80,9 +81,10 @@ namespace neos::language
     public:
         static constexpr std::size_t RecursionLimit = 64u;
     public:
-        schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries);
+        schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries, bool aShowParseTimes = false);
     public:
         std::string const& path() const;
+        std::chrono::steady_clock::duration parse_time() const; ///< (the time parsing the schema's grammars took)
         language::meta const& meta() const;
         language::pipeline const& pipeline() const;
     private:
@@ -95,5 +97,6 @@ namespace neos::language
         language::meta iMeta;
         language::pipeline iPipeline;
         const concept_libraries_t& iConceptLibraries;
+        std::chrono::steady_clock::duration iParseTime = {};
     };
 }

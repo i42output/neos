@@ -71,9 +71,41 @@ namespace neos::language
         return iEndTime;
     }
 
+    std::chrono::steady_clock::duration compiler::preparse_time() const
+    {
+        return iPreparseTime;
+    }
+
+    std::chrono::steady_clock::duration compiler::parse_time() const
+    {
+        return iParseTime;
+    }
+
+    bool compiler::show_parse_times() const
+    {
+        return iShowParseTimes;
+    }
+
+    void compiler::set_show_parse_times(bool aShowParseTimes)
+    {
+        iShowParseTimes = aShowParseTimes;
+    }
+
+    bool compiler::preparse() const
+    {
+        return iPreparse;
+    }
+
+    void compiler::set_preparse(bool aPreparse)
+    {
+        iPreparse = aPreparse;
+    }
+
     bool compiler::compile(program& aProgram)
     {
         iStartTime = std::chrono::steady_clock::now();
+        iPreparseTime = {};
+        iParseTime = {};
 
         bool ok = true;
 
@@ -265,8 +297,13 @@ namespace neos::language
 
         aFragment.set_status(compilation_status::Compiling);
 
-        if (is_python())
+        // (a language's own pass over the source before it is parsed)
+        if (iPreparse && is_python())
+        {
+            auto const preparseStart = std::chrono::steady_clock::now();
             py_join_lines(aFragment);
+            iPreparseTime += std::chrono::steady_clock::now() - preparseStart;
+        }
 
         if (!aFragment.imported() && !iDeclarationPass)
             declare_globals();
@@ -290,6 +327,7 @@ namespace neos::language
             for (auto const& discard : *stage->discard)
                 parser.ignore(stage->symbolMap->at(discard));
             parser.set_debug_output(std::cerr, false, false);
+            parser.set_debug_timing(iShowParseTimes);
             // (a source parsed by the previous compilation pass need not be parsed again)
             auto& parsed = iParsed[&parser];
             if (parsed.first && parsed.second == aFragment.source().to_std_string_view())
@@ -301,6 +339,7 @@ namespace neos::language
                     ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
                 else
                     ok = parser.parse(aFragment.source().to_std_string_view());
+                iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
                 if (ok && last)
                     parser.create_ast();
                 if (ok)

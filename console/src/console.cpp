@@ -21,8 +21,15 @@ namespace
 
 bool process_command(neos::context& aContext, bool& aInteractive, const std::string& aConsoleInput)
 {
-    auto output_compilation_time = [&aContext]()
+    auto output_parse_time = [](std::chrono::steady_clock::duration aParseTime)
     {
+        std::cout << "Parse time: " << std::chrono::duration_cast<std::chrono::microseconds>(aParseTime).count() / 1000.0 << "ms" << std::endl;
+    };
+    auto output_compilation_time = [&aContext, &output_parse_time]()
+    {
+        if (aContext.compiler().preparse())
+            std::cout << "Pre-parse time: " << std::chrono::duration_cast<std::chrono::microseconds>(aContext.compiler().preparse_time()).count() / 1000.0 << "ms" << std::endl;
+        output_parse_time(aContext.compiler().parse_time());
         std::cout << "Compilation time: " <<
             std::chrono::duration_cast<std::chrono::microseconds>(aContext.compiler().end_time() - aContext.compiler().start_time()).count() / 1000.0 << "ms" << std::endl;
     };
@@ -52,6 +59,9 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << "q(uit)                                   Quit neos\n"
                 << "lc                                       List loaded concept libraries\n"
                 << "t(race) <0|1|2|3|4|5> [<filter>]         Compiler trace\n"
+                << "parsetimes [on|off]                      Output the time of each parse (off: only the total)\n"
+                << "preparse [on|off]                        A language's own pass over a source before it is parsed (on by\n"
+                << "                                         default)\n"
                 << "m(etrics)                                Display metrics for running programs\n"
                 << "restricted [on|off]                      Restricted mode: programs cannot call runtime plugin functions\n"
                 << "                                         that can change the host environment (off by default)\n"
@@ -60,6 +70,7 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
         else if (command == "s" || command == "schema")
         {
             aContext.load_schema(parameters);
+            output_parse_time(aContext.schema().parse_time());
             std::cout << "Language: " << aContext.schema().meta().description + "\nVersion: " + aContext.schema().meta().version << std::endl;
             if (!aContext.schema().meta().copyright.empty())
                 std::cout << aContext.schema().meta().copyright << std::endl;
@@ -124,6 +135,26 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 throw std::runtime_error("restricted: expected 'on' or 'off'");
             std::cout << "Restricted mode: " << (aContext.restricted() ? "on" : "off") << std::endl;
         }
+        else if (command == "parsetimes")
+        {
+            if (parameters == "on")
+                aContext.compiler().set_show_parse_times(true);
+            else if (parameters == "off")
+                aContext.compiler().set_show_parse_times(false);
+            else if (!parameters.empty())
+                throw std::runtime_error("parsetimes: expected 'on' or 'off'");
+            std::cout << "Parse times: " << (aContext.compiler().show_parse_times() ? "on" : "off") << std::endl;
+        }
+        else if (command == "preparse")
+        {
+            if (parameters == "on")
+                aContext.compiler().set_preparse(true);
+            else if (parameters == "off")
+                aContext.compiler().set_preparse(false);
+            else if (!parameters.empty())
+                throw std::runtime_error("preparse: expected 'on' or 'off'");
+            std::cout << "Preparse: " << (aContext.compiler().preparse() ? "on" : "off") << std::endl;
+        }
         else if (command == "t" || command == "trace")
         {
             if (words.size() >= 2)
@@ -168,6 +199,10 @@ void main_loop(boost::program_options::variables_map& aOptions)
         if (first)
         {
             first = false;
+            if (aOptions.count("parse-times"))
+                process_command(context, interactive, "parsetimes on");
+            if (aOptions.count("no-preparse"))
+                process_command(context, interactive, "preparse off");
             if (aOptions.count("s"))
                 process_command(context, interactive, "s " + aOptions["s"].as<std::string>());
             if (aOptions.count("schema"))
@@ -205,6 +240,8 @@ int main(int argc, char* argv[])
             ("schema,s", boost::program_options::value<std::string>(), "language schema")
             ("trace,t", boost::program_options::value<uint32_t>(), "compiler trace")
             ("compile,c", "compile program")
+            ("parse-times", "output the time of each parse (else only the total)")
+            ("no-preparse", "no language's own pass over a source before it is parsed")
             ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
             ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
         boost::program_options::positional_options_description positionalOptionsDescription;

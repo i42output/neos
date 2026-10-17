@@ -63,14 +63,6 @@ namespace neos::numpy
 
         neos_py_type const sModuleType = make_module_type();
         neos_rt_object sModule{ &sModuleType.base };
-
-        object* float_scalar(double aValue)
-        {
-            scalar_value v;
-            v.type = dtype::Float64;
-            v.f = aValue;
-            return as_object(new_scalar(dtype::Float64, v));
-        }
     }
 
     object* module_getattr(char const* aName)
@@ -123,7 +115,6 @@ namespace neos::numpy
             name == "infty" || name == "float_" || name == "complex_" || name == "round_" || name == "product" || name == "cumproduct" || name == "alltrue" ||
             name == "sometrue")
             return error("AttributeError", "`np." + std::string{ name } + "` was removed in the NumPy 2.0 release.");
-        (void)float_scalar;
         return error("AttributeError", "module 'numpy' has no attribute '" + std::string{ name } + "'");
     }
 

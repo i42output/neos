@@ -23,6 +23,7 @@
     libraries: [
         neos.core
         neos.math.universal
+        neos.javascript
     ]
 
     discard: [

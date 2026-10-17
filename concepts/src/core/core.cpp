@@ -26,8 +26,6 @@
 #include "math.hpp"
 #include "string.hpp"
 #include "object.hpp"
-#include "python.hpp"
-#include "javascript.hpp"
 
 namespace neos
 {
@@ -54,8 +52,6 @@ namespace neos
                 sublibraries()[neolib::string{ "neos.math" }] = neolib::make_ref<math>(*this);
                 sublibraries()[neolib::string{ "neos.string" }] = neolib::make_ref<string>(*this);
                 sublibraries()[neolib::string{ "neos.object" }] = neolib::make_ref<object>(*this);
-                sublibraries()[neolib::string{ "neos.python" }] = neolib::make_ref<python>(*this);
-                sublibraries()[neolib::string{ "neos.javascript" }] = neolib::make_ref<javascript>(*this);
             }
 
             const std::string& core::library_name()

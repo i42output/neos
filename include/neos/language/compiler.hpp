@@ -417,6 +417,12 @@ namespace neos::language
         void set_trace(std::uint32_t aTrace, const std::optional<std::string>& aFilter = {});
         const std::chrono::steady_clock::time_point& start_time() const;    
         const std::chrono::steady_clock::time_point& end_time() const;
+        std::chrono::steady_clock::duration preparse_time() const; ///< (the time the last compilation spent in preparsing)
+        std::chrono::steady_clock::duration parse_time() const;    ///< (the time the last compilation spent parsing)
+        bool show_parse_times() const;                              ///< (each parse's time is output; off by default)
+        void set_show_parse_times(bool aShowParseTimes);
+        bool preparse() const;                                      ///< (a language's own pass over a source before it is parsed
+        void set_preparse(bool aPreparse);                          ///< (e.g. Python's joining of lines within brackets); on by default)
     private:
         const compilation_state& state() const;
         compilation_state& state();
@@ -526,6 +532,10 @@ namespace neos::language
         std::optional<std::string> iTraceFilter;
         std::chrono::steady_clock::time_point iStartTime;
         std::chrono::steady_clock::time_point iEndTime;
+        std::chrono::steady_clock::duration iPreparseTime = {};
+        std::chrono::steady_clock::duration iParseTime = {};
+        bool iShowParseTimes = false;
+        bool iPreparse = true;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;
         std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;

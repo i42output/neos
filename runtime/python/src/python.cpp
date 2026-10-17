@@ -142,11 +142,18 @@ namespace
     {
         std::string line;
         char buffer[256];
+        bool read = false;
         while (std::fgets(buffer, sizeof(buffer), stdin) != nullptr)
         {
+            read = true;
             line += buffer;
             if (!line.empty() && line.back() == '\n')
                 break;
+        }
+        if (!read)
+        {
+            raise("EOFError", "EOF when reading a line");
+            return "";
         }
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
             line.pop_back();

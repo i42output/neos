@@ -28,6 +28,7 @@
     libraries: [
         neos.core
         neos.math.universal
+        neos.python
     ]
 
     discard: [ 
