@@ -36,7 +36,7 @@
 #include <neos/bytecode/text.hpp>
 #include <neos/i_context.hpp>
 #include <neos/language/compiler.hpp>
-#include "compiler.emit.hpp"
+#include <neos/language/emit.hpp>
 
 namespace neos::language
 {
@@ -158,22 +158,21 @@ namespace neos::language
             aProgram.scope.clear();
             iCompilationStateStack.clear();
             iGlobalsDeclared = false;
-            iInference.arguments.clear();
             iInference.returned.clear();
             iInference.functionGlobals.clear();
-            iInference.observed.clear();
-            iInference.assignments.clear();
-            iInference.counters.clear();
-            iRangeBound = std::nullopt;
-            iInference.declaredGlobals.clear();
-            iInference.pyCounterBindings.clear();
             iInference.changed = false;
+            for (auto& languageCompiler : iLanguageCompilers)
+                languageCompiler->begin_pass();
         };
+        // (the language compiler of the program's language)
+        auto* const programLanguage = aProgram.translationUnits.empty() ? nullptr : language(aProgram.translationUnits.front().schema->meta().language);
 
         try
         {
             // pass 1: declarations only (collects function signatures so that functions can be called before they are defined)
             iInference = {};
+            for (auto& languageCompiler : iLanguageCompilers)
+                languageCompiler->begin_compilation();
             reset();
             iForwardDeclarations.clear();
             iDeclarationPass = true;
@@ -203,9 +202,9 @@ namespace neos::language
                                 {
                                     auto const facts = iInference.parameters.find(declaration.name);
                                     auto t = facts != iInference.parameters.end() && i < facts->second.size() ? facts->second[i] : type::F64;
-                                    // (a number parameter only passed 32-bit integers is an i32)
-                                    if (t == type::F64 && iInference.ranges.contains(range_key{ nullptr, declaration.name + "#" + std::to_string(i) }))
-                                        t = type::I32;
+                                    // (the language's type of the parameter)
+                                    if (programLanguage != nullptr)
+                                        t = programLanguage->parameter_type(neolib::string_view{ declaration.name }, static_cast<std::uint32_t>(i), t);
                                     signature.parameters().value()[i].set_parameter_type(t);
                                 }
                             auto const result = iInference.results.find(declaration.name);
@@ -228,12 +227,10 @@ namespace neos::language
                             iInference.entryGlobals = entryGlobals;
                             iInference.changed = true;
                         }
-                        // number variables and parameters only assigned 32-bit integers can be i32
+                        // (the facts that the language compilers found)
                         if (ok)
-                            update_ranges();
-                        // (Python: int variables that only for loops over ranges bind)
-                        if (ok)
-                            py_update_counters();
+                            for (auto& languageCompiler : iLanguageCompilers)
+                                languageCompiler->end_pass();
                     }
                     catch (...)
                     {
@@ -331,14 +328,17 @@ namespace neos::language
             return false;
 
         iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit, &aFragment));
+        state().language = language(aUnit.schema->meta().language);
+        if (state().language != nullptr)
+            state().language->begin_fragment(aFragment);
 
         aFragment.set_status(compilation_status::Compiling);
 
         // (a language's own pass over the source before it is parsed)
-        if (iPreparse && is_python())
+        if (iPreparse && state().language != nullptr)
         {
             auto const preparseStart = std::chrono::steady_clock::now();
-            py_join_lines(aFragment);
+            state().language->preparse(aFragment);
             iPreparseTime += std::chrono::steady_clock::now() - preparseStart;
         }
 
@@ -398,6 +398,8 @@ namespace neos::language
             {
                 aFragment.set_status(compilation_status::Error);
 
+                if (state().language != nullptr)
+                    state().language->end_fragment();
                 iCompilationStateStack.pop_back();
 
                 throw std::runtime_error("Failed to fold semantic concepts");
@@ -408,7 +410,8 @@ namespace neos::language
         else
             aFragment.set_status(compilation_status::Error);
 
-
+        if (state().language != nullptr)
+            state().language->end_fragment();
         iCompilationStateStack.pop_back();
 
         return ok;
@@ -514,11 +517,11 @@ namespace neos::language
 
     void compiler::push_operand(i_operand_type const& aOperand)
     {
-        if (is_python())
-            if (auto const big = py_big_literal(operand_type{ aOperand }))
+        if (auto* const languageCompiler = language())
+            if (auto const* value = languageCompiler->literal(aOperand))
             {
-                // (an int literal beyond 64 bits: an int object)
-                state().operandStack.push_back(operand_type{ *big });
+                // (the language's value of a literal (e.g. an int literal beyond 64 bits: an int object))
+                state().operandStack.push_back(operand_type{ fragment{ *value } });
                 return;
             }
         state().operandStack.push_back(aOperand);
@@ -785,19 +788,20 @@ namespace neos::language
         if (aOperand.holds_alternative<i_symbol_reference>())
         {
             auto const& reference = aOperand.get<i_symbol_reference>();
-            bool const python = is_python();
-            if (python && !state().function)
+            bool const late = language() != nullptr && language()->late_binding();
+            if (late && !state().function)
                 ensure_function(); // (top-level statements: the variables of the entry point are declared)
-            // (a Python name is that of the function being compiled)
-            symbol = find_symbol(python ? current_scope() : reference.scope(), neolib::string_view{ reference.name() });
-            if (is_python() && (symbol == nullptr || symbol->type() == type::Function))
-            {
-                // (a Python name that is not a variable: a global, a builtin, ...)
-                result = py_name(reference.name().to_std_string());
-                if (aTargetType && result.valueType != *aTargetType)
-                    coerce(result, *aTargetType);
-                return result;
-            }
+            // (a late bound name is that of the function being compiled)
+            symbol = find_symbol(late ? current_scope() : reference.scope(), neolib::string_view{ reference.name() });
+            if (late && (symbol == nullptr || symbol->type() == type::Function))
+                if (auto const* value = language()->unbound_name(neolib::string_view{ reference.name() }))
+                {
+                    // (a name that is not a variable: the language's (e.g. a global, a builtin, ...))
+                    result = fragment{ *value };
+                    if (aTargetType && result.valueType != *aTargetType)
+                        coerce(result, *aTargetType);
+                    return result;
+                }
             if (symbol == nullptr)
                 throw std::runtime_error("undefined identifier '" + reference.name().to_std_string() + "'");
         }
@@ -881,8 +885,9 @@ namespace neos::language
         // a value converted to another type
         if (aValue.valueType == aTarget)
             return;
-        if (is_python())
-            py_coerce(aValue, aTarget);
+        auto* const languageCompiler = language();
+        if (auto const* converted = languageCompiler != nullptr ? languageCompiler->convert_value(aValue, aTarget) : nullptr)
+            aValue = fragment{ *converted };
         else
             convert(aValue.fragmentCode.as_std_vector(), aValue.valueType, aTarget);
         aValue.valueType = aTarget;
@@ -934,12 +939,10 @@ namespace neos::language
 
     void compiler::emit_language_construct(neolib::i_string_view const& aLanguage, std::uint32_t aConstruct, neolib::i_string_view const& aSource)
     {
-        if (aLanguage.to_std_string_view() == javascript::Language)
-            emit_js(static_cast<javascript::construct>(aConstruct), aSource);
-        else if (aLanguage.to_std_string_view() == python::Language)
-            emit_python(static_cast<python::construct>(aConstruct), aSource);
+        if (auto* const languageCompiler = language(aLanguage.to_std_string()))
+            languageCompiler->emit_construct(aConstruct, aSource);
         else
-            throw std::runtime_error("no code generation for constructs of language '" + aLanguage.to_std_string() + "'");
+            throw std::runtime_error("no code generation for constructs of language '" + aLanguage.to_std_string() + "' (no compiler plugin)");
     }
 
     void compiler::emit_operation(operation aOperation)
@@ -981,8 +984,8 @@ namespace neos::language
         };
         bool const relational = (aOperation >= operation::Equal && aOperation <= operation::GreaterThanOrEqual);
         bool const logical = (aOperation >= operation::LogicalAnd && aOperation <= operation::LogicalNot);
-        bool const pythonic = (aOperation == operation::Modulo || aOperation == operation::FloorDivide || aOperation == operation::TrueDivide);
-        // constant folding (not of Python division by zero, which is an error at run time, nor if the result is 
+        bool const floored = (aOperation == operation::Modulo || aOperation == operation::FloorDivide || aOperation == operation::TrueDivide);
+        // constant folding (not of a floored division by zero, which is an error at run time, nor if the result is 
         // negative zero, infinite or NaN, which a literal cannot represent)
         auto const foldable = [&]()
         {
@@ -990,7 +993,7 @@ namespace neos::language
                 return true;
             auto const l = get_immediate(*lhs);
             auto const r = get_immediate(rhs);
-            if (pythonic && l.t != type::String && r.t != type::String)
+            if (floored && l.t != type::String && r.t != type::String)
                 return is_float(r.t) ? r.f != 0.0 : r.i != 0;
             return true;
         };
@@ -1054,8 +1057,8 @@ namespace neos::language
                     case operation::Multiply: result.f = lf * rf; break;
                     case operation::Divide: 
                     case operation::TrueDivide: result.f = lf / rf; break;
-                    case operation::FloorDivide: result.f = python_divmod(lf, rf).first; break;
-                    case operation::Modulo: result.f = python_divmod(lf, rf).second; break;
+                    case operation::FloorDivide: result.f = floored_divmod(lf, rf).first; break;
+                    case operation::Modulo: result.f = floored_divmod(lf, rf).second; break;
                     case operation::Equal: result.i = lf == rf; break;
                     case operation::NotEqual: result.i = lf != rf; break;
                     case operation::LessThan: result.i = lf < rf; break;
@@ -1258,26 +1261,19 @@ namespace neos::language
             }
         if (rank(common) < 3u)
             common = is_unsigned(common) ? type::U32 : type::I32;
-        if (aOperation == operation::TrueDivide || (pythonic && is_float(common)))
+        if (aOperation == operation::TrueDivide || (floored && is_float(common)))
             common = type::F64;
-        // (division by zero: Python raises ZeroDivisionError (aKind selects its message); otherwise a trap)
+        // (division by zero: the language's (e.g. an exception; aKind selects its message); otherwise a trap)
         auto const zero_division = [&](std::int32_t aKind)
         {
             auto& out = result.fragmentCode.as_std_vector();
-            if (is_python())
-            {
-                put_op(out, opcode::I32Const);
-                put_s64(out, aKind);
-                put_op(out, opcode::CallFunction);
-                result.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(out.size()),
-                    runtime_function("python::zero_division", { type::I32 }, type::Void) });
-                out.resize(out.size() + 5u);
-            }
+            if (auto const* code = language() != nullptr ? language()->division_by_zero(aKind) : nullptr)
+                append(result, *code);
             else
                 put_op(out, opcode::Unreachable);
         };
         bool const floatOperand = is_float(lt) || is_float(rt);
-        if (pythonic && aOperation != operation::TrueDivide)
+        if (floored && aOperation != operation::TrueDivide)
         {
             // floor division / modulo with the sign of the divisor: operands are needed more than once so are held in temporaries
             bool const f = is_float(common);
@@ -1356,7 +1352,7 @@ namespace neos::language
             auto get = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalGet); put_u32(code, aLocal); };
             if (f)
             {
-                // CPython's float floor division / modulo (based on fmod, which is exact)
+                // float floor division / modulo (based on fmod, which is exact; as CPython)
                 auto const set = [&](std::uint32_t aLocal) { put_op(code, opcode::LocalSet); put_u32(code, aLocal); };
                 auto const constant = [&](double aValue) { put_op(code, opcode::F64Const); put_raw(code, aValue); };
                 auto const m = temporary(type::F64);
@@ -1570,7 +1566,8 @@ namespace neos::language
                 push_operand(operand_type{ statement });
                 return;
             }
-            auto const t = bare ? type::Void : js_type(state().operandStack.back());
+            auto const t = bare ? type::Void : language() != nullptr ? language()->inferred_type(state().operandStack.back()) : 
+                state().operandStack.back().holds_alternative<i_fragment>() ? state().operandStack.back().get<i_fragment>().value_type() : type::UNKNOWN;
             auto const returned = iInference.returned.find(function.name);
             auto const describe = [](type aType) -> std::string
             {
@@ -1647,13 +1644,16 @@ namespace neos::language
         if (operand.holds_alternative<i_fragment>() && operand.get<i_fragment>().kind() != fragment_kind::Value)
             throw std::runtime_error("argument expected");
         state().operandStack.pop_back();
-        auto const range = integer_range(operand);
-        // (Python: an int literal is an integer of any size (type::Integer))
-        auto argument = is_python() ? materialize(operand, py_type(operand)) : materialize(operand);
+        // (an integer argument's range (that the language knows))
+        std::int64_t low = 0, high = 0;
+        bool const range = language() != nullptr && language()->value_range(operand, low, high);
+        // (the language's type of the argument (e.g. an int literal is an integer of any size (type::Integer)))
+        auto const argumentType = language() != nullptr ? language()->argument_type(operand) : type::UNKNOWN;
+        auto argument = argumentType != type::UNKNOWN ? materialize(operand, argumentType) : materialize(operand);
         argument.fragmentKind = fragment_kind::Argument;
-        argument.hasRange = range.has_value();
-        argument.rangeLow = range ? range->low : 0;
-        argument.rangeHigh = range ? range->high : 0;
+        argument.hasRange = range;
+        argument.rangeLow = range ? low : 0;
+        argument.rangeHigh = range ? high : 0;
         argument.fragmentSource = aSource;
         push_operand(operand_type{ argument });
     }
@@ -2148,9 +2148,9 @@ namespace neos::language
         state().indentStack.pop_back();
         if (construct.kind == indented_construct::Function)
         {
-            if (is_python() && !iDeclarationPass && state().function)
-                if (auto end = py_function_end(construct.implicit); !end.fragmentCode.empty())
-                    push_operand(operand_type{ end });
+            if (language() != nullptr && !iDeclarationPass && state().function)
+                if (auto const* end = language()->function_end(construct.implicit); end != nullptr && !end->code().empty())
+                    push_operand(operand_type{ fragment{ *end } });
             leave_scope(scope_type::Function); // (finish_function collects the body)
             if (construct.implicit)
                 state().implicitFunctionFinished = true;
@@ -2162,7 +2162,7 @@ namespace neos::language
         {
             construct.arms.push_back(take_body(construct.bodyBase));
             if (!iDeclarationPass)
-                py_with(construct, statement);
+                statement = language_construct(construct);
             auto& stack = state().operandStack;
             stack.insert(stack.begin() + static_cast<std::ptrdiff_t>(std::min(construct.base, stack.size())), operand_type{ statement });
             return;
@@ -2182,7 +2182,7 @@ namespace neos::language
             if (construct.kind == indented_construct::Try)
                 throw std::runtime_error("expected 'except' or 'finally' block");
             if (!iDeclarationPass)
-                py_try(construct, statement);
+                statement = language_construct(construct);
             auto& stack = state().operandStack;
             stack.insert(stack.begin() + static_cast<std::ptrdiff_t>(std::min(construct.base, stack.size())), operand_type{ statement });
             return;
@@ -2319,7 +2319,9 @@ namespace neos::language
                 }
                 if (t == type::Integer)
                 {
-                    append(statement, py_small_integers({ counter, stop, range.size() == 3u && !constantStep ? step : counter }));
+                    if (auto const* check = language() != nullptr ? language()->small_integers(
+                        neolib::vector<std::uint32_t>{ counter, stop, range.size() == 3u && !constantStep ? step : counter }) : nullptr)
+                        append(statement, *check);
                     // (the range of the values it binds: start to stop, if they are constants)
                     auto const constant_value = [&](fragment const& aValue) -> std::optional<std::int64_t>
                     {
@@ -2354,11 +2356,12 @@ namespace neos::language
                     if (values.low > values.high)
                         values = { 0, 0 }; // (no iterations: the variable is not bound)
                     values = values.join({ 0, 0 }); // (before it is bound: zero)
-                    if (!global)
-                        py_bound(construct.loopVariableName, values);
+                    if (!global && language() != nullptr)
+                        language()->loop_variable_range(neolib::string_view{ construct.loopVariableName }, values.low, values.high);
                 }
                 if (variableType == type::Integer && !global && !sets_local(construct.arms[0], variable))
-                    append(statement, py_release_integer(variable, global));
+                    if (auto const* release = language() != nullptr ? language()->release_integer(variable, global) : nullptr)
+                        append(statement, *release);
                 put_op(code, opcode::Block);
                 code.push_back(0x40u);
                 put_op(code, opcode::Loop);
@@ -2401,7 +2404,8 @@ namespace neos::language
                     // (an integer of any size: the integer it held is released; only once, before the loop, if it is a local that 
                     // the body does not set (it then holds the counter's small integer after the first iteration))
                     if (variableType == type::Integer && (global || sets_local(construct.arms[0], variable)))
-                        append(statement, py_release_integer(variable, global));
+                        if (auto const* release = language() != nullptr ? language()->release_integer(variable, global) : nullptr)
+                            append(statement, *release);
                     get(counter); set_variable();
                 }
                 // (break: out of the loop's block; continue: to the end of the body, which is a block of its own)
@@ -2513,8 +2517,8 @@ namespace neos::language
         scope.set_function_signature(signature);
         current_function().entry = true;
         current_function().implicitEntry = true;
-        if (is_python())
-            py_function_start(); // (variables declared at its start)
+        if (language() != nullptr)
+            language()->function_start(); // (e.g. variables declared at its start)
         // operands of the statement being compiled (e.g. when a temporary is needed mid-expression) belong to the implicit function
         auto const& stack = state().operandStack;
         auto base = stack.size();
@@ -2592,7 +2596,7 @@ namespace neos::language
                 auto const end = text.find_first_of(" \t", begin);
                 neolib::string const variable{ std::string{ text.substr(begin, end - begin) } };
                 declare_loop_variable(neolib::string_view{ variable }, aSource);
-                construct.loopVariable = find_symbol(current_scope(), neolib::string_view{ variable }, !is_python());
+                construct.loopVariable = find_symbol(current_scope(), neolib::string_view{ variable }, !(language() != nullptr && language()->late_binding()));
                 construct.loopVariableName = variable.to_std_string();
             }
             break;
@@ -2616,12 +2620,8 @@ namespace neos::language
                     while (!n.empty() && (n.front() == ' ' || n.front() == '\t')) n.remove_prefix(1u);
                     while (!n.empty() && (n.back() == ' ' || n.back() == '\t')) n.remove_suffix(1u);
                     name = std::string{ n };
-                    if (is_python() && !iDeclarationPass)
-                    {
-                        auto& variable = py_variable(*name, type::Object);
-                        if (variable.type() != type::Object)
-                            py_kind_change(*name);
-                    }
+                    if (language() != nullptr && !iDeclarationPass)
+                        language()->bind_name(neolib::string_view{ *name }, type::Object);
                 }
                 construct.handlerNames.push_back(name);
             }
@@ -2670,12 +2670,10 @@ namespace neos::language
                 }
                 top.handlerTypes.push_back(type);
                 top.handlerNames.push_back(name);
-                if (name && is_python() && !iDeclarationPass)
+                if (name && language() != nullptr && !iDeclarationPass)
                 {
                     // (the name is bound before the handler's body is compiled)
-                    auto& variable = py_variable(*name, type::Object);
-                    if (variable.type() != type::Object && !iDeclarationPass)
-                        py_kind_change(*name);
+                    language()->bind_name(neolib::string_view{ *name }, type::Object);
                 }
                 top.kind = indented_construct::Except;
             }
@@ -2707,9 +2705,9 @@ namespace neos::language
             finalize_suspended(column);
             if (aConstruct == indented_construct::Function)
             {
-                // (Python: functions can follow top-level statements)
+                // (functions that can follow top-level statements)
                 bool const followsStatements = (state().indentStack.size() == 1u && state().indentStack[0].implicit);
-                if (state().indentStack.size() > 1u || (followsStatements && !is_python()))
+                if (state().indentStack.size() > 1u || (followsStatements && !(language() != nullptr && language()->functions_follow_statements())))
                     throw std::runtime_error("function definitions must precede top-level statements and cannot be nested");
                 construct.base = construct.bodyBase = current_function().operandBase;
             }
@@ -2840,17 +2838,11 @@ namespace neos::language
         // a for loop's variable is bound (as an integer) before its body is compiled
         ensure_function();
         auto const* symbol = find_symbol(current_scope(), aName, true);
-        if (is_python() && symbol == nullptr && !iDeclarationPass)
-        {
-            py_variable(aName.to_std_string(), type::I64);
+        // (the language's loop variable)
+        if (language() != nullptr && language()->declare_loop_variable(aName, symbol))
             return;
-        }
         if (symbol == nullptr)
             define_symbol(neolib::string{ aName }, type::I64, aSource);
-        else if (is_python() && (symbol->type() == type::Object || symbol->type() == type::Integer))
-            ; // (an object: assigned an int object; an integer: assigned the counter)
-        else if (is_python() && (!is_numeric(symbol->type()) || is_float(symbol->type()) || symbol->type() == type::Boolean))
-            py_kind_change(aName.to_std_string());
         else if (!is_numeric(symbol->type()) || is_float(symbol->type()) || symbol->type() == type::Boolean)
             throw std::runtime_error("loop variable '" + aName.to_std_string() + "' must be an integer");
     }
@@ -2863,13 +2855,9 @@ namespace neos::language
     void compiler::finish_function()
     {
         using bytecode::opcode;
-        // (the imports that py_error_checks uses: imported before references to the module's functions are taken)
-        if (is_python() && !iDeclarationPass)
-        {
-            runtime_function("neos::object_release", { type::Object }, type::Void);
-            if (current_function().entry)
-                runtime_function("neos::raise", { type::String }, type::Void);
-        }
+        // (e.g. the imports that the language's checks of the function use: imported before references to the module's functions are taken)
+        if (language() != nullptr && !iDeclarationPass)
+            language()->finishing_function(current_function().entry);
         auto& function = current_function();
         auto const& signature = function.scope->function_signature();
         auto& stack = state().operandStack;
@@ -2918,8 +2906,8 @@ namespace neos::language
             function.relocations.emplace_back(r.first(), r.second());
         }
         function.signature = signature;
-        if (is_python() && !iDeclarationPass && !function.imported && !function.stub)
-            py_error_checks(function);
+        if (language() != nullptr && !iDeclarationPass && !function.imported && !function.stub)
+            language()->function_finished(*state().function);
         function.compiled = true;
         if (function.stub)
         {

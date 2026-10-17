@@ -1,5 +1,5 @@
 /*
-  compiler.emit.hpp
+  emit.hpp
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
@@ -19,7 +19,7 @@
 
 #pragma once
 
-// WASM code generation helpers (used by compiler.cpp and compiler.javascript.cpp)
+// WASM code generation helpers (used by the compiler and the language compilers (i_language_compiler))
 
 #include <neolib/neolib.hpp>
 #include <iomanip>
@@ -28,7 +28,7 @@
 #include <cmath>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
-#include <neos/language/compiler.hpp>
+#include <neos/language/i_compiler.hpp>
 
 namespace neos::language
 {
@@ -308,7 +308,7 @@ namespace neos::language
             for (auto i = before; i < aTarget.fragmentRelocations.size(); ++i)
             {
                 auto& r = aTarget.fragmentRelocations[i];
-                if ((r.second() & compiler::BranchTarget) != 0u && (r.second() & 0x80000000u) == 0u)
+                if ((r.second() & BranchTarget) != 0u && (r.second() & DeferredCall) == 0u)
                     r.second() = r.second() + aLevels;
             }
         }
@@ -321,10 +321,10 @@ namespace neos::language
             neolib::vector<neolib::pair<std::uint32_t, std::uint32_t>> remaining;
             for (auto const& r : aBody.fragmentRelocations)
             {
-                if ((r.second() & compiler::BranchTarget) != 0u && (r.second() & 0x80000000u) == 0u)
+                if ((r.second() & BranchTarget) != 0u && (r.second() & DeferredCall) == 0u)
                 {
-                    bool const isContinue = (r.second() & compiler::ContinueTarget) != 0u;
-                    auto const depth = r.second() & ~(compiler::BranchTarget | compiler::ContinueTarget);
+                    bool const isContinue = (r.second() & ContinueTarget) != 0u;
+                    auto const depth = r.second() & ~(BranchTarget | ContinueTarget);
                     put_u32_padded(code, r.first(), depth + (isContinue ? aContinueDepth : aBreakDepth));
                 }
                 else
@@ -337,7 +337,7 @@ namespace neos::language
         inline bool has_continue(i_fragment const& aFragment)
         {
             for (auto const& r : aFragment.relocations())
-                if ((r.second() & compiler::BranchTarget) != 0u && (r.second() & compiler::ContinueTarget) != 0u && (r.second() & 0x80000000u) == 0u)
+                if ((r.second() & BranchTarget) != 0u && (r.second() & ContinueTarget) != 0u && (r.second() & DeferredCall) == 0u)
                     return true;
             return false;
         }
@@ -374,8 +374,8 @@ namespace neos::language
             std::string s;
         };
 
-        // CPython's float floor division and modulo
-        inline std::pair<double, double> python_divmod(double aLhs, double aRhs)
+        // float floor division and modulo (the sign of the divisor; as CPython)
+        inline std::pair<double, double> floored_divmod(double aLhs, double aRhs)
         {
             double mod = std::fmod(aLhs, aRhs);
             double div = (aLhs - mod) / aRhs;

@@ -1,5 +1,5 @@
 /*
-  compiler.javascript.cpp
+  compiler.cpp
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
@@ -34,14 +34,13 @@
 #include <regex>
 #include <neos/language/ecmascript.hpp>
 #include <neos/bytecode/bytecode.hpp>
-#include <neos/i_context.hpp>
-#include "compiler.emit.hpp"
+#include <neos/language/emit.hpp>
+#include "compiler.hpp"
 
-namespace neos::language
+namespace neos::compilers::javascript
 {
     using namespace emitter;
     using bytecode::opcode;
-    using javascript::construct;
 
     namespace
     {
@@ -238,29 +237,11 @@ namespace neos::language
         return {};
     }
 
-    operand_type compiler::pop_operand_value()
-    {
-        if (state().operandStack.empty() || state().operandStack.size() <= (state().function ? current_function().operandBase : 0u))
-            throw std::runtime_error("expression expected");
-        operand_type operand = state().operandStack.back();
-        if (operand.holds_alternative<i_fragment>() && operand.get<i_fragment>().kind() != fragment_kind::Value)
-            throw std::runtime_error("expression expected");
-        state().operandStack.pop_back();
-        return operand;
-    }
-
     std::uint32_t compiler::js_runtime(std::string const& aName, std::vector<type> const& aParameters, type aReturnType)
     {
         return runtime_function(aName, aParameters, aReturnType);
     }
 
-    void compiler::emit_call_to(fragment& aTarget, std::uint32_t aFunction)
-    {
-        auto& code = aTarget.fragmentCode.as_std_vector();
-        put_op(code, opcode::CallFunction);
-        aTarget.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), aFunction });
-        code.resize(code.size() + 5u);
-    }
 
     operand_type compiler::js_to_number(operand_type const& aOperand)
     {
@@ -460,7 +441,7 @@ namespace neos::language
         std::optional<operand_type> lhs;
         if (!unary)
             lhs = pop_operand_value();
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             fragment dummy;
             dummy.valueType = type::F64;
@@ -882,6 +863,78 @@ namespace neos::language
 
     // --- constructs
 
+    // --- the language compiler
+
+    compiler::compiler() :
+        language_compiler{ language::javascript::Language }
+    {
+    }
+
+    void compiler::begin_compilation()
+    {
+        iInference = {};
+    }
+
+    void compiler::begin_pass()
+    {
+        iInference.arguments.clear();
+        iInference.observed.clear();
+        iInference.assignments.clear();
+        iInference.counters.clear();
+        iInference.declaredGlobals.clear();
+        iRangeBound = std::nullopt;
+        iSymbolInfo.clear();
+    }
+
+    void compiler::end_pass()
+    {
+        // number variables and parameters only assigned 32-bit integers can be i32
+        update_ranges();
+    }
+
+    void compiler::begin_fragment(i_source_fragment&)
+    {
+        iFragments.emplace_back();
+    }
+
+    void compiler::end_fragment()
+    {
+        iFragments.pop_back();
+    }
+
+    compiler::fragment_state& compiler::js()
+    {
+        return iFragments.back();
+    }
+
+    void compiler::emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource)
+    {
+        emit_js(static_cast<construct>(aConstruct), aSource);
+    }
+
+    type compiler::inferred_type(i_operand_type const& aOperand)
+    {
+        return js_type(operand_type{ aOperand });
+    }
+
+    type compiler::parameter_type(neolib::i_string_view const& aFunction, std::uint32_t aIndex, type aType)
+    {
+        // (a number parameter only passed 32-bit integers is an i32)
+        if (aType == type::F64 && iInference.ranges.contains(range_key{ nullptr, aFunction.to_std_string() + "#" + std::to_string(aIndex) }))
+            return type::I32;
+        return aType;
+    }
+
+    bool compiler::value_range(i_operand_type const& aOperand, std::int64_t& aLow, std::int64_t& aHigh)
+    {
+        auto const range = integer_range(operand_type{ aOperand });
+        if (!range)
+            return false;
+        aLow = range->low;
+        aHigh = range->high;
+        return true;
+    }
+
     void compiler::emit_js(construct aConstruct, neolib::i_string_view const& aSource)
     {
         if (aConstruct >= construct::Add)
@@ -892,10 +945,10 @@ namespace neos::language
         switch (aConstruct)
         {
         case construct::Module:
-            end_indented();
+            generator().end_indented();
             break;
         case construct::Function:
-            state().pendingInferred = true;
+            generator().set_pending_inferred();
             break;
         case construct::Let:
         case construct::Const:
@@ -903,7 +956,7 @@ namespace neos::language
         case construct::GlobalLet:
         case construct::GlobalConst:
         case construct::GlobalVar:
-            state().jsDeclaration = aConstruct;
+            js().jsDeclaration = aConstruct;
             break;
         case construct::Declarator:
             js_declarator(aSource);
@@ -928,16 +981,16 @@ namespace neos::language
         case construct::ForTest:
             {
                 auto const condition = pop_operand_value();
-                if (!iDeclarationPass)
+                if (!declaration_pass())
                     js_loop_test(aSource);
-                fragment test = iDeclarationPass ? fragment{} : js_to_boolean(condition);
+                fragment test = declaration_pass() ? fragment{} : js_to_boolean(condition);
                 test.valueType = type::Boolean;
                 test.fragmentSource = aSource;
                 push_operand(operand_type{ test });
             }
             break;
         case construct::Return:
-            emit_return(aSource);
+            generator().emit_return(aSource);
             break;
         case construct::Break:
         case construct::Continue:
@@ -974,7 +1027,7 @@ namespace neos::language
             push_operand(operand_type{ data<string>{ string{} } });
             break;
         case construct::TemplateSubstitution:
-            if (iDeclarationPass)
+            if (declaration_pass())
                 emit_js_operation(construct::Add);
             else
             {
@@ -987,56 +1040,6 @@ namespace neos::language
         }
     }
 
-    void compiler::complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource)
-    {
-        if (is_python())
-        {
-            py_complete_signature(aSignature, aSource);
-            return;
-        }
-        if (!state().pendingInferred)
-            return;
-        // (a function declared after top-level statements is not part of the entry point that they form)
-        if (state().function && current_function().implicitEntry)
-            suspend_entry();
-        if (state().function)
-            throw std::runtime_error("nested functions are not supported");
-        std::string name = current_scope().qualified_name().to_std_string() + "::" + aSignature.name().to_std_string();
-        while (name.starts_with("::"))
-            name.erase(0, 2);
-        if (aSignature.parameters().has_value())
-        {
-            auto const facts = iInference.parameters.find(name);
-            for (std::size_t i = 0u; i < aSignature.parameters().value().size(); ++i)
-            {
-                auto& parameter = aSignature.parameters().value()[i];
-                if (parameter.parameter_type() != type::UNKNOWN)
-                    continue;
-                auto t = facts != iInference.parameters.end() && i < facts->second.size() ? facts->second[i] : type::F64;
-                // (a number parameter only passed 32-bit integers is an i32)
-                if (t == type::F64 && iInference.ranges.contains(range_key{ nullptr, name + "#" + std::to_string(i) }))
-                    t = type::I32;
-                parameter.set_parameter_type(t);
-            }
-        }
-        auto const result = iInference.results.find(name);
-        aSignature.set_return_type(result != iInference.results.end() ? result->second : type::Void);
-    }
-
-    void compiler::suspend_entry()
-    {
-        state().suspendedEntry.emplace(*state().function, state().scopeStack.back());
-        state().scopeStack.pop_back();
-        state().function = std::nullopt;
-    }
-
-    void compiler::resume_entry()
-    {
-        auto const entry = *state().suspendedEntry;
-        state().suspendedEntry = std::nullopt;
-        state().scopeStack.push_back(entry.second);
-        state().function = entry.first;
-    }
 
     // --- integer ranges
 
@@ -1094,16 +1097,13 @@ namespace neos::language
         auto const info = iSymbolInfo.find(&aSymbol);
         if (info != iSymbolInfo.end() && info->second.site != nullptr)
             return range_key{ info->second.site, {} };
-        if (!state().function)
+        if (!in_function() || implicit_entry())
             return {};
-        auto const& function = iModule.functions[*state().function];
-        if (function.implicitEntry || function.scope == nullptr)
-            return {};
-        auto const& signature = function.scope->function_signature();
+        auto const& signature = generator().signature_of(current_function());
         if (signature.parameters().has_value())
             for (std::size_t i = 0u; i < signature.parameters().value().size(); ++i)
                 if (signature.parameters().value()[i].parameter_name() == aName)
-                    return range_key{ nullptr, function.name + "#" + std::to_string(i) };
+                    return range_key{ nullptr, generator().function_name(current_function()).to_std_string() + "#" + std::to_string(i) };
         return {};
     }
 
@@ -1114,7 +1114,7 @@ namespace neos::language
             // (not a 32-bit integer: an f64 from now on)
             iInference.notInt32.insert(aKey);
             if (iInference.ranges.erase(aKey) != 0u)
-                iInference.changed = true;
+                set_changed();
             return;
         }
         auto const observed = iInference.observed.find(aKey);
@@ -1124,17 +1124,17 @@ namespace neos::language
             observed->second = observed->second.join(*aRange);
         auto const fact = iInference.ranges.find(aKey);
         if (fact != iInference.ranges.end() && !fact->second.contains(*aRange))
-            iInference.changed = true;
+            set_changed();
     }
 
     void compiler::update_ranges()
     {
         // (after many passes a range that changes is no longer an integer range; so the passes end)
-        bool const converge = iInference.pass >= 24u;
+        bool const converge = generator().inference_pass() >= 24u;
         // a loop counter's update must be its only assignment
         for (auto const& counter : iInference.counters)
             if (iInference.assignments[counter] != 1u && iInference.notCounters.insert(counter).second)
-                iInference.changed = true;
+                set_changed();
         for (auto const& [key, observed] : iInference.observed)
         {
             if (iInference.notInt32.contains(key))
@@ -1146,13 +1146,13 @@ namespace neos::language
                 if (key.first == nullptr)
                 {
                     iInference.ranges.emplace(key, observed);
-                    iInference.changed = true;
+                    set_changed();
                 }
                 continue;
             }
             if (!fact->second.contains(observed))
             {
-                iInference.changed = true;
+                set_changed();
                 if (converge)
                 {
                     iInference.notInt32.insert(key);
@@ -1174,7 +1174,7 @@ namespace neos::language
             {
                 // narrow (once)
                 fact->second = observed;
-                iInference.changed = true;
+                set_changed();
             }
         }
     }
@@ -1184,8 +1184,8 @@ namespace neos::language
         // a loop whose test is "v < E", "v <= E", "v > E", "v >= E", "v * v <= E" or "v * v < E" (or one of these && ...) 
         // bounds the value of the counter v when its (only) assignment, an update by a positive integer constant at most once 
         // an iteration, happens
-        state().counterLoops.push_back(compilation_state::counter_loop{ aSource.to_std_string_view().data() });
-        auto& loop = state().counterLoops.back();
+        js().counterLoops.push_back(fragment_state::counter_loop{ aSource.to_std_string_view().data() });
+        auto& loop = js().counterLoops.back();
         auto const text = aSource.to_std_string_view();
         if (text.find("||") != std::string_view::npos || text.find('?') != std::string_view::npos)
             return;
@@ -1233,58 +1233,16 @@ namespace neos::language
             loop.minimum = limit->low;
     }
 
-    bool compiler::is_global(i_symbol_table_entry const& aSymbol) const
-    {
-        auto const info = iSymbolInfo.find(&aSymbol);
-        return info != iSymbolInfo.end() && info->second.global;
-    }
-
-    i_symbol_table_entry& compiler::define_global(std::string const& aName, type aType)
-    {
-        std::uint32_t index = 0u;
-        while (index < iInference.globals.size() && iInference.globals[index].first != aName)
-            ++index;
-        if (index == iInference.globals.size())
-            iInference.globals.emplace_back(aName, aType);
-        auto& symbols = state().program->symbolTable[&state().program->scope];
-        auto& entry = symbols.insert(neolib::string{ aName }, symbol_table_entry{ aType, index + 1u })->second();
-        auto& info = iSymbolInfo[&entry];
-        info.global = true;
-        info.sequence = ++iSymbolSequence;
-        return entry;
-    }
-
-    void compiler::declare_globals()
-    {
-        // globals (found by the previous pass) can be used by functions declared before them
-        if (iGlobalsDeclared)
-            return;
-        iGlobalsDeclared = true;
-        auto const globals = iInference.globals;
-        for (auto const& global : globals)
-            if (!iInference.entryGlobals.contains(global.first))
-                define_global(global.first, global.second);
-    }
-
-    void compiler::infer(std::string const& aWhat, std::optional<type> const& aOld, type aNew)
-    {
-        if (aOld != aNew)
-        {
-            iInference.changed = true;
-            if (trace() >= 1)
-                iContext.cout() << "Inferred type of " << aWhat << ": " << js_type_name(aNew) << std::endl;
-        }
-    }
 
     void compiler::js_declarator(neolib::i_string_view const& aSource)
     {
         auto const [name, rest] = leading_name(aSource.to_std_string_view());
         check_name(name);
         bool const hasValue = !rest.empty() && rest.front() == '=';
-        auto const kind = state().jsDeclaration.value_or(construct::Let);
+        auto const kind = js().jsDeclaration.value_or(construct::Let);
         bool const declaredGlobal = (kind == construct::GlobalLet || kind == construct::GlobalConst || kind == construct::GlobalVar);
         // (a top-level variable that no function uses is a local of the entry point)
-        bool const global = declaredGlobal && (iDeclarationPass || !iInference.entryGlobals.contains(name));
+        bool const global = declaredGlobal && (declaration_pass() || !generator().entry_global(neolib::string_view{ name }));
         bool const constant = (kind == construct::Const || kind == construct::GlobalConst);
         bool const hoisted = (kind == construct::Var || kind == construct::GlobalVar) || (declaredGlobal && !global);
         if (declaredGlobal)
@@ -1302,15 +1260,15 @@ namespace neos::language
         else if (constant)
             throw std::runtime_error("missing initializer in const declaration of '" + name + "'");
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             if (global)
             {
                 bool known = false;
-                for (auto const& g : iInference.globals)
-                    known = known || g.first == name;
+                for (std::size_t g = 0u; g < generator().global_count(); ++g)
+                    known = known || generator().global_name(g).to_std_string_view() == name;
                 if (!known)
-                    iInference.globals.emplace_back(name, type::F64);
+                    generator().add_global(neolib::string{ name }, type::F64);
             }
             else
                 ensure_function();
@@ -1341,7 +1299,7 @@ namespace neos::language
         i_symbol_table_entry* symbol = nullptr;
         if (global)
         {
-            symbol = find_symbol(state().program->scope, neolib::string_view{ name }, true);
+            symbol = find_symbol(generator().global_scope(), neolib::string_view{ name }, true);
             if (symbol == nullptr)
             {
                 infer("'" + name + "'", {}, t);
@@ -1349,9 +1307,9 @@ namespace neos::language
             }
             else if (symbol->type() != t)
             {
-                for (auto& g : iInference.globals)
-                    if (g.first == name)
-                        g.second = t;
+                for (std::size_t g = 0u; g < generator().global_count(); ++g)
+                    if (generator().global_name(g).to_std_string_view() == name)
+                        generator().set_global_type(g, t);
                 infer("'" + name + "'", symbol->type(), t);
                 push_operand(operand_type{ placeholder(fragment_kind::Statement, type::Void, aSource) });
                 return;
@@ -1364,19 +1322,19 @@ namespace neos::language
             {
                 // (a var redeclared in the same function is the same variable)
                 auto* existing = find_symbol(current_scope(), neolib::string_view{ name }, true);
-                if (existing != nullptr && iSymbolInfo[existing].position == nullptr && existing->type() == t)
+                if (existing != nullptr && !generator().is_block_scoped(*existing) && existing->type() == t)
                     symbol = existing;
             }
             if (symbol == nullptr)
             {
-                define_symbol(neolib::string{ name }, t, aSource);
+                generator().define_symbol(neolib::string{ name }, t, aSource);
                 symbol = find_symbol(current_scope(), neolib::string_view{ name }, true);
                 if (hoisted)
-                    iSymbolInfo[symbol].position = nullptr; // (not block scoped)
+                    generator().set_block_scoped(*symbol, false);
             }
         }
         auto& info = iSymbolInfo[symbol];
-        info.constant = false;
+        generator().set_constant(*symbol, false);
         info.declaration = value ? nullptr : position;
         info.site = position;
         // (a variable declared without a value is initialized to the zero of its type; JavaScript's undefined)
@@ -1384,27 +1342,27 @@ namespace neos::language
             value = t == type::String ? operand_type{ data<string>{ string{} } } : t == type::Boolean ?
                 operand_type{ data<boolean>{ false } } : operand_type{ data<f64>{ 0.0 } };
         push_operand(*value);
-        emit_assignment(neolib::string_view{ name }, aSource);
-        info.constant = constant;
+        generator().emit_assignment(neolib::string_view{ name }, aSource);
+        generator().set_constant(*symbol, constant);
     }
 
     void compiler::js_statement(neolib::i_string_view const& aSource)
     {
         // an assignment or update whose value is unused needs only its effect
-        auto& stack = state().operandStack;
-        if (!iDeclarationPass && !stack.empty() && stack.back().holds_alternative<i_fragment>() &&
+        auto stack = operands();
+        if (!declaration_pass() && !stack.empty() && stack.back().holds_alternative<i_fragment>() &&
             stack.back().get<i_fragment>().kind() == fragment_kind::Value && !stack.back().get<i_fragment>().source().empty())
         {
-            auto const form = state().jsStatementForms.find(stack.back().get<i_fragment>().source().to_std_string_view().data());
-            if (form != state().jsStatementForms.end() && form->second.fragmentSource == stack.back().get<i_fragment>().source())
+            auto const form = js().jsStatementForms.find(stack.back().get<i_fragment>().source().to_std_string_view().data());
+            if (form != js().jsStatementForms.end() && form->second.fragmentSource == stack.back().get<i_fragment>().source())
             {
                 auto statement = form->second;
                 statement.fragmentSource = aSource;
-                stack.back() = operand_type{ statement };
+                stack.set_back(operand_type{ statement });
                 return;
             }
         }
-        emit_statement(aSource);
+        generator().emit_statement(aSource);
     }
 
     void compiler::js_global_statement(neolib::i_string_view const& aSource)
@@ -1445,7 +1403,7 @@ namespace neos::language
         std::optional<operand_type> value;
         if (!update)
             value = pop_operand_value();
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             fragment dummy;
             dummy.valueType = type::F64;
@@ -1457,14 +1415,14 @@ namespace neos::language
             throw std::runtime_error("'" + name + "' is not defined");
         if (symbol->type() == type::Function)
             throw std::runtime_error("cannot assign to function '" + name + "'");
-        if (is_global(*symbol) && state().function && !current_function().implicitEntry)
-            iInference.functionGlobals.insert(name);
+        if (is_global(*symbol) && in_function() && !implicit_entry())
+            generator().function_global(neolib::string{ name });
         auto& info = iSymbolInfo[symbol];
-        if (info.constant)
+        if (generator().is_constant(*symbol))
             throw std::runtime_error("assignment to constant variable '" + name + "'");
         if (info.site != nullptr)
             ++iInference.assignments[info.site];
-        bool const global = info.global;
+        bool const global = is_global(*symbol);
         type const variableType = symbol->type() == type::I32 ? type::F64 : symbol->type(); // (an i32 variable is a number)
         if (update && variableType != type::F64)
             throw std::runtime_error("'" + name + "' is a " + js_type_name(symbol->type()) + " (not a number)");
@@ -1472,7 +1430,7 @@ namespace neos::language
         {
             // a loop counter's value when it is updated by a positive integer constant is bounded by its loop's test
             auto const step = update ? std::optional<interval>{ interval{ 1, 1 } } : integer_range(*value);
-            auto const& loops = state().counterLoops;
+            auto const& loops = js().counterLoops;
             if (info.site != nullptr && step && step->low > 0 && !loops.empty() && loops.back().counter == info.site &&
                 !iInference.notCounters.contains(info.site))
             {
@@ -1484,7 +1442,7 @@ namespace neos::language
                 if (iRangeBound)
                 {
                     iInference.counters.insert(info.site);
-                    state().counterUpdates.push_back(compilation_state::counter_update{ info.site, loop.test, text.data() });
+                    js().counterUpdates.push_back(fragment_state::counter_update{ info.site, loop.test, text.data() });
                 }
             }
             push_operand(operand_type{ symbol_reference{ current_scope(), neolib::string{ name } } });
@@ -1547,7 +1505,7 @@ namespace neos::language
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
         append(statement, valueCode);
         set(statement);
-        state().jsStatementForms[text.data()] = statement;
+        js().jsStatementForms[text.data()] = statement;
         push_operand(operand_type{ expression });
     }
 
@@ -1555,10 +1513,10 @@ namespace neos::language
     {
         auto const name = std::string{ trimmed(aSource.to_std_string_view()) };
         check_name(name);
-        auto const* const symbol = iDeclarationPass ? nullptr : find_symbol(current_scope(), neolib::string_view{ name });
-        if (symbol != nullptr && is_global(*symbol) && state().function && !current_function().implicitEntry)
-            iInference.functionGlobals.insert(name);
-        if (!iDeclarationPass && symbol == nullptr)
+        auto const* const symbol = declaration_pass() ? nullptr : find_symbol(current_scope(), neolib::string_view{ name });
+        if (symbol != nullptr && is_global(*symbol) && in_function() && !implicit_entry())
+            generator().function_global(neolib::string{ name });
+        if (!declaration_pass() && symbol == nullptr)
         {
             if (name == "NaN")
             {
@@ -1583,7 +1541,7 @@ namespace neos::language
         auto const whenFalse = pop_operand_value();
         auto const whenTrue = pop_operand_value();
         auto const condition = pop_operand_value();
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             fragment dummy;
             dummy.valueType = type::F64;
@@ -1618,7 +1576,7 @@ namespace neos::language
             throw std::runtime_error("if statement body expected");
         auto const condition = pop_operand_value();
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
-        if (!iDeclarationPass)
+        if (!declaration_pass())
         {
             auto& code = statement.fragmentCode.as_std_vector();
             append(statement, js_to_boolean(condition));
@@ -1636,7 +1594,7 @@ namespace neos::language
 
     void compiler::js_loop(construct aConstruct, neolib::i_string_view const& aSource)
     {
-        auto& stack = state().operandStack;
+        auto stack = operands();
         auto const source = aSource.to_std_string_view();
         auto const in = [&](i_fragment const& aFragment, std::pair<std::size_t, std::size_t> const& aRegion)
         {
@@ -1646,7 +1604,7 @@ namespace neos::language
         };
         auto const top_in = [&](fragment_kind aKind, std::pair<std::size_t, std::size_t> const& aRegion)
         {
-            return stack.size() > (state().function ? current_function().operandBase : 0u) && stack.back().holds_alternative<i_fragment>() &&
+            return stack.size() > operand_base() && stack.back().holds_alternative<i_fragment>() &&
                 stack.back().get<i_fragment>().kind() == aKind && in(stack.back().get<i_fragment>(), aRegion);
         };
         auto const pop = [&]()
@@ -1689,30 +1647,30 @@ namespace neos::language
         }
         if (!body)
             throw std::runtime_error("loop body expected");
-        if (!iDeclarationPass)
+        if (!declaration_pass())
         {
             // a loop counter's update must be in its loop (and not in a loop within it)
             char const* own = nullptr;
-            auto& loops = state().counterLoops;
+            auto& loops = js().counterLoops;
             auto const within = [&](char const* aPosition) { return aPosition >= source.data() && aPosition < source.data() + source.size(); };
             if (aConstruct != construct::DoWhile && !loops.empty() && within(loops.back().test))
             {
                 own = loops.back().test;
                 loops.pop_back();
             }
-            auto& updates = state().counterUpdates;
+            auto& updates = js().counterUpdates;
             for (auto u = updates.begin(); u != updates.end();)
                 if (within(u->position))
                 {
                     if (u->test != own && iInference.notCounters.insert(u->counter).second)
-                        iInference.changed = true;
+                        set_changed();
                     u = updates.erase(u);
                 }
                 else
                     ++u;
         }
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
-        if (!iDeclarationPass)
+        if (!declaration_pass())
         {
             auto& code = statement.fragmentCode.as_std_vector();
             // block (exit) loop [test] block (iteration) body end [update] br loop end end
@@ -1770,7 +1728,7 @@ namespace neos::language
         if (aConstruct == construct::Case)
         {
             auto const value = pop_operand_value();
-            fragment test = iDeclarationPass ? fragment{} : materialize(value);
+            fragment test = declaration_pass() ? fragment{} : materialize(value);
             test.fragmentKind = fragment_kind::Value;
             test.fragmentSource = aSource;
             push_operand(operand_type{ test });
@@ -1781,7 +1739,7 @@ namespace neos::language
 
     void compiler::js_switch(neolib::i_string_view const& aSource)
     {
-        auto& stack = state().operandStack;
+        auto stack = operands();
         auto const label = [&](i_fragment const& aFragment)
         {
             auto const text = aFragment.source().to_std_string_view();
@@ -1790,7 +1748,7 @@ namespace neos::language
         };
         // the labels and statements of the switch's body (in order)
         std::vector<fragment> items;
-        while (stack.size() > (state().function ? current_function().operandBase : 0u) && stack.back().holds_alternative<i_fragment>() && 
+        while (stack.size() > operand_base() && stack.back().holds_alternative<i_fragment>() && 
             within(stack.back().get<i_fragment>().source(), aSource) &&
             (stack.back().get<i_fragment>().kind() == fragment_kind::Statement || label(stack.back().get<i_fragment>())))
         {
@@ -1814,7 +1772,7 @@ namespace neos::language
         }
         auto const discriminant = pop_operand_value();
         auto statement = make_fragment(fragment_kind::Statement, type::Void, aSource);
-        if (!iDeclarationPass)
+        if (!declaration_pass())
         {
             auto& code = statement.fragmentCode.as_std_vector();
             auto value = materialize(discriminant);
@@ -1885,7 +1843,7 @@ namespace neos::language
         auto const [name, rest] = leading_name(aSource.to_std_string_view());
         check_name(name);
         auto arguments = pop_fragments(aSource, fragment_kind::Argument);
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             fragment dummy;
             dummy.valueType = type::F64;
@@ -1899,16 +1857,15 @@ namespace neos::language
         {
             if (symbol->type() != type::Function)
                 throw std::runtime_error("'" + name + "' is not a function");
-            auto const& function = iModule.functions[symbol->index()];
-            signature = function.scope != nullptr ? function_signature{ function.scope->function_signature() } : function.signature;
-            inferred = function.inferred;
+            signature = function_signature{ generator().signature_of(symbol->index()) };
+            inferred = generator().function_inferred(symbol->index());
         }
         else
-            for (auto const& declaration : iForwardDeclarations)
-                if (declaration.name == name)
+            for (std::size_t d = 0u; d < generator().forward_declaration_count(); ++d)
+                if (generator().forward_declaration_name(d).to_std_string_view() == name)
                 {
-                    signature = declaration.signature;
-                    inferred = declaration.inferred;
+                    signature = function_signature{ generator().forward_declaration_signature(d) };
+                    inferred = generator().forward_declaration_inferred(d);
                 }
         if (!signature)
         {
@@ -1923,9 +1880,7 @@ namespace neos::language
         {
             // the type of a parameter is that of the arguments passed to it
             auto& seen = iInference.arguments[name];
-            auto& facts = iInference.parameters[name];
             seen.resize(parameterCount);
-            facts.resize(parameterCount, type::F64);
             bool changed = false;
             for (std::size_t i = 0u; i < parameterCount; ++i)
             {
@@ -1934,10 +1889,13 @@ namespace neos::language
                     throw std::runtime_error("argument " + std::to_string(i + 1u) + " of '" + name + "' is a " + js_type_name(*seen[i]) +
                         " in one call and a " + js_type_name(t) + " in another");
                 seen[i] = t;
-                if (facts[i] != t)
+                auto fact = generator().inferred_parameter(neolib::string_view{ name }, static_cast<std::uint32_t>(i));
+                if (fact == type::UNKNOWN)
+                    fact = type::F64;
+                if (fact != t)
                 {
-                    infer("parameter " + std::to_string(i + 1u) + " of '" + name + "'", facts[i], t);
-                    facts[i] = t;
+                    infer("parameter " + std::to_string(i + 1u) + " of '" + name + "'", fact, t);
+                    generator().set_inferred_parameter(neolib::string_view{ name }, static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(parameterCount), t);
                 }
                 auto const parameterType = signature->parameters().value()[i].parameter_type();
                 if ((parameterType == type::I32 ? type::F64 : parameterType) != t)
@@ -1970,7 +1928,7 @@ namespace neos::language
             }
             push_operand(operand_type{ argument });
         }
-        emit_call(neolib::string_view{ name }, aSource);
+        generator().emit_call(neolib::string_view{ name }, aSource);
     }
 
     void compiler::js_member(construct aConstruct, neolib::i_string_view const& aSource)
@@ -1991,7 +1949,7 @@ namespace neos::language
         else
             index = pop_operand_value();
         auto const receiver = pop_operand_value();
-        if (iDeclarationPass)
+        if (declaration_pass())
         {
             fragment dummy;
             dummy.valueType = type::F64;

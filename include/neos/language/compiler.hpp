@@ -29,11 +29,11 @@
 #include <neos/fwd.hpp>
 #include <neos/language/schema.hpp>
 #include <neos/language/ast.hpp>
-#include <neos/language/javascript.hpp>
-#include <neos/language/python.hpp>
 #include <neos/language/semantic_concept.hpp>
 #include <neos/language/i_concept_library.hpp>
 #include <neos/language/i_compiler.hpp>
+#include <neos/language/i_code_generator.hpp>
+#include <neos/language/i_language_compiler.hpp>
 #include <neos/language/scope.hpp>
 #include <neos/language/symbol_table.hpp>
 
@@ -180,7 +180,7 @@ namespace neos::language
 
     using fold_stack = neolib::vector<neolib::ref_ptr<i_ast_node>>;
 
-    class compiler : public i_compiler
+    class compiler : public i_code_generator
     {
     private:
         using source_iterator = const_source_iterator;
@@ -222,54 +222,9 @@ namespace neos::language
             };
             std::vector<indented> indentStack;
             bool implicitFunctionFinished = false;
-            // JavaScript
-            std::optional<javascript::construct> jsDeclaration;  ///< the kind of declaration being compiled
+            i_language_compiler* language = nullptr;    ///< the language compiler of the unit's language (if it has one)
             bool pendingInferred = false;               ///< the function being declared has inferred types
             std::optional<std::pair<std::uint32_t, neolib::ref_ptr<i_scope>>> suspendedEntry; ///< the implicit entry point while a function is compiled
-            std::unordered_map<char const*, language::fragment> jsStatementForms; ///< assignments and updates whose values are unused
-            struct counter_loop
-            {
-                char const* test = nullptr;             ///< the loop's test
-                char const* counter = nullptr;          ///< the variable (declaration) the test bounds
-                std::optional<std::int64_t> maximum;    ///< the counter's largest value while the test is true
-                std::optional<std::int64_t> minimum;    ///< the counter's smallest value while the test is true
-            };
-            std::vector<counter_loop> counterLoops;     ///< the loops being compiled (innermost last)
-            struct counter_update
-            {
-                char const* counter;
-                char const* test;                       ///< the loop whose test bounds it
-                char const* position;
-            };
-            std::vector<counter_update> counterUpdates; ///< updates whose loop has not been compiled yet
-            // Python
-            struct py_target
-            {
-                enum class kind_t { Name, Item, Attribute } kind = kind_t::Name;
-                std::string name;                           ///< (Name: the variable; Attribute: the attribute)
-                std::optional<language::fragment> receiver; ///< (Item and Attribute)
-                std::optional<language::fragment> key;      ///< (Item)
-                char const* position = nullptr;             ///< (its source)
-            };
-            std::vector<py_target> pyTargets;               ///< assignment targets (the assignment that follows them pops them)
-            struct py_access
-            {
-                language::fragment receiver;
-                std::optional<language::fragment> key;      ///< (a subscript)
-                std::string attribute;                      ///< (an attribute)
-            };
-            std::map<char const*, py_access> pyAccesses;    ///< subscripts and attributes (by their source), which can be targets
-            std::map<char const*, std::vector<language::fragment>> pyTuples; ///< tuple displays (by their source): their items
-            std::vector<std::size_t> pyComprehensions;      ///< comprehensions being compiled: the number of the statement's temporaries before them
-            struct py_clause
-            {
-                std::vector<py_target> targets;             ///< (for)
-                language::fragment value;                   ///< the iterable (for) or the condition (if)
-                char const* position = nullptr;
-            };
-            std::vector<py_clause> pyClauses;               ///< the for and if clauses of comprehensions
-            std::map<char const*, std::pair<std::uint32_t, type>> pyChains; ///< comparisons (by their source) that a chained comparison follows: 
-                                                                    ///< the local that holds their right operand
         };
         struct symbol_info
         {
@@ -278,8 +233,6 @@ namespace neos::language
             bool retired = false;
             bool global = false;                        ///< a global variable (index is that of the WASM global)
             bool constant = false;
-            char const* declaration = nullptr;          ///< declared without a value (its type is that of the value first assigned to it)
-            char const* site = nullptr;                 ///< (JavaScript) its declaration
         };
         struct forward_declaration
         {
@@ -287,24 +240,6 @@ namespace neos::language
             function_signature signature;
             bool stub = false;
             bool inferred = false;
-        };
-        // (Python) an int expression (see py_integer_operation): a fast version (inline, without calls or blocks: a value that is not
-        // a small integer, or a result that would not be one, branches out of the block that encloses it (br_if 0)) and a slow
-        // version (calls of the runtime plugin: its result is a new reference)
-        struct py_integer_expression
-        {
-            fragment prefix;                    ///< code that runs first (operands' snapshots: calls)
-            fragment fast;
-            fragment slow;
-            fragment zeroFast;                  ///< (if any) a cheaper fast version, whose value is zero if and only if the fast version's is
-            bool bails = false;                 ///< the fast version can branch out
-            bool stable = false;                ///< its versions read no variable (only temporaries that its prefix sets): other code 
-                                                ///< that runs after its prefix does not change its value
-            std::int64_t low = 0;               ///< the fast version's result is within [low, high]
-            std::int64_t high = 0;
-            std::set<std::uint32_t> small;      ///< the locals that the fast version checks are small integers
-            std::uint32_t height = 1u;          ///< (the slow version's temporaries are those of its height)
-            std::optional<std::uint32_t> holder; ///< the object temporary of the expression's value (as a whole)
         };
         struct wasm_function
         {
@@ -324,23 +259,6 @@ namespace neos::language
             std::vector<std::uint8_t> body;
             std::vector<std::pair<std::uint32_t, std::uint32_t>> relocations;
             std::size_t operandBase = 0u;
-            // (Python)
-            std::vector<std::uint32_t> pendingObjects;  ///< object temporaries of the statement being compiled (released at its end)
-            std::vector<std::uint32_t> freeObjects;     ///< object temporaries that can be reused
-            std::vector<std::uint32_t> objectVariables; ///< locals and parameters that hold objects (released when the function returns)
-            std::vector<std::uint32_t> integerVariables; ///< (Python) locals and parameters that hold integers of any size (an integer
-                                                        ///< object's reference is released when the function returns)
-            bool returns = false;                       ///< a return statement has been compiled
-            std::set<std::uint32_t> objectTemporaries;  ///< (Python) all the locals used as object temporaries
-            std::map<std::uint32_t, std::uint32_t> pyScratch; ///< (Python) locals that code uses only between its own instructions (by role)
-            std::map<std::vector<std::uint8_t>, py_integer_expression> pyIntegers; ///< (Python) int expressions (by their code)
-            std::vector<std::uint32_t> consumedObjects; ///< (Python) object temporaries of int expressions that other code took over
-                                                        ///< (reusable after the statement)
-            std::map<std::vector<std::uint8_t>, fragment> pyIntegerStrings; ///< (Python) str() of an int: the int (by the str's code)
-            std::map<std::uint32_t, std::pair<std::int64_t, std::int64_t>> pyCounters; ///< (Python) int variables that only for loops
-                                                        ///< over ranges bind (small integers): their values' range
-            std::vector<std::uint32_t> pendingIntegers; ///< (Python) integer temporaries of the statement being compiled
-            std::vector<std::uint32_t> freeIntegers;    ///< (Python) integer temporaries that can be reused
         };
         struct wasm_module
         {
@@ -357,7 +275,6 @@ namespace neos::language
             interval join(interval const& aOther) const { return { std::min(low, aOther.low), std::max(high, aOther.high) }; }
             bool operator==(interval const&) const = default;
         };
-        using range_key = std::pair<char const*, std::string>;
         // types inferred from the code (each compilation pass uses the types found by the previous one; passes are 
         // repeated until they no longer change)
         struct inference
@@ -365,42 +282,13 @@ namespace neos::language
             std::map<std::string, std::vector<type>> parameters;    ///< function -> types of its arguments
             std::map<std::string, type> results;                    ///< function -> type of the values it returns
             std::vector<std::pair<std::string, type>> globals;     ///< global variables (in order of declaration)
-            std::map<char const*, type> declarations;               ///< variable declared without a value -> type of the value assigned to it
-            std::map<std::string, std::vector<std::optional<type>>> arguments; ///< (this pass)
             std::map<std::string, type> returned;                   ///< (this pass)
             std::set<std::string> functionGlobals;                  ///< (this pass) global variables used by functions
             std::set<std::string> entryGlobals;                     ///< global variables only used by top-level code (locals of the entry point)
-            // integer ranges: a number variable (declaration) or parameter ("function#index") whose values are 32-bit integers
-            // (never -0) is an i32; the ranges of the values assigned to it must be within its range (else its range grows)
-            std::map<range_key, interval> ranges;
-            std::set<range_key> notInt32;                           ///< assigned a number that is not a 32-bit integer
-            std::map<range_key, std::uint32_t> grown;               ///< (widened after growing once)
-            std::set<range_key> narrowed;
-            std::set<char const*> notCounters;                      ///< variables that are not loop counters
-            std::map<range_key, interval> observed;                 ///< (this pass) ranges of the values assigned
-            std::map<char const*, std::uint32_t> assignments;       ///< (this pass) number of assignments to a variable
-            std::set<char const*> counters;                         ///< (this pass) variables updated as loop counters
             std::uint32_t pass = 0u;
-            std::map<std::string, bool> declaredGlobals;            ///< (this pass) top-level declarations (true: var)
-            // (Python)
-            std::map<std::string, std::map<std::string, type>> pyLocals;  ///< function -> variables declared at its start (variables
-                                                                    ///< that hold objects or whose type changes)
-            std::set<std::string> pyFree;                           ///< names that functions use but do not bind
-            std::set<std::string> pyModuleNames;                    ///< names that top-level statements bind
-            std::map<std::string, std::set<std::string>> pyGlobals; ///< function -> names it declares global
-            std::map<std::string, std::map<std::string, interval>> pyCounters; ///< function -> its int variables that only for loops over
-                                                                    ///< ranges bind -> the range of their values (found by the 
-                                                                    ///< previous pass)
-            std::map<std::string, std::map<std::string, std::optional<interval>>> pyCounterBindings; ///< (this pass) function -> variable ->
-                                                                    ///< the range of the values for loops over ranges bind (none: 
-                                                                    ///< something else binds it)
             bool changed = false;
         };
-    public:
-        static constexpr std::uint32_t BranchTarget = 0x40000000u;  ///< relocation: break (or continue) out of the enclosing loop
-        static constexpr std::uint32_t ContinueTarget = 0x20000000u;
     private:
-        static constexpr std::uint32_t DeferredCall = 0x80000000u;
         using compilation_state_stack_t = std::vector<std::unique_ptr<compilation_state>>;
     public:
         compiler(i_context& aContext);
@@ -461,125 +349,106 @@ namespace neos::language
         void set_preparse(bool aPreparse);                          ///< (e.g. Python's joining of lines within brackets); on by default)
         bool trap_on_overflow() const;                              ///< (integer arithmetic whose result overflows its (fixed size) type 
         void set_trap_on_overflow(bool aTrapOnOverflow);            ///< traps; off by default: it wraps)
-        bool bigint_promotion() const;                              ///< (a language's integers are of any size: a result that overflows 
+                                                                    ///< (bigint_promotion: a language's integers are of any size: a result that overflows 
         std::optional<bool> bigint_promotion_override() const;      ///< is promoted to an arbitrary precision integer (e.g. Python's int); 
         void set_bigint_promotion_override(std::optional<bool> aBigintPromotion); ///< the schema's bigint.promotion, unless overridden)
+        void add_language_compiler(i_language_compiler& aLanguageCompiler); ///< (a compiler plugin's: the code generation of its language)
+        // i_code_generator
+    public:
+        bool declaration_pass() const final;
+        std::uint32_t inference_pass() const final;
+        void set_changed() final;
+        void trace_output(neolib::i_string const& aText) final;
+        bool bigint_promotion() const final;
+        bool overflow_traps() const final;
+        std::size_t operand_count() const final;
+        std::size_t operand_base() const final;
+        i_operand_type const& operand(std::size_t aIndex) const final;
+        void set_operand(std::size_t aIndex, i_operand_type const& aOperand) final;
+        void insert_operand(std::size_t aIndex, i_operand_type const& aOperand) final;
+        void erase_operands(std::size_t aIndex, std::size_t aCount = 1u) final;
+        i_fragment const& materialize_operand(i_operand_type const& aOperand) final;
+        i_fragment const& materialize_operand(i_operand_type const& aOperand, type aTargetType) final;
+        i_fragment const& coerce_value(i_fragment const& aValue, type aTarget) final;
+        void pop_fragments_into(neolib::i_string_view const& aSource, fragment_kind aKind, neolib::i_vector<i_fragment>& aFragments) final;
+        std::uint32_t temporary(type aType) final;
+        std::uint32_t string_literal(neolib::i_string const& aValue) final;
+        std::uint32_t runtime_function(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters, type aReturnType) final;
+        bool in_function() const final;
+        std::uint32_t current_function_index() const final;
+        void ensure_function() final;
+        void suspend_entry() final;
+        void set_pending_inferred() final;
+        neolib::i_string const& function_name(std::uint32_t aFunction) const final;
+        i_function_signature const& signature_of(std::uint32_t aFunction) const final;
+        bool function_inferred(std::uint32_t aFunction) const final;
+        bool function_implicit_entry(std::uint32_t aFunction) const final;
+        std::size_t forward_declaration_count() const final;
+        neolib::i_string_view const& forward_declaration_name(std::size_t aIndex) const final;
+        i_function_signature const& forward_declaration_signature(std::size_t aIndex) const final;
+        bool forward_declaration_stub(std::size_t aIndex) const final;
+        bool forward_declaration_inferred(std::size_t aIndex) const final;
+        std::size_t function_count() const final;
+        bool function_imported(std::uint32_t aFunction) const final;
+        bool function_stub(std::uint32_t aFunction) const final;
+        bool function_intrinsic(std::uint32_t aFunction) const final;
+        bool function_entry(std::uint32_t aFunction) const final;
+        i_fragment const& function_body(std::uint32_t aFunction) const final;
+        void set_function_body(std::uint32_t aFunction, i_fragment const& aBody) final;
+        std::uint32_t deferred_call(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters) final;
+        type inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const final;
+        void set_inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex, std::uint32_t aCount, type aType) final;
+        void infer(neolib::i_string const& aWhat, type aOld, type aNew) final;
+        i_scope const& global_scope() const final;
+        i_symbol_table_entry* find_symbol(i_scope const& aScope, neolib::i_string_view const& aName, bool aThisScopeOnly = false) const final;
+        i_symbol_table_entry& define_global(neolib::i_string const& aName, type aType) final;
+        void declare_globals() final;
+        bool is_global(i_symbol_table_entry const& aSymbol) const final;
+        bool is_constant(i_symbol_table_entry const& aSymbol) const final;
+        void set_constant(i_symbol_table_entry const& aSymbol, bool aConstant) final;
+        bool is_block_scoped(i_symbol_table_entry const& aSymbol) const final;
+        void set_block_scoped(i_symbol_table_entry const& aSymbol, bool aBlockScoped) final;
+        void retire_symbols(neolib::i_string_view const& aSource) final;
+        std::size_t indented_count() const final;
+        indented_construct indented_kind(std::size_t aIndex) const final;
+        bool indented_try_else(std::size_t aIndex) const final;
+        void set_loop_epilogue(i_fragment const& aEpilogue) final;
+        void finalize_suspended(std::size_t aIndent) final;
+        std::size_t global_count() const final;
+        neolib::i_string const& global_name(std::size_t aIndex) const final;
+        type global_type(std::size_t aIndex) const final;
+        void add_global(neolib::i_string const& aName, type aType) final;
+        void set_global_type(std::size_t aIndex, type aType) final;
+        bool entry_global(neolib::i_string_view const& aName) const final;
+        void function_global(neolib::i_string const& aName) final;
     private:
         const compilation_state& state() const;
         compilation_state& state();
         fold_stack& fold_stack();
-        i_symbol_table_entry* find_symbol(i_scope const& aScope, neolib::i_string_view const& aName, bool aThisScopeOnly = false) const;
         wasm_function& current_function();
         std::uint32_t add_function(std::string const& aName, bool aImported);
         std::uint32_t runtime_function(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
+        std::uint32_t string_literal(std::string const& aValue);
         void finish_function();
         fragment materialize(operand_type const& aOperand, std::optional<type> aTargetType = {});
+        i_language_compiler* language() const;                  ///< (that of the fragment being compiled)
+        i_language_compiler* language(std::string const& aLanguage) const;
         fragment pop_value();
         std::vector<fragment> pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
-        std::uint32_t string_literal(std::string const& aValue);
         void emit_module(program& aProgram);
-        void retire_symbols(neolib::i_string_view const& aSource);
-        std::uint32_t temporary(type aType);
         void check_rebinding(i_symbol_table_entry const& aVariable, neolib::i_string_view const& aName, type aValueType) const;
         std::optional<std::size_t> line_indent(neolib::i_string_view const& aSource) const;
         void close_indented(std::size_t aIndent);
-        void finalize_suspended(std::size_t aIndent);
         void finalize_indented();
-        void ensure_function();
+        fragment language_construct(compilation_state::indented const& aConstruct);
         fragment take_body(std::size_t aBodyBase);
         void wrap_expression_body(neolib::i_string_view const& aSource);
-        // JavaScript
-        void emit_js(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        void emit_js_operation(javascript::construct aOperation);
-        type js_type(operand_type const& aOperand) const;
-        operand_type js_to_number(operand_type const& aOperand);
-        operand_type js_to_string(operand_type const& aOperand, bool aInspect = false);
-        fragment js_to_boolean(operand_type const& aOperand);
-        fragment js_to_int32(operand_type const& aOperand);
-        operand_type pop_operand_value();
-        void js_declarator(neolib::i_string_view const& aSource);
-        void js_assignment(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        void js_call(neolib::i_string_view const& aSource);
-        void js_member(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        bool js_builtin(std::string const& aName, std::optional<operand_type> const& aReceiver, std::vector<fragment>& aArguments, neolib::i_string_view const& aSource);
-        void js_if(neolib::i_string_view const& aSource);
-        void js_loop(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        void js_conditional(neolib::i_string_view const& aSource);
-        void js_variable(neolib::i_string_view const& aSource);
-        void js_global_statement(neolib::i_string_view const& aSource);
-        void js_statement(neolib::i_string_view const& aSource);
-        void js_branch(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        void js_case(javascript::construct aConstruct, neolib::i_string_view const& aSource);
-        void js_switch(neolib::i_string_view const& aSource);
-        void declare_globals();
         i_symbol_table_entry& define_global(std::string const& aName, type aType);
         void infer(std::string const& aWhat, std::optional<type> const& aOld, type aNew);
-        void emit_call_to(fragment& aTarget, std::uint32_t aFunction);
-        std::uint32_t js_runtime(std::string const& aName, std::vector<type> const& aParameters, type aReturnType);
-        bool is_global(i_symbol_table_entry const& aSymbol) const;
         bool inline_call(fragment& aCall, wasm_function const& aCallee, std::size_t aParameterCount);
         bool strip_call(fragment& aFragment, std::string_view aVmFunction);
-        std::optional<interval> integer_range(operand_type const& aOperand) const;
-        std::optional<range_key> range_key_of(i_symbol_table_entry const& aSymbol, std::string const& aName) const;
-        void observe_range(range_key const& aKey, std::optional<interval> const& aRange);
-        void update_ranges();
-        void js_loop_test(neolib::i_string_view const& aSource);
-        std::optional<type> integer_type(operand_type const& aOperand) const;
-        void suspend_entry();
         void resume_entry();
         void coerce(fragment& aValue, type aTarget);
-        // Python
-        bool is_python() const;
-        void emit_python(python::construct aConstruct, neolib::i_string_view const& aSource);
-        void py_join_lines(i_source_fragment& aFragment);
-        void py_complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource);
-        operand_type py_pop();
-        type py_type(operand_type const& aOperand) const;
-        fragment py_object(operand_type const& aOperand);
-        fragment py_owned(fragment aValue);
-        fragment py_flush();
-        fragment py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept = {});
-        void py_coerce(fragment& aValue, type aTarget);
-        fragment py_name(std::string const& aName);
-        fragment py_runtime_call(std::string const& aName, std::vector<type> const& aParameters, type aResult, std::vector<fragment> const& aArguments);
-        fragment py_string(std::string const& aValue);
-        std::optional<fragment> py_big_literal(operand_type const& aOperand);
-        fragment py_small_integers(std::vector<std::uint32_t> const& aLocals);
-        fragment py_release_integer(std::uint32_t aVariable, bool aGlobal);
-        fragment py_retain_integer(std::uint32_t aLocal);
-        fragment py_park_integer(fragment aValue);
-        std::uint32_t py_scratch(std::uint32_t aRole, type aType);
-        bool py_big_integers() const;
-        void py_bound(std::string const& aName, std::optional<interval> const& aCounter = {});
-        void py_update_counters();
-        std::optional<std::pair<std::int64_t, std::int64_t>> py_counter(std::uint32_t aLocal);
-        void py_coerce_integer(fragment& aValue, type aTarget);
-        void py_integer_operation(python::construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs);
-        void py_integer_divide_or_power(python::construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs);
-        std::optional<py_integer_expression> py_integer_expression_of(fragment const& aValue);
-        fragment py_integer_value(py_integer_expression const& aExpression, bool aHeld);
-        fragment py_integer_fragment(py_integer_expression aExpression);
-        std::uint32_t py_integer_temporary();
-        void py_operation(python::construct aConstruct, bool aInplace = false, neolib::i_string_view const* aSource = nullptr);
-        void py_bind(compilation_state::py_target const& aTarget, operand_type const& aValue, fragment& aStatement);
-        void py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement);
-        i_symbol_table_entry& py_variable(std::string const& aName, type aType);
-        void py_kind_change(std::string const& aName);
-        void py_call(neolib::i_string_view const& aSource);
-        std::optional<std::vector<fragment>> py_bind_arguments(std::string const& aFunction, std::vector<fragment> const& aArguments,
-            std::vector<std::optional<std::string>> const& aKeywords);
-        void py_assign(python::construct aConstruct, neolib::i_string_view const& aSource);
-        void py_import(python::construct aConstruct, neolib::i_string_view const& aSource);
-        void py_return(neolib::i_string_view const& aSource);
-        void py_for_in(neolib::i_string_view const& aSource);
-        void py_function_start();
-        void py_comprehension(neolib::i_string_view const& aSource, bool aDict = false);
-        std::uint32_t py_try_depth(bool aLoop);
-        fragment py_function_end(bool aImplicit);
-        void py_try(compilation_state::indented& aConstruct, fragment& aStatement);
-        void py_with(compilation_state::indented& aConstruct, fragment& aStatement);
-        void py_error_checks(wasm_function& aFunction);
-        std::uint32_t py_error_global();
         bool fold();
         bool fold2();
         static std::string location(const translation_unit& aUnit, const i_source_fragment& aFragment, source_iterator aSourcePos, bool aShowFragmentFilePath = true);
@@ -595,25 +464,17 @@ namespace neos::language
         bool iPreparse = true;
         bool iTrapOnOverflow = false;
         std::optional<bool> iBigintPromotion;
-        bool overflow_traps() const;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;
         std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;
         std::uint64_t iSymbolSequence = 0u;
         bool iDeclarationPass = false;
         std::vector<forward_declaration> iForwardDeclarations;
-        // (Python: the parameters of the program's functions)
-        struct py_parameter
-        {
-            enum kind_t { Positional, KeywordOnly, VarArgs, VarKeywords } kind = Positional;
-            std::string name;
-            bool hasDefault = false;
-        };
-        std::map<std::string, std::vector<py_parameter>> iPyParameters;
         std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
         inference iInference;
         bool iGlobalsDeclared = false;
         std::map<void const*, std::pair<bool, std::string>> iParsed; ///< parser -> source of its last successful parse
-        std::optional<std::pair<range_key, interval>> iRangeBound;  ///< (a loop counter's range when it is updated)
+        std::vector<neolib::ref_ptr<i_language_compiler>> iLanguageCompilers;
+        fragment iResult;                                       ///< (i_code_generator: the fragment returned)
     };
 }

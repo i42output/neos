@@ -143,6 +143,11 @@ namespace neos::language
         Else
     };
 
+    // (a fragment's relocations: a code offset and the index of the function called or one of these)
+    constexpr std::uint32_t BranchTarget = 0x40000000u;     ///< break (or continue) out of the enclosing loop (its depth)
+    constexpr std::uint32_t ContinueTarget = 0x20000000u;
+    constexpr std::uint32_t DeferredCall = 0x80000000u;     ///< a call of a function defined later (resolved when the module is emitted)
+
     // A fragment of emitted WASM code; produced by the compiler's emit_xxx operations
     struct i_fragment
     {

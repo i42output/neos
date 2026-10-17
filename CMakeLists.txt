@@ -156,10 +156,30 @@ add_neos_concept_library(python.core
     concepts/src/common/dllmain.cpp
     concepts/src/python/plugin.cpp
     concepts/src/python/python.cpp)
+target_include_directories(python.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/python/include") # (the language's constructs)
 add_neos_concept_library(javascript.core
     concepts/src/common/dllmain.cpp
     concepts/src/javascript/plugin.cpp
     concepts/src/javascript/javascript.cpp)
+target_include_directories(javascript.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include")
+
+# compiler plugins (plugins with the extension ".ncp"): the code generation of a language (i_language_compiler)
+function(add_neos_compiler_plugin TARGET LANGUAGE)
+    add_library(${TARGET} MODULE concepts/src/common/dllmain.cpp ${ARGN})
+    target_include_directories(${TARGET} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/${LANGUAGE}/include")
+    target_link_libraries(${TARGET} PRIVATE neos)
+    target_compile_definitions(${TARGET} PRIVATE CORE_EXPORTS)
+    set_target_properties(${TARGET} PROPERTIES PREFIX "" OUTPUT_NAME "${LANGUAGE}" SUFFIX ".ncp"
+        LIBRARY_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    install(TARGETS ${TARGET} LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endfunction()
+add_neos_compiler_plugin(compiler.javascript javascript
+    compilers/javascript/src/plugin.cpp
+    compilers/javascript/src/compiler.cpp)
+add_neos_compiler_plugin(compiler.python python
+    compilers/python/src/plugin.cpp
+    compilers/python/src/compiler.cpp)
 
 # console (the neos executable)
 add_executable(neos_console console/src/console.cpp)
@@ -167,7 +187,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal python.core javascript.core)
+add_dependencies(neos_console core core.math.universal python.core javascript.core compiler.javascript compiler.python)
 
 # runtime plugins (C ABI: include/neos/runtime/plugin.h)
 function(add_neos_runtime_plugin TARGET)
@@ -187,6 +207,7 @@ endfunction()
 add_neos_runtime_plugin(c runtime/c/src/c.c)
 
 add_neos_runtime_plugin(javascript runtime/javascript/src/javascript.cpp)
+target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include") # (ECMAScript's conversions)
 
 add_neos_runtime_plugin(python runtime/python/src/python.cpp runtime/python/src/objects.cpp)
 target_include_directories(python PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/python/include")

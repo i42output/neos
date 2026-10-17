@@ -19,6 +19,7 @@
 
 #include <neolib/neolib.hpp>
 
+#include <algorithm>
 #include <iostream>
 #include <filesystem>
 
@@ -199,9 +200,20 @@ namespace neos
 
     void context::init()
     {
+        // (concept libraries (".ncl") and compiler plugins (".ncp"))
+        auto& extensions = iApplication.plugin_manager().plugin_file_extensions();
+        if (std::find(extensions.begin(), extensions.end(), neolib::string{ ".ncp" }) == extensions.end())
+            extensions.push_back(neolib::string{ ".ncp" });
         iApplication.plugin_manager().load_plugins();
         for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
         {
+            // a compiler plugin: the code generation of its language
+            neolib::ref_ptr<language::i_language_compiler> languageCompiler;
+            if (plugin->discover(languageCompiler))
+            {
+                iCompiler.add_language_compiler(*languageCompiler);
+                continue;
+            }
             neolib::ref_ptr<language::i_concept_library> library(*plugin);
             iConceptLibraries[library->name()] = library;
             auto add_sublibraries = [this](auto& self, auto& aParentLibrary) -> void
