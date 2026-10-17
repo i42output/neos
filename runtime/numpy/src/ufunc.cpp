@@ -23,9 +23,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include "numpy.hpp"
 #include "cast.hpp"
 #include "ufunc.hpp"
+#include "kernels.hpp"
+#include "simd.hpp"
 
 namespace neos::numpy
 {
@@ -155,10 +158,11 @@ namespace neos::numpy
 
     namespace ops
     {
-        struct add { NEOS_NUMPY_ALL template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a || b; else return static_cast<T>(a + b); } };
-        struct subtract { NEOS_NUMPY_ALL template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a != b; else return static_cast<T>(a - b); } };
-        struct multiply { NEOS_NUMPY_ALL template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a && b; else return static_cast<T>(a * b); } };
-        struct true_divide { NEOS_NUMPY_INEXACT template <typename T> static T apply(T a, T b) { return a / b; } };
+        // (simd: the operation's kernels (kernels.hpp), whose operations on real values are these operations')
+        struct add { NEOS_NUMPY_ALL static constexpr simd::op simd = simd::op::Add; template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a || b; else return static_cast<T>(a + b); } };
+        struct subtract { NEOS_NUMPY_ALL static constexpr simd::op simd = simd::op::Subtract; template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a != b; else return static_cast<T>(a - b); } };
+        struct multiply { NEOS_NUMPY_ALL static constexpr simd::op simd = simd::op::Multiply; template <typename T> static T apply(T a, T b) { if constexpr (is_bool_v<T>) return a && b; else return static_cast<T>(a * b); } };
+        struct true_divide { NEOS_NUMPY_INEXACT static constexpr simd::op simd = simd::op::TrueDivide; template <typename T> static T apply(T a, T b) { return a / b; } };
         struct floor_divide
         {
             NEOS_NUMPY_REAL
@@ -214,41 +218,45 @@ namespace neos::numpy
         struct maximum
         {
             NEOS_NUMPY_ALL
+            static constexpr simd::op simd = simd::op::Maximum;
+            static constexpr int extremum = 1;
             template <typename T> static T apply(T a, T b)
             {
                 if constexpr (is_complex_v<T>) { if (a != a) return a; if (b != b) return b; return complex_less(a, b) ? b : a; }
-                else if constexpr (std::is_floating_point_v<T>) { if (std::isnan(a)) return a; if (std::isnan(b)) return b; return a >= b ? a : b; }
-                else return a >= b ? a : b;
+                else return baseline::kernel_ops::maximum::apply(a, b);
             }
         };
         struct minimum
         {
             NEOS_NUMPY_ALL
+            static constexpr simd::op simd = simd::op::Minimum;
+            static constexpr int extremum = -1;
             template <typename T> static T apply(T a, T b)
             {
                 if constexpr (is_complex_v<T>) { if (a != a) return a; if (b != b) return b; return complex_less(b, a) ? b : a; }
-                else if constexpr (std::is_floating_point_v<T>) { if (std::isnan(a)) return a; if (std::isnan(b)) return b; return a <= b ? a : b; }
-                else return a <= b ? a : b;
+                else return baseline::kernel_ops::minimum::apply(a, b);
             }
         };
         struct fmax
         {
             NEOS_NUMPY_ALL
+            static constexpr simd::op simd = simd::op::Fmax;
+            static constexpr int extremum = 1;
             template <typename T> static T apply(T a, T b)
             {
                 if constexpr (is_complex_v<T>) { if (b != b) return a; if (a != a) return b; return complex_less(a, b) ? b : a; }
-                else if constexpr (std::is_floating_point_v<T>) { if (std::isnan(b)) return a; if (std::isnan(a)) return b; return a >= b ? a : b; }
-                else return a >= b ? a : b;
+                else return baseline::kernel_ops::fmax::apply(a, b);
             }
         };
         struct fmin
         {
             NEOS_NUMPY_ALL
+            static constexpr simd::op simd = simd::op::Fmin;
+            static constexpr int extremum = -1;
             template <typename T> static T apply(T a, T b)
             {
                 if constexpr (is_complex_v<T>) { if (b != b) return a; if (a != a) return b; return complex_less(b, a) ? b : a; }
-                else if constexpr (std::is_floating_point_v<T>) { if (std::isnan(b)) return a; if (std::isnan(a)) return b; return a <= b ? a : b; }
-                else return a <= b ? a : b;
+                else return baseline::kernel_ops::fmin::apply(a, b);
             }
         };
         struct equal { NEOS_NUMPY_ALL template <typename T> static bool apply(T a, T b) { return a == b; } };
@@ -474,6 +482,48 @@ namespace neos::numpy
 
     namespace
     {
+        // (a C++ type that is the type of a dtype)
+        template <typename T> constexpr bool is_ctype_v = std::is_same_v<T, bool> || std::is_same_v<T, std::int8_t> || std::is_same_v<T, std::uint8_t> ||
+            std::is_same_v<T, std::int16_t> || std::is_same_v<T, std::uint16_t> || std::is_same_v<T, std::int32_t> || std::is_same_v<T, std::uint32_t> ||
+            std::is_same_v<T, std::int64_t> || std::is_same_v<T, std::uint64_t> || std::is_same_v<T, float> || std::is_same_v<T, double> ||
+            std::is_same_v<T, std::complex<float>> || std::is_same_v<T, std::complex<double>>;
+
+        // (the baseline kernels: kernels.hpp)
+        using baseline::unit;
+        using baseline::typed_binary_loop;
+
+        // (the kernel operation of an operation)
+        template <typename Op>
+        constexpr simd::op simd_op()
+        {
+            if constexpr (requires { Op::simd; })
+                return Op::simd;
+            else
+                return simd::op::None;
+        }
+
+        template <typename Op, typename T, typename R>
+        void typed_unary_loop(std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
+        {
+            auto p0 = aPointers[0];
+            auto p1 = aPointers[1];
+            if (unit<T>(p0, aStrides[0]) && unit<R>(p1, aStrides[1]))
+            {
+                auto const* const a = reinterpret_cast<T const*>(p0);
+                auto* const r = reinterpret_cast<R*>(p1);
+                for (std::int64_t i = 0; i < aCount; ++i)
+                    r[i] = Op::apply(a[i]);
+                return;
+            }
+            for (std::int64_t i = 0; i < aCount; ++i, p0 += aStrides[0], p1 += aStrides[1])
+            {
+                T a;
+                std::memcpy(&a, p0, sizeof(T));
+                R const r = Op::apply(a);
+                std::memcpy(p1, &r, sizeof(R));
+            }
+        }
+
         template <typename Op>
         void binary_loop(dtype aLoop, dtype aOut, dtype aIn0, dtype aIn1, std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
         {
@@ -483,6 +533,33 @@ namespace neos::numpy
                 using C = compute_t<T>;
                 if constexpr (Op::template supports<C>)
                 {
+                    if constexpr (std::is_same_v<T, C>)
+                    {
+                        using R = std::decay_t<decltype(Op::apply(std::declval<C>(), std::declval<C>()))>;
+                        if constexpr (is_ctype_v<R>)
+                            if (aOut == dtype_of_ctype<R>() && (aIn0 == aLoop || aStrides[0] == 0) && (aIn1 == aLoop || aStrides[1] == 0))
+                            {
+                                // (a scalar operand of another type: converted once)
+                                T scalars[2];
+                                unsigned char* pointers[3] = { aPointers[0], aPointers[1], aPointers[2] };
+                                if (aIn0 != aLoop)
+                                {
+                                    scalars[0] = read_as<T>(aPointers[0], aIn0);
+                                    pointers[0] = reinterpret_cast<unsigned char*>(&scalars[0]);
+                                }
+                                if (aIn1 != aLoop)
+                                {
+                                    scalars[1] = read_as<T>(aPointers[1], aIn1);
+                                    pointers[1] = reinterpret_cast<unsigned char*>(&scalars[1]);
+                                }
+                                // (the kernel of the CPU's instruction set, or the baseline's)
+                                if constexpr (simd_op<Op>() != simd::op::None && simd::type_of<T>().has_value() && std::is_same_v<T, R>)
+                                    if (simd::binary(simd_op<Op>(), *simd::type_of<T>(), aCount, pointers, aStrides))
+                                        return;
+                                typed_binary_loop<Op, T, R>(aCount, pointers, aStrides);
+                                return;
+                            }
+                    }
                     auto p0 = aPointers[0];
                     auto p1 = aPointers[1];
                     auto p2 = aPointers[2];
@@ -509,6 +586,16 @@ namespace neos::numpy
                 using C = compute_t<T>;
                 if constexpr (Op::template supports<C>)
                 {
+                    if constexpr (std::is_same_v<T, C>)
+                    {
+                        using R = std::decay_t<decltype(Op::apply(std::declval<C>()))>;
+                        if constexpr (is_ctype_v<R>)
+                            if (aIn0 == aLoop && aOut == dtype_of_ctype<R>())
+                            {
+                                typed_unary_loop<Op, T, R>(aCount, aPointers, aStrides);
+                                return;
+                            }
+                    }
                     auto p0 = aPointers[0];
                     auto p1 = aPointers[1];
                     for (std::int64_t i = 0; i < aCount; ++i, p0 += aStrides[0], p1 += aStrides[1])
@@ -919,7 +1006,7 @@ namespace neos::numpy
             ctx->retain(as_object(result));
         }
         else
-            result = new_array(out, shape);
+            result = new_unfilled_array(out, shape);
         // (an output that overlaps an input: computed into a temporary first)
         bool const overlap = aOut != nullptr && (aOut->data == a.array->data || aOut->data == b.array->data);
         ndarray* target = overlap ? new_array(result->type, shape) : result;
@@ -990,7 +1077,7 @@ namespace neos::numpy
             ctx->retain(as_object(result));
         }
         else
-            result = new_array(out, shape);
+            result = new_unfilled_array(out, shape);
         auto const sa = broadcast_strides(*a.array, shape);
         auto const t0 = a.array->type;
         auto const resultType = result->type;
@@ -1099,10 +1186,24 @@ namespace neos::numpy
         }
 
         // (NumPy's pairwise summation)
-        template <typename A, typename T>
+        template <typename A, typename T, bool Direct = false>
         A pairwise_sum(unsigned char const* aPointer, std::int64_t n, std::int64_t aStride, dtype aType)
         {
-            auto const at = [&](std::int64_t i) { return static_cast<A>(cast<compute_t<T>>(read_as<T>(aPointer + i * aStride, aType))); };
+            // (elements of the type T are loaded directly)
+            if constexpr (!Direct)
+                if (aType == dtype_of_ctype<T>())
+                    return pairwise_sum<A, T, true>(aPointer, n, aStride, aType);
+            auto const at = [&](std::int64_t i)
+            {
+                if constexpr (Direct)
+                {
+                    T value;
+                    std::memcpy(&value, aPointer + i * aStride, sizeof(T));
+                    return static_cast<A>(cast<compute_t<T>>(value));
+                }
+                else
+                    return static_cast<A>(cast<compute_t<T>>(read_as<T>(aPointer + i * aStride, aType)));
+            };
             if (n < 8)
             {
                 A result = A(0);
@@ -1126,7 +1227,7 @@ namespace neos::numpy
             }
             std::int64_t n2 = n / 2;
             n2 -= n2 % 8;
-            return pairwise_sum<A, T>(aPointer, n2, aStride, aType) + pairwise_sum<A, T>(aPointer + n2 * aStride, n - n2, aStride, aType);
+            return pairwise_sum<A, T, Direct>(aPointer, n2, aStride, aType) + pairwise_sum<A, T, Direct>(aPointer + n2 * aStride, n - n2, aStride, aType);
         }
     }
 
@@ -1362,6 +1463,20 @@ namespace neos::numpy
                                         }
                                         continue;
                                     }
+                                }
+                                if (!casting && runLength > 1)
+                                {
+                                    // (the whole run: the accumulator is the first operand and the result)
+                                    std::int64_t i = 0;
+                                    if (first)
+                                        combine(read_as<T>(runPointer + i++ * runStride, aArray->type));
+                                    unsigned char a[16];
+                                    std::memcpy(a, &accumulator, sizeof(T));
+                                    unsigned char* pointers[3] = { a, const_cast<unsigned char*>(runPointer) + i * runStride, a };
+                                    std::int64_t const strides[3] = { 0, runStride, 0 };
+                                    aUfunc.binary(loop, loop, loop, loop, runLength - i, pointers, strides);
+                                    std::memcpy(&accumulator, a, sizeof(T));
+                                    continue;
                                 }
                                 for (std::int64_t i = 0; i < runLength; ++i)
                                     combine(read_as<T>(runPointer + i * runStride, aArray->type));

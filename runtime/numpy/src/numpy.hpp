@@ -167,6 +167,7 @@ namespace neos::numpy
         std::unique_ptr<std::uint64_t[]> words;
         std::size_t bytes = 0;
         explicit storage(std::size_t aBytes) : words{ new std::uint64_t[(aBytes + 15u) / 8u + 1u]() }, bytes{ aBytes } {}
+        storage(std::size_t aBytes, bool aZero) : words{ aZero ? new std::uint64_t[(aBytes + 15u) / 8u + 1u]() : new std::uint64_t[(aBytes + 15u) / 8u + 1u] }, bytes{ aBytes } {}
         unsigned char* data() { return reinterpret_cast<unsigned char*>(words.get()); }
     };
 
@@ -200,6 +201,7 @@ namespace neos::numpy
     object* as_object(ndarray* aArray);
     shape_t contiguous_strides(shape_t const& aShape, std::size_t aItemsize, bool aFortran = false);
     ndarray* new_array(dtype aType, shape_t const& aShape, bool aFortran = false); // (zero filled)
+    ndarray* new_unfilled_array(dtype aType, shape_t const& aShape, bool aFortran = false); // (not filled: for a result whose every element is written)
     ndarray* new_view(ndarray* aBase, dtype aType, std::size_t aOffset, shape_t aShape, shape_t aStrides);
     ndarray* new_scalar(dtype aType, scalar_value const& aValue);
     ndarray* copy_array(ndarray const& aArray, std::optional<dtype> aType = {}, bool aFortran = false);

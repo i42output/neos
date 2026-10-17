@@ -470,6 +470,20 @@ namespace neos::numpy
     object* array_getitem(object* aSelf, object* aKey)
     {
         auto* const array = as_array(aSelf);
+        // (an int indexing a 1-D array: the element)
+        if (kind(aKey) == NEOS_PY_INT && array->ndim() == 1u && !array->scalar)
+        {
+            std::int64_t i = 0;
+            if (!to_int(aKey, i))
+                return nullptr;
+            auto const n = array->shape[0];
+            if (i >= -n && i < n)
+            {
+                if (i < 0)
+                    i += n;
+                return as_object(new_scalar(array->type, load(array->pointer() + i * array->strides[0], array->type)));
+            }
+        }
         index_result r;
         if (!apply_index(*array, aKey, r))
             return nullptr;

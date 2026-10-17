@@ -26,6 +26,8 @@
 #include "cast.hpp"
 #include "functions.hpp"
 #include "sort.hpp"
+#include "kernels.hpp"
+#include "simd.hpp"
 
 namespace neos::numpy
 {
@@ -592,8 +594,29 @@ namespace neos::numpy
                 auto o = aPointers[1];
                 for (std::int64_t k = 0; k < aCount; ++k, p += aStrides[0], o += aStrides[1])
                 {
-                    for (std::int64_t i = 0; i < n; ++i)
-                        std::memcpy(buffer.data() + i * size, p + i * stride, static_cast<std::size_t>(size));
+                    // (a contiguous result lane: the lane itself (the values copied to it, or the indices))
+                    if (!aIndices && rStride == size)
+                    {
+                        if (p == o)
+                            ;
+                        else if (stride == size)
+                            std::memmove(o, p, static_cast<std::size_t>(n * size));
+                        else
+                            for (std::int64_t i = 0; i < n; ++i)
+                                std::memcpy(o + i * size, p + i * stride, static_cast<std::size_t>(size));
+                        aFunction(o, nullptr);
+                        continue;
+                    }
+                    if (stride == size)
+                        std::memcpy(buffer.data(), p, static_cast<std::size_t>(n * size));
+                    else
+                        for (std::int64_t i = 0; i < n; ++i)
+                            std::memcpy(buffer.data() + i * size, p + i * stride, static_cast<std::size_t>(size));
+                    if (aIndices && rStride == static_cast<std::int64_t>(sizeof(std::int64_t)) && reinterpret_cast<std::uintptr_t>(o) % alignof(std::int64_t) == 0u)
+                    {
+                        aFunction(buffer.data(), reinterpret_cast<std::int64_t*>(o));
+                        continue;
+                    }
                     aFunction(buffer.data(), aIndices ? indices.data() : nullptr);
                     for (std::int64_t i = 0; i < n; ++i)
                     {
@@ -609,7 +632,7 @@ namespace neos::numpy
         // sort (or argsort) along an axis
         ndarray* sort_along(ndarray* aArray, std::size_t aAxis, bool aIndices, sort_kind aKind = sort_kind::Quick)
         {
-            auto* const r = aIndices ? new_array(dtype::Int64, aArray->shape) : copy_array(*aArray);
+            auto* const r = aIndices ? new_unfilled_array(dtype::Int64, aArray->shape) : copy_array(*aArray);
             auto const n = aArray->shape[aAxis];
             if (aArray->size() == 0)
                 return r;
@@ -737,7 +760,7 @@ namespace neos::numpy
                     return error("ValueError", "kth(=" + std::to_string(k) + ") out of bounds (" + std::to_string(n) + ")");
             }
             std::sort(kth.begin(), kth.end());
-            auto* const r = aIndices ? new_array(dtype::Int64, a->shape) : copy_array(*a);
+            auto* const r = aIndices ? new_unfilled_array(dtype::Int64, a->shape) : copy_array(*a);
             if (a->size() == 0)
                 return as_object(r);
             for_each_lane(a, r, axis, [&](unsigned char* aBuffer, std::int64_t* aIndexBuffer)
@@ -778,6 +801,28 @@ namespace neos::numpy
             }
             ref const flat{ as_object(ravel(array_of(v))) };
             auto* const a = as_array(flat.get());
+            if (!returnIndex && !returnInverse && !returnCounts && (is_integer(a->type) || is_bool(a->type)))
+            {
+                // (integers: the values sorted (equal values are indistinguishable) and their repeats removed)
+                ref const copy{ as_object(copy_array(*a)) };
+                auto* const c = as_array(copy.get());
+                auto const n = c->size();
+                auto const size = c->itemsize();
+                auto* const data = c->pointer();
+                sort_contiguous(c->type, data, n, sort_kind::Quick);
+                std::int64_t count = 0;
+                for (std::int64_t k = 0; k < n; ++k)
+                    if (k == 0 || std::memcmp(data + k * size, data + (count - 1) * size, size) != 0)
+                    {
+                        if (count != k)
+                            std::memcpy(data + count * size, data + k * size, size);
+                        ++count;
+                    }
+                auto* const values = new_unfilled_array(c->type, { count });
+                if (count > 0)
+                    std::memcpy(values->pointer(), data, static_cast<std::size_t>(count) * size);
+                return as_object(values);
+            }
             ref const order{ as_object(sort_along(a, 0u, true, sort_kind::Stable)) };
             auto* const o = as_array(order.get());
             auto const n = a->size();
@@ -903,7 +948,7 @@ namespace neos::numpy
             shape_t shape = batch;
             shape.push_back(m);
             shape.push_back(n);
-            auto* const r = new_array(t, shape);
+            auto* const r = new_unfilled_array(t, shape);
             shape_t aStrides = broadcast_strides(*a, [&]() { auto s = batch; s.push_back(m); s.push_back(k); return s; }());
             shape_t bStrides = broadcast_strides(*b, [&]() { auto s = batch; s.push_back(k); s.push_back(n); return s; }());
             shape_t aOuter{ aStrides.begin(), aStrides.end() - 2 };
@@ -937,11 +982,26 @@ namespace neos::numpy
                                 write_as(pr + i * rs0 + j * rs1, t, sum);
                         }
                 };
+                // (operands of the result's type: the matrix product kernel (kernels.hpp) of the CPU's instruction set, or the baseline's)
+                auto const blocked = [&](unsigned char* pa, unsigned char* pb, unsigned char* pr)
+                {
+                    if constexpr (!is_half_v<T> && !is_bool_v<T>)
+                    {
+                        if constexpr (simd::type_of<T>().has_value())
+                            if (simd::matmul(*simd::type_of<T>(), m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1))
+                                return;
+                        baseline::matmul_kernel<T>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1);
+                    }
+                };
+                bool const direct = !is_half_v<T> && !is_bool_v<T> && a->type == t && b->type == t;
                 iterate(batch, { a->pointer(), b->pointer(), r->pointer() }, { aOuter, bOuter, rOuter }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
                 {
                     auto pa = aPointers[0], pb = aPointers[1], pr = aPointers[2];
                     for (std::int64_t q = 0; q < aCount; ++q, pa += aStrides[0], pb += aStrides[1], pr += aStrides[2])
-                        matmul(pa, pb, pr);
+                        if (direct)
+                            blocked(pa, pb, pr);
+                        else
+                            matmul(pa, pb, pr);
                 });
             });
             return r;

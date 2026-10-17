@@ -716,7 +716,7 @@ namespace neos::numpy
                     return error("ValueError", "arange: cannot compute length");
                 length = n > 0.0 ? static_cast<std::int64_t>(n) : 0;
             }
-            auto* const r = new_array(type, { length });
+            auto* const r = new_unfilled_array(type, { length });
             if (length > 0)
             {
                 auto const size = r->itemsize();
@@ -758,7 +758,7 @@ namespace neos::numpy
                             value = half{ f + static_cast<float>(i) * delta };
                         else
                             value = static_cast<T>(f + static_cast<C>(i) * delta);
-                        std::memcpy(r->pointer() + static_cast<std::size_t>(i) * size, &value, size);
+                        std::memcpy(r->pointer() + static_cast<std::size_t>(i) * sizeof(T), &value, sizeof(T));
                     }
                 });
             }

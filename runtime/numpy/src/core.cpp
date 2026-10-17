@@ -527,6 +527,17 @@ namespace neos::numpy
         return result;
     }
 
+    ndarray* new_unfilled_array(dtype aType, shape_t const& aShape, bool aFortran)
+    {
+        auto* const result = new ndarray{};
+        result->base.type = &array_type()->base;
+        result->type = aType;
+        result->shape = aShape;
+        result->strides = contiguous_strides(aShape, info(aType).itemsize, aFortran);
+        result->data = std::make_shared<storage>(static_cast<std::size_t>(std::max<std::int64_t>(element_count(aShape), 1)) * info(aType).itemsize, false);
+        return result;
+    }
+
     ndarray* new_view(ndarray* aBase, dtype aType, std::size_t aOffset, shape_t aShape, shape_t aStrides)
     {
         auto* const result = new ndarray{};
@@ -585,7 +596,7 @@ namespace neos::numpy
     ndarray* copy_array(ndarray const& aArray, std::optional<dtype> aType, bool aFortran)
     {
         auto const t = aType.value_or(aArray.type);
-        auto* const result = new_array(t, aArray.shape, aFortran);
+        auto* const result = new_unfilled_array(t, aArray.shape, aFortran);
         iterate(aArray.shape, { aArray.pointer(), result->pointer() }, { aArray.strides, result->strides },
             [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
             {
@@ -594,8 +605,11 @@ namespace neos::numpy
                 if (aArray.type == t)
                 {
                     auto const size = info(t).itemsize;
-                    for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                        std::memcpy(to, from, size);
+                    if (aStrides[0] == static_cast<std::int64_t>(size) && aStrides[1] == static_cast<std::int64_t>(size))
+                        std::memcpy(to, from, static_cast<std::size_t>(aCount) * size);
+                    else
+                        for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
+                            std::memcpy(to, from, size);
                 }
                 else
                     for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
