@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/language/compiler.hpp>
+#include <bit>
 #include "compiler.emit.hpp"
 
 namespace neos::language
@@ -161,6 +162,38 @@ namespace neos::language
             aFragment.fragmentCode.push_back(aResult ? *wasm_type(*aResult) : 0x40u);
         }
 
+        // (a value that is a local's: the local)
+        std::optional<std::uint32_t> local_of(fragment const& aValue)
+        {
+            auto const& code = aValue.fragmentCode.as_std_vector();
+            if (!aValue.fragmentRelocations.empty() || code.size() < 2u || code[0] != 0x20u)
+                return {};
+            std::uint32_t index = 0u;
+            std::size_t p = 1u;
+            for (std::uint32_t shift = 0u; p < code.size() && shift < 35u; shift += 7u)
+            {
+                auto const b = code[p++];
+                index |= static_cast<std::uint32_t>(b & 0x7Fu) << shift;
+                if ((b & 0x80u) == 0u)
+                    break;
+            }
+            if (p != code.size())
+                return {};
+            return index;
+        }
+
+        // (the code that identifies an int expression: its code and relocations)
+        std::vector<std::uint8_t> integer_key(fragment const& aValue)
+        {
+            std::vector<std::uint8_t> key = aValue.fragmentCode.as_std_vector();
+            for (auto const& r : aValue.fragmentRelocations)
+                for (auto const v : { r.first(), r.second() })
+                    for (int b = 0; b < 4; ++b)
+                        key.push_back(static_cast<std::uint8_t>(v >> (8 * b)));
+            key.push_back(static_cast<std::uint8_t>(aValue.fragmentRelocations.size()));
+            return key;
+        }
+
         fragment local_value(std::uint32_t aLocal, type aType)
         {
             fragment result;
@@ -169,26 +202,37 @@ namespace neos::language
             return result;
         }
 
-        // the kind of value (Python's type) that a native type holds
-        type kind_of(type aType)
+        // (the roles of scratch locals (see py_scratch))
+        enum scratch_role : std::uint32_t { ScratchPark, ScratchCoerce, ScratchCoerceI64, ScratchBind, ScratchReturn, ScratchResult, ScratchX, ScratchY, ScratchQ, ScratchM, ScratchN,
+            ScratchZ, ScratchReturnValue, ScratchOwned = 0x100u /* + 2 * height + operand: an operand of a slow version (see py_integer_operation) */ };
+
+        // (small integers: the integers that an integer value holds shifted left one bit)
+        constexpr std::int64_t SmallLow = -(std::int64_t{ 1 } << 62);
+        constexpr std::int64_t SmallHigh = (std::int64_t{ 1 } << 62) - 1;
+
+        // the kind of value (Python's type) that a native type holds (an int: an integer of any size (type::Integer) if aBigIntegers 
+        // (see compiler::py_big_integers), else a 64-bit integer)
+        type kind_of(type aType, bool aBigIntegers)
         {
+            if (aType == type::Integer)
+                return aBigIntegers ? aType : type::I64;
             if (aType == type::Boolean || aType == type::String || aType == type::Object || aType == type::Void)
                 return aType;
             if (is_float(aType))
                 return type::F64;
             if (is_numeric(aType))
-                return type::I64;
+                return aBigIntegers ? type::Integer : type::I64;
             return aType;
         }
 
         bool is_number(type aType)
         {
-            return is_numeric(aType); // (bool is a number)
+            return is_numeric(aType) || aType == type::Integer; // (bool is a number)
         }
 
         bool is_integer(type aType)
         {
-            return is_numeric(aType) && !is_float(aType) && aType != type::Boolean;
+            return aType == type::Integer || (is_numeric(aType) && !is_float(aType) && aType != type::Boolean);
         }
 
         std::set<std::string> const& builtin_names()
@@ -229,6 +273,28 @@ namespace neos::language
         auto const close = text.rfind(')');
         if (close == std::string_view::npos || text.find("->", close) == std::string_view::npos)
             aSignature.set_return_type(type::Object);
+        // an int is an integer of any size (except for the VM's functions (__neos_f), which take and return 64-bit integers); with 
+        // 64-bit ints (see py_big_integers) only a stub's (a runtime plugin's function, whose body is "...") are
+        bool stub = false;
+        {
+            auto const all = current_fragment().source().to_std_string_view();
+            if (text.data() >= all.data() && text.data() + text.size() <= all.data() + all.size())
+            {
+                auto rest = all.substr(static_cast<std::size_t>(text.data() + text.size() - all.data()));
+                while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t' || rest.front() == ':'))
+                    rest.remove_prefix(1u);
+                stub = rest.starts_with("...");
+            }
+        }
+        if (!aSignature.name().to_std_string().starts_with("__neos_") && (py_big_integers() || stub))
+        {
+            if (aSignature.parameters().has_value())
+                for (auto& parameter : aSignature.parameters().value())
+                    if (parameter.parameter_type() == type::I64)
+                        parameter.set_parameter_type(type::Integer);
+            if (aSignature.return_type() == type::I64)
+                aSignature.set_return_type(type::Integer);
+        }
         // the parameters' kinds (*args, **kwargs, keyword-only) and default values
         auto const name = aSignature.name().to_std_string();
         auto const open = text.find('(');
@@ -328,6 +394,14 @@ namespace neos::language
                     if (value.valueType != t)
                         coerce(value, t);
                     append(statement, value);
+                    if (t == type::Integer)
+                    {
+                        // (the global holds a reference of its own)
+                        auto const scratch = py_scratch(ScratchBind, type::Integer);
+                        put_local(statement, opcode::LocalSet, scratch);
+                        append(statement, py_retain_integer(scratch));
+                        put_local(statement, opcode::LocalGet, scratch);
+                    }
                 }
                 put_local(statement, opcode::GlobalSet, global.index());
             }
@@ -1408,7 +1482,9 @@ namespace neos::language
         if (is_immediate(aOperand))
         {
             auto const t = get_immediate(aOperand).t;
-            return t == type::Ibig ? type::I64 : t == type::Fbig ? type::F64 : t;
+            if (!py_big_integers())
+                return t == type::Ibig ? type::I64 : t == type::Fbig ? type::F64 : t;
+            return t == type::Fbig ? type::F64 : t == type::Boolean || t == type::String || is_float(t) ? t : type::Integer;
         }
         return static_cast<type>(aOperand.get<i_data_type>().index());
     }
@@ -1439,19 +1515,38 @@ namespace neos::language
             }, std::get<data_type>(aOperand));
         if (text.empty())
             return {};
+        if (!py_big_integers())
+        {
+            // (64-bit ints: a literal that does not fit is an int object)
+            try
+            {
+                (void)std::stoll(text);
+                return {};
+            }
+            catch (std::out_of_range const&)
+            {
+            }
+            fragment result;
+            result.valueType = type::Object;
+            if (iDeclarationPass)
+                return result;
+            return py_owned(py_runtime_call("python::int_from_string", { type::String }, type::Object, { py_string(text) }));
+        }
+        // (an int literal is a small integer (an integer of any size shifted left one bit) if it has at most 62 bits)
         try
         {
-            (void)std::stoll(text);
-            return {};
+            auto const value = std::stoll(text);
+            if (value >= -(std::int64_t{ 1 } << 62) && value < (std::int64_t{ 1 } << 62))
+                return {};
         }
         catch (std::out_of_range const&)
         {
         }
         fragment result;
-        result.valueType = type::Object;
+        result.valueType = type::Integer;
         if (iDeclarationPass)
             return result;
-        return py_owned(py_runtime_call("python::int_from_string", { type::String }, type::Object, { py_string(text) }));
+        return py_park_integer(py_runtime_call("python::integer_from_string", { type::String }, type::Integer, { py_string(text) }));
     }
 
     fragment compiler::py_string(std::string const& aValue)
@@ -1498,6 +1593,126 @@ namespace neos::language
         return aValue;
     }
 
+    // --- integers of any size (Python's int): type::Integer, a small integer shifted left one bit or an integer object's handle
+    // shifted left one bit with the low bit set (see NEOS_RT_INTEGER); an integer value is borrowed: an integer that is a new 
+    // reference (a call's result) has its object's reference held by a temporary (released at the end of the statement), a
+    // variable holds a reference of its own
+
+    namespace
+    {
+        // (the handle of an integer object (i32), or zero: (value >> 1) & -(value & 1))
+        void put_integer_handle(fragment& aFragment, std::uint32_t aLocal)
+        {
+            put_local(aFragment, opcode::LocalGet, aLocal);
+            put_i64(aFragment, 1);
+            put(aFragment, opcode::I64ShrU);
+            put_i64(aFragment, 0);
+            put_local(aFragment, opcode::LocalGet, aLocal);
+            put_i64(aFragment, 1);
+            put(aFragment, opcode::I64And);
+            put(aFragment, opcode::I64Sub);
+            put(aFragment, opcode::I64And);
+            put(aFragment, opcode::I32ConvertI64);
+        }
+
+        // (if an integer is an integer object: the value's low bit as an i32)
+        void put_is_object(fragment& aFragment, std::uint32_t aLocal, bool aGlobal = false)
+        {
+            put_local(aFragment, aGlobal ? opcode::GlobalGet : opcode::LocalGet, aLocal);
+            put_i64(aFragment, 1);
+            put(aFragment, opcode::I64And);
+            put(aFragment, opcode::I32ConvertI64);
+        }
+    }
+
+    bool compiler::py_big_integers() const
+    {
+        // Python's int is an integer of any size (type::Integer) with bigint promotion (python.neos: bigint.promotion: true), else a 
+        // 64-bit integer (which wraps, or traps on overflow if trap_on_overflow is on)
+        return bigint_promotion();
+    }
+
+    std::uint32_t compiler::py_scratch(std::uint32_t aRole, type aType)
+    {
+        // a local that code uses only between its own instructions (no other code that uses the role runs between them): one
+        // for each role in a function (fewer locals: the JIT keeps the most used locals in registers)
+        auto& scratch = current_function().pyScratch;
+        auto const existing = scratch.find(aRole);
+        if (existing != scratch.end())
+            return existing->second;
+        return scratch[aRole] = temporary(aType);
+    }
+
+    fragment compiler::py_park_integer(fragment aValue)
+    {
+        // an integer that is a new reference: an int expression (its value is in a temporary: if it is a small integer (its fast 
+        // version), else an integer object whose reference is held by the expression's object temporary (its slow version))
+        ensure_function();
+        py_integer_expression e;
+        auto const value = py_integer_temporary();
+        e.prefix = aValue;
+        put_local(e.prefix, opcode::LocalSet, value);
+        put_local(e.fast, opcode::LocalGet, value);
+        put_i64(e.fast, 1);
+        put(e.fast, opcode::I64And);
+        put(e.fast, opcode::I32ConvertI64);
+        put_op(e.fast.fragmentCode.as_std_vector(), opcode::BrIf);
+        put_u32(e.fast.fragmentCode.as_std_vector(), 0u);
+        put_local(e.fast, opcode::LocalGet, value);
+        e.bails = true;
+        e.small.insert(value);
+        e.stable = true;
+        put_local(e.slow, opcode::LocalGet, value);
+        e.low = SmallLow;
+        e.high = SmallHigh;
+        auto result = py_integer_fragment(std::move(e));
+        if (aValue.fragmentKind == fragment_kind::Argument)
+            result.fragmentKind = fragment_kind::Argument;
+        return result;
+    }
+
+    fragment compiler::py_retain_integer(std::uint32_t aLocal)
+    {
+        // (an integer object: a reference for its holder)
+        fragment result;
+        put_is_object(result, aLocal);
+        put_block(result, opcode::If, {});
+        put_integer_handle(result, aLocal);
+        emit_call_to(result, runtime_function("neos::object_retain", { type::Object }, type::Void));
+        put(result, opcode::End);
+        return result;
+    }
+
+    fragment compiler::py_release_integer(std::uint32_t aVariable, bool aGlobal)
+    {
+        // (an integer object: its holder's reference is released)
+        fragment result;
+        put_is_object(result, aVariable, aGlobal);
+        put_block(result, opcode::If, {});
+        put_local(result, aGlobal ? opcode::GlobalGet : opcode::LocalGet, aVariable);
+        put_i64(result, 1);
+        put(result, opcode::I64ShrU);
+        put(result, opcode::I32ConvertI64);
+        emit_call_to(result, runtime_function("neos::object_release", { type::Object }, type::Void));
+        put(result, opcode::End);
+        return result;
+    }
+
+    fragment compiler::py_small_integers(std::vector<std::uint32_t> const& aLocals)
+    {
+        // (integers that must be small (e.g. range()'s arguments): OverflowError if one is an integer object)
+        fragment result;
+        for (auto const local : aLocals)
+        {
+            put_is_object(result, local);
+            put_block(result, opcode::If, {});
+            append(result, py_runtime_call("python::integer_i64", { type::Integer }, type::I64, { local_value(local, type::Integer) }));
+            put(result, opcode::Drop);
+            put(result, opcode::End);
+        }
+        return result;
+    }
+
     namespace
     {
         // the temporary a value is the reference of (if it is a temporary's value)
@@ -1522,27 +1737,43 @@ namespace neos::language
     {
         // the temporaries of the statement are released (and zeroed: they may not be set by the next statement that uses them)
         auto result = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
-        if (!state().function || current_function().pendingObjects.empty())
+        if (!state().function)
+            return result;
+        // (the temporaries of int expressions that other code took over: reusable)
+        auto& function = current_function();
+        function.freeObjects.insert(function.freeObjects.end(), function.consumedObjects.begin(), function.consumedObjects.end());
+        function.consumedObjects.clear();
+        function.freeIntegers.insert(function.freeIntegers.end(), function.pendingIntegers.begin(), function.pendingIntegers.end());
+        function.pendingIntegers.clear();
+        if (function.pendingObjects.empty())
             return result;
         auto const release = runtime_function("neos::object_release", { type::Object }, type::Void);
-        auto& function = current_function();
         for (auto const t : function.pendingObjects)
         {
+            // (a temporary that holds no object (e.g. that of an int that is a small integer): zero)
+            put_local(result, opcode::LocalGet, t);
+            put_block(result, opcode::If, {});
             put_local(result, opcode::LocalGet, t);
             emit_call_to(result, release);
             put_i32(result, 0);
             put_local(result, opcode::LocalSet, t);
+            put(result, opcode::End);
             function.freeObjects.push_back(t);
         }
         function.pendingObjects.clear();
         return result;
     }
 
-    fragment compiler::py_release_variables(bool aTemporaries)
+    fragment compiler::py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept)
     {
         // the function's objects are released (when it returns)
         auto result = aTemporaries ? py_flush() : make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
-        if (!state().function || current_function().objectVariables.empty())
+        if (!state().function)
+            return result;
+        for (auto const v : current_function().integerVariables)
+            if (v != aExcept)
+                append(result, py_release_integer(v, false));
+        if (current_function().objectVariables.empty())
             return result;
         auto const release = runtime_function("neos::object_release", { type::Object }, type::Void);
         for (auto const v : current_function().objectVariables)
@@ -1556,6 +1787,11 @@ namespace neos::language
     void compiler::py_coerce(fragment& aValue, type aTarget)
     {
         auto const from = aValue.valueType;
+        if (from == type::Integer || aTarget == type::Integer)
+        {
+            py_coerce_integer(aValue, aTarget);
+            return;
+        }
         if (from == type::Object)
         {
             if (aTarget == type::Boolean)
@@ -1615,6 +1851,1122 @@ namespace neos::language
         aValue.valueType = aTarget;
     }
 
+    void compiler::py_coerce_integer(fragment& aValue, type aTarget)
+    {
+        // conversions of integers of any size (type::Integer)
+        auto const from = aValue.valueType;
+        auto const kind = aValue.fragmentKind == fragment_kind::Argument ? fragment_kind::Argument : fragment_kind::Value;
+        auto const source = aValue.fragmentSource;
+        auto const original = aValue;
+        auto const finish = [&](fragment aResult, type aType)
+        {
+            aResult.valueType = aType;
+            aResult.fragmentKind = kind;
+            aResult.fragmentSource = source;
+            aValue = aResult;
+        };
+        if (from == type::Integer)
+        {
+            if (auto const local = local_of(aValue); local && py_counter(*local) && (is_float(aTarget) || (is_numeric(aTarget) && aTarget != type::Boolean) ||
+                aTarget == type::String))
+            {
+                // (a variable that only for loops over ranges bind: a small integer)
+                fragment result = aValue;
+                put_i64(result, 1);
+                put(result, opcode::I64ShrS);
+                if (aTarget == type::String)
+                    emit_call_to(result, runtime_function("neos::string_from_i64", { type::I64 }, type::String));
+                else if (aTarget != type::I64)
+                    convert(result.fragmentCode.as_std_vector(), type::I64, aTarget);
+                finish(result, aTarget);
+                return;
+            }
+            if (aTarget == type::Boolean)
+            {
+                // (an integer object is never zero)
+                put_i64(aValue, 0);
+                put(aValue, opcode::I64Ne);
+                finish(aValue, type::Boolean);
+            }
+            else if (aTarget == type::Object)
+                finish(py_owned(py_runtime_call("python::from_integer", { type::Integer }, type::Object, { aValue })), type::Object);
+            else if (aTarget == type::String)
+            {
+                // (a small integer: decimal (the VM's neos::string_from_i64); an integer object: by the runtime plugin)
+                auto const scratch = py_scratch(ScratchCoerce, type::Integer);
+                fragment result = aValue;
+                put_local(result, opcode::LocalSet, scratch);
+                put_is_object(result, scratch);
+                put_block(result, opcode::If, type::String);
+                append(result, py_runtime_call("python::integer_str", { type::Integer }, type::String, { local_value(scratch, type::Integer) }));
+                put(result, opcode::Else);
+                put_local(result, opcode::LocalGet, scratch);
+                put_i64(result, 1);
+                put(result, opcode::I64ShrS);
+                emit_call_to(result, runtime_function("neos::string_from_i64", { type::I64 }, type::String));
+                put(result, opcode::End);
+                finish(result, type::String);
+                // (a string followed by it: see py_operation)
+                if (state().function)
+                    current_function().pyIntegerStrings[integer_key(aValue)] = original;
+            }
+            else if (is_float(aTarget) || is_numeric(aTarget))
+            {
+                // (a small integer: shifted right one bit; an integer object: converted by the runtime plugin)
+                bool const toFloat = is_float(aTarget);
+                auto const scratch = py_scratch(ScratchCoerce, type::Integer);
+                fragment result = aValue;
+                put_local(result, opcode::LocalSet, scratch);
+                put_is_object(result, scratch);
+                put_block(result, opcode::If, toFloat ? type::F64 : type::I64);
+                append(result, py_runtime_call(toFloat ? "python::integer_float" : "python::integer_i64", { type::Integer }, toFloat ? type::F64 : type::I64, 
+                    { local_value(scratch, type::Integer) }));
+                put(result, opcode::Else);
+                put_local(result, opcode::LocalGet, scratch);
+                put_i64(result, 1);
+                put(result, opcode::I64ShrS);
+                if (toFloat)
+                    put(result, opcode::F64SConvertI64);
+                put(result, opcode::End);
+                if (aTarget != (toFloat ? type::F64 : type::I64))
+                    convert(result.fragmentCode.as_std_vector(), toFloat ? type::F64 : type::I64, aTarget);
+                finish(result, aTarget);
+            }
+            else
+                throw std::runtime_error("cannot convert an int to " + type_name(aTarget));
+            return;
+        }
+        // (to an integer)
+        if (from == type::Object)
+            finish(py_park_integer(py_runtime_call("python::to_integer", { type::Object }, type::Integer, { aValue })), type::Integer);
+        else if (from == type::Void)
+            throw std::runtime_error("cannot convert None to an int");
+        else if (from == type::String)
+            throw std::runtime_error("cannot convert a str to an int");
+        else if (is_float(from))
+        {
+            if (from != type::F64)
+                convert(aValue.fragmentCode.as_std_vector(), from, type::F64);
+            aValue.valueType = type::F64;
+            finish(py_park_integer(py_runtime_call("python::integer_from_float", { type::F64 }, type::Integer, { aValue })), type::Integer);
+        }
+        else if (is_numeric(from))
+        {
+            // (a value of at most 32 bits is a small integer; a 64-bit value is one if it has at most 63 bits, else an integer
+            // object)
+            bool const small = !is_64(from);
+            if (small)
+            {
+                if (from == type::Boolean || is_unsigned(from))
+                    put(aValue, opcode::I64UConvertI32);
+                else
+                    put(aValue, opcode::I64SConvertI32);
+                put_i64(aValue, 1);
+                put(aValue, opcode::I64Shl);
+                finish(aValue, type::Integer);
+                return;
+            }
+            auto const scratch = py_scratch(ScratchCoerceI64, type::I64);
+            fragment result = aValue;
+            put_local(result, opcode::LocalTee, scratch);
+            put_i64(result, 1);
+            put(result, opcode::I64Shl);
+            put_i64(result, 1);
+            put(result, opcode::I64ShrS);
+            put_local(result, opcode::LocalGet, scratch);
+            put(result, opcode::I64Eq);
+            put_block(result, opcode::If, type::Integer);
+            put_local(result, opcode::LocalGet, scratch);
+            put_i64(result, 1);
+            put(result, opcode::I64Shl);
+            put(result, opcode::Else);
+            append(result, py_park_integer(py_runtime_call("python::integer_from_i64", { type::I64 }, type::Integer, { local_value(scratch, type::I64) })));
+            put(result, opcode::End);
+            finish(result, type::Integer);
+        }
+        else
+            throw std::runtime_error("cannot convert " + type_name(from) + " to an int");
+    }
+
+    namespace
+    {
+        // (an int literal (or a bool): its value)
+        std::optional<ibig> int_immediate(operand_type const& aOperand)
+        {
+            if (!is_immediate(aOperand))
+                return {};
+            std::optional<ibig> result;
+            std::visit([&](auto const& d)
+                {
+                    using vt = std::decay_t<decltype(d)>;
+                    if constexpr (!std::is_same_v<vt, std::monostate>)
+                    {
+                        using value_type = typename vt::type;
+                        if constexpr (std::is_same_v<value_type, ibig>)
+                            result = d.value().value();
+                        else if constexpr (std::is_same_v<value_type, boolean>)
+                            result = ibig{ d.value().value() ? 1 : 0 };
+                        else if constexpr (std::is_integral_v<value_type>)
+                            result = ibig{ static_cast<long long>(d.value().value()) };
+                    }
+                }, std::get<data_type>(aOperand));
+            return result;
+        }
+
+        bool ibig_negative(ibig const& aValue)
+        {
+            return aValue < ibig{ 0 };
+        }
+    }
+
+    namespace
+    {
+        struct int_range
+        {
+            std::int64_t low = SmallLow;
+            std::int64_t high = SmallHigh;
+            bool small() const { return low >= SmallLow && high <= SmallHigh; }
+        };
+
+        // (of values within the range of small integers (or one beyond): without overflow)
+        std::int64_t saturated_multiply(std::int64_t aLhs, std::int64_t aRhs)
+        {
+            if (aLhs == 0 || aRhs == 0)
+                return 0;
+            auto const max = std::numeric_limits<std::int64_t>::max();
+            auto const l = static_cast<std::uint64_t>(aLhs < 0 ? -aLhs : aLhs);
+            auto const r = static_cast<std::uint64_t>(aRhs < 0 ? -aRhs : aRhs);
+            if (l > static_cast<std::uint64_t>(max) / r)
+                return (aLhs < 0) != (aRhs < 0) ? -max : max;
+            return aLhs * aRhs;
+        }
+
+        std::int64_t floor_divide(std::int64_t aLhs, std::int64_t aRhs)
+        {
+            auto const q = aLhs / aRhs;
+            return (aLhs % aRhs != 0 && ((aLhs < 0) != (aRhs < 0))) ? q - 1 : q;
+        }
+
+
+    }
+
+    std::optional<compiler::py_integer_expression> compiler::py_integer_expression_of(fragment const& aValue)
+    {
+        // the int expression that is a value (its code is unchanged): its object temporary (if any) is no longer the statement's (the
+        // code that uses the expression takes over its slow version's result)
+        if (!state().function || aValue.valueType != type::Integer)
+            return {};
+        auto& function = current_function();
+        auto const found = function.pyIntegers.find(integer_key(aValue));
+        if (found == function.pyIntegers.end())
+            return {};
+        auto result = found->second;
+        if (result.holder)
+        {
+            auto const pending = std::find(function.pendingObjects.begin(), function.pendingObjects.end(), *result.holder);
+            if (pending == function.pendingObjects.end())
+                return {};
+            function.pendingObjects.erase(pending);
+            function.consumedObjects.push_back(*result.holder);
+        }
+        return result;
+    }
+
+    fragment compiler::py_integer_value(py_integer_expression const& aExpression, bool aHeld)
+    {
+        // an int expression's value (without its prefix): its fast version, or (if that branches out) its slow version (whose result
+        // is held by the expression's object temporary (aHeld) or is a new reference)
+        fragment result;
+        if (!aExpression.bails)
+            append(result, aExpression.fast);
+        else
+        {
+            put_block(result, opcode::Block, type::Integer);
+            put_block(result, opcode::Block, {});
+            append(result, aExpression.fast);
+            put_op(result.fragmentCode.as_std_vector(), opcode::Br);
+            put_u32(result.fragmentCode.as_std_vector(), 1u);
+            put(result, opcode::End);
+            append(result, aExpression.slow);
+            if (aHeld && aExpression.holder)
+            {
+                auto const scratch = py_scratch(ScratchPark, type::Integer);
+                put_local(result, opcode::LocalTee, scratch);
+                put_integer_handle(result, scratch);
+                put_local(result, opcode::LocalSet, *aExpression.holder);
+            }
+            put(result, opcode::End);
+        }
+        result.valueType = type::Integer;
+        result.fragmentKind = fragment_kind::Value;
+        return result;
+    }
+
+    void compiler::py_integer_operation(construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs)
+    {
+        // an operation on integers of any size: an int expression (see py_integer_expression) whose fast version is inline (operands
+        // that are int expressions are part of it: one fast version for an expression as a whole, without intermediate checks where 
+        // the operands' ranges show that the result is a small integer) and whose slow version calls the runtime plugin 
+        // (python::integer_binary, integer_unary, integer_compare)
+        bool const unary = !aLhs;
+        // (constants: folded, exactly (as Python: floor division and modulo; a big power or shift is left to the program))
+        {
+            auto const l = unary ? std::optional<ibig>{ ibig{ 0 } } : int_immediate(*aLhs);
+            auto const r = int_immediate(aRhs);
+            if (l && r)
+            {
+                std::optional<ibig> folded;
+                std::optional<bool> truth;
+                auto const zero = ibig{ 0 };
+                auto const floor_divmod = [&](ibig& q, ibig& m)
+                {
+                    q = *l / *r;
+                    m = *l - q * *r;
+                    if (m != zero && ibig_negative(m) != ibig_negative(*r))
+                    {
+                        q = q - ibig{ 1 };
+                        m = m + *r;
+                    }
+                };
+                auto const small = [](ibig const& aValue, std::int64_t aLimit) { return !(aValue < ibig{ -aLimit }) && aValue < ibig{ aLimit }; };
+                switch (aConstruct)
+                {
+                case construct::Add: folded = *l + *r; break;
+                case construct::Subtract: folded = *l - *r; break;
+                case construct::Multiply: folded = *l * *r; break;
+                case construct::FloorDivide:
+                case construct::Modulo:
+                    if (*r != zero)
+                    {
+                        ibig q, m;
+                        floor_divmod(q, m);
+                        folded = aConstruct == construct::FloorDivide ? q : m;
+                    }
+                    break;
+                case construct::Power:
+                    if (!ibig_negative(*r) && small(*r, 4096) && small(*l, std::int64_t{ 1 } << 32))
+                    {
+                        auto e = integer_cast<std::int64_t>(*r);
+                        ibig p{ 1 }, b = *l;
+                        for (; e > 0; e >>= 1)
+                        {
+                            if ((e & 1) != 0)
+                                p = p * b;
+                            if (e > 1)
+                                b = b * b;
+                        }
+                        folded = p;
+                    }
+                    break;
+                case construct::LeftShift:
+                    if (!ibig_negative(*r) && small(*r, 4096))
+                        folded = *l << integer_cast<std::int64_t>(*r);
+                    break;
+                case construct::RightShift:
+                    if (!ibig_negative(*r))
+                        folded = small(*r, 1 << 20) ? *l >> integer_cast<std::int64_t>(*r) : (ibig_negative(*l) ? ibig{ -1 } : zero);
+                    break;
+                case construct::BitAnd: folded = *l & *r; break;
+                case construct::BitOr: folded = *l | *r; break;
+                case construct::BitXor: folded = *l ^ *r; break;
+                case construct::Negative: folded = -*r; break;
+                case construct::Positive: folded = *r; break;
+                case construct::Invert: folded = ~*r; break;
+                case construct::Less: truth = *l < *r; break;
+                case construct::LessEqual: truth = *l <= *r; break;
+                case construct::Greater: truth = *l > *r; break;
+                case construct::GreaterEqual: truth = *l >= *r; break;
+                case construct::Equal: truth = *l == *r; break;
+                case construct::NotEqual: truth = *l != *r; break;
+                default: break;
+                }
+                if (folded)
+                {
+                    push_operand(operand_type{ data_type{ data<ibig>{ *folded } } });
+                    return;
+                }
+                if (truth)
+                {
+                    push_operand(operand_type{ data_type{ data<boolean>{ *truth } } });
+                    return;
+                }
+            }
+        }
+        ensure_function();
+        if (aConstruct == construct::Divide || aConstruct == construct::Power)
+        {
+            py_integer_divide_or_power(aConstruct, aLhs, aRhs);
+            return;
+        }
+        if (aConstruct == construct::Positive)
+        {
+            push_operand(operand_type{ materialize(aRhs, type::Integer) });
+            return;
+        }
+        // (the operands: a constant small integer, a variable (a local, read where it is used), an int expression, or other code's 
+        // value (a snapshot: a temporary that its code sets first))
+        struct operand_info
+        {
+            enum kind_t { Constant, Variable, Expression } kind = Constant;
+            std::int64_t value = 0;
+            std::uint32_t local = 0u;
+            py_integer_expression expression;
+            fragment original;
+            fragment prefix;
+            bool stable = false;                // (its value is not a variable's (that other code can change))
+            std::int64_t low = SmallLow;
+            std::int64_t high = SmallHigh;
+            int_range range() const { return { low, high }; }
+            std::int64_t magnitude() const { return std::max(-low, high); }
+        };
+        auto const classify = [&](operand_type const& aOperand) -> operand_info
+        {
+            operand_info o;
+            if (auto const value = int_immediate(aOperand); value && !(*value < ibig{ SmallLow }) && !(ibig{ SmallHigh } < *value))
+            {
+                o.value = integer_cast<std::int64_t>(*value);
+                o.low = o.high = o.value;
+                o.stable = true;
+                return o;
+            }
+            auto value = materialize(aOperand, type::Integer);
+            if (auto const local = local_of(value))
+            {
+                o.kind = operand_info::Variable;
+                o.local = *local;
+                if (auto const counter = py_counter(*local))
+                {
+                    o.low = counter->first;
+                    o.high = counter->second;
+                }
+                return o;
+            }
+            if (state().function)
+                if (auto const found = current_function().pyIntegers.find(integer_key(value)); found != current_function().pyIntegers.end())
+                {
+                    o.kind = operand_info::Expression;
+                    o.expression = found->second;
+                    o.original = value;
+                    o.stable = o.expression.stable;
+                    o.low = o.expression.low;
+                    o.high = o.expression.high;
+                    return o;
+                }
+            o.kind = operand_info::Variable;
+            o.local = py_integer_temporary();
+            o.prefix = value;
+            put_local(o.prefix, opcode::LocalSet, o.local);
+            o.stable = true;
+            return o;
+        };
+        auto const has_prefix = [](operand_info const& o)
+        {
+            return !o.prefix.fragmentCode.empty() || (o.kind == operand_info::Expression && !o.expression.prefix.fragmentCode.empty());
+        };
+        std::optional<operand_info> lhsInfo;
+        if (!unary)
+            lhsInfo = classify(*aLhs);
+        auto b = classify(aRhs);
+        bool const lhsChanged = lhsInfo && (lhsInfo->kind != operand_info::Variable ||
+            sets_local(b.kind == operand_info::Expression ? b.expression.prefix : b.prefix, lhsInfo->local));
+        if (lhsInfo && !lhsInfo->stable && has_prefix(b) && lhsChanged)
+        {
+            // (the left operand is evaluated before the right operand's code runs: a snapshot)
+            auto& o = *lhsInfo;
+            auto const local = py_integer_temporary();
+            fragment prefix = o.kind == operand_info::Expression ? o.original : local_value(o.local, type::Integer);
+            put_local(prefix, opcode::LocalSet, local);
+            o = operand_info{};
+            o.kind = operand_info::Variable;
+            o.local = local;
+            o.prefix = prefix;
+            o.stable = true;
+        }
+        operand_info dummy;
+        auto& a = lhsInfo ? *lhsInfo : dummy;
+        // (the expression)
+        py_integer_expression e;
+        e.stable = (!lhsInfo || lhsInfo->stable) && b.stable;
+        for (auto* o : { lhsInfo ? &*lhsInfo : nullptr, &b })
+        {
+            if (o == nullptr)
+                continue;
+            if (o->kind == operand_info::Expression)
+            {
+                // (the operand's code is part of this expression's: its object temporary is not used)
+                if (o->expression.holder)
+                {
+                    auto& function = current_function();
+                    auto const pending = std::find(function.pendingObjects.begin(), function.pendingObjects.end(), *o->expression.holder);
+                    if (pending != function.pendingObjects.end())
+                    {
+                        function.pendingObjects.erase(pending);
+                        function.consumedObjects.push_back(*o->expression.holder);
+                    }
+                }
+                append(e.prefix, o->expression.prefix);
+                e.small.insert(o->expression.small.begin(), o->expression.small.end());
+                e.height = std::max(e.height, o->expression.height + 1u);
+                if (o->expression.bails)
+                    e.bails = true;
+            }
+            else
+                append(e.prefix, o->prefix);
+        }
+        // --- the fast version
+        auto& f = e.fast;
+        auto const op = [&](opcode aOpcode) { put(f, aOpcode); };
+        auto const i64 = [&](std::int64_t aValue) { put_i64(f, aValue); };
+        auto const get = [&](std::uint32_t aLocal) { put_local(f, opcode::LocalGet, aLocal); };
+        auto const set = [&](std::uint32_t aLocal) { put_local(f, opcode::LocalSet, aLocal); };
+        auto const tee = [&](std::uint32_t aLocal) { put_local(f, opcode::LocalTee, aLocal); };
+        auto const scratch = [&](std::uint32_t aRole) { return py_scratch(aRole, type::I64); };
+        // (the fast version branches out (to its slow version) if the condition (an i32) holds)
+        auto const bail = [&]()
+        {
+            put_op(f.fragmentCode.as_std_vector(), opcode::BrIf);
+            put_u32(f.fragmentCode.as_std_vector(), 0u);
+            e.bails = true;
+        };
+        auto const always_bail = [&]()
+        {
+            put_op(f.fragmentCode.as_std_vector(), opcode::Br);
+            put_u32(f.fragmentCode.as_std_vector(), 0u);
+            e.bails = true;
+            i64(0);
+        };
+        // (variables (that the expression has not checked) that must be small integers: one test of their low bits)
+        auto const check_small = [&](std::initializer_list<operand_info const*> aOperands)
+        {
+            std::vector<std::uint32_t> locals;
+            for (auto const* o : aOperands)
+                if (o != nullptr && o->kind == operand_info::Variable && !e.small.contains(o->local) && !py_counter(o->local) && 
+                    std::find(locals.begin(), locals.end(), o->local) == locals.end())
+                    locals.push_back(o->local);
+            if (locals.empty())
+                return;
+            for (std::size_t i = 0u; i < locals.size(); ++i)
+            {
+                get(locals[i]);
+                if (i > 0u)
+                    op(opcode::I64Ior);
+            }
+            i64(1); op(opcode::I64And); op(opcode::I32ConvertI64); bail();
+            e.small.insert(locals.begin(), locals.end());
+        };
+        auto const push = [&](operand_info const& o)
+        {
+            switch (o.kind)
+            {
+            case operand_info::Constant:
+                i64(o.value * 2);
+                break;
+            case operand_info::Variable:
+                get(o.local);
+                break;
+            case operand_info::Expression:
+                append(f, o.expression.fast);
+                break;
+            }
+        };
+        // (an operand (a variable, or an expression just pushed) whose value must be within [aLow, aHigh]: checked (if its range is 
+        // not))
+        auto const narrow = [&](operand_info& o, std::int64_t aLow, std::int64_t aHigh)
+        {
+            aLow = std::max(aLow, o.low);
+            aHigh = std::min(aHigh, o.high);
+            if (o.kind == operand_info::Constant || (aLow == o.low && aHigh == o.high))
+                return;
+            if (o.kind == operand_info::Variable)
+                get(o.local);
+            else
+            {
+                auto const z = scratch(ScratchZ);
+                tee(z);
+                get(z);
+            }
+            bool const below = aLow > o.low;
+            bool const above = aHigh < o.high;
+            if (below && above)
+            {
+                if (aHigh >= 0 && aLow == -aHigh - 1 && ((aHigh + 1) & aHigh) == 0)
+                {
+                    // (within [-2^k, 2^k): (v >> (k + 1)) + 1 is 0 or 1 (v shifted left one bit))
+                    int k = 0;
+                    while ((std::int64_t{ 1 } << k) != aHigh + 1)
+                        ++k;
+                    i64(k + 1); op(opcode::I64ShrS); i64(1); op(opcode::I64Add); i64(2); op(opcode::I64GeU);
+                }
+                else
+                {
+                    i64(aLow * 2); op(opcode::I64Sub);
+                    i64(static_cast<std::int64_t>((static_cast<std::uint64_t>(aHigh) - static_cast<std::uint64_t>(aLow)) * 2u)); op(opcode::I64GtU);
+                }
+            }
+            else if (above)
+            {
+                i64(aHigh * 2); op(opcode::I64GtS);
+            }
+            else
+            {
+                i64(aLow * 2); op(opcode::I64LtS);
+            }
+            bail();
+            o.low = aLow;
+            o.high = aHigh;
+        };
+        auto const result_range = [&](int_range const& aRange)
+        {
+            e.low = aRange.low;
+            e.high = aRange.high;
+        };
+        // --- the slow version
+        auto& g = e.slow;
+        std::vector<std::uint32_t> owned;
+        auto const slow_push = [&](operand_info const& o, std::uint32_t aOperand)
+        {
+            switch (o.kind)
+            {
+            case operand_info::Constant:
+                put_i64(g, o.value * 2);
+                break;
+            case operand_info::Variable:
+                put_local(g, opcode::LocalGet, o.local);
+                break;
+            case operand_info::Expression:
+                append(g, py_integer_value(o.expression, false));
+                if (o.expression.bails)
+                {
+                    // (a new reference: released after the call)
+                    auto const t = py_scratch(ScratchOwned + 2u * e.height + aOperand, type::Integer);
+                    put_local(g, opcode::LocalTee, t);
+                    owned.push_back(t);
+                }
+                break;
+            }
+        };
+        auto const slow_call = [&](std::string const& aName, std::int32_t aOperator, type aResult)
+        {
+            put_i32(g, aOperator);
+            if (!unary)
+                slow_push(a, 0u);
+            slow_push(b, 1u);
+            if (unary)
+                emit_call_to(g, runtime_function(aName, { type::I32, type::Integer }, aResult));
+            else
+                emit_call_to(g, runtime_function(aName, { type::I32, type::Integer, type::Integer }, aResult));
+            for (auto const t : owned)
+                append(g, py_release_integer(t, false));
+        };
+        static std::map<construct, std::int32_t> const sBinary = { { construct::Add, PyAdd }, { construct::Subtract, PySubtract }, 
+            { construct::Multiply, PyMultiply }, { construct::FloorDivide, PyFloorDivide }, { construct::Modulo, PyRemainder }, 
+            { construct::LeftShift, PyLeftShift }, { construct::RightShift, PyRightShift }, 
+            { construct::BitAnd, PyAnd }, { construct::BitOr, PyOr }, { construct::BitXor, PyXor } };
+        static std::map<construct, std::pair<std::int32_t, opcode>> const sCompare = { { construct::Less, { PyLess, opcode::I64LtS } }, 
+            { construct::LessEqual, { PyLessEqual, opcode::I64LeS } }, { construct::Equal, { PyEqual, opcode::I64Eq } }, 
+            { construct::NotEqual, { PyNotEqual, opcode::I64Ne } }, { construct::Greater, { PyGreater, opcode::I64GtS } }, 
+            { construct::GreaterEqual, { PyGreaterEqual, opcode::I64GeS } } };
+        constexpr std::int64_t Half = std::int64_t{ 1 } << 61;
+        bool comparison = false;
+        switch (aConstruct)
+        {
+        case construct::Add:
+        case construct::Subtract:
+            {
+                // (the operands' ranges: no overflow check if the result is within the range of small integers; else a variable is
+                // checked to be within a range that makes it so; else an overflow check of the result)
+                bool const add = aConstruct == construct::Add;
+                auto const sum = [&]() { return add ? int_range{ a.low + b.low, a.high + b.high } : int_range{ a.low - b.high, a.high - b.low }; };
+                auto const bounded = [&](operand_info const& o) { return o.low >= -Half && o.high <= Half; };
+                std::optional<int_range> na, nb;
+                if (!sum().small())
+                {
+                    if (a.kind != operand_info::Constant && bounded(b))
+                        na = add ? int_range{ SmallLow - b.low, SmallHigh - b.high } : int_range{ SmallLow + b.high, SmallHigh + b.low };
+                    else if (b.kind != operand_info::Constant && bounded(a))
+                        nb = add ? int_range{ SmallLow - a.low, SmallHigh - a.high } : int_range{ a.high - SmallHigh, a.low - SmallLow };
+                    else if (a.kind == operand_info::Variable && b.kind == operand_info::Variable)
+                        na = nb = int_range{ -(Half >> 1), (Half >> 1) - 1 };
+                }
+                check_small({ &a, &b });
+                // (variables first: then the operation is a variable's update (local.get, constant, add, local.set), if it is one)
+                if (na && a.kind == operand_info::Variable)
+                    narrow(a, na->low, na->high);
+                if (nb && b.kind == operand_info::Variable)
+                    narrow(b, nb->low, nb->high);
+                push(a);
+                if (na)
+                    narrow(a, na->low, na->high);
+                push(b);
+                if (nb)
+                    narrow(b, nb->low, nb->high);
+                if (sum().small())
+                {
+                    op(add ? opcode::I64Add : opcode::I64Sub);
+                    result_range(sum());
+                }
+                else
+                {
+                    // r = a + b (a - b); overflow: ((a ^ r) & (b ^ r)) < 0 (((a ^ b) & (a ^ r)) < 0)
+                    auto const x = scratch(ScratchX), y = scratch(ScratchY), r = scratch(ScratchResult);
+                    set(y); tee(x); get(y); op(add ? opcode::I64Add : opcode::I64Sub); set(r);
+                    if (add)
+                    {
+                        get(x); get(r); op(opcode::I64Xor); get(y); get(r); op(opcode::I64Xor);
+                    }
+                    else
+                    {
+                        get(x); get(y); op(opcode::I64Xor); get(x); get(r); op(opcode::I64Xor);
+                    }
+                    op(opcode::I64And); i64(0); op(opcode::I64LtS); bail();
+                    get(r);
+                    result_range({});
+                }
+                slow_call("python::integer_binary", sBinary.at(aConstruct), type::Integer);
+            }
+            break;
+        case construct::Multiply:
+            {
+                // (the operands' ranges: within ranges that make the product a small integer)
+                bool const square = a.kind == operand_info::Variable && b.kind == operand_info::Variable && a.local == b.local;
+                auto const product = [&]() -> int_range
+                {
+                    if (square)
+                    {
+                        auto const m = a.magnitude();
+                        return { 0, saturated_multiply(m, m) };
+                    }
+                    std::int64_t const p[] = { saturated_multiply(a.low, b.low), saturated_multiply(a.low, b.high), saturated_multiply(a.high, b.low), saturated_multiply(a.high, b.high) };
+                    return { *std::min_element(std::begin(p), std::end(p)), *std::max_element(std::begin(p), std::end(p)) };
+                };
+                auto const bound = [&](std::int64_t aMagnitude)
+                {
+                    // ([-2^k, 2^k): a range whose product with a value of at most aMagnitude is within [-2^61, 2^61])
+                    auto const limit = static_cast<std::uint64_t>(Half) / static_cast<std::uint64_t>(std::max<std::int64_t>(aMagnitude, 1));
+                    auto const k = static_cast<std::int64_t>(std::bit_floor(std::max<std::uint64_t>(limit, 1u)));
+                    return int_range{ -k, k - 1 };
+                };
+                std::optional<int_range> na, nb;
+                if (!product().small())
+                {
+                    if (a.kind == operand_info::Constant)
+                        nb = bound(a.magnitude());
+                    else if (b.kind == operand_info::Constant)
+                        na = bound(b.magnitude());
+                    else if (a.magnitude() <= (std::int64_t{ 1 } << 30))
+                        nb = bound(a.magnitude());
+                    else if (b.magnitude() <= (std::int64_t{ 1 } << 30))
+                        na = bound(b.magnitude());
+                    else
+                    {
+                        na = int_range{ -(std::int64_t{ 1 } << 30), (std::int64_t{ 1 } << 30) - 1 };
+                        if (!square)
+                            nb = na;
+                    }
+                }
+                check_small({ &a, &b });
+                if (a.kind == operand_info::Constant || b.kind == operand_info::Constant)
+                {
+                    auto& v = a.kind == operand_info::Constant ? b : a;
+                    auto const& c = a.kind == operand_info::Constant ? a : b;
+                    push(v);
+                    if (auto const& n = a.kind == operand_info::Constant ? nb : na)
+                        narrow(v, n->low, n->high);
+                    i64(c.value); op(opcode::I64Mul);
+                }
+                else
+                {
+                    push(a);
+                    if (na)
+                        narrow(a, na->low, na->high);
+                    if (square)
+                    {
+                        b.low = a.low;
+                        b.high = a.high;
+                    }
+                    i64(1); op(opcode::I64ShrS);
+                    push(b);
+                    if (nb)
+                        narrow(b, nb->low, nb->high);
+                    op(opcode::I64Mul);
+                }
+                if (!product().small())
+                    throw std::logic_error("neos::language::compiler::py_integer_operation: product range");
+                result_range(product());
+                slow_call("python::integer_binary", PyMultiply, type::Integer);
+            }
+            break;
+        case construct::FloorDivide:
+        case construct::Modulo:
+            {
+                bool const floor = aConstruct == construct::FloorDivide;
+                if (b.kind == operand_info::Constant && b.value == 0)
+                    always_bail();
+                else if (b.kind == operand_info::Constant && b.value > 0)
+                {
+                    auto const c = b.value;
+                    check_small({ &a });
+                    push(a);
+                    if ((c & (c - 1)) == 0)
+                    {
+                        // (by a power of two, 2^k: shifted right k bits (q), or the low k bits (m))
+                        int k = 0;
+                        while ((std::int64_t{ 1 } << k) != c)
+                            ++k;
+                        if (floor)
+                        {
+                            i64(k); op(opcode::I64ShrS); i64(-2); op(opcode::I64And);
+                        }
+                        else
+                        {
+                            i64((c - 1) * 2); op(opcode::I64And);
+                        }
+                    }
+                    else if (a.low >= 0)
+                    {
+                        // (a value that is not negative: as 64-bit integers (both shifted left one bit))
+                        i64(c * 2);
+                        if (floor)
+                        {
+                            op(opcode::I64DivS); i64(1); op(opcode::I64Shl);
+                        }
+                        else
+                            op(opcode::I64RemS);
+                    }
+                    else if (floor)
+                    {
+                        // (q = trunc(a / c), less one if the remainder is negative)
+                        auto const x = scratch(ScratchX), q = scratch(ScratchQ);
+                        tee(x); i64(c * 2); op(opcode::I64DivS); tee(q);
+                        get(x); get(q); i64(c * 2); op(opcode::I64Mul); op(opcode::I64Sub); i64(63); op(opcode::I64ShrS); op(opcode::I64Add);
+                        i64(1); op(opcode::I64Shl);
+                    }
+                    else
+                    {
+                        // (m = a % c, plus c if negative)
+                        auto const m = scratch(ScratchM);
+                        i64(c * 2); op(opcode::I64RemS);
+                        e.zeroFast = f;
+                        tee(m);
+                        get(m); i64(63); op(opcode::I64ShrS); i64(c * 2); op(opcode::I64And); op(opcode::I64Add);
+                    }
+                    if (floor)
+                        result_range({ floor_divide(a.low, c), floor_divide(a.high, c) });
+                    else
+                        result_range(a.low >= 0 && a.high < c ? a.range() : int_range{ 0, c - 1 });
+                }
+                else
+                {
+                    // (as 64-bit integers (both shifted left one bit): b != 0 and (floor division, if b can be -1) a is not the least small 
+                    // integer: q = a / b, r = a - q * b (m = a % b), adjusted to the floor (r != 0 and its sign is not b's: q - 1, m + b))
+                    auto const x = scratch(ScratchX), y = scratch(ScratchY), q = scratch(ScratchQ), m = scratch(ScratchM);
+                    check_small({ &a, &b });
+                    // (the adjustment: r != 0 and its sign is not b's: ((r ^ b) & (r | -r)) >> 63 (-1, else 0))
+                    auto const adjustment = [&]()
+                    {
+                        get(m); get(y); op(opcode::I64Xor); i64(0); get(m); op(opcode::I64Sub); get(m); op(opcode::I64Ior); op(opcode::I64And);
+                        i64(63); op(opcode::I64ShrS);
+                    };
+                    if (floor)
+                    {
+                        // (both operands first: the code of an operand can use the scratch locals)
+                        push(a); push(b); set(y); set(x);
+                        if (a.low == SmallLow && b.low <= -1 && b.high >= -1)
+                        {
+                            get(x); i64(SmallLow * 2); op(opcode::I64Eq); bail();
+                        }
+                        get(y); op(opcode::I64Eqz); bail();
+                        get(x); get(y); op(opcode::I64DivS); tee(q);
+                        get(x); get(q); get(y); op(opcode::I64Mul); op(opcode::I64Sub); set(m);
+                        adjustment(); op(opcode::I64Add);
+                        i64(1); op(opcode::I64Shl);
+                    }
+                    else
+                    {
+                        push(a);
+                        push(b); tee(y); op(opcode::I64Eqz); bail();
+                        get(y); op(opcode::I64RemS);
+                        // (whether the result is zero: the remainder's)
+                        e.zeroFast = f;
+                        tee(m);
+                        adjustment(); get(y); op(opcode::I64And); op(opcode::I64Add);
+                    }
+                    if (floor)
+                    {
+                        auto const ma = std::min(a.magnitude(), SmallHigh);
+                        result_range({ -ma, ma });
+                    }
+                    else if (b.low > 0)
+                        result_range({ 0, b.high - 1 });
+                    else if (b.high < 0)
+                        result_range({ b.low + 1, 0 });
+                    else
+                        result_range({ -std::min(b.magnitude(), SmallHigh), std::min(b.magnitude(), SmallHigh) });
+                }
+                slow_call("python::integer_binary", sBinary.at(aConstruct), type::Integer);
+            }
+            break;
+        case construct::BitAnd:
+        case construct::BitOr:
+        case construct::BitXor:
+            {
+                // (the bits of small integers (shifted left one bit) are the bits of the result (shifted))
+                check_small({ &a, &b });
+                push(a); push(b);
+                op(aConstruct == construct::BitAnd ? opcode::I64And : aConstruct == construct::BitOr ? opcode::I64Ior : opcode::I64Xor);
+                if (aConstruct == construct::BitAnd && (a.low >= 0 || b.low >= 0))
+                    result_range({ 0, a.low >= 0 && b.low >= 0 ? std::min(a.high, b.high) : a.low >= 0 ? a.high : b.high });
+                else if (a.low >= 0 && b.low >= 0)
+                    result_range({ 0, static_cast<std::int64_t>(std::bit_ceil(static_cast<std::uint64_t>(std::max(a.high, b.high)) + 1u)) - 1 });
+                else
+                    result_range({});
+                slow_call("python::integer_binary", sBinary.at(aConstruct), type::Integer);
+            }
+            break;
+        case construct::LeftShift:
+            {
+                if (b.kind == operand_info::Constant)
+                {
+                    if (b.value < 0 || b.value >= 62)
+                        always_bail();
+                    else
+                    {
+                        // (a within a range that makes the result a small integer)
+                        auto const k = b.value;
+                        auto const limit = std::int64_t{ 1 } << (61 - k);
+                        check_small({ &a });
+                        push(a);
+                        narrow(a, -limit, limit - 1);
+                        result_range({ a.low * (std::int64_t{ 1 } << k), a.high * (std::int64_t{ 1 } << k) });
+                        i64(k); op(opcode::I64Shl);
+                    }
+                }
+                else
+                {
+                    // (0 <= n <= 62 and (r >> n) == a: r = a << n)
+                    auto const x = scratch(ScratchX), n = scratch(ScratchN), r = scratch(ScratchResult);
+                    check_small({ &a, &b });
+                    // (both operands first: the code of an operand can use the scratch locals)
+                    push(a); push(b); i64(1); op(opcode::I64ShrS); set(n); set(x);
+                    get(n); i64(62); op(opcode::I64GtU); bail();
+                    get(x); get(n); op(opcode::I64Shl); tee(r); get(n); op(opcode::I64ShrS); get(x); op(opcode::I64Ne); bail();
+                    get(r);
+                    result_range({});
+                }
+                slow_call("python::integer_binary", PyLeftShift, type::Integer);
+            }
+            break;
+        case construct::RightShift:
+            {
+                if (b.kind == operand_info::Constant)
+                {
+                    if (b.value < 0)
+                        always_bail();
+                    else
+                    {
+                        auto const k = std::min<std::int64_t>(b.value, 63);
+                        check_small({ &a });
+                        push(a); i64(k); op(opcode::I64ShrS); i64(-2); op(opcode::I64And);
+                        result_range({ a.low >> k, a.high >> k });
+                    }
+                }
+                else
+                {
+                    // (n >= 0: r = (a >> min(n, 63)) & ~1)
+                    auto const n = scratch(ScratchN);
+                    check_small({ &a, &b });
+                    push(a);
+                    push(b); i64(1); op(opcode::I64ShrS); tee(n); i64(0); op(opcode::I64LtS); bail();
+                    get(n); i64(63); get(n); i64(63); op(opcode::I64LtU); op(opcode::Select);
+                    op(opcode::I64ShrS); i64(-2); op(opcode::I64And);
+                    result_range({ a.low < 0 ? a.low : 0, a.high >= 0 ? a.high : -1 });
+                }
+                slow_call("python::integer_binary", PyRightShift, type::Integer);
+            }
+            break;
+        case construct::Negative:
+            {
+                check_small({ &b });
+                i64(0);
+                push(b);
+                narrow(b, SmallLow + 1, SmallHigh);
+                op(opcode::I64Sub);
+                result_range({ -b.high, -b.low });
+                slow_call("python::integer_unary", PyNegative, type::Integer);
+            }
+            break;
+        case construct::Invert:
+            {
+                // (~a: -a - 1)
+                check_small({ &b });
+                push(b); i64(-2); op(opcode::I64Xor);
+                result_range({ -b.high - 1, -b.low - 1 });
+                slow_call("python::integer_unary", PyInvert, type::Integer);
+            }
+            break;
+        case construct::Less:
+        case construct::LessEqual:
+        case construct::Greater:
+        case construct::GreaterEqual:
+        case construct::Equal:
+        case construct::NotEqual:
+            {
+                // (small: as 64-bit integers (shifted left one bit, their order is kept); equality with a small integer: an integer 
+                // object is never equal to one)
+                auto const& c = sCompare.at(aConstruct);
+                bool const equality = aConstruct == construct::Equal || aConstruct == construct::NotEqual;
+                if (!(equality && (a.kind == operand_info::Constant || b.kind == operand_info::Constant)))
+                    check_small({ &a, &b });
+                // (equality with zero: an expression whose value is zero if a cheaper one is)
+                auto const zero_test = [&](operand_info const& o, operand_info const& aOther)
+                {
+                    return equality && aOther.kind == operand_info::Constant && aOther.value == 0 && o.kind == operand_info::Expression && 
+                        !o.expression.zeroFast.fragmentCode.empty();
+                };
+                if (zero_test(a, b))
+                    append(f, a.expression.zeroFast);
+                else
+                    push(a);
+                if (zero_test(b, a))
+                    append(f, b.expression.zeroFast);
+                else
+                    push(b);
+                op(c.second);
+                slow_call("python::integer_compare", c.first, type::Boolean);
+                comparison = true;
+            }
+            break;
+        default:
+            throw std::logic_error("neos::language::compiler::py_integer_operation");
+        }
+        if (comparison)
+        {
+            fragment result = e.prefix;
+            if (!e.bails)
+                append(result, e.fast);
+            else
+            {
+                put_block(result, opcode::Block, type::Boolean);
+                put_block(result, opcode::Block, {});
+                append(result, e.fast);
+                put_op(result.fragmentCode.as_std_vector(), opcode::Br);
+                put_u32(result.fragmentCode.as_std_vector(), 1u);
+                put(result, opcode::End);
+                append(result, e.slow);
+                put(result, opcode::End);
+            }
+            result.valueType = type::Boolean;
+            result.fragmentKind = fragment_kind::Value;
+            push_operand(operand_type{ result });
+            return;
+        }
+        push_operand(operand_type{ py_integer_fragment(std::move(e)) });
+    }
+
+    fragment compiler::py_integer_fragment(py_integer_expression aExpression)
+    {
+        // an int expression as a value (its slow version's result is held by an object temporary: if code takes over the expression 
+        // it takes over that result instead (see py_integer_expression_of))
+        auto& function = current_function();
+        if (aExpression.bails)
+        {
+            std::uint32_t holder;
+            if (!function.freeObjects.empty())
+            {
+                holder = function.freeObjects.back();
+                function.freeObjects.pop_back();
+            }
+            else
+                holder = temporary(type::Object);
+            function.pendingObjects.push_back(holder);
+            function.objectTemporaries.insert(holder);
+            aExpression.holder = holder;
+        }
+        else
+            aExpression.slow = fragment{};
+        fragment result = aExpression.prefix;
+        append(result, py_integer_value(aExpression, true));
+        result.valueType = type::Integer;
+        result.fragmentKind = fragment_kind::Value;
+        function.pyIntegers[integer_key(result)] = std::move(aExpression);
+        return result;
+    }
+
+    std::uint32_t compiler::py_integer_temporary()
+    {
+        // a temporary integer of the statement (reusable after it)
+        auto& function = current_function();
+        std::uint32_t result;
+        if (!function.freeIntegers.empty())
+        {
+            result = function.freeIntegers.back();
+            function.freeIntegers.pop_back();
+        }
+        else
+            result = temporary(type::Integer);
+        function.pendingIntegers.push_back(result);
+        return result;
+    }
+
+    void compiler::py_integer_divide_or_power(construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs)
+    {
+        // a true division (small integers of at most 53 bits: as doubles; otherwise by the runtime plugin) or a power (by the
+        // runtime plugin)
+        auto const constant = [&](operand_type const& aOperand) -> std::optional<std::int64_t>
+        {
+            auto const value = int_immediate(aOperand);
+            if (!value || *value < ibig{ SmallLow } || ibig{ SmallHigh } < *value)
+                return {};
+            return integer_cast<std::int64_t>(*value);
+        };
+        fragment result;
+        auto const operand = [&](operand_type const& aOperand) -> fragment
+        {
+            if (auto const c = constant(aOperand))
+            {
+                fragment value;
+                put_i64(value, *c * 2);
+                value.valueType = type::Integer;
+                return value;
+            }
+            auto const local = temporary(type::Integer);
+            append(result, materialize(aOperand, type::Integer));
+            put_local(result, opcode::LocalSet, local);
+            return local_value(local, type::Integer);
+        };
+        auto const lhs = operand(*aLhs);
+        auto const rhs = operand(aRhs);
+        auto const operator_code = [](std::int32_t aOperator) { fragment c; put_i32(c, aOperator); c.valueType = type::I32; return c; };
+        if (aConstruct == construct::Power)
+        {
+            append(result, py_park_integer(py_runtime_call("python::integer_binary", { type::I32, type::Integer, type::Integer }, type::Integer,
+                { operator_code(PyPower), lhs, rhs })));
+            result.valueType = type::Integer;
+        }
+        else
+        {
+            auto const x = py_scratch(ScratchX, type::I64);
+            auto const y = py_scratch(ScratchY, type::I64);
+            auto const op = [&](opcode aOpcode) { put(result, aOpcode); };
+            auto const i64 = [&](std::int64_t aValue) { put_i64(result, aValue); };
+            // (small: ((a | b) & 1) == 0)
+            append(result, lhs); append(result, rhs); op(opcode::I64Ior); i64(1); op(opcode::I64And); op(opcode::I64Eqz);
+            append(result, lhs); i64(1); op(opcode::I64ShrS); put_local(result, opcode::LocalTee, x);
+            i64(std::int64_t{ 1 } << 53); op(opcode::I64Add); i64(std::int64_t{ 1 } << 54); op(opcode::I64LeU); op(opcode::I32And);
+            append(result, rhs); i64(1); op(opcode::I64ShrS); put_local(result, opcode::LocalTee, y);
+            i64(std::int64_t{ 1 } << 53); op(opcode::I64Add); i64(std::int64_t{ 1 } << 54); op(opcode::I64LeU); op(opcode::I32And);
+            append(result, rhs); i64(0); op(opcode::I64Ne); op(opcode::I32And);
+            put_block(result, opcode::If, type::F64);
+            put_local(result, opcode::LocalGet, x); op(opcode::F64SConvertI64); put_local(result, opcode::LocalGet, y); op(opcode::F64SConvertI64); op(opcode::F64Div);
+            op(opcode::Else);
+            append(result, py_runtime_call("python::integer_true_divide", { type::Integer, type::Integer }, type::F64, { lhs, rhs }));
+            op(opcode::End);
+            result.valueType = type::F64;
+        }
+        result.fragmentKind = fragment_kind::Value;
+        push_operand(operand_type{ result });
+    }
+
     fragment compiler::py_object(operand_type const& aOperand)
     {
         auto value = materialize(aOperand);
@@ -1646,7 +2998,8 @@ namespace neos::language
                         if (aType == type::String) return 'S';
                         if (aType == type::Void) return 'V';
                         if (is_float(aType)) return 'F';
-                        return 'I';
+                        if (aType == type::Integer) return 'I';
+                        return 'L';
                     };
                     auto const& parameters = iPyParameters.at(aName);
                     std::vector<type> parameterTypes;
@@ -1758,7 +3111,7 @@ namespace neos::language
         if (auto* const existing = find_symbol(current_scope(), neolib::string_view{ name }, true))
             return *existing;
         bool const module = current_function().implicitEntry;
-        auto t = kind_of(aType);
+        auto t = kind_of(aType, py_big_integers());
         if (t == type::Void)
             t = type::Object;
         if (!module)
@@ -1799,6 +3152,25 @@ namespace neos::language
                 t = v->second;
         define_symbol(name, t, neolib::string_view{});
         auto& entry = *find_symbol(current_scope(), neolib::string_view{ name }, true);
+        if (t == type::Integer)
+            if (auto const function = iInference.pyCounters.find(functionName); function != iInference.pyCounters.end())
+                if (auto const counter = function->second.find(aName); counter != function->second.end())
+                {
+                    // (only for loops over ranges bind it: a small integer within their range (its integer is never an object to 
+                    // release))
+                    current_function().pyCounters[entry.index()] = { counter->second.low, counter->second.high };
+                    return entry;
+                }
+        if (t == type::Integer)
+        {
+            // (an int's integer object is released when the function returns)
+            current_function().integerVariables.push_back(entry.index());
+            if (current_function().returns && !module)
+            {
+                iInference.pyLocals[functionName][aName] = type::Integer;
+                { iInference.changed = true; if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
+            }
+        }
         if (t == type::Object)
         {
             current_function().objectVariables.push_back(entry.index());
@@ -1838,9 +3210,69 @@ namespace neos::language
         { iInference.changed = true; if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
     }
 
+    void compiler::py_bound(std::string const& aName, std::optional<interval> const& aCounter)
+    {
+        // a variable of the current function is bound (by a for loop over a range (aCounter: the range of the values), or else by 
+        // something else)
+        if (iDeclarationPass || !state().function)
+            return;
+        auto& bindings = iInference.pyCounterBindings[current_function().name];
+        auto const existing = bindings.find(aName);
+        if (existing == bindings.end())
+            bindings[aName] = aCounter;
+        else if (existing->second && aCounter)
+            existing->second = existing->second->join(*aCounter);
+        else
+            existing->second = std::nullopt;
+    }
+
+    void compiler::py_update_counters()
+    {
+        // the int variables that only for loops over ranges bind (if they are not those of the previous pass, another pass)
+        std::map<std::string, std::map<std::string, interval>> counters;
+        for (auto const& function : iInference.pyCounterBindings)
+            for (auto const& variable : function.second)
+                if (variable.second)
+                    counters[function.first][variable.first] = *variable.second;
+        bool same = counters.size() == iInference.pyCounters.size();
+        for (auto const& function : counters)
+        {
+            auto const previous = iInference.pyCounters.find(function.first);
+            if (!same || previous == iInference.pyCounters.end() || previous->second.size() != function.second.size())
+            {
+                same = false;
+                break;
+            }
+            for (auto const& variable : function.second)
+            {
+                auto const p = previous->second.find(variable.first);
+                if (p == previous->second.end() || p->second.low != variable.second.low || p->second.high != variable.second.high)
+                    same = false;
+            }
+        }
+        if (!same)
+        {
+            iInference.pyCounters = counters;
+            iInference.changed = true;
+        }
+    }
+
+    std::optional<std::pair<std::int64_t, std::int64_t>> compiler::py_counter(std::uint32_t aLocal)
+    {
+        // (a variable that only for loops over ranges bind: the range of its values)
+        if (!state().function)
+            return {};
+        auto const& counters = current_function().pyCounters;
+        auto const counter = counters.find(aLocal);
+        if (counter == counters.end())
+            return {};
+        return counter->second;
+    }
+
     void compiler::py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement)
     {
-        auto const valueType = kind_of(py_type(aValue));
+        py_bound(aName);
+        auto const valueType = kind_of(py_type(aValue), py_big_integers());
         auto& variable = py_variable(aName, valueType);
         bool const global = is_global(variable);
         auto const variableType = variable.type();
@@ -1875,10 +3307,70 @@ namespace neos::language
             }
             return;
         }
-        if (valueType != kind_of(variableType))
+        if (valueType != kind_of(variableType, py_big_integers()))
         {
             py_kind_change(aName);
             put(aStatement, opcode::Unreachable);
+            return;
+        }
+        if (variableType == type::Integer)
+        {
+            // (the variable holds a reference of its own to an integer object: retained; the integer it held is released)
+            auto value = materialize(aValue, type::Integer);
+            if (auto const expression = py_integer_expression_of(value))
+            {
+                // (an int expression: its fast version's result is a small integer (as is the variable's integer, if the 
+                // expression checks that); its slow version's result is a new reference (the variable's))
+                auto const get = global ? opcode::GlobalGet : opcode::LocalGet;
+                auto const set = global ? opcode::GlobalSet : opcode::LocalSet;
+                bool const checked = !global && expression->small.contains(index);
+                append(aStatement, expression->prefix);
+                if (!expression->bails && checked)
+                {
+                    append(aStatement, expression->fast);
+                    put_local(aStatement, set, index);
+                    return;
+                }
+                put_block(aStatement, opcode::Block, {});
+                put_block(aStatement, opcode::Block, {});
+                append(aStatement, expression->fast);
+                if (!checked)
+                {
+                    put_local(aStatement, get, index);
+                    put_i64(aStatement, 1);
+                    put(aStatement, opcode::I64And);
+                    put(aStatement, opcode::I32ConvertI64);
+                    put_op(aStatement.fragmentCode.as_std_vector(), opcode::BrIf);
+                    put_u32(aStatement.fragmentCode.as_std_vector(), 0u);
+                }
+                put_local(aStatement, set, index);
+                put_op(aStatement.fragmentCode.as_std_vector(), opcode::Br);
+                put_u32(aStatement.fragmentCode.as_std_vector(), 1u);
+                put(aStatement, opcode::End);
+                auto const scratch = py_scratch(ScratchBind, type::Integer);
+                append(aStatement, expression->bails ? expression->slow : expression->fast);
+                put_local(aStatement, opcode::LocalSet, scratch);
+                append(aStatement, py_release_integer(index, global));
+                put_local(aStatement, opcode::LocalGet, scratch);
+                put_local(aStatement, set, index);
+                put(aStatement, opcode::End);
+                return;
+            }
+            auto const scratch = py_scratch(ScratchBind, type::Integer);
+            append(aStatement, value);
+            put_local(aStatement, opcode::LocalTee, scratch);
+            // (either an integer object: ((new | old) & 1) != 0)
+            put_local(aStatement, global ? opcode::GlobalGet : opcode::LocalGet, index);
+            put(aStatement, opcode::I64Ior);
+            put_i64(aStatement, 1);
+            put(aStatement, opcode::I64And);
+            put(aStatement, opcode::I32ConvertI64);
+            put_block(aStatement, opcode::If, {});
+            append(aStatement, py_retain_integer(scratch));
+            append(aStatement, py_release_integer(index, global));
+            put(aStatement, opcode::End);
+            put_local(aStatement, opcode::LocalGet, scratch);
+            put_local(aStatement, global ? opcode::GlobalSet : opcode::LocalSet, index);
             return;
         }
         append(aStatement, materialize(aValue, variableType));
@@ -1975,8 +3467,8 @@ namespace neos::language
             }
             return;
         }
-        auto const rt = kind_of(py_type(rhs));
-        auto const lt = lhs ? kind_of(py_type(*lhs)) : rt;
+        auto const rt = kind_of(py_type(rhs), py_big_integers());
+        auto const lt = lhs ? kind_of(py_type(*lhs), py_big_integers()) : rt;
         bool const native = lt != type::Object && rt != type::Object && lt != type::Void && rt != type::Void;
         auto const generic = [&](operation aOperation)
         {
@@ -2012,11 +3504,126 @@ namespace neos::language
             op.valueType = type::I32;
             value(py_owned(py_runtime_call("python::unary", { type::I32, type::Object }, type::Object, { op, py_object(rhs) })));
         };
+        // ints (of any size) and bools: as integers (type::Integer)
+        auto const int_like = [](type t) { return t == type::Integer || t == type::Boolean || is_integer(t); };
+        if (native && int_like(lt) && int_like(rt) && py_big_integers())
+        {
+            bool const booleans = lt == type::Boolean && rt == type::Boolean;
+            switch (aConstruct)
+            {
+            case construct::Add:
+            case construct::Subtract:
+            case construct::Multiply:
+            case construct::Divide:
+            case construct::FloorDivide:
+            case construct::Modulo:
+            case construct::LeftShift:
+            case construct::RightShift:
+            case construct::Less:
+            case construct::LessEqual:
+            case construct::Greater:
+            case construct::GreaterEqual:
+            case construct::Equal:
+            case construct::NotEqual:
+            case construct::Negative:
+            case construct::Positive:
+            case construct::Invert:
+                py_integer_operation(aConstruct, lhs, rhs);
+                return;
+            case construct::BitAnd:
+            case construct::BitOr:
+            case construct::BitXor:
+                if (!booleans)
+                {
+                    py_integer_operation(aConstruct, lhs, rhs);
+                    return;
+                }
+                break;
+            case construct::Power:
+                if (auto const exponent = int_immediate(rhs); exponent && !(*exponent < ibig{ 0 }))
+                {
+                    if (int_immediate(*lhs) || *exponent != ibig{ 2 })
+                    {
+                        py_integer_operation(aConstruct, lhs, rhs);
+                        return;
+                    }
+                    // (x ** 2: x * x)
+                    auto x = materialize(*lhs, type::Integer);
+                    auto const& code = x.fragmentCode.as_std_vector();
+                    if (x.fragmentRelocations.empty() && code.size() >= 2u && code[0] == 0x20u && code.back() < 0x80u &&
+                        std::all_of(code.begin() + 1, code.end() - 1, [](std::uint8_t b) { return b >= 0x80u; }))
+                    {
+                        // (a variable)
+                        py_integer_operation(construct::Multiply, operand_type{ x }, operand_type{ x });
+                        return;
+                    }
+                    auto const local = temporary(type::Integer);
+                    put_local(x, opcode::LocalSet, local);
+                    py_integer_operation(construct::Multiply, operand_type{ local_value(local, type::Integer) }, operand_type{ local_value(local, type::Integer) });
+                    fragment square{ state().operandStack.back().get<i_fragment>() };
+                    state().operandStack.pop_back();
+                    fragment result = x;
+                    append(result, square);
+                    result.valueType = type::Integer;
+                    result.fragmentKind = fragment_kind::Value;
+                    value(result);
+                    return;
+                }
+                break;
+            case construct::Is:
+            case construct::IsNot:
+                if (lt == type::Integer && rt == type::Integer)
+                {
+                    py_integer_operation(aConstruct == construct::Is ? construct::Equal : construct::NotEqual, lhs, rhs);
+                    return;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        // (a float with an int or a bool: as floats)
+        if (native && (is_float(lt) || is_float(rt)) && is_number(lt) && is_number(rt) && aConstruct != construct::Is && aConstruct != construct::IsNot)
+        {
+            if (lhs && !is_float(lt))
+                lhs = operand_type{ materialize(*lhs, type::F64) };
+            if (!is_float(rt) && !(aConstruct == construct::Power && is_immediate(rhs)))
+                rhs = operand_type{ materialize(rhs, type::F64) };
+        }
         bool const numbers = native && is_number(lt) && is_number(rt);
         bool const integers = native && (is_integer(lt) || lt == type::Boolean) && (is_integer(rt) || rt == type::Boolean) && !(lt == type::Boolean && rt == type::Boolean);
         switch (aConstruct)
         {
         case construct::Add:
+            if (native && lt == type::String && rt == type::String && rhs.holds_alternative<i_fragment>() && state().function)
+                if (auto const integer = current_function().pyIntegerStrings.find(integer_key(fragment{ rhs.get<i_fragment>() })); 
+                    integer != current_function().pyIntegerStrings.end())
+                {
+                    // (a string followed by an int's str(): the int is formatted into the result (a small integer: the VM's
+                    // neos::string_concat_i64))
+                    auto const left = temporary(type::String);
+                    auto const x = py_scratch(ScratchCoerce, type::Integer);
+                    fragment result = materialize(*lhs, type::String);
+                    put_local(result, opcode::LocalSet, left);
+                    append(result, integer->second);
+                    put_local(result, opcode::LocalSet, x);
+                    put_is_object(result, x);
+                    put_block(result, opcode::If, type::String);
+                    put_local(result, opcode::LocalGet, left);
+                    append(result, py_runtime_call("python::integer_str", { type::Integer }, type::String, { local_value(x, type::Integer) }));
+                    emit_call_to(result, runtime_function("neos::string_concat", { type::String, type::String }, type::String));
+                    put(result, opcode::Else);
+                    put_local(result, opcode::LocalGet, left);
+                    put_local(result, opcode::LocalGet, x);
+                    put_i64(result, 1);
+                    put(result, opcode::I64ShrS);
+                    emit_call_to(result, runtime_function("neos::string_concat_i64", { type::String, type::I64 }, type::String));
+                    put(result, opcode::End);
+                    result.valueType = type::String;
+                    result.fragmentKind = fragment_kind::Value;
+                    value(result);
+                    break;
+                }
             if (numbers || (native && lt == type::String && rt == type::String))
                 generic(operation::Add);
             else
@@ -2046,7 +3653,7 @@ namespace neos::language
             {
                 // x ** n (an integer, or a float squared): multiplication
                 auto const n = get_immediate(rhs).i;
-                auto x = materialize(*lhs, lt == type::Boolean ? type::I64 : kind_of(lt));
+                auto x = materialize(*lhs, lt == type::Boolean ? type::I64 : kind_of(lt, py_big_integers()));
                 auto const t = x.valueType;
                 auto const local = temporary(t);
                 fragment result;
@@ -2235,6 +3842,30 @@ namespace neos::language
             for (auto const& declaration : iForwardDeclarations)
                 if (declaration.name == name)
                     declared = declaration;
+            // (str() of an int: a conversion)
+            if (name == "str" && arguments.size() == 1u && !anyKeyword && declared && declared->stub && !py_big_integers() && 
+                is_integer(arguments[0].valueType) && arguments[0].valueType != type::Integer)
+            {
+                // (64-bit ints: decimal (the VM's neos::string_from_i64))
+                fragment value = arguments[0];
+                if (value.valueType != type::I64)
+                    convert(value.fragmentCode.as_std_vector(), value.valueType, type::I64);
+                emit_call_to(value, runtime_function("neos::string_from_i64", { type::I64 }, type::String));
+                value.valueType = type::String;
+                value.fragmentKind = fragment_kind::Value;
+                value.fragmentSource = make_fragment(fragment_kind::Value, type::String, aSource).fragmentSource;
+                push_operand(operand_type{ value });
+                return;
+            }
+            if (name == "str" && arguments.size() == 1u && !anyKeyword && arguments[0].valueType == type::Integer && declared && declared->stub)
+            {
+                fragment value = arguments[0];
+                coerce(value, type::String);
+                value.fragmentKind = fragment_kind::Value;
+                value.fragmentSource = make_fragment(fragment_kind::Value, type::String, aSource).fragmentSource;
+                push_operand(operand_type{ value });
+                return;
+            }
             if ((symbol != nullptr && symbol->type() == type::Function) || (symbol == nullptr && declared))
             {
                 // a function of the program (or a builtin that the Python runtime plugin provides as a function)
@@ -2291,6 +3922,12 @@ namespace neos::language
                         auto& result = state().operandStack.back();
                         if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Object)
                             result = operand_type{ py_owned(fragment{ result.get<i_fragment>() }) }; // (a function returns a new reference)
+                        else if (result.holds_alternative<i_fragment>() && result.get<i_fragment>().value_type() == type::Integer)
+                        {
+                            result = operand_type{ py_park_integer(fragment{ result.get<i_fragment>() }) };
+                            if (!py_big_integers())
+                                result = operand_type{ materialize(result, type::I64) }; // (64-bit ints: a runtime plugin's int is one)
+                        }
                         return;
                     }
                     catch (std::runtime_error const&)
@@ -2712,6 +4349,7 @@ namespace neos::language
             return;
         }
         auto const resultType = current_function().scope->function_signature().return_type();
+        std::optional<std::uint32_t> returned;
         if (resultType == type::Void)
         {
             if (value)
@@ -2754,16 +4392,43 @@ namespace neos::language
         {
             if (!value)
                 throw std::runtime_error("function must return a value");
-            append(statement, materialize(*value, resultType));
+            auto result = materialize(*value, resultType);
+            if (resultType == type::Integer)
+            {
+                // (a new reference: an int expression's (its slow version's result is one), a variable's (that is not released), or 
+                // retained)
+                auto const local = local_of(result);
+                auto const& variables = current_function().integerVariables;
+                if (auto const expression = py_integer_expression_of(result))
+                {
+                    append(statement, expression->prefix);
+                    append(statement, py_integer_value(*expression, false));
+                }
+                else if (local && py_try_depth(false) == 0u && std::find(variables.begin(), variables.end(), *local) != variables.end())
+                {
+                    append(statement, result);
+                    returned = *local;
+                }
+                else
+                {
+                    append(statement, result);
+                    auto const scratch = py_scratch(ScratchReturn, type::Integer);
+                    put_local(statement, opcode::LocalSet, scratch);
+                    append(statement, py_retain_integer(scratch));
+                    put_local(statement, opcode::LocalGet, scratch);
+                }
+            }
+            else
+                append(statement, result);
         }
-        auto const release = py_release_variables(true);
+        auto const release = py_release_variables(true, returned);
         auto const tries = py_try_depth(false);
         if (!release.fragmentCode.empty() || tries != 0u)
         {
             std::optional<std::uint32_t> result;
             if (resultType != type::Void)
             {
-                result = temporary(resultType);
+                result = py_scratch(ScratchReturnValue, resultType);
                 put_local(statement, opcode::LocalSet, *result);
             }
             // (finally bodies run (before the function's objects are released))
@@ -2999,6 +4664,8 @@ namespace neos::language
             for (auto const& parameter : signature.parameters().value())
                 if (parameter.parameter_type() == type::Object)
                     current_function().objectVariables.push_back(find_symbol(current_scope(), neolib::string_view{ parameter.parameter_name() }, true)->index());
+                else if (parameter.parameter_type() == type::Integer)
+                    current_function().integerVariables.push_back(find_symbol(current_scope(), neolib::string_view{ parameter.parameter_name() }, true)->index());
         auto const predeclared = iInference.pyLocals.find(current_function().name);
         if (predeclared != iInference.pyLocals.end())
             for (auto const& variable : predeclared->second)
@@ -3023,6 +4690,8 @@ namespace neos::language
                     put_local(prologue, opcode::LocalGet, find_symbol(current_scope(), neolib::string_view{ parameter.parameter_name() }, true)->index());
                     emit_call_to(prologue, runtime_function("neos::object_retain", { type::Object }, type::Void));
                 }
+                else if (parameter.parameter_type() == type::Integer)
+                    append(prologue, py_retain_integer(find_symbol(current_scope(), neolib::string_view{ parameter.parameter_name() }, true)->index()));
         if (!prologue.fragmentCode.empty())
             stack.insert(stack.begin() + static_cast<std::ptrdiff_t>(std::min(base, stack.size())), operand_type{ prologue });
         // a function that ends without a return statement releases its objects (and returns None)
@@ -3180,8 +4849,8 @@ namespace neos::language
                     dummy(type::Object);
                     break;
                 }
-                auto const at = kind_of(py_type(a));
-                auto const bt = kind_of(py_type(b));
+                auto const at = kind_of(py_type(a), py_big_integers());
+                auto const bt = kind_of(py_type(b), py_big_integers());
                 auto const t = at == bt && at != type::Object && at != type::Void ? at : type::Object;
                 auto result = materialize(condition, type::Boolean);
                 put_block(result, opcode::If, t);
@@ -3205,8 +4874,8 @@ namespace neos::language
                     dummy(type::Object);
                     break;
                 }
-                auto const at = kind_of(py_type(a));
-                auto const bt = kind_of(py_type(b));
+                auto const at = kind_of(py_type(a), py_big_integers());
+                auto const bt = kind_of(py_type(b), py_big_integers());
                 if (at == type::Boolean && bt == type::Boolean)
                 {
                     push_operand(a);
@@ -4008,6 +5677,28 @@ namespace neos::language
             put_op(result, opcode::CallFunction);
             relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
             result.resize(result.size() + 5u);
+        }
+        // (and its ints' integer objects)
+        for (auto const local : std::set<std::uint32_t>{ aFunction.integerVariables.begin(), aFunction.integerVariables.end() })
+        {
+            put_op(result, opcode::LocalGet);
+            put_u32(result, local);
+            put_op(result, opcode::I64Const);
+            put_s64(result, 1);
+            put_op(result, opcode::I64And);
+            put_op(result, opcode::I32ConvertI64);
+            put_op(result, opcode::If);
+            result.push_back(0x40u);
+            put_op(result, opcode::LocalGet);
+            put_u32(result, local);
+            put_op(result, opcode::I64Const);
+            put_s64(result, 1);
+            put_op(result, opcode::I64ShrU);
+            put_op(result, opcode::I32ConvertI64);
+            put_op(result, opcode::CallFunction);
+            relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
+            result.resize(result.size() + 5u);
+            put_op(result, opcode::End);
         }
         if (aFunction.entry)
         {

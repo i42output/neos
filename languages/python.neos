@@ -8,6 +8,7 @@
         copyright: "Copyright (C) 2026 Leigh Johnston"
         version: "0.1.0"
         prelude: [ builtins ]
+        bigint.promotion: true
     }
 
     stages: {

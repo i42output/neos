@@ -48,7 +48,9 @@ namespace neos
             Array, Tuple, Struct, 
             Function,
             Custom,
-            Object      ///< an object of a runtime plugin (a handle; see neos/runtime/plugin.h)
+            Object,     ///< an object of a runtime plugin (a handle; see neos/runtime/plugin.h)
+            Integer     ///< an integer of any size (64 bits): a small integer shifted left one bit, or an integer object (a runtime 
+                        ///< plugin's: its handle shifted left one bit, with the low bit set; see NEOS_RT_INTEGER in neos/runtime/plugin.h)
         };
 
         using custom_type_id = neolib::uuid;
@@ -81,6 +83,7 @@ namespace neos
             case type::Function:  return "function";
             case type::Custom:    return "custom";
             case type::Object:    return "object";
+            case type::Integer:   return "integer";
             default:              return "unknown";
             }
         }
@@ -111,7 +114,8 @@ namespace neos
                 { "struct",    type::Struct },
                 { "function",  type::Function },
                 { "custom",    type::Custom },
-                { "object",    type::Object }
+                { "object",    type::Object },
+                { "integer",   type::Integer }
             };
             try
             {

@@ -43,6 +43,8 @@ namespace neos::language
         std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
         std::size_t parserRecursionLimit = 256u;
         std::vector<std::string> prelude; ///< packages implicitly imported by every (non-imported) source fragment
+        bool bigintPromotion = false;   ///< (meta: bigint.promotion) the language's integers are of any size: a result that overflows 
+                                        ///< is promoted to an arbitrary precision integer (e.g. Python's int); the compiler can override it
     };
 
     namespace code_parser

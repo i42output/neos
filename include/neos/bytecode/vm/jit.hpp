@@ -24,6 +24,8 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <optional>
+#include <string_view>
 
 namespace neos
 {
@@ -39,12 +41,32 @@ namespace neos
 
                 using value = std::uint64_t;
 
+                // checked integer arithmetic: the VM's functions neos::checked_<op>_<type> (op: add, sub, mul or neg; type: i32, 
+                // u32, i64 or u64) return the result of the operation, or trap (integer overflow) if it overflows the type; a code:
+                // its operation (0 add, 1 sub, 2 mul, 3 neg) | 4 (64 bits) | 8 (unsigned)
+                inline std::optional<std::uint8_t> checked_arithmetic(std::string_view aName)
+                {
+                    std::string_view constexpr Prefix = "neos::checked_";
+                    if (!aName.starts_with(Prefix))
+                        return {};
+                    aName.remove_prefix(Prefix.size());
+                    static std::string_view const sOperations[] = { "add_", "sub_", "mul_", "neg_" };
+                    static std::string_view const sTypes[] = { "i32", "i64", "u32", "u64" };
+                    for (std::uint8_t o = 0u; o < 4u; ++o)
+                        if (aName.starts_with(sOperations[o]))
+                            for (std::uint8_t t = 0u; t < 4u; ++t)
+                                if (aName.substr(4u) == sTypes[t] && !(o == 3u && t >= 2u))
+                                    return static_cast<std::uint8_t>(o | (t << 2u));
+                    return {};
+                }
+
                 struct function_description
                 {
                     std::vector<std::uint8_t> const* parameters = nullptr; ///< value types
                     std::vector<std::uint8_t> const* results = nullptr;    ///< value types
                     std::vector<std::uint8_t> const* locals = nullptr;     ///< value types of locals declared by the body
                     bool imported = false;
+                    std::optional<std::uint8_t> checked;                   ///< (an import that is checked integer arithmetic)
                     std::size_t codeBegin = 0u; ///< token index
                     std::size_t codeEnd = 0u;   ///< token index
                 };

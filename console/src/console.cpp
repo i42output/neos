@@ -62,6 +62,11 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 << "parsetimes [on|off]                      Output the time of each parse (off: only the total)\n"
                 << "preparse [on|off]                        A language's own pass over a source before it is parsed (on by\n"
                 << "                                         default)\n"
+                << "trap_on_overflow [on|off]                Integer arithmetic whose result overflows its (fixed size) type\n"
+                << "                                         traps (off by default: it wraps)\n"
+                << "bigint_promotion [on|off|schema]         Integers of any size: a result that overflows is promoted to an\n"
+                << "                                         arbitrary precision integer (e.g. Python's int); by default the\n"
+                << "                                         language's schema says (bigint.promotion)\n"
                 << "m(etrics)                                Display metrics for running programs\n"
                 << "restricted [on|off]                      Restricted mode: programs cannot call runtime plugin functions\n"
                 << "                                         that can change the host environment (off by default)\n"
@@ -145,6 +150,29 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 throw std::runtime_error("parsetimes: expected 'on' or 'off'");
             std::cout << "Parse times: " << (aContext.compiler().show_parse_times() ? "on" : "off") << std::endl;
         }
+        else if (command == "trap_on_overflow")
+        {
+            if (parameters == "on")
+                aContext.compiler().set_trap_on_overflow(true);
+            else if (parameters == "off")
+                aContext.compiler().set_trap_on_overflow(false);
+            else if (!parameters.empty())
+                throw std::runtime_error("trap_on_overflow: expected 'on' or 'off'");
+            std::cout << "Trap on overflow: " << (aContext.compiler().trap_on_overflow() ? "on" : "off") << std::endl;
+        }
+        else if (command == "bigint_promotion")
+        {
+            if (parameters == "on")
+                aContext.compiler().set_bigint_promotion_override(true);
+            else if (parameters == "off")
+                aContext.compiler().set_bigint_promotion_override(false);
+            else if (parameters == "schema")
+                aContext.compiler().set_bigint_promotion_override({});
+            else if (!parameters.empty())
+                throw std::runtime_error("bigint_promotion: expected 'on', 'off' or 'schema'");
+            auto const setting = aContext.compiler().bigint_promotion_override();
+            std::cout << "Bigint promotion: " << (setting ? (*setting ? "on" : "off") : "the schema's") << std::endl;
+        }
         else if (command == "preparse")
         {
             if (parameters == "on")
@@ -203,6 +231,10 @@ void main_loop(boost::program_options::variables_map& aOptions)
                 process_command(context, interactive, "parsetimes on");
             if (aOptions.count("no-preparse"))
                 process_command(context, interactive, "preparse off");
+            if (aOptions.count("trap-on-overflow"))
+                process_command(context, interactive, "trap_on_overflow on");
+            if (aOptions.count("bigint-promotion"))
+                process_command(context, interactive, "bigint_promotion " + aOptions["bigint-promotion"].as<std::string>());
             if (aOptions.count("s"))
                 process_command(context, interactive, "s " + aOptions["s"].as<std::string>());
             if (aOptions.count("schema"))
@@ -242,6 +274,8 @@ int main(int argc, char* argv[])
             ("compile,c", "compile program")
             ("parse-times", "output the time of each parse (else only the total)")
             ("no-preparse", "no language's own pass over a source before it is parsed")
+            ("trap-on-overflow", "integer arithmetic whose result overflows its (fixed size) type traps (else it wraps)")
+            ("bigint-promotion", boost::program_options::value<std::string>(), "on|off: integers of any size (a result that overflows is promoted to an arbitrary precision integer), overriding the language's schema (bigint.promotion)")
             ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
             ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
         boost::program_options::positional_options_description positionalOptionsDescription;

@@ -211,6 +211,7 @@ namespace neos::language
                 std::optional<language::fragment> elseArm;
                 std::optional<language::fragment> loopCondition;
                 i_symbol_table_entry* loopVariable = nullptr;
+                std::string loopVariableName;
                 std::vector<language::fragment> range;
                 std::optional<language::fragment> epilogue;   ///< (a while loop) code that follows the loop
                 // (try: the handlers' exception types (conditions; none: any) and the names they bind, and finally's body)
@@ -287,6 +288,24 @@ namespace neos::language
             bool stub = false;
             bool inferred = false;
         };
+        // (Python) an int expression (see py_integer_operation): a fast version (inline, without calls or blocks: a value that is not
+        // a small integer, or a result that would not be one, branches out of the block that encloses it (br_if 0)) and a slow
+        // version (calls of the runtime plugin: its result is a new reference)
+        struct py_integer_expression
+        {
+            fragment prefix;                    ///< code that runs first (operands' snapshots: calls)
+            fragment fast;
+            fragment slow;
+            fragment zeroFast;                  ///< (if any) a cheaper fast version, whose value is zero if and only if the fast version's is
+            bool bails = false;                 ///< the fast version can branch out
+            bool stable = false;                ///< its versions read no variable (only temporaries that its prefix sets): other code 
+                                                ///< that runs after its prefix does not change its value
+            std::int64_t low = 0;               ///< the fast version's result is within [low, high]
+            std::int64_t high = 0;
+            std::set<std::uint32_t> small;      ///< the locals that the fast version checks are small integers
+            std::uint32_t height = 1u;          ///< (the slow version's temporaries are those of its height)
+            std::optional<std::uint32_t> holder; ///< the object temporary of the expression's value (as a whole)
+        };
         struct wasm_function
         {
             std::string name;
@@ -309,8 +328,19 @@ namespace neos::language
             std::vector<std::uint32_t> pendingObjects;  ///< object temporaries of the statement being compiled (released at its end)
             std::vector<std::uint32_t> freeObjects;     ///< object temporaries that can be reused
             std::vector<std::uint32_t> objectVariables; ///< locals and parameters that hold objects (released when the function returns)
+            std::vector<std::uint32_t> integerVariables; ///< (Python) locals and parameters that hold integers of any size (an integer
+                                                        ///< object's reference is released when the function returns)
             bool returns = false;                       ///< a return statement has been compiled
             std::set<std::uint32_t> objectTemporaries;  ///< (Python) all the locals used as object temporaries
+            std::map<std::uint32_t, std::uint32_t> pyScratch; ///< (Python) locals that code uses only between its own instructions (by role)
+            std::map<std::vector<std::uint8_t>, py_integer_expression> pyIntegers; ///< (Python) int expressions (by their code)
+            std::vector<std::uint32_t> consumedObjects; ///< (Python) object temporaries of int expressions that other code took over
+                                                        ///< (reusable after the statement)
+            std::map<std::vector<std::uint8_t>, fragment> pyIntegerStrings; ///< (Python) str() of an int: the int (by the str's code)
+            std::map<std::uint32_t, std::pair<std::int64_t, std::int64_t>> pyCounters; ///< (Python) int variables that only for loops
+                                                        ///< over ranges bind (small integers): their values' range
+            std::vector<std::uint32_t> pendingIntegers; ///< (Python) integer temporaries of the statement being compiled
+            std::vector<std::uint32_t> freeIntegers;    ///< (Python) integer temporaries that can be reused
         };
         struct wasm_module
         {
@@ -358,6 +388,12 @@ namespace neos::language
             std::set<std::string> pyFree;                           ///< names that functions use but do not bind
             std::set<std::string> pyModuleNames;                    ///< names that top-level statements bind
             std::map<std::string, std::set<std::string>> pyGlobals; ///< function -> names it declares global
+            std::map<std::string, std::map<std::string, interval>> pyCounters; ///< function -> its int variables that only for loops over
+                                                                    ///< ranges bind -> the range of their values (found by the 
+                                                                    ///< previous pass)
+            std::map<std::string, std::map<std::string, std::optional<interval>>> pyCounterBindings; ///< (this pass) function -> variable ->
+                                                                    ///< the range of the values for loops over ranges bind (none: 
+                                                                    ///< something else binds it)
             bool changed = false;
         };
     public:
@@ -423,6 +459,11 @@ namespace neos::language
         void set_show_parse_times(bool aShowParseTimes);
         bool preparse() const;                                      ///< (a language's own pass over a source before it is parsed
         void set_preparse(bool aPreparse);                          ///< (e.g. Python's joining of lines within brackets); on by default)
+        bool trap_on_overflow() const;                              ///< (integer arithmetic whose result overflows its (fixed size) type 
+        void set_trap_on_overflow(bool aTrapOnOverflow);            ///< traps; off by default: it wraps)
+        bool bigint_promotion() const;                              ///< (a language's integers are of any size: a result that overflows 
+        std::optional<bool> bigint_promotion_override() const;      ///< is promoted to an arbitrary precision integer (e.g. Python's int); 
+        void set_bigint_promotion_override(std::optional<bool> aBigintPromotion); ///< the schema's bigint.promotion, unless overridden)
     private:
         const compilation_state& state() const;
         compilation_state& state();
@@ -497,12 +538,28 @@ namespace neos::language
         fragment py_object(operand_type const& aOperand);
         fragment py_owned(fragment aValue);
         fragment py_flush();
-        fragment py_release_variables(bool aTemporaries);
+        fragment py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept = {});
         void py_coerce(fragment& aValue, type aTarget);
         fragment py_name(std::string const& aName);
         fragment py_runtime_call(std::string const& aName, std::vector<type> const& aParameters, type aResult, std::vector<fragment> const& aArguments);
         fragment py_string(std::string const& aValue);
         std::optional<fragment> py_big_literal(operand_type const& aOperand);
+        fragment py_small_integers(std::vector<std::uint32_t> const& aLocals);
+        fragment py_release_integer(std::uint32_t aVariable, bool aGlobal);
+        fragment py_retain_integer(std::uint32_t aLocal);
+        fragment py_park_integer(fragment aValue);
+        std::uint32_t py_scratch(std::uint32_t aRole, type aType);
+        bool py_big_integers() const;
+        void py_bound(std::string const& aName, std::optional<interval> const& aCounter = {});
+        void py_update_counters();
+        std::optional<std::pair<std::int64_t, std::int64_t>> py_counter(std::uint32_t aLocal);
+        void py_coerce_integer(fragment& aValue, type aTarget);
+        void py_integer_operation(python::construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs);
+        void py_integer_divide_or_power(python::construct aConstruct, std::optional<operand_type> const& aLhs, operand_type const& aRhs);
+        std::optional<py_integer_expression> py_integer_expression_of(fragment const& aValue);
+        fragment py_integer_value(py_integer_expression const& aExpression, bool aHeld);
+        fragment py_integer_fragment(py_integer_expression aExpression);
+        std::uint32_t py_integer_temporary();
         void py_operation(python::construct aConstruct, bool aInplace = false, neolib::i_string_view const* aSource = nullptr);
         void py_bind(compilation_state::py_target const& aTarget, operand_type const& aValue, fragment& aStatement);
         void py_bind_name(std::string const& aName, operand_type const& aValue, fragment& aStatement);
@@ -536,6 +593,9 @@ namespace neos::language
         std::chrono::steady_clock::duration iParseTime = {};
         bool iShowParseTimes = false;
         bool iPreparse = true;
+        bool iTrapOnOverflow = false;
+        std::optional<bool> iBigintPromotion;
+        bool overflow_traps() const;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;
         std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;

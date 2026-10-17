@@ -101,6 +101,39 @@ namespace neos::language
         iPreparse = aPreparse;
     }
 
+    bool compiler::trap_on_overflow() const
+    {
+        return iTrapOnOverflow;
+    }
+
+    bool compiler::overflow_traps() const
+    {
+        // (integer arithmetic of fixed size types traps on overflow)
+        return iTrapOnOverflow;
+    }
+
+    bool compiler::bigint_promotion() const
+    {
+        if (iBigintPromotion)
+            return *iBigintPromotion;
+        return !iCompilationStateStack.empty() && state().unit != nullptr && state().unit->schema->meta().bigintPromotion;
+    }
+
+    std::optional<bool> compiler::bigint_promotion_override() const
+    {
+        return iBigintPromotion;
+    }
+
+    void compiler::set_bigint_promotion_override(std::optional<bool> aBigintPromotion)
+    {
+        iBigintPromotion = aBigintPromotion;
+    }
+
+    void compiler::set_trap_on_overflow(bool aTrapOnOverflow)
+    {
+        iTrapOnOverflow = aTrapOnOverflow;
+    }
+
     bool compiler::compile(program& aProgram)
     {
         iStartTime = std::chrono::steady_clock::now();
@@ -133,6 +166,7 @@ namespace neos::language
             iInference.counters.clear();
             iRangeBound = std::nullopt;
             iInference.declaredGlobals.clear();
+            iInference.pyCounterBindings.clear();
             iInference.changed = false;
         };
 
@@ -197,6 +231,9 @@ namespace neos::language
                         // number variables and parameters only assigned 32-bit integers can be i32
                         if (ok)
                             update_ranges();
+                        // (Python: int variables that only for loops over ranges bind)
+                        if (ok)
+                            py_update_counters();
                     }
                     catch (...)
                     {
@@ -808,6 +845,15 @@ namespace neos::language
                 put_op(code, opcode::F64Const);
                 put_raw(code, is_float(value.t) ? value.f : static_cast<double>(value.i));
             }
+            else if (target == type::Integer)
+            {
+                // (a small integer: shifted left one bit)
+                std::int64_t const i = is_float(value.t) ? static_cast<std::int64_t>(value.f) : value.t == type::Boolean ? (value.i != 0 ? 1 : 0) : value.i;
+                if (i < -(std::int64_t{ 1 } << 62) || i >= (std::int64_t{ 1 } << 62))
+                    throw std::runtime_error("integer literal out of range: " + std::to_string(i));
+                put_op(code, opcode::I64Const);
+                put_s64(code, static_cast<std::int64_t>(static_cast<std::uint64_t>(i) << 1u));
+            }
             else
             {
                 std::int64_t const i = is_float(value.t) ? static_cast<std::int64_t>(value.f) : value.i;
@@ -1039,9 +1085,26 @@ namespace neos::language
                         if (result.i != 0 && ((result.i < 0) != (r.i < 0))) 
                             result.i += r.i; 
                         break;
-                    case operation::Add: result.i = l.i + r.i; break;
-                    case operation::Subtract: result.i = l.i - r.i; break;
-                    case operation::Multiply: result.i = l.i * r.i; break;
+                    case operation::Add:
+                    case operation::Subtract:
+                    case operation::Multiply:
+                        {
+                            // (wrapping; trap_on_overflow: overflow (of 64 bits) is an error)
+                            auto const ul = static_cast<std::uint64_t>(l.i);
+                            auto const ur = static_cast<std::uint64_t>(r.i);
+                            result.i = static_cast<std::int64_t>(aOperation == operation::Add ? ul + ur : aOperation == operation::Subtract ? ul - ur : ul * ur);
+                            bool overflow;
+                            if (aOperation == operation::Add)
+                                overflow = ((l.i ^ result.i) & (r.i ^ result.i)) < 0;
+                            else if (aOperation == operation::Subtract)
+                                overflow = ((l.i ^ r.i) & (l.i ^ result.i)) < 0;
+                            else
+                                overflow = l.i != 0 && ((l.i == -1 && r.i == std::numeric_limits<std::int64_t>::min()) || 
+                                    (r.i == -1 && l.i == std::numeric_limits<std::int64_t>::min()) || result.i / l.i != r.i);
+                            if (overflow && overflow_traps())
+                                throw std::runtime_error("integer overflow");
+                        }
+                        break;
                     case operation::Divide:
                         if (r.i == 0)
                             throw std::runtime_error("division by zero");
@@ -1082,6 +1145,16 @@ namespace neos::language
             }
             else if (t == type::String || t == type::Boolean)
                 throw std::runtime_error("invalid operand for negation");
+            else if (overflow_traps() && (t == type::I32 || t == type::I64))
+            {
+                // (trap_on_overflow: checked negation, the VM's neos::checked_neg_<type> (the least integer has none))
+                append(result, materialize(rhs, t));
+                auto const id = runtime_function(is_64(t) ? "neos::checked_neg_i64" : "neos::checked_neg_i32", { t }, t);
+                put_op(code, opcode::CallFunction);
+                result.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), id });
+                code.resize(code.size() + 5u);
+                result.valueType = t;
+            }
             else
             {
                 put_op(code, is_64(t) ? opcode::I64Const : opcode::I32Const);
@@ -1408,6 +1481,19 @@ namespace neos::language
         bool const f = is_float(common);
         bool const w = is_64(common);
         bool const u = is_unsigned(common);
+        if (!f && overflow_traps() && (aOperation == operation::Add || aOperation == operation::Subtract || aOperation == operation::Multiply))
+        {
+            // (trap_on_overflow: checked arithmetic, the VM's neos::checked_<op>_<type>)
+            std::string const name = std::string{ "neos::checked_" } + (aOperation == operation::Add ? "add_" : aOperation == operation::Subtract ? "sub_" : "mul_") +
+                (u ? "u" : "i") + (w ? "64" : "32");
+            auto const id = runtime_function(name, { common, common }, common);
+            put_op(code, opcode::CallFunction);
+            result.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), id });
+            code.resize(code.size() + 5u);
+            result.valueType = common;
+            push_operand(operand_type{ result });
+            return;
+        }
         opcode op = opcode::Nop;
         switch (aOperation)
         {
@@ -1562,7 +1648,8 @@ namespace neos::language
             throw std::runtime_error("argument expected");
         state().operandStack.pop_back();
         auto const range = integer_range(operand);
-        auto argument = materialize(operand);
+        // (Python: an int literal is an integer of any size (type::Integer))
+        auto argument = is_python() ? materialize(operand, py_type(operand)) : materialize(operand);
         argument.fragmentKind = fragment_kind::Argument;
         argument.hasRange = range.has_value();
         argument.rangeLow = range ? range->low : 0;
@@ -1580,6 +1667,8 @@ namespace neos::language
             if (parameterCount != aArguments.size())
                 return -1;
             std::int32_t score = 0;
+            // (an integer of any size (type::Integer) is a number, an integer)
+            auto const numeric = [](type t) { return is_numeric(t) || t == type::Integer; };
             for (std::size_t i = 0u; i < parameterCount; ++i)
             {
                 auto const p = aSignature.parameters().value()[i].parameter_type();
@@ -1590,7 +1679,7 @@ namespace neos::language
                     ; // (an object parameter: the argument is converted to an object; an object argument: it is converted)
                 else if (p == type::String || a == type::String)
                     return -1;
-                else if (is_numeric(p) && is_numeric(a))
+                else if (numeric(p) && numeric(a))
                     score += (is_float(p) == is_float(a) && (p == type::Boolean) == (a == type::Boolean)) ? 2 : 1;
                 else
                     return -1;
@@ -2157,10 +2246,12 @@ namespace neos::language
                 // and assignments to it in the body do not affect the iteration)
                 auto const variable = construct.loopVariable->index();
                 auto const variableType = construct.loopVariable->type();
-                // (an object variable is assigned the counter as an int object)
+                // (an object variable is assigned the counter as an int object; an integer of any size (Python's int) is
+                // counted as a small integer: shifted left one bit, so its step and constants are doubled)
                 auto const t = variableType == type::Object ? type::I64 : variableType;
                 bool const global = is_global(*construct.loopVariable);
                 bool const w = is_64(t);
+                std::int64_t const unit = t == type::Integer ? 2 : 1;
                 auto const counter = temporary(t);
                 auto const stop = temporary(t);
                 auto const step = temporary(t);
@@ -2176,7 +2267,7 @@ namespace neos::language
                 // a constant step (the default, 1, or a literal) needs one comparison per test rather than a test of its sign
                 std::optional<std::int64_t> constantStep;
                 if (range.size() < 3u)
-                    constantStep = 1;
+                    constantStep = unit;
                 else if (range[2].fragmentRelocations.empty())
                 {
                     auto const& bytes = range[2].fragmentCode.as_std_vector();
@@ -2223,9 +2314,51 @@ namespace neos::language
                 }
                 else
                 {
-                    constant(1);
+                    constant(unit);
                     set(step);
                 }
+                if (t == type::Integer)
+                {
+                    append(statement, py_small_integers({ counter, stop, range.size() == 3u && !constantStep ? step : counter }));
+                    // (the range of the values it binds: start to stop, if they are constants)
+                    auto const constant_value = [&](fragment const& aValue) -> std::optional<std::int64_t>
+                    {
+                        auto const& bytes = aValue.fragmentCode.as_std_vector();
+                        if (!aValue.fragmentRelocations.empty() || bytes.empty() || bytes[0] != 0x42u)
+                            return {};
+                        std::int64_t value = 0;
+                        std::uint32_t shift = 0u;
+                        std::size_t i = 1u;
+                        std::uint8_t b = 0x80u;
+                        while (i < bytes.size() && (b & 0x80u) != 0u)
+                        {
+                            b = bytes[i++];
+                            value |= static_cast<std::int64_t>(b & 0x7Fu) << shift;
+                            shift += 7u;
+                        }
+                        if ((b & 0x80u) != 0u || i != bytes.size())
+                            return {};
+                        if (shift < 64u && (b & 0x40u) != 0u)
+                            value |= -(std::int64_t{ 1 } << shift);
+                        return value >> 1;
+                    };
+                    std::int64_t constexpr Low = -(std::int64_t{ 1 } << 62);
+                    std::int64_t constexpr High = (std::int64_t{ 1 } << 62) - 1;
+                    auto const first = range.size() == 1u ? std::optional<std::int64_t>{ 0 } : constant_value(range[0]);
+                    auto const last = constant_value(range.size() == 1u ? range[0] : range[1]);
+                    interval values{ Low, High };
+                    if (constantStep && *constantStep > 0)
+                        values = { first ? *first : Low, last ? *last - 1 : High };
+                    else if (constantStep && *constantStep < 0)
+                        values = { last ? *last + 1 : Low, first ? *first : High };
+                    if (values.low > values.high)
+                        values = { 0, 0 }; // (no iterations: the variable is not bound)
+                    values = values.join({ 0, 0 }); // (before it is bound: zero)
+                    if (!global)
+                        py_bound(construct.loopVariableName, values);
+                }
+                if (variableType == type::Integer && !global && !sets_local(construct.arms[0], variable))
+                    append(statement, py_release_integer(variable, global));
                 put_op(code, opcode::Block);
                 code.push_back(0x40u);
                 put_op(code, opcode::Loop);
@@ -2265,6 +2398,10 @@ namespace neos::language
                 }
                 else
                 {
+                    // (an integer of any size: the integer it held is released; only once, before the loop, if it is a local that 
+                    // the body does not set (it then holds the counter's small integer after the first iteration))
+                    if (variableType == type::Integer && (global || sets_local(construct.arms[0], variable)))
+                        append(statement, py_release_integer(variable, global));
                     get(counter); set_variable();
                 }
                 // (break: out of the loop's block; continue: to the end of the body, which is a block of its own)
@@ -2448,7 +2585,7 @@ namespace neos::language
                     throw std::runtime_error("range() takes 1 to 3 arguments");
                 if (!iDeclarationPass)
                     for (auto const& argument : construct.range)
-                        if ((is_float(argument.valueType) || !is_numeric(argument.valueType)) && argument.valueType != type::Object)
+                        if ((is_float(argument.valueType) || !is_numeric(argument.valueType)) && argument.valueType != type::Object && argument.valueType != type::Integer)
                             throw std::runtime_error("range() arguments must be integers");
                 auto const text = aSource.to_std_string_view();
                 auto const begin = text.find_first_not_of(" \t", 3u);
@@ -2456,6 +2593,7 @@ namespace neos::language
                 neolib::string const variable{ std::string{ text.substr(begin, end - begin) } };
                 declare_loop_variable(neolib::string_view{ variable }, aSource);
                 construct.loopVariable = find_symbol(current_scope(), neolib::string_view{ variable }, !is_python());
+                construct.loopVariableName = variable.to_std_string();
             }
             break;
         case indented_construct::With:
@@ -2709,8 +2847,8 @@ namespace neos::language
         }
         if (symbol == nullptr)
             define_symbol(neolib::string{ aName }, type::I64, aSource);
-        else if (is_python() && symbol->type() == type::Object)
-            ; // (an object: assigned an int object)
+        else if (is_python() && (symbol->type() == type::Object || symbol->type() == type::Integer))
+            ; // (an object: assigned an int object; an integer: assigned the counter)
         else if (is_python() && (!is_numeric(symbol->type()) || is_float(symbol->type()) || symbol->type() == type::Boolean))
             py_kind_change(aName.to_std_string());
         else if (!is_numeric(symbol->type()) || is_float(symbol->type()) || symbol->type() == type::Boolean)

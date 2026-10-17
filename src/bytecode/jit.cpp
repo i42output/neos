@@ -183,6 +183,7 @@ namespace neos
                     public:
                         bytes code;
                     private:
+                        static constexpr std::size_t NoFixup = ~std::size_t{};
                         struct label
                         {
                             std::optional<std::size_t> offset;
@@ -190,26 +191,109 @@ namespace neos
                         };
                         std::vector<label> iLabels;
                         std::map<std::uint64_t, std::size_t> iConstants;
+                        // (cold code (rarely executed): emitted to its own section, which follows the function's code)
+                        bytes iCold;
+                        bool iInCold = false;
+                        std::vector<std::size_t> iColdLabels;
+                        std::vector<std::pair<std::size_t, std::size_t>> iColdFixups; ///< (label, fixup index)
+                        std::optional<std::pair<std::size_t, std::size_t>> iLastJump; ///< (the jmp that code ends with: its offset and label)
+                        std::vector<std::size_t> iBoundAfterJump;   ///< (labels bound after that jmp)
+                        bytes& out() { return iInCold ? iCold : code; }
                     public:
-                        std::size_t offset() const { return code.size(); }
+                        std::size_t offset() const { return iInCold ? iCold.size() : code.size(); }
                         std::size_t new_label() { iLabels.emplace_back(); return iLabels.size() - 1u; }
-                        void bind(std::size_t aLabel) { iLabels[aLabel].offset = code.size(); }
+                        void bind(std::size_t aLabel)
+                        {
+                            if (!iInCold && iLastJump)
+                            {
+                                if (iLastJump->second == aLabel)
+                                {
+                                    // (a jmp to the code that follows it: removed (labels bound after it move back to where it was))
+                                    auto& fixups = iLabels[aLabel].fixups;
+                                    *std::find(fixups.begin(), fixups.end(), iLastJump->first + 1u) = NoFixup;
+                                    code.resize(iLastJump->first);
+                                    for (auto const l : iBoundAfterJump)
+                                        iLabels[l].offset = code.size();
+                                    iLastJump.reset();
+                                    iBoundAfterJump.clear();
+                                }
+                                else
+                                    iBoundAfterJump.push_back(aLabel);
+                            }
+                            iLabels[aLabel].offset = offset();
+                            if (iInCold)
+                                iColdLabels.push_back(aLabel);
+                        }
+                        bool in_cold() const { return iInCold; }
+                        void begin_cold() { iInCold = true; }
+                        void end_cold() { iInCold = false; }
+                        // (the end of a function: its cold code follows it)
+                        void append_cold()
+                        {
+                            iLastJump.reset();
+                            iBoundAfterJump.clear();
+                            auto const base = code.size();
+                            code.insert(code.end(), iCold.begin(), iCold.end());
+                            iCold.clear();
+                            for (auto const l : iColdLabels)
+                                *iLabels[l].offset += base;
+                            iColdLabels.clear();
+                            for (auto const& f : iColdFixups)
+                                iLabels[f.first].fixups[f.second] += base;
+                            iColdFixups.clear();
+                        }
                         std::size_t label_offset(std::size_t aLabel) const { return iLabels[aLabel].offset.value(); }
                         void resolve()
                         {
                             for (auto const& l : iLabels)
                                 for (auto f : l.fixups)
                                 {
+                                    if (f == NoFixup)
+                                        continue;
                                     if (!l.offset)
                                         throw std::logic_error("neos::jit: unbound label");
                                     auto const rel = static_cast<std::int32_t>(static_cast<std::int64_t>(*l.offset) - static_cast<std::int64_t>(f + 4u));
                                     std::memcpy(&code[f], &rel, sizeof(rel));
                                 }
+                            // a jump (jmp or jcc) to a jmp: to the jmp's destination
+                            auto const destination = [&](std::size_t aField)
+                            {
+                                std::int32_t rel;
+                                std::memcpy(&rel, &code[aField], sizeof(rel));
+                                return static_cast<std::size_t>(static_cast<std::int64_t>(aField + 4u) + rel);
+                            };
+                            for (auto const& l : iLabels)
+                                for (auto f : l.fixups)
+                                {
+                                    if (f == NoFixup)
+                                        continue;
+                                    bool const jump = (f >= 1u && code[f - 1u] == 0xE9u) || (f >= 2u && code[f - 2u] == 0x0Fu && (code[f - 1u] & 0xF0u) == 0x80u);
+                                    if (!jump)
+                                        continue;
+                                    auto target = destination(f);
+                                    for (int hops = 0; hops < 8 && target + 5u <= code.size() && code[target] == 0xE9u; ++hops)
+                                    {
+                                        auto const next = destination(target + 1u);
+                                        if (next == target)
+                                            break;
+                                        target = next;
+                                    }
+                                    auto const rel = static_cast<std::int32_t>(static_cast<std::int64_t>(target) - static_cast<std::int64_t>(f + 4u));
+                                    std::memcpy(&code[f], &rel, sizeof(rel));
+                                }
                         }
                     public:
-                        void emit8(std::uint8_t aByte) { code.push_back(aByte); }
-                        void emit32(std::uint32_t aValue) { for (int i = 0; i < 4; ++i) code.push_back(static_cast<std::uint8_t>(aValue >> (i * 8))); }
-                        void emit64(std::uint64_t aValue) { for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::uint8_t>(aValue >> (i * 8))); }
+                        void emit8(std::uint8_t aByte)
+                        {
+                            if (!iInCold)
+                            {
+                                iLastJump.reset();
+                                iBoundAfterJump.clear();
+                            }
+                            out().push_back(aByte);
+                        }
+                        void emit32(std::uint32_t aValue) { for (int i = 0; i < 4; ++i) emit8(static_cast<std::uint8_t>(aValue >> (i * 8))); }
+                        void emit64(std::uint64_t aValue) { for (int i = 0; i < 8; ++i) emit8(static_cast<std::uint8_t>(aValue >> (i * 8))); }
                         void patch32(std::size_t aPosition, std::uint32_t aValue) { std::memcpy(&code[aPosition], &aValue, sizeof(aValue)); }
                     private:
                         void rex(bool aW, int aR, int aX, int aB, bool aForce = false)
@@ -338,6 +422,8 @@ namespace neos
                         }
                         void sub_rsp_imm32(std::int32_t aImm) { op_rr({ 0x81 }, true, 5, RSP); emit32(static_cast<std::uint32_t>(aImm)); }
                         void test_rr(bool aW, int aA, int aB) { op_rr({ 0x85 }, aW, aB, aA); }
+                        void test_ri(int aReg, std::int32_t aImm) { op_rr({ 0xF7 }, false, 0, aReg); emit32(static_cast<std::uint32_t>(aImm)); }
+                        void test_mi(int aBase, std::int32_t aDisp, std::int32_t aImm) { op_rm({ 0xF7 }, false, 0, aBase, aDisp); emit32(static_cast<std::uint32_t>(aImm)); }
                         void imul_rr(bool aW, int aDst, int aSrc) { op_rr({ 0x0F, 0xAF }, aW, aDst, aSrc); }
                         void imul_rm(bool aW, int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x0F, 0xAF }, aW, aDst, aBase, aDisp); }
                         void imul_rri(bool aW, int aDst, int aSrc, std::int32_t aImm)
@@ -368,7 +454,14 @@ namespace neos
                         void pop(int aReg) { rex(false, 0, 0, aReg); emit8(static_cast<std::uint8_t>(0x58u + (aReg & 7))); }
                         void ret() { emit8(0xC3u); }
                         void call_r(int aReg) { op_rr({ 0xFF }, false, 2, aReg); }
-                        void jmp(std::size_t aLabel) { emit8(0xE9u); fixup(aLabel); }
+                        void jmp(std::size_t aLabel)
+                        {
+                            auto const at = offset();
+                            emit8(0xE9u);
+                            fixup(aLabel);
+                            if (!iInCold)
+                                iLastJump = std::make_pair(at, aLabel);
+                        }
                         void jcc(std::uint8_t aCc, std::size_t aLabel) { emit8(0x0Fu); emit8(static_cast<std::uint8_t>(0x80u + aCc)); fixup(aLabel); }
                         void call(std::size_t aLabel) { emit8(0xE8u); fixup(aLabel); }
                         // SSE
@@ -418,7 +511,9 @@ namespace neos
                     private:
                         void fixup(std::size_t aLabel)
                         {
-                            iLabels[aLabel].fixups.push_back(code.size());
+                            iLabels[aLabel].fixups.push_back(offset());
+                            if (iInCold)
+                                iColdFixups.emplace_back(aLabel, iLabels[aLabel].fixups.size() - 1u);
                             emit32(0u);
                         }
                     };
@@ -432,8 +527,19 @@ namespace neos
 #endif
                     constexpr std::int32_t ShadowSpace = 32; // (also reserved on System V for simplicity)
 
-                    constexpr int ScratchGprs[] = { RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11 };
-                    constexpr int PinnedGprs[] = { RBX, R12, R13, R14 };
+                    // (pinned registers hold locals: a function saves those it uses that native code preserves (they are callee saved), 
+                    // and saves the others around calls (they are caller saved))
+#if defined(_WIN32)
+                    constexpr int ScratchGprs[] = { RAX, RCX, RDX, R8, R9, R10, R11 };
+                    constexpr int PinnedGprs[] = { RBX, R12, R13, R14, RSI, RDI };
+#else
+                    constexpr int ScratchGprs[] = { RAX, RCX, RDX, RSI, RDI, R8, R9 };
+                    constexpr int PinnedGprs[] = { RBX, R12, R13, R14, R10, R11 };
+#endif
+                    bool native_volatile(int aReg)
+                    {
+                        return aReg == RAX || aReg == RCX || aReg == RDX || (aReg >= R8 && aReg <= R11) || (!Windows && (aReg == RSI || aReg == RDI));
+                    }
                     constexpr int ScratchXmms[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
                     constexpr int PinnedXmms[] = { 8, 9, 10, 11, 12, 13, 14, 15 };
 
@@ -645,6 +751,23 @@ namespace neos
                             std::size_t elseLabel = 0u;
                             bool hasElse = false;
                             bool branched = false;
+                            // (a block whose (i32) result is only tested (by the if or br_if that follows it, perhaps after an 
+                            // i32.eqz): its result is not materialized; the code that delivers it jumps to where the test would)
+                            struct condition_target
+                            {
+                                std::size_t whenTrue = 0u;      ///< (labels: where a true (non zero) result goes...)
+                                std::size_t whenFalse = 0u;     ///< (...and a false one)
+                                std::size_t next = 0u;          ///< (whenTrue or whenFalse: the label that follows the test)
+                                std::size_t testEnd = 0u;       ///< (the tokens after the test)
+                                bool isIf = false;
+                                std::optional<std::uint8_t> ifResult;
+                                std::size_t brTarget = 0u;      ///< (br_if: the index of its target in the control stack)
+                            };
+                            std::optional<condition_target> condition;
+                            std::size_t bodyBegin = 0u;         ///< (a block: the position of its body)
+                            // (a block whose body starts with a block that ends with a branch out of this one (br 1): what follows that 
+                            // block is only reached by branches to its end (e.g. a slow path): its code is cold)
+                            bool coldTail = false;
                             // (a loop whose code up to its first exit (br_if out of it) has no control flow: that code is 
                             // repeated at the branch back to the loop, which then continues after the exit (the loop is 
                             // rotated: one branch an iteration))
@@ -758,6 +881,7 @@ namespace neos
                             iControl.clear();
                             iLocals.clear();
                             iUsedPinnedGprs.clear();
+                            iNativeVolatilePinnedGprs.clear();
                             iUsedPinnedXmms.clear();
                             for (int r = 0; r < 16; ++r)
                             {
@@ -776,7 +900,8 @@ namespace neos
                         std::int32_t pushed_bytes() const { return static_cast<std::int32_t>(iUsedPinnedGprs.size()) * 8; }
                         std::int32_t xmm_save_disp(std::size_t aIndex) const { return -pushed_bytes() - 8 * static_cast<std::int32_t>(aIndex + 1u); }
                         std::int32_t xmm_native_save_disp(std::size_t aIndex) const { return -pushed_bytes() - 8 * static_cast<std::int32_t>(iUsedPinnedXmms.size() + aIndex + 1u); }
-                        std::int32_t locals_base() const { return -pushed_bytes() - 16 * static_cast<std::int32_t>(iUsedPinnedXmms.size()); }
+                        std::int32_t gpr_native_save_disp(std::size_t aIndex) const { return -pushed_bytes() - 16 * static_cast<std::int32_t>(iUsedPinnedXmms.size()) - 8 * static_cast<std::int32_t>(aIndex + 1u); }
+                        std::int32_t locals_base() const { return -pushed_bytes() - 16 * static_cast<std::int32_t>(iUsedPinnedXmms.size()) - 8 * static_cast<std::int32_t>(iNativeVolatilePinnedGprs.size()); }
                         std::int32_t slot_disp(std::size_t aDepth) const { return iSlotsBase - 8 * static_cast<std::int32_t>(aDepth + 1u); }
                     private:
                         // --- registers
@@ -1255,6 +1380,17 @@ namespace neos
                             for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
                                 a.movf_store(true, RBP, xmm_native_save_disp(i), iUsedPinnedXmms[i]);
                         }
+                        // (pinned registers that native code does not preserve: saved around native calls)
+                        void save_pinned_gprs()
+                        {
+                            for (std::size_t i = 0u; i < iNativeVolatilePinnedGprs.size(); ++i)
+                                a.store(true, RBP, gpr_native_save_disp(i), iNativeVolatilePinnedGprs[i]);
+                        }
+                        void restore_pinned_gprs()
+                        {
+                            for (std::size_t i = 0u; i < iNativeVolatilePinnedGprs.size(); ++i)
+                                a.load(true, iNativeVolatilePinnedGprs[i], RBP, gpr_native_save_disp(i));
+                        }
                         void restore_pinned_xmms()
                         {
                             if (Windows)
@@ -1267,6 +1403,7 @@ namespace neos
                         void native_call(void const* aFunction, std::vector<native_argument> const& aArguments, bool aCanTrap)
                         {
                             spill_registers();
+                            save_pinned_gprs();
                             int intIndex = 0;
                             int floatIndex = 0;
                             for (std::size_t i = 0u; i < aArguments.size(); ++i)
@@ -1287,6 +1424,7 @@ namespace neos
                             a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aFunction), true);
                             a.call_r(RAX);
                             restore_pinned_xmms();
+                            restore_pinned_gprs();
                             if (aCanTrap)
                             {
                                 a.alu_mi(7, false, R15, ContextTrap, 0);
@@ -1301,36 +1439,70 @@ namespace neos
                         }
                     private:
                         // --- functions
+                        // (code that is rarely executed: what follows a block that is the first in its enclosing block and that ends 
+                        // with a branch out of that block (br 1): see control::coldTail)
+                        std::optional<std::size_t> cold_tail(std::size_t aPosition) const
+                        {
+                            // (aPosition: a block (0x02) whose body starts with a block without a result)
+                            if (iTokens[aPosition] != 0x02u || aPosition + 3u >= iFunction->codeEnd || iTokens[aPosition + 2u] != 0x02u || iTokens[aPosition + 3u] != 0x40u)
+                                return {};
+                            auto const childEnd = block_end(aPosition + 4u);
+                            if (childEnd < 2u || childEnd >= iFunction->codeEnd || iTokens[childEnd - 2u] != 0x0Cu || iTokens[childEnd - 1u] != 1u)
+                                return {};
+                            return childEnd;
+                        }
                         void choose_pinned_locals(std::size_t aBegin, std::size_t aEnd)
                         {
+                            // (locals by their (static) uses, weighted by loop depth (and less within ifs), outside cold code; registers 
+                            // that calls do not preserve only for locals used more than the calls (outside cold code) that would save them)
                             std::vector<std::uint64_t> score(iLocals.size(), 0u);
-                            std::vector<bool> loops;
+                            std::uint64_t calls = 0u;
+                            std::vector<std::uint8_t> loops; // (0 block, 1 loop, 2 if)
                             std::size_t loopDepth = 0u;
+                            std::size_t ifDepth = 0u;
+                            std::vector<std::pair<std::size_t, std::size_t>> cold; // (cold code: [begin, end))
                             for (std::size_t p = aBegin; p < aEnd;)
                             {
+                                while (!cold.empty() && p >= cold.back().second)
+                                    cold.pop_back();
+                                bool const isCold = !cold.empty() && p >= cold.back().first;
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                auto const weight = (std::uint64_t{ 64 } << (3u * std::min<std::size_t>(loopDepth, 6u))) >> std::min<std::size_t>(ifDepth, 6u);
                                 switch (op)
                                 {
-                                case 0x02: case 0x04:
-                                    loops.push_back(false);
+                                case 0x02:
+                                    loops.push_back(0u);
+                                    if (!isCold)
+                                        if (auto const tail = cold_tail(p))
+                                            cold.emplace_back(*tail, block_end(p + 2u));
+                                    break;
+                                case 0x04:
+                                    loops.push_back(2u);
+                                    ++ifDepth;
                                     break;
                                 case 0x03:
-                                    loops.push_back(true);
+                                    loops.push_back(1u);
                                     ++loopDepth;
                                     break;
                                 case 0x0B:
                                     if (!loops.empty())
                                     {
-                                        if (loops.back())
+                                        if (loops.back() == 1u)
                                             --loopDepth;
+                                        else if (loops.back() == 2u)
+                                            --ifDepth;
                                         loops.pop_back();
                                     }
+                                    break;
+                                case 0x10:
+                                    if (!isCold)
+                                        calls += weight;
                                     break;
                                 case 0x20: case 0x21: case 0x22:
                                     {
                                         auto const l = static_cast<std::size_t>(iTokens[p + 1u]);
-                                        if (l < score.size())
-                                            score[l] += std::uint64_t{ 1 } << (3u * std::min<std::size_t>(loopDepth, 6u));
+                                        if (l < score.size() && !isCold)
+                                            score[l] += weight;
                                     }
                                     break;
                                 default:
@@ -1358,13 +1530,73 @@ namespace neos
                                         iUsedPinnedXmms.push_back(local.reg);
                                     }
                                 }
-                                else if (gprs < std::size(PinnedGprs))
+                                else if (gprs < std::size(PinnedGprs) && (!native_volatile(PinnedGprs[gprs]) || score[l] > 2u * calls))
                                 {
                                     local.pinned = true;
                                     local.reg = PinnedGprs[gprs++];
-                                    iUsedPinnedGprs.push_back(local.reg);
+                                    if (native_volatile(local.reg))
+                                        iNativeVolatilePinnedGprs.push_back(local.reg);
+                                    else
+                                        iUsedPinnedGprs.push_back(local.reg);
                                 }
                             }
+                        }
+                        // (the locals (not parameters) that must be zeroed when the function starts: all except those whose first use 
+                        // sets them and whose other uses are within the same region (a block's, loop's, if's or else's body, or the 
+                        // function's), which can only be entered at its start)
+                        std::vector<bool> locals_to_zero(std::size_t aBegin, std::size_t aEnd, std::size_t aParameters) const
+                        {
+                            std::vector<bool> zero(iLocals.size(), false);
+                            constexpr std::size_t None = ~std::size_t{};
+                            std::vector<std::size_t> region(iLocals.size(), None); // (the region of a local's first use, which set it)
+                            std::vector<bool> open{ true };                         // (regions: open or closed)
+                            std::vector<std::size_t> stack{ 0u };
+                            for (std::size_t p = aBegin; p < aEnd;)
+                            {
+                                auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                switch (op)
+                                {
+                                case 0x02: case 0x03: case 0x04:
+                                    stack.push_back(open.size());
+                                    open.push_back(true);
+                                    break;
+                                case 0x05:
+                                    if (stack.size() > 1u)
+                                    {
+                                        open[stack.back()] = false;
+                                        stack.back() = open.size();
+                                        open.push_back(true);
+                                    }
+                                    break;
+                                case 0x0B:
+                                    if (stack.size() > 1u)
+                                    {
+                                        open[stack.back()] = false;
+                                        stack.pop_back();
+                                    }
+                                    break;
+                                case 0x20: case 0x21: case 0x22:
+                                    {
+                                        auto const l = static_cast<std::size_t>(iTokens[p + 1u]);
+                                        if (l < aParameters || l >= iLocals.size() || zero[l])
+                                            break;
+                                        if (region[l] == None)
+                                        {
+                                            if (op == 0x20)
+                                                zero[l] = true;
+                                            else
+                                                region[l] = stack.back();
+                                        }
+                                        else if (!open[region[l]])
+                                            zero[l] = true;
+                                    }
+                                    break;
+                                default:
+                                    break;
+                                }
+                                p += 1u + immediate_count(op, iTokens, p);
+                            }
+                            return zero;
                         }
                         void function(std::uint32_t aIndex)
                         {
@@ -1395,6 +1627,7 @@ namespace neos
                             a.jcc(B, iTrapLabels[TrapStackExhausted]);
                             for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
                                 a.movf_store(true, RBP, xmm_save_disp(i), iUsedPinnedXmms[i]);
+                            auto const zero = locals_to_zero(f.codeBegin, f.codeEnd, f.parameters->size());
                             for (std::size_t i = 0u; i < iLocals.size(); ++i)
                             {
                                 auto const& l = iLocals[i];
@@ -1414,6 +1647,8 @@ namespace neos
                                         a.store(true, RBP, l.disp, RAX);
                                     }
                                 }
+                                else if (!zero[i])
+                                    continue;
                                 else if (l.pinned)
                                 {
                                     if (is_float(l.type))
@@ -1440,6 +1675,9 @@ namespace neos
                                 a.pop(*r);
                             a.pop(RBP);
                             a.ret();
+                            if (a.in_cold())
+                                throw std::logic_error("neos::jit: cold code");
+                            a.append_cold();
                             // frame size (keeping rsp 16 byte aligned)
                             std::int32_t const raw = -iSlotsBase - pushed_bytes() + 8 * static_cast<std::int32_t>(iMaxDepth) + std::max(iOutgoing, ShadowSpace);
                             std::int32_t const total = (pushed_bytes() + raw + 15) & ~15;
@@ -1511,6 +1749,150 @@ namespace neos
                                     owner(xmm, target) = Free;
                                 }
                             }
+                        }
+                        // the position of the end of the block whose body starts at aBody
+                        std::size_t block_end(std::size_t aBody) const
+                        {
+                            std::size_t depth = 0u;
+                            for (std::size_t p = aBody; p < iFunction->codeEnd;)
+                            {
+                                auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                if (op == 0x02 || op == 0x03 || op == 0x04)
+                                    ++depth;
+                                else if (op == 0x0B)
+                                {
+                                    if (depth == 0u)
+                                        return p;
+                                    --depth;
+                                }
+                                p += 1u + immediate_count(op, iTokens, p);
+                            }
+                            return iFunction->codeEnd;
+                        }
+                        // a block (whose body starts at aBody) whose result is only tested (see control::condition)
+                        std::optional<control::condition_target> condition_block(std::size_t aBody)
+                        {
+                            auto p = block_end(aBody);
+                            if (p >= iFunction->codeEnd)
+                                return {};
+                            ++p;
+                            bool const inverted = p < iFunction->codeEnd && iTokens[p] == 0x45u;
+                            if (inverted)
+                                ++p;
+                            if (p + 1u >= iFunction->codeEnd || (iTokens[p] != 0x04u && iTokens[p] != 0x0Du))
+                                return {};
+                            control::condition_target t;
+                            t.isIf = iTokens[p] == 0x04u;
+                            t.testEnd = p + 2u;
+                            t.next = a.new_label();
+                            std::size_t other;
+                            if (t.isIf)
+                            {
+                                if (iTokens[p + 1u] != 0x40u)
+                                {
+                                    auto const type = static_cast<std::uint8_t>(iTokens[p + 1u]);
+                                    if (type != I32 && type != I64 && type != F32 && type != F64)
+                                        return {};
+                                    t.ifResult = type;
+                                }
+                                other = a.new_label();      // (the if's else)
+                            }
+                            else
+                            {
+                                auto const depth = static_cast<std::size_t>(iTokens[p + 1u]);
+                                if (depth >= iControl.size())
+                                    return {};
+                                t.brTarget = iControl.size() - 1u - depth;
+                                auto const& target = iControl[t.brTarget];
+                                if (target.kind == control::Function || (target.kind != control::Loop && target.result))
+                                    return {};
+                                other = target.label;
+                            }
+                            // (if: true goes to its body (next); br_if: true goes to its target (other); i32.eqz: the reverse)
+                            bool const trueIsNext = t.isIf != inverted;
+                            t.whenTrue = trueIsNext ? t.next : other;
+                            t.whenFalse = trueIsNext ? other : t.next;
+                            return t;
+                        }
+                        // a result delivered to a condition block (see control::condition) (aFallThrough: the block's end; else a branch)
+                        void deliver_condition(control::condition_target const& aTarget, entry const& aValue, bool aFallThrough)
+                        {
+                            auto const finish = [&](std::size_t aOther)
+                            {
+                                if (!aFallThrough)
+                                    a.jmp(aOther);
+                            };
+                            switch (aValue.k)
+                            {
+                            case kind::Cond:
+                                if (aTarget.whenTrue == aTarget.next)
+                                {
+                                    jump_on(aValue, false, aTarget.whenFalse);
+                                    finish(aTarget.whenTrue);
+                                }
+                                else
+                                {
+                                    jump_on(aValue, true, aTarget.whenTrue);
+                                    finish(aTarget.whenFalse);
+                                }
+                                break;
+                            case kind::Const:
+                                {
+                                    auto const destination = (aValue.bits & 0xFFFFFFFFull) != 0u ? aTarget.whenTrue : aTarget.whenFalse;
+                                    if (!aFallThrough || destination != aTarget.next)
+                                        a.jmp(destination);
+                                }
+                                break;
+                            default:
+                                test_value(aValue);
+                                if (aTarget.whenTrue == aTarget.next)
+                                {
+                                    a.jcc(E, aTarget.whenFalse);
+                                    finish(aTarget.whenTrue);
+                                }
+                                else
+                                {
+                                    a.jcc(NE, aTarget.whenTrue);
+                                    finish(aTarget.whenFalse);
+                                }
+                                break;
+                            }
+                        }
+                        // the end of a condition block: its test follows (aNext is advanced past it)
+                        bool condition_end(std::size_t& aNext)
+                        {
+                            if (iControl.empty() || !iControl.back().condition)
+                                return false;
+                            auto const c = iControl.back();
+                            auto const& t = *c.condition;
+                            if (iReachable)
+                            {
+                                auto const value = pop();
+                                deliver_condition(t, value, !c.coldTail);
+                                release(value);
+                                release_temps();
+                            }
+                            unwind(c.base);
+                            iControl.pop_back();
+                            if (c.coldTail)
+                                a.end_cold();
+                            a.bind(c.label);
+                            if (t.isIf)
+                            {
+                                control i;
+                                i.kind = control::If;
+                                i.result = t.ifResult;
+                                i.base = iStack.size();
+                                i.label = a.new_label();
+                                i.elseLabel = t.whenTrue == t.next ? t.whenFalse : t.whenTrue;
+                                iControl.push_back(i);
+                            }
+                            else
+                                iControl[t.brTarget].branched = true;
+                            a.bind(t.next);
+                            iReachable = true;
+                            aNext = t.testEnd;
+                            return true;
                         }
                         // drop the operand stack back to a control frame's base
                         void unwind(std::size_t aBase)
@@ -1587,6 +1969,14 @@ namespace neos
                                 return;
                             }
                             target.branched = true;
+                            if (target.condition)
+                            {
+                                auto const value = pop();
+                                deliver_condition(*target.condition, value, false);
+                                release(value);
+                                release_temps();
+                                return;
+                            }
                             if (target.kind != control::Loop)
                                 transfer_block_result(target, true);
                             a.jmp(target.label);
@@ -1615,6 +2005,30 @@ namespace neos
                                 return;
                             }
                             target.branched = true;
+                            if (target.condition)
+                            {
+                                // (the result stays for the code that follows: delivered if the branch is taken)
+                                auto const skip = a.new_label();
+                                jump_unless(condition, skip, false);
+                                auto const value = iStack.back();
+                                if (value.k == kind::Cond)
+                                    throw unsupported{ "condition result" };
+                                if (value.k == kind::Const)
+                                    deliver_condition(*target.condition, value, false);
+                                else
+                                {
+                                    auto const o = operand_of(value, false);
+                                    if (o.k == operand::Reg)
+                                        a.test_rr(false, o.reg, o.reg);
+                                    else
+                                        a.alu_mi(7, false, o.base, o.disp, 0);
+                                    release_temps();
+                                    a.jcc(NE, target.condition->whenTrue);
+                                    a.jmp(target.condition->whenFalse);
+                                }
+                                a.bind(skip);
+                                return;
+                            }
                             if (target.kind != control::Loop && target.result)
                             {
                                 // test the condition first (its register may be the result register), then copy the result 
@@ -2201,6 +2615,11 @@ namespace neos
                             auto const& results = *callee.results;
                             if (results.size() > MaxResults)
                                 throw unsupported{ "too many results" };
+                            if (callee.checked)
+                            {
+                                checked_arithmetic(*callee.checked);
+                                return;
+                            }
                             std::int32_t const base = callee.imported ? ShadowSpace : 0;
                             std::size_t const n = parameters.size();
                             if (iStack.size() < iControl.back().base + n)
@@ -2213,7 +2632,9 @@ namespace neos
                             iOutgoing = std::max(iOutgoing, base + 8 * static_cast<std::int32_t>(std::max(n, results.size())));
                             if (!callee.imported)
                             {
+                                save_pinned_gprs();
                                 a.call(iFunctionLabels[aFunction]);
+                                restore_pinned_gprs();
                                 for (std::size_t i = 0u; i < results.size(); ++i)
                                 {
                                     auto const t = results[i];
@@ -2238,17 +2659,62 @@ namespace neos
                             else
                             {
                                 save_pinned_xmms();
+                                save_pinned_gprs();
                                 a.mov_rr(true, NativeIntegerArguments[0], R15);
                                 a.mov_ri(NativeIntegerArguments[1], aFunction, false);
                                 a.lea(NativeIntegerArguments[2], RSP, ShadowSpace);
                                 a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&host_thunk), true);
                                 a.call_r(RAX);
                                 restore_pinned_xmms();
+                                restore_pinned_gprs();
                                 a.test_rr(false, RAX, RAX);
                                 a.jcc(NE, iTrapLabels[TrapHostException]);
                                 for (std::size_t i = 0u; i < results.size(); ++i)
                                     push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
                             }
+                        }
+                        // checked integer arithmetic (see jit::checked_arithmetic): the operation, then a trap if it overflowed (OF, or CF 
+                        // for unsigned addition and subtraction)
+                        void checked_arithmetic(std::uint8_t aCode)
+                        {
+                            auto const operation = aCode & 3u;
+                            bool const w = (aCode & 4u) != 0u;
+                            bool const isUnsigned = (aCode & 8u) != 0u;
+                            auto const type = w ? I64 : I32;
+                            if (operation == 3u)
+                            {
+                                auto const v = pop();
+                                auto const r = to_gpr(v);
+                                a.f7(3, w, r); // neg (OF: the least integer)
+                                a.jcc(O, iTrapLabels[TrapIntegerOverflow]);
+                                push_reg(type, r);
+                                return;
+                            }
+                            if (operation == 2u && isUnsigned)
+                            {
+                                // (mul: rdx:rax = rax * src; OF and CF if rdx (edx) is not zero)
+                                auto rhs = pop();
+                                auto lhs = pop();
+                                evict(false, RAX);
+                                evict(false, RDX);
+                                owner(false, RDX) = Locked;
+                                load_gpr(lhs, RAX);
+                                if (!(lhs.k == kind::Reg && lhs.reg == RAX))
+                                    release(lhs);
+                                owner(false, RAX) = Locked;
+                                auto const src = to_gpr(rhs, (1u << RAX) | (1u << RDX));
+                                a.f7(4, w, src);
+                                a.jcc(O, iTrapLabels[TrapIntegerOverflow]);
+                                release_reg(false, src);
+                                release_reg(false, RDX);
+                                push_reg(type, RAX);
+                                return;
+                            }
+                            if (operation == 2u)
+                                int_multiply(w);
+                            else
+                                int_binary(operation == 0u ? 0 : 5, w, operation == 0u);
+                            a.jcc(isUnsigned ? B : O, iTrapLabels[TrapIntegerOverflow]);
                         }
                         void push_loaded(std::uint8_t aType, int aBase, std::int32_t aDisp)
                         {
@@ -2346,6 +2812,50 @@ namespace neos
                                 push(e);
                             }
                             aNext = aPosition + 7u;
+                            return true;
+                        }
+                        // x & c (c a constant of at most 31 bits) whose result is only tested (against zero: wrapped and then tested by
+                        // br_if, if or eqz; eqz; or compared with zero): test x, c (a condition); aNext is advanced past the tokens it 
+                        // replaces
+                        bool test_and(bool aW, std::size_t& aNext)
+                        {
+                            if (iStack.size() < iControl.back().base + 2u || iStack.back().k != kind::Const)
+                                return false;
+                            auto const bits = iStack.back().bits;
+                            std::int64_t const c = aW ? static_cast<std::int64_t>(bits) : static_cast<std::int64_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(bits)));
+                            if (c < 0 || c > 0x7FFFFFFF)
+                                return false;
+                            auto const token = [&](std::size_t aIndex) { return aNext + aIndex < iTokens.size() ? iTokens[aNext + aIndex] : ~std::uint64_t{}; };
+                            auto const test = [](std::uint64_t aOp) { return aOp == 0x0Du || aOp == 0x04u || aOp == 0x45u; };
+                            std::uint8_t cc = NE;
+                            std::size_t skip = 0u;
+                            if (aW && token(0u) == 0xA7u && test(token(1u)))
+                                skip = 1u;
+                            else if (token(0u) == (aW ? 0x50u : 0x45u))
+                            {
+                                cc = E;
+                                skip = 1u;
+                            }
+                            else if (!aW && (token(0u) == 0x0Du || token(0u) == 0x04u))
+                                skip = 0u;
+                            else if (token(0u) == (aW ? 0x42u : 0x41u) && token(1u) == 0u && (token(2u) == (aW ? 0x51u : 0x46u) || token(2u) == (aW ? 0x52u : 0x47u)))
+                            {
+                                cc = token(2u) == (aW ? 0x51u : 0x46u) ? E : NE;
+                                skip = 3u;
+                            }
+                            else
+                                return false;
+                            release(pop());
+                            auto const value = pop();
+                            auto const o = operand_of(value, false);
+                            if (o.k == operand::Reg)
+                                a.test_ri(o.reg, static_cast<std::int32_t>(c));
+                            else
+                                a.test_mi(o.base, o.disp, static_cast<std::int32_t>(c));
+                            release(value);
+                            release_temps();
+                            push_cond(cc);
+                            aNext += skip;
                             return true;
                         }
                         // a load or store: [address + offset, address + offset + width) must be within linear memory
@@ -2560,6 +3070,14 @@ namespace neos
                                 }
                                 if (op == 0x20u && update_local(opPosition, p))
                                     continue;
+                                if ((op == 0x71u || op == 0x83u) && test_and(op == 0x83u, p))
+                                    continue;
+                                if (op == 0x0Bu && condition_end(p))
+                                {
+                                    if (iControl.empty())
+                                        return;
+                                    continue;
+                                }
                                 instruction(op, opPosition, immediate);
                                 if (iControl.empty())
                                     return;
@@ -2606,6 +3124,9 @@ namespace neos
                                     c.result = block_result(aImmediate(0));
                                     c.base = iStack.size();
                                     c.label = a.new_label();
+                                    c.bodyBegin = aPosition + 2u;
+                                    if (aOp == 0x02 && c.result == I32 && iStack.empty())
+                                        c.condition = condition_block(aPosition + 2u);
                                     if (aOp == 0x03)
                                     {
                                         a.bind(c.label);
@@ -2661,6 +3182,21 @@ namespace neos
                                         transfer_block_result(c, true);
                                     unwind(c.base);
                                     iControl.pop_back();
+                                    if (c.coldTail)
+                                    {
+                                        // (the end of a cold tail: back to the block's end)
+                                        if (iReachable)
+                                            a.jmp(c.label);
+                                        a.end_cold();
+                                    }
+                                    else if (c.kind == control::Block && !iReachable && !a.in_cold() && !iControl.empty() && 
+                                        iControl.back().kind == control::Block && iControl.back().bodyBegin == c.bodyBegin - 2u &&
+                                        iLastBranch && iLastBranch->first + 2u == aPosition && iLastBranch->second == 1u)
+                                    {
+                                        // (the start of a cold tail)
+                                        iControl.back().coldTail = true;
+                                        a.begin_cold();
+                                    }
                                     if (c.kind == control::If && !c.hasElse)
                                     {
                                         a.bind(c.elseLabel);
@@ -2685,7 +3221,9 @@ namespace neos
                                 }
                                 break;
                             case 0x0C:
-                                materialize_cond();
+                                iLastBranch = std::make_pair(aPosition, static_cast<std::size_t>(aImmediate(0)));
+                                if (auto const depth = static_cast<std::size_t>(aImmediate(0)); depth >= iControl.size() || !iControl[iControl.size() - 1u - depth].condition)
+                                    materialize_cond();
                                 if (rotate_loop(static_cast<std::size_t>(aImmediate(0))))
                                 {
                                     unwind(iControl.back().base);
@@ -2980,7 +3518,8 @@ namespace neos
                         std::vector<entry> iStack;
                         std::vector<control> iControl;
                         std::vector<local_info> iLocals;
-                        std::vector<int> iUsedPinnedGprs;
+                        std::vector<int> iUsedPinnedGprs;               ///< (those that native code preserves: saved by the function)
+                        std::vector<int> iNativeVolatilePinnedGprs;     ///< (those that native code does not preserve: saved around calls)
                         std::vector<int> iUsedPinnedXmms;
                         int iGprOwner[16] = {};
                         int iXmmOwner[16] = {};
@@ -2990,6 +3529,7 @@ namespace neos
                         std::int32_t iOutgoing = 0;
                         std::size_t iEpilogue = 0u;
                         bool iReachable = true;
+                        std::optional<std::pair<std::size_t, std::size_t>> iLastBranch; ///< (the last br: its position and depth)
                     };
 
                     void* allocate_executable(bytes const& aCode, std::size_t& aSize)

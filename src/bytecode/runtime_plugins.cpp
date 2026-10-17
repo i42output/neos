@@ -100,7 +100,8 @@ namespace neos
                         case NEOS_RT_STRING:
                         case NEOS_RT_OBJECT: return I32;
                         case NEOS_RT_I64:
-                        case NEOS_RT_U64: return I64;
+                        case NEOS_RT_U64:
+                        case NEOS_RT_INTEGER: return I64;
                         case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? I64 : I32;
                         case NEOS_RT_F32: return F32;
                         case NEOS_RT_F64: return F64;
@@ -130,7 +131,8 @@ namespace neos
                         case NEOS_RT_CHAR: return &ffi_type_schar;
                         case NEOS_RT_I32: return &ffi_type_sint32;
                         case NEOS_RT_U32: return &ffi_type_uint32;
-                        case NEOS_RT_I64: return &ffi_type_sint64;
+                        case NEOS_RT_I64:
+                        case NEOS_RT_INTEGER: return &ffi_type_sint64;
                         case NEOS_RT_U64: return &ffi_type_uint64;
                         case NEOS_RT_SIZE: return sizeof(std::size_t) == 8u ? &ffi_type_uint64 : &ffi_type_uint32;
                         case NEOS_RT_F32: return &ffi_type_float;
@@ -458,6 +460,13 @@ namespace neos
                         case NEOS_RT_OBJECT:
                             a.object = aMarshaller.objectPointer(static_cast<std::uint32_t>(v));
                             break;
+                        case NEOS_RT_INTEGER:
+                            // (an object: its handle (shifted) becomes its address, with the low bit set)
+                            if ((v & 1u) != 0u)
+                                a.i64 = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(aMarshaller.objectPointer(static_cast<std::uint32_t>(v >> 1u))) | 1u);
+                            else
+                                a.i64 = static_cast<std::int64_t>(v);
+                            break;
                         default:
                             break;
                         }
@@ -494,6 +503,16 @@ namespace neos
                     case NEOS_RT_F64: { value bits; std::memcpy(&bits, &r.f64, sizeof(bits)); aBuffer[0] = bits; break; }
                     case NEOS_RT_STRING: aBuffer[0] = static_cast<value>(aMarshaller.allocateString(r.string != nullptr ? std::string_view{ r.string } : std::string_view{})); break;
                     case NEOS_RT_OBJECT: aBuffer[0] = static_cast<value>(aMarshaller.objectHandle(r.object)); break;
+                    case NEOS_RT_INTEGER:
+                        {
+                            auto const v = sizeof(ffi_arg) >= 8u ? static_cast<std::uint64_t>(r.signedIntegral) : static_cast<std::uint64_t>(r.i64);
+                            // (an object: a handle for the new reference (shifted), with the low bit set)
+                            if ((v & 1u) != 0u)
+                                aBuffer[0] = (static_cast<value>(aMarshaller.objectHandle(reinterpret_cast<void*>(static_cast<std::uintptr_t>(v & ~std::uint64_t{ 1u })))) << 1u) | 1u;
+                            else
+                                aBuffer[0] = static_cast<value>(v);
+                        }
+                        break;
                     }
 #endif
                 }

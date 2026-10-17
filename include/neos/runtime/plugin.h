@@ -47,6 +47,11 @@
     reference that the VM takes over (a null result is no object). Scripts see objects as handles (i32; 0 is no
     object) that the VM validates, so they never see the objects' addresses; they retain and release handles with
     the VM's functions neos::object_retain and neos::object_release.
+  - NEOS_RT_INTEGER is an integer of any size (int64_t): a small integer shifted left one bit (the low bit clear), or 
+    an object (that the plugin implements, e.g. an arbitrary precision integer) as its "neos_rt_object*" with the low
+    bit set (objects are at least two byte aligned). An object argument is borrowed and an object result is a new 
+    reference, as NEOS_RT_OBJECT's. Scripts see an integer object as its handle shifted left one bit, with the low 
+    bit set.
 */
 
 #ifndef NEOS_RUNTIME_PLUGIN_H
@@ -80,7 +85,8 @@ typedef enum neos_rt_type
     NEOS_RT_F32,
     NEOS_RT_F64,
     NEOS_RT_STRING,
-    NEOS_RT_OBJECT
+    NEOS_RT_OBJECT,
+    NEOS_RT_INTEGER
 } neos_rt_type;
 
 /* an object: its type (whose functions implement it) is its first member; each plugin defines its own types (which

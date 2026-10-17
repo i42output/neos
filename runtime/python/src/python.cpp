@@ -134,7 +134,6 @@ namespace
     }
 
     void print_string(char const* aValue) { write_line(aValue); }
-    void print_int(std::int64_t aValue) { write_line(std::to_string(aValue)); }
     void print_float(double aValue) { write_line(python_float(aValue)); }
     void print_bool(bool aValue) { write_line(aValue ? "True" : "False"); }
 
@@ -160,35 +159,8 @@ namespace
         return result(std::move(line));
     }
 
-    char const* str_int(std::int64_t aValue) { return result(std::to_string(aValue)); }
     char const* str_float(double aValue) { return result(python_float(aValue)); }
     char const* str_bool(bool aValue) { return result(aValue ? "True" : "False"); }
-
-    // [whitespace] [sign] digits (with optional single underscores between digits) [whitespace]
-    std::int64_t int_string(char const* aValue)
-    {
-        auto const text = trimmed(aValue);
-        std::string digits;
-        std::size_t i = (!text.empty() && (text[0] == '+' || text[0] == '-')) ? 1u : 0u;
-        for (bool digitBefore = false; i < text.size(); ++i)
-        {
-            if (text[i] >= '0' && text[i] <= '9')
-                digits += text[i], digitBefore = true;
-            else if (text[i] == '_' && digitBefore && i + 1u < text.size() && text[i + 1u] >= '0' && text[i + 1u] <= '9')
-                digitBefore = false;
-            else
-            {
-                raise("ValueError", "invalid literal for int() with base 10: '" + text + "'");
-                return 0;
-            }
-        }
-        if (!text.empty() && text[0] == '-')
-            digits.insert(digits.begin(), '-');
-        std::int64_t value = 0;
-        if (digits.empty() || digits == "-" || std::from_chars(digits.data(), digits.data() + digits.size(), value).ec != std::errc{})
-            raise("ValueError", "invalid literal for int() with base 10: '" + text + "'");
-        return value;
-    }
 
     // the whole of the (trimmed) string must be a number (single underscores may separate digits)
     double float_string(char const* aValue)
@@ -222,23 +194,18 @@ namespace
         return length;
     }
 
-    std::int64_t abs_int(std::int64_t aValue) { return aValue < 0 ? -aValue : aValue; }
     double abs_float(double aValue) { return std::fabs(aValue); }
 
     neos_rt_function const sBuiltins[] =
     {
         { "print(string)", NEOS_RT_FUNCTION(print_string), NEOS_RT_VOID, 1u, { NEOS_RT_STRING }, 0u },
-        { "print(i64)", NEOS_RT_FUNCTION(print_int), NEOS_RT_VOID, 1u, { NEOS_RT_I64 }, 0u },
         { "print(f64)", NEOS_RT_FUNCTION(print_float), NEOS_RT_VOID, 1u, { NEOS_RT_F64 }, 0u },
         { "print(bool)", NEOS_RT_FUNCTION(print_bool), NEOS_RT_VOID, 1u, { NEOS_RT_BOOL }, 0u },
         { "input()", NEOS_RT_FUNCTION(input), NEOS_RT_STRING, 0u, {}, 0u },
-        { "str(i64)", NEOS_RT_FUNCTION(str_int), NEOS_RT_STRING, 1u, { NEOS_RT_I64 }, 0u },
         { "str(f64)", NEOS_RT_FUNCTION(str_float), NEOS_RT_STRING, 1u, { NEOS_RT_F64 }, 0u },
         { "str(bool)", NEOS_RT_FUNCTION(str_bool), NEOS_RT_STRING, 1u, { NEOS_RT_BOOL }, 0u },
-        { "int(string)", NEOS_RT_FUNCTION(int_string), NEOS_RT_I64, 1u, { NEOS_RT_STRING }, 0u },
         { "float(string)", NEOS_RT_FUNCTION(float_string), NEOS_RT_F64, 1u, { NEOS_RT_STRING }, 0u },
         { "len(string)", NEOS_RT_FUNCTION(len_string), NEOS_RT_I64, 1u, { NEOS_RT_STRING }, 0u },
-        { "abs(i64)", NEOS_RT_FUNCTION(abs_int), NEOS_RT_I64, 1u, { NEOS_RT_I64 }, 0u },
         { "abs(f64)", NEOS_RT_FUNCTION(abs_float), NEOS_RT_F64, 1u, { NEOS_RT_F64 }, 0u }
     };
 

@@ -251,6 +251,24 @@ namespace neos::python_runtime
             return &result->h.base;
         }
 
+        // (integers of any size (NEOS_RT_INTEGER): see the functions scripts call)
+        constexpr long long sSmallIntegerLimit = 1ll << 62;
+
+        bool integer_is_object(std::int64_t aValue)
+        {
+            return (aValue & 1) != 0;
+        }
+
+        object* integer_object(std::int64_t aValue)
+        {
+            return reinterpret_cast<object*>(static_cast<std::uintptr_t>(aValue) & ~std::uintptr_t{ 1u });
+        }
+
+        std::int64_t small_integer(long long aValue)
+        {
+            return static_cast<std::int64_t>(static_cast<std::uint64_t>(aValue) << 1u);
+        }
+
         bool big_negative(big_integer const& aValue)
         {
             return big_detail::is_negative(aValue);
@@ -3401,7 +3419,7 @@ namespace neos::python_runtime
         {
             enum kind_t { Positional, KeywordOnly, VarArgs, VarKeywords } kind = Positional;
             std::string name;
-            char type = 'O';        // O(bject), I(nt), F(loat), B(ool), S(tr)
+            char type = 'O';        // O(bject), I(nt, of any size), L (an int of 64 bits), F(loat), B(ool), S(tr)
             object* defaultValue = nullptr;
         };
         struct script_function_object
@@ -3538,6 +3556,27 @@ namespace neos::python_runtime
                 {
                 case 'I':
                     {
+                        // (an int of any size: borrowed)
+                        if (!is_int_like(bound[p]))
+                        {
+                            long long i = 0;
+                            if (!to_index(bound[p], i))
+                                return nullptr;
+                            owned.emplace_back(make_int(i));
+                            bound[p] = owned.back().get();
+                        }
+                        if (kind_of(bound[p]) == NEOS_PY_BOOL)
+                            v.i64 = small_integer(bound[p] == &sTrue.base ? 1 : 0);
+                        else if (!is_big(bound[p]) && as<int_object>(bound[p])->value >= -sSmallIntegerLimit && as<int_object>(bound[p])->value < sSmallIntegerLimit)
+                            v.i64 = small_integer(as<int_object>(bound[p])->value);
+                        else
+                            v.i64 = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(bound[p]) | 1u);
+                        types.push_back(NEOS_RT_INTEGER);
+                    }
+                    break;
+                case 'L':
+                    {
+                        // (an int of 64 bits)
                         long long i = 0;
                         if (!to_index(bound[p], i))
                             return nullptr;
@@ -3576,7 +3615,7 @@ namespace neos::python_runtime
             auto const* host = python_runtime::host();
             if (host == nullptr)
                 return error("SystemError", "functions of the program cannot be called");
-            neos_rt_type const resultType = f.result == 'I' ? NEOS_RT_I64 : f.result == 'F' ? NEOS_RT_F64 : f.result == 'B' ? NEOS_RT_BOOL :
+            neos_rt_type const resultType = f.result == 'I' ? NEOS_RT_INTEGER : f.result == 'L' ? NEOS_RT_I64 : f.result == 'F' ? NEOS_RT_F64 : f.result == 'B' ? NEOS_RT_BOOL :
                 f.result == 'S' ? NEOS_RT_STRING : f.result == 'V' ? NEOS_RT_VOID : NEOS_RT_OBJECT;
             neos_rt_value r{};
             if (auto const message = host->call(f.index, static_cast<unsigned>(values.size()), types.data(), values.data(), resultType, &r))
@@ -3591,7 +3630,8 @@ namespace neos::python_runtime
             }
             switch (f.result)
             {
-            case 'I': return make_int(r.i64);
+            case 'I': return integer_is_object(r.i64) ? integer_object(r.i64) : make_int(r.i64 >> 1);
+            case 'L': return make_int(r.i64);
             case 'F': return make_float(r.f64);
             case 'B': return make_bool(r.b != 0);
             case 'S': return make_str(r.string != nullptr ? r.string : "");
@@ -3611,7 +3651,7 @@ namespace neos::python_runtime
 
         neos_py_type sScriptFunctionType = make_script_function_type();
 
-        // python::function(name, index, signature, defaults): signature: "[*|**]name:T[=],...;R" (T: O, I, F, B or S; R also V)
+        // python::function(name, index, signature, defaults): signature: "[*|**]name:T[=],...;R" (T: O, I, L, F, B or S; R also V)
         object* fn_function(char const* aName, std::int32_t aIndex, char const* aSignature, object* aDefaults)
         {
             auto* const f = new script_function_object{ { { &sScriptFunctionType.base } }, aName, static_cast<unsigned>(aIndex), {}, 'O' };
@@ -3988,6 +4028,150 @@ namespace neos::python_runtime
         object* fn_unary(std::int32_t aOperation, object* aObject) { return checked(unary(aOperation, aObject)); }
         object* fn_compare(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(compare(aOperation, aLhs, aRhs)); }
         bool fn_is(object* aLhs, object* aRhs) { return aLhs == aRhs; }
+
+        // --- integers of any size (NEOS_RT_INTEGER: a small integer shifted left one bit, or an int object's address with the low
+        // bit set); an argument is borrowed, a result is a new reference
+
+        // (an integer as an int object: a new reference)
+        object* integer_to_object(std::int64_t aValue)
+        {
+            if (integer_is_object(aValue))
+            {
+                auto const result = integer_object(aValue);
+                retain(result);
+                return result;
+            }
+            return make_int(aValue >> 1);
+        }
+
+        // (an int (a new reference) as an integer: a small integer if it is one; 0 if there is no result (an exception))
+        std::int64_t integer_result(object* aResult)
+        {
+            if (aResult == nullptr)
+                return (checked(nullptr), 0);
+            if (kind_of(aResult) == NEOS_PY_BOOL)
+            {
+                bool const value = aResult == &sTrue.base;
+                release(aResult);
+                return small_integer(value ? 1 : 0);
+            }
+            if (kind_of(aResult) != NEOS_PY_INT)
+            {
+                ref const discarded{ aResult };
+                return (error("TypeError", std::string{ "an integer is required, not '" } + type_name(aResult) + "'"), 0);
+            }
+            if (!is_big(aResult))
+            {
+                auto const value = as<int_object>(aResult)->value;
+                if (value >= -sSmallIntegerLimit && value < sSmallIntegerLimit)
+                {
+                    release(aResult);
+                    return small_integer(value);
+                }
+            }
+            return static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(aResult) | 1u);
+        }
+
+        // (an integer as an int object: borrowed (an integer object) or owned by aOwned)
+        object* integer_borrowed(std::int64_t aValue, ref& aOwned)
+        {
+            if (integer_is_object(aValue))
+                return integer_object(aValue);
+            aOwned = ref{ make_int(aValue >> 1) };
+            return aOwned.get();
+        }
+
+        std::int64_t fn_integer_binary(std::int32_t aOperation, std::int64_t aLhs, std::int64_t aRhs)
+        {
+            if (!integer_is_object(aLhs) && !integer_is_object(aRhs))
+                return integer_result(int_binary(aOperation, aLhs >> 1, aRhs >> 1));
+            ref l, r;
+            return integer_result(binary(aOperation, integer_borrowed(aLhs, l), integer_borrowed(aRhs, r), false));
+        }
+
+        std::int64_t fn_integer_unary(std::int32_t aOperation, std::int64_t aValue)
+        {
+            ref v;
+            return integer_result(unary(aOperation, integer_borrowed(aValue, v)));
+        }
+
+        bool fn_integer_compare(std::int32_t aOperation, std::int64_t aLhs, std::int64_t aRhs)
+        {
+            ref l, r;
+            ref const result{ compare(aOperation, integer_borrowed(aLhs, l), integer_borrowed(aRhs, r)) };
+            if (!result)
+                return (checked(nullptr), false);
+            return truth(result.get()) == 1;
+        }
+
+        double fn_integer_true_divide(std::int64_t aLhs, std::int64_t aRhs)
+        {
+            ref l, r;
+            ref const result{ binary(NEOS_PY_TRUE_DIVIDE, integer_borrowed(aLhs, l), integer_borrowed(aRhs, r), false) };
+            if (!result)
+                return (checked(nullptr), 0.0);
+            return as<float_object>(result.get())->value;
+        }
+
+        double fn_integer_float(std::int64_t aValue)
+        {
+            if (!integer_is_object(aValue))
+                return static_cast<double>(aValue >> 1);
+            double result = 0.0;
+            if (!to_double(integer_object(aValue), result))
+                return 0.0;
+            return result;
+        }
+
+        std::int64_t fn_integer_i64(std::int64_t aValue)
+        {
+            if (!integer_is_object(aValue))
+                return aValue >> 1;
+            return int_value(integer_object(aValue));
+        }
+
+        char const* fn_integer_str(std::int64_t aValue)
+        {
+            if (!integer_is_object(aValue))
+                return result(std::to_string(aValue >> 1));
+            return fn_str(integer_object(aValue));
+        }
+
+        void write_out(std::string const& aText);
+
+        void fn_print_integer(std::int64_t aValue)
+        {
+            write_out(std::string{ fn_integer_str(aValue) } + "\n");
+        }
+
+        std::int64_t fn_integer_from_i64(std::int64_t aValue) { return integer_result(make_int(aValue)); }
+
+        std::int64_t fn_integer_from_float(double aValue)
+        {
+            ref const value{ make_float(aValue) };
+            return integer_result(int_from(value.get(), -1));
+        }
+
+        std::int64_t fn_integer_from_string(char const* aText) { return integer_result(make_int(big_integer::from_string(std::string{ aText }))); }
+        std::int64_t fn_to_integer(object* aObject) { return integer_result(int_from(aObject, -1)); }
+        object* fn_from_integer(std::int64_t aValue) { return integer_to_object(aValue); }
+
+        // (builtins.py's stubs whose argument or result is an int)
+        std::int64_t fn_int_string(char const* aText)
+        {
+            ref const value{ make_str(aText) };
+            return integer_result(int_from(value.get(), -1));
+        }
+        std::int64_t fn_abs_integer(std::int64_t aValue) { return fn_integer_unary(NEOS_PY_ABSOLUTE, aValue); }
+        std::int64_t fn_len_integer(object* aObject)
+        {
+            auto const result = length(aObject);
+            return failed() ? 0 : small_integer(result);
+        }
+        char const* fn_fstring_integer(object* aObject, std::int64_t aConversion, char const* aSpec)
+        {
+            return fn_format_field(aObject, static_cast<std::int32_t>(aConversion >> 1), aSpec);
+        }
         bool fn_contains(object* aContainer, object* aItem) { return contains(aContainer, aItem) == 1; }
         object* fn_getattr(object* aObject, char const* aName) { return checked(getattr(aObject, aName)); }
         void fn_setattr(object* aObject, char const* aName, object* aValue) { setattr(aObject, aName, aValue); }
@@ -8683,6 +8867,7 @@ namespace neos::python_runtime
         constexpr auto STR = NEOS_RT_STRING;
         constexpr auto BOOL = NEOS_RT_BOOL;
         constexpr auto VOID = NEOS_RT_VOID;
+        constexpr auto INT = NEOS_RT_INTEGER;
     }
 
     std::vector<neos_rt_function> const& object_functions()
@@ -8701,8 +8886,24 @@ namespace neos::python_runtime
             { "str", NEOS_RT_FUNCTION(fn_str), STR, 1u, { OBJ }, 0u },
             { "repr", NEOS_RT_FUNCTION(fn_repr), STR, 1u, { OBJ }, 0u },
             { "format_field", NEOS_RT_FUNCTION(fn_format_field), STR, 3u, { OBJ, I32, STR }, 0u },
-            { "__fstring(object,i64,string)", NEOS_RT_FUNCTION(fn_fstring), STR, 3u, { OBJ, I64, STR }, 0u },
+            { "__fstring(object,integer,string)", NEOS_RT_FUNCTION(fn_fstring_integer), STR, 3u, { OBJ, INT, STR }, 0u },
             { "to_int", NEOS_RT_FUNCTION(fn_to_int), I64, 1u, { OBJ }, 0u },
+            { "integer_binary", NEOS_RT_FUNCTION(fn_integer_binary), INT, 3u, { I32, INT, INT }, 0u },
+            { "integer_unary", NEOS_RT_FUNCTION(fn_integer_unary), INT, 2u, { I32, INT }, 0u },
+            { "integer_compare", NEOS_RT_FUNCTION(fn_integer_compare), BOOL, 3u, { I32, INT, INT }, 0u },
+            { "integer_true_divide", NEOS_RT_FUNCTION(fn_integer_true_divide), F64, 2u, { INT, INT }, 0u },
+            { "integer_float", NEOS_RT_FUNCTION(fn_integer_float), F64, 1u, { INT }, 0u },
+            { "integer_i64", NEOS_RT_FUNCTION(fn_integer_i64), I64, 1u, { INT }, 0u },
+            { "integer_str", NEOS_RT_FUNCTION(fn_integer_str), STR, 1u, { INT }, 0u },
+            { "integer_from_i64", NEOS_RT_FUNCTION(fn_integer_from_i64), INT, 1u, { I64 }, 0u },
+            { "integer_from_float", NEOS_RT_FUNCTION(fn_integer_from_float), INT, 1u, { F64 }, 0u },
+            { "integer_from_string", NEOS_RT_FUNCTION(fn_integer_from_string), INT, 1u, { STR }, 0u },
+            { "to_integer", NEOS_RT_FUNCTION(fn_to_integer), INT, 1u, { OBJ }, 0u },
+            { "from_integer", NEOS_RT_FUNCTION(fn_from_integer), OBJ, 1u, { INT }, 0u },
+            { "print(integer)", NEOS_RT_FUNCTION(fn_print_integer), VOID, 1u, { INT }, 0u },
+            { "str(integer)", NEOS_RT_FUNCTION(fn_integer_str), STR, 1u, { INT }, 0u },
+            { "int(string)", NEOS_RT_FUNCTION(fn_int_string), INT, 1u, { STR }, 0u },
+            { "abs(integer)", NEOS_RT_FUNCTION(fn_abs_integer), INT, 1u, { INT }, 0u },
             { "to_float", NEOS_RT_FUNCTION(fn_to_float), F64, 1u, { OBJ }, 0u },
             { "binary", NEOS_RT_FUNCTION(fn_binary), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
             { "int_from_string", NEOS_RT_FUNCTION(fn_int_from_string), OBJ, 1u, { STR }, 0u },
@@ -8752,8 +8953,8 @@ namespace neos::python_runtime
             { "print(object)", NEOS_RT_FUNCTION(fn_print_object), VOID, 1u, { OBJ }, 0u },
             { "str(object)", NEOS_RT_FUNCTION(fn_str), STR, 1u, { OBJ }, 0u },
             { "repr(object)", NEOS_RT_FUNCTION(fn_repr), STR, 1u, { OBJ }, 0u },
-            { "len(object)", NEOS_RT_FUNCTION(fn_len), I64, 1u, { OBJ }, 0u },
-            { "int(object)", NEOS_RT_FUNCTION(fn_to_int), I64, 1u, { OBJ }, 0u },
+            { "len(object)", NEOS_RT_FUNCTION(fn_len_integer), INT, 1u, { OBJ }, 0u },
+            { "int(object)", NEOS_RT_FUNCTION(fn_to_integer), INT, 1u, { OBJ }, 0u },
             { "float(object)", NEOS_RT_FUNCTION(fn_to_float), F64, 1u, { OBJ }, 0u },
             { "abs(object)", NEOS_RT_FUNCTION(fn_abs_object), OBJ, 1u, { OBJ }, 0u },
             { "bool(object)", NEOS_RT_FUNCTION(fn_bool_object), BOOL, 1u, { OBJ }, 0u }

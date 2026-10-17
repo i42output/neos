@@ -112,7 +112,7 @@ namespace neos::language
 
         inline bool is_64(type aType)
         {
-            return aType == type::I64 || aType == type::U64 || aType == type::Ibig;
+            return aType == type::I64 || aType == type::U64 || aType == type::Ibig || aType == type::Integer;
         }
 
         inline bool is_unsigned(type aType)
@@ -139,6 +139,7 @@ namespace neos::language
             case type::I64:
             case type::U64:
             case type::Ibig:
+            case type::Integer:
                 return 0x7Eu;
             case type::F32:
                 return 0x7Du;
@@ -260,6 +261,24 @@ namespace neos::language
             default:
                 break;
             }
+        }
+
+        // whether code can set a local: if it has the bytes of a local.set or local.tee of it (they can also be other code's)
+        inline bool sets_local(i_fragment const& aCode, std::uint32_t aLocal)
+        {
+            bytes pattern;
+            put_u32(pattern, aLocal);
+            auto const& code = aCode.code();
+            for (std::size_t i = 0u; i + pattern.size() < code.size(); ++i)
+                if (code[i] == 0x21u || code[i] == 0x22u)
+                {
+                    bool match = true;
+                    for (std::size_t j = 0u; j < pattern.size() && match; ++j)
+                        match = code[i + 1u + j] == pattern[j];
+                    if (match)
+                        return true;
+                }
+            return false;
         }
 
         inline void append(fragment& aTarget, i_fragment const& aSource)

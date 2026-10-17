@@ -310,6 +310,8 @@ namespace neos
                             d.results = &iTypes.at(f.type).results;
                             d.locals = &f.locals;
                             d.imported = f.import.has_value();
+                            if (d.imported)
+                                d.checked = jit::checked_arithmetic(*f.import);
                             d.codeBegin = f.codeBegin;
                             d.codeEnd = f.codeEnd;
                             module.functions.push_back(d);
@@ -1146,6 +1148,18 @@ namespace neos
                                     handles.push_back(object_handle(a.object));
                                     arguments.push_back(of_u32(handles.back()));
                                     break;
+                                case NEOS_RT_INTEGER:
+                                    if ((a.u64 & 1u) != 0u)
+                                    {
+                                        // (an object (its address with the low bit set): a handle of its own for the call)
+                                        auto* const object = reinterpret_cast<neos_rt_object*>(static_cast<std::uintptr_t>(a.u64 & ~std::uint64_t{ 1u }));
+                                        object->type->retain(object);
+                                        handles.push_back(object_handle(object));
+                                        arguments.push_back((static_cast<value>(handles.back()) << 1u) | 1u);
+                                    }
+                                    else
+                                        arguments.push_back(a.u64);
+                                    break;
                                 default:
                                     throw trap{ "invalid argument type" };
                                 }
@@ -1187,6 +1201,19 @@ namespace neos
                                     aResultValue->object = object;
                                 }
                                 break;
+                            case NEOS_RT_INTEGER:
+                                if ((r & 1u) != 0u)
+                                {
+                                    // (an object: the program's new reference becomes the plugin's)
+                                    auto const handle = static_cast<std::uint32_t>(r >> 1u);
+                                    auto* const object = static_cast<neos_rt_object*>(object_pointer(handle));
+                                    object->type->retain(object);
+                                    release_object(handle);
+                                    aResultValue->u64 = static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(object)) | 1u;
+                                }
+                                else
+                                    aResultValue->u64 = r;
+                                break;
                             }
                             return nullptr;
                         }
@@ -1216,6 +1243,7 @@ namespace neos
                         ObjectRetain,
                         ObjectRelease,
                         Raise,
+                        Checked,
                         Runtime
                     };
                     import_kind resolve_import(std::uint32_t aFunction)
@@ -1239,6 +1267,8 @@ namespace neos
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
                             return host->second;
+                        if (jit::checked_arithmetic(name))
+                            return import_kind::Checked;
                         // a function of a runtime plugin (called through libffi)
                         auto const type = iImportTypes.find(name);
                         if (type == iImportTypes.end())
@@ -1260,6 +1290,47 @@ namespace neos
                             throw trap{ e.what() };
                         }
                         return import_kind::Runtime;
+                    }
+                    // checked integer arithmetic (see jit::checked_arithmetic): a trap if the result overflows
+                    static value checked_arithmetic(std::uint8_t aCode, value aLhs, value aRhs)
+                    {
+                        auto const operation = aCode & 3u;
+                        bool const wide = (aCode & 4u) != 0u;
+                        bool const isUnsigned = (aCode & 8u) != 0u;
+                        if (!wide)
+                        {
+                            // (in 64 bits: the result must be within the 32-bit type's range)
+                            std::int64_t const l = isUnsigned ? static_cast<std::int64_t>(static_cast<std::uint32_t>(aLhs)) : static_cast<std::int64_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aLhs)));
+                            std::int64_t const r = isUnsigned ? static_cast<std::int64_t>(static_cast<std::uint32_t>(aRhs)) : static_cast<std::int64_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aRhs)));
+                            std::int64_t const result = operation == 0u ? l + r : operation == 1u ? l - r : operation == 2u ? l * r : -l;
+                            bool const fits = isUnsigned ? (result >= 0 && result <= 0xFFFFFFFFll) : 
+                                (result >= std::numeric_limits<std::int32_t>::min() && result <= std::numeric_limits<std::int32_t>::max());
+                            if (!fits)
+                                throw trap{ "integer overflow" };
+                            return static_cast<value>(static_cast<std::uint32_t>(result));
+                        }
+                        if (isUnsigned)
+                        {
+                            std::uint64_t const l = aLhs, r = aRhs;
+                            bool const overflow = operation == 0u ? l + r < l : operation == 1u ? l < r : (l != 0u && (l * r) / l != r);
+                            if (overflow)
+                                throw trap{ "integer overflow" };
+                            return operation == 0u ? l + r : operation == 1u ? l - r : l * r;
+                        }
+                        auto const l = static_cast<std::int64_t>(aLhs), r = static_cast<std::int64_t>(aRhs);
+                        auto const min = std::numeric_limits<std::int64_t>::min();
+                        std::int64_t const result = static_cast<std::int64_t>(operation == 0u ? aLhs + aRhs : operation == 1u ? aLhs - aRhs : operation == 2u ? aLhs * aRhs : 0u - aLhs);
+                        bool overflow;
+                        switch (operation)
+                        {
+                        case 0u: overflow = ((l ^ result) & (r ^ result)) < 0; break;
+                        case 1u: overflow = ((l ^ r) & (l ^ result)) < 0; break;
+                        case 2u: overflow = l != 0 && ((l == -1 && r == min) || (r == -1 && l == min) || result / l != r); break;
+                        default: overflow = l == min; break;
+                        }
+                        if (overflow)
+                            throw trap{ "integer overflow" };
+                        return static_cast<value>(result);
                     }
                     // an imported function (resolved on its first call): aBuffer holds its arguments and receives its result
                     void call_import(std::uint32_t aFunction, value* aBuffer)
@@ -1348,6 +1419,12 @@ namespace neos
                             break;
                         case import_kind::Raise:
                             throw trap{ read_string(as_u32(aBuffer[0])) };
+                        case import_kind::Checked:
+                            {
+                                auto const code = *jit::checked_arithmetic(*iFunctions.at(aFunction).import);
+                                aBuffer[0] = checked_arithmetic(code, aBuffer[0], (code & 3u) == 3u ? 0u : aBuffer[1]);
+                            }
+                            break;
                         default:
                             break;
                         }

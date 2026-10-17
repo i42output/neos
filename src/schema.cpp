@@ -462,6 +462,14 @@ namespace neos::language
                     iMeta.copyright = meta.as<neolib::rjson_string>();
                 else if (meta.name() == "version")
                     iMeta.version = meta.as<neolib::rjson_string>();
+                else if (meta.name() == "bigint.promotion")
+                {
+                    std::string const value{ meta.type() == neolib::json_type::Bool ? (meta.as<neolib::rjson_bool>() ? "true" : "false") : 
+                        meta.type() == neolib::json_type::String ? std::string{ meta.as<neolib::rjson_string>() } : std::string{ meta.as<neolib::rjson_keyword>().text } };
+                    if (value != "true" && value != "false")
+                        throw std::runtime_error("bigint.promotion: expected true or false");
+                    iMeta.bigintPromotion = (value == "true");
+                }
                 else if (meta.name() == "prelude")
                 {
                     for (auto const& package : meta)
