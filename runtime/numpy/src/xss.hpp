@@ -35,7 +35,9 @@
 
 #define NEOS_XSS_DECLARE_16(T) \
     void qsort(T* aArray, std::size_t aSize); \
-    void qselect(T* aArray, std::size_t aKth, std::size_t aSize); \
+    void qselect(T* aArray, std::size_t aKth, std::size_t aSize);
+
+#define NEOS_XSS_DECLARE_HALF() \
     void qsort_half(std::uint16_t* aArray, std::size_t aSize); \
     void qselect_half(std::uint16_t* aArray, std::size_t aKth, std::size_t aSize);
 
@@ -50,7 +52,9 @@
 
 #define NEOS_XSS_DECLARE_16(T) \
     inline void qsort(T*, std::size_t) {} \
-    inline void qselect(T*, std::size_t, std::size_t) {} \
+    inline void qselect(T*, std::size_t, std::size_t) {}
+
+#define NEOS_XSS_DECLARE_HALF() \
     inline void qsort_half(std::uint16_t*, std::size_t) {} \
     inline void qselect_half(std::uint16_t*, std::size_t, std::size_t) {}
 
@@ -80,5 +84,6 @@ namespace neos::numpy::xss
     {
         NEOS_XSS_DECLARE_16(std::int16_t)
         NEOS_XSS_DECLARE_16(std::uint16_t)
+        NEOS_XSS_DECLARE_HALF()
     }
 }

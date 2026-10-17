@@ -1,0 +1,28 @@
+Hello, neos!
+12 12 33 12 2 3
+3.5 1 -1 1 1.5 1024 0.5
+Infinity -Infinity NaN 0
+number string boolean
+true true true true true false
+1 7 6 -6 -2147483648 -4 15
+-3 3 3 -2 -0 3 5 2 1.4142135623730951
+9007199254740991 2.220446049250313e-16 3.141592653589793
+10 S J JAVASCRIPT javascript 4 Script ava
+pad| 007 ababab true true 74
+3.14 ff 1 1.00 -2
+42 350 12 NaN 255 12.5
+true false true false
+true true true true 5 4 default
+42
+123456789012345680000 1e-7 0.000001 Infinity 9007199254740992 0.30000000000000004
+Hi 1 2
+35
+A B C F
+5
+3
+false true
+1e+21 1.23e-18 -1e-7 33.333333333333336 33.3333
+1.5 false -2147483648 5 4294967295
+c b 3 true xy1true
+num
+-1 0 -4 5 3 3 12 31
