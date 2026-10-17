@@ -22,6 +22,7 @@
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
 #include <neolib/core/string_utils.hpp>
+#include <neolib/file/file.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos::language::schema_parser
@@ -349,6 +350,19 @@ namespace neos::language
         iPath{ aPath },
         iConceptLibraries{ aConceptLibraries }
     {
+        std::filesystem::path const specifiedPath{ aPath };
+        if (!specifiedPath.has_parent_path() && !specifiedPath.has_extension())
+        {
+            // (a schema name without path or extension: search relative to where neos is installed, e.g. /usr/local/bin/neos ->
+            // /usr/local/share/neos, else side-by-side with the neos binary)
+            std::filesystem::path const programDirectory{ neolib::program_directory() };
+            for (auto const& candidate : { programDirectory.parent_path() / "share" / "neos" / (aPath + ".neos"), programDirectory / (aPath + ".neos") })
+                if (std::filesystem::exists(candidate))
+                {
+                    iPath = candidate.string();
+                    break;
+                }
+        }
         if (!std::filesystem::exists(iPath) && std::filesystem::exists(iPath + ".neos"))
             iPath += ".neos";
 
