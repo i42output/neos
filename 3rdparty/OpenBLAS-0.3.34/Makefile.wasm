@@ -1,0 +1,1 @@
+CCOMMON_OPT += -msimd128

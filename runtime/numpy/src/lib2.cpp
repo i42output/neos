@@ -27,6 +27,7 @@
 #include "cast.hpp"
 #include "functions.hpp"
 #include "py.hpp"
+#include "blas.hpp"
 
 namespace neos::numpy
 {
@@ -657,7 +658,14 @@ namespace neos::numpy
                     auto const* p1 = reinterpret_cast<T const*>(a1.array()->pointer());
                     auto const* p2 = reinterpret_cast<T const*>(a2.array()->pointer());
                     auto* op = reinterpret_cast<T*>(r->pointer());
+                    // (the type's dot function (blas.hpp); small_correlate's sums (in order) for a float kernel of at most 11 elements)
                     auto const dot = [&](T const* x, T const* y, long long aCount)
+                    {
+                        auto* const px = reinterpret_cast<unsigned char*>(const_cast<T*>(x));
+                        auto* const py = reinterpret_cast<unsigned char*>(const_cast<T*>(y));
+                        blas::dot(aType, px, sizeof(T), py, sizeof(T), reinterpret_cast<unsigned char*>(op++), aCount);
+                    };
+                    auto const small_dot = [&](T const* x, T const* y, long long aCount)
                     {
                         C sum{};
                         for (long long i = 0; i < aCount; ++i)
@@ -667,6 +675,7 @@ namespace neos::numpy
                         else
                             *op++ = sum;
                     };
+                    bool const small = (std::is_same_v<T, float> || std::is_same_v<T, double>) && n <= 11;
                     auto const* ip1 = p1;
                     auto const* ip2 = p2 + nLeft;
                     auto count = n - nLeft;
@@ -678,7 +687,10 @@ namespace neos::numpy
                     }
                     for (long long i = 0; i < n1 - n2 + 1; ++i)
                     {
-                        dot(ip1, ip2, count);
+                        if (small)
+                            small_dot(ip1, ip2, count);
+                        else
+                            dot(ip1, ip2, count);
                         ++ip1;
                     }
                     for (long long i = 0; i < nRight; ++i)

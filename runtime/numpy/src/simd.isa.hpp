@@ -78,8 +78,6 @@ namespace neos::numpy::simd::NEOS_NUMPY_ISA
     {
         switch (aType)
         {
-        case type::Float32: kernels::matmul_kernel<float>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1); return true;
-        case type::Float64: kernels::matmul_kernel<double>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1); return true;
         case type::Int32: kernels::matmul_kernel<std::int32_t>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1); return true;
         case type::Int64: kernels::matmul_kernel<std::int64_t>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1); return true;
         default:

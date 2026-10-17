@@ -173,6 +173,16 @@ namespace neos::numpy::NEOS_NUMPY_ISA
                 std::memcpy(p2, &accumulator, sizeof(T));
                 return;
             }
+        if constexpr (std::is_same_v<T, R>)
+            if (p0 == p2 && unit<T>(p0, aStrides[0]) && aStrides[2] == aStrides[0] && unit<T>(p1, aStrides[1]))
+            {
+                // (in place: the result is the first operand)
+                auto* const r = reinterpret_cast<T*>(p2);
+                auto const* const b = reinterpret_cast<T const*>(p1);
+                for (std::int64_t i = 0; i < aCount; ++i)
+                    r[i] = Op::apply(r[i], b[i]);
+                return;
+            }
         if (unit<T>(p0, aStrides[0]) && unit<T>(p1, aStrides[1]) && unit<R>(p2, aStrides[2]))
         {
             auto const* const a = reinterpret_cast<T const*>(p0);
@@ -214,7 +224,7 @@ namespace neos::numpy::NEOS_NUMPY_ISA
     }
 
     // the matrix product of an m by k matrix and a k by n matrix (strides in bytes) into the result, of operands of the
-    // result's type: blocked, each element's products summed in the same order (l ascending) as a dot product
+    // result's type (integers: their sums wrap; their order does not change them): blocked
     template <typename T>
     void matmul_kernel(std::int64_t m, std::int64_t n, std::int64_t k, unsigned char const* pa, std::int64_t as0, std::int64_t as1,
         unsigned char const* pb, std::int64_t bs0, std::int64_t bs1, unsigned char* pr, std::int64_t rs0, std::int64_t rs1)

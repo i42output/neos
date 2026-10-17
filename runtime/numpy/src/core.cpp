@@ -22,6 +22,9 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 #include "numpy.hpp"
 #include "cast.hpp"
 
@@ -434,6 +437,60 @@ namespace neos::numpy
         });
     }
 
+    void advise_large_allocation(void* aData, std::size_t aBytes)
+    {
+#ifdef __linux__
+        // (as NumPy (PyDataMem_UserNEW): madvise(MADV_HUGEPAGE) for 4 MiB or more)
+        if (aBytes >= (std::size_t{ 1u } << 22u))
+        {
+            auto const address = reinterpret_cast<std::uintptr_t>(aData);
+            auto const offset = 4096u - address % 4096u;
+            ::madvise(reinterpret_cast<void*>(address + offset), aBytes - offset, MADV_HUGEPAGE);
+        }
+#else
+        (void)aData; (void)aBytes;
+#endif
+    }
+
+    void cast_elements(unsigned char const* aFrom, std::int64_t aFromStride, dtype aFromType, unsigned char* aTo, std::int64_t aToStride, dtype aToType, std::int64_t aCount)
+    {
+        // (the types' loop: the conversion of each element is cast_element's)
+        dispatch(aFromType, [&](auto aFromTag)
+        {
+            using S = decltype(aFromTag);
+            dispatch(aToType, [&](auto aToTag)
+            {
+                using D = decltype(aToTag);
+                auto from = aFrom;
+                auto to = aTo;
+                bool const unit = aFromStride == static_cast<std::int64_t>(sizeof(S)) && aToStride == static_cast<std::int64_t>(sizeof(D));
+                if constexpr (std::is_same_v<S, D>)
+                {
+                    if (unit)
+                        std::memcpy(to, from, static_cast<std::size_t>(aCount) * sizeof(S));
+                    else
+                        for (std::int64_t i = 0; i < aCount; ++i, from += aFromStride, to += aToStride)
+                            std::memcpy(to, from, sizeof(S));
+                }
+                else if (unit && reinterpret_cast<std::uintptr_t>(from) % alignof(S) == 0u && reinterpret_cast<std::uintptr_t>(to) % alignof(D) == 0u)
+                {
+                    auto const* const s = reinterpret_cast<S const*>(from);
+                    auto* const d = reinterpret_cast<D*>(to);
+                    for (std::int64_t i = 0; i < aCount; ++i)
+                        d[i] = cast<D>(s[i]);
+                }
+                else
+                    for (std::int64_t i = 0; i < aCount; ++i, from += aFromStride, to += aToStride)
+                    {
+                        S value;
+                        std::memcpy(&value, from, sizeof(S));
+                        D const result = cast<D>(value);
+                        std::memcpy(to, &result, sizeof(D));
+                    }
+            });
+        });
+    }
+
     // --- arrays
 
     std::int64_t element_count(shape_t const& aShape)
@@ -600,20 +657,7 @@ namespace neos::numpy
         iterate(aArray.shape, { aArray.pointer(), result->pointer() }, { aArray.strides, result->strides },
             [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
             {
-                auto from = aPointers[0];
-                auto to = aPointers[1];
-                if (aArray.type == t)
-                {
-                    auto const size = info(t).itemsize;
-                    if (aStrides[0] == static_cast<std::int64_t>(size) && aStrides[1] == static_cast<std::int64_t>(size))
-                        std::memcpy(to, from, static_cast<std::size_t>(aCount) * size);
-                    else
-                        for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                            std::memcpy(to, from, size);
-                }
-                else
-                    for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                        cast_element(from, aArray.type, to, t);
+                cast_elements(aPointers[0], aStrides[0], aArray.type, aPointers[1], aStrides[1], t, aCount);
             });
         return result;
     }
@@ -755,8 +799,7 @@ namespace neos::numpy
                     {
                         auto from = aPointers[0];
                         auto to = aPointers[1];
-                        for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                            cast_element(from, source->type, to, aArray.type);
+                        cast_elements(from, aStrides[0], source->type, to, aStrides[1], aArray.type, aCount);
                     });
                 return true;
             }
@@ -960,14 +1003,37 @@ namespace neos::numpy
         for (auto d : aShape)
             if (d == 0)
                 return;
-        auto const ndim = aShape.size();
+        // (dimensions whose elements follow those of the next in memory for every operand are one: longer inner loops, 
+        // the elements in the same order)
+        shape_t shape;
+        std::vector<shape_t> strides(n);
+        for (std::size_t d = 0u; d < aShape.size(); ++d)
+        {
+            if (!shape.empty())
+            {
+                bool merge = true;
+                for (std::size_t k = 0u; k < n && merge; ++k)
+                    merge = strides[k].back() == aStrides[k][d] * aShape[d];
+                if (merge)
+                {
+                    shape.back() *= aShape[d];
+                    for (std::size_t k = 0u; k < n; ++k)
+                        strides[k].back() = aStrides[k][d];
+                    continue;
+                }
+            }
+            shape.push_back(aShape[d]);
+            for (std::size_t k = 0u; k < n; ++k)
+                strides[k].push_back(aStrides[k][d]);
+        }
+        auto const ndim = shape.size();
         for (std::size_t k = 0u; k < n; ++k)
-            innerStrides[k] = aStrides[k][ndim - 1u];
+            innerStrides[k] = strides[k][ndim - 1u];
         std::vector<std::int64_t> index(ndim, 0);
         std::vector<unsigned char*> pointers = aPointers;
         for (;;)
         {
-            aInner(aShape[ndim - 1u], pointers.data(), innerStrides.data());
+            aInner(shape[ndim - 1u], pointers.data(), innerStrides.data());
             // (the next index of the outer dimensions)
             std::size_t d = ndim - 1u;
             for (;;)
@@ -977,11 +1043,11 @@ namespace neos::numpy
                 --d;
                 ++index[d];
                 for (std::size_t k = 0u; k < n; ++k)
-                    pointers[k] += aStrides[k][d];
-                if (index[d] < aShape[d])
+                    pointers[k] += strides[k][d];
+                if (index[d] < shape[d])
                     break;
                 for (std::size_t k = 0u; k < n; ++k)
-                    pointers[k] -= aStrides[k][d] * aShape[d];
+                    pointers[k] -= strides[k][d] * shape[d];
                 index[d] = 0;
             }
         }

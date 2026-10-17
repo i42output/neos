@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include "numpy.hpp"
 #include "cast.hpp"
@@ -28,6 +30,7 @@
 #include "sort.hpp"
 #include "kernels.hpp"
 #include "simd.hpp"
+#include "blas.hpp"
 
 namespace neos::numpy
 {
@@ -932,79 +935,74 @@ namespace neos::numpy
             return result_object(r);
         }
 
-        // --- products
+        // --- products (NumPy's, with BLAS (blas.hpp) for float32, float64, complex64 and complex128)
 
-        // matrix product of 2-D arrays (or stacks of them), accumulated in the common type
-        ndarray* matmul_2d(ndarray* a, ndarray* b, dtype t)
+        // an operand in the product's type: the array, or a copy cast to the type (aKeepOrder: a 2-D copy in the array's
+        // order (NumPy's keep order), otherwise C order)
+        ref product_operand(ndarray* aArray, dtype aType, bool aKeepOrder)
         {
-            auto const m = a->shape[a->ndim() - 2u];
-            auto const k = a->shape[a->ndim() - 1u];
-            auto const n = b->shape[b->ndim() - 1u];
-            shape_t aBatch{ a->shape.begin(), a->shape.end() - 2 };
-            shape_t bBatch{ b->shape.begin(), b->shape.end() - 2 };
+            if (aArray->type == aType)
+                return array_ref(as_object(aArray), {});
+            bool const fortran = aKeepOrder && aArray->ndim() == 2u && std::abs(aArray->strides[0]) < std::abs(aArray->strides[1]);
+            return new_ref(copy_array(*aArray, aType, fortran));
+        }
+
+        // a gufunc of two operands (aCoreA, aCoreB: their core dimensions' counts): the result (its core shape aResultCore,
+        // after the broadcast outer dimensions) and the loop (aLoop: the number of outer iterations, the pointers and their
+        // outer strides) over the outer dimensions
+        ndarray* gufunc2(ndarray* aA, std::size_t aCoreA, ndarray* aB, std::size_t aCoreB, dtype aType, shape_t const& aResultCore,
+            std::function<void(std::int64_t, unsigned char**, std::int64_t const*, ndarray const&)> const& aLoop)
+        {
+            shape_t const aOuterShape{ aA->shape.begin(), aA->shape.end() - static_cast<std::ptrdiff_t>(aCoreA) };
+            shape_t const bOuterShape{ aB->shape.begin(), aB->shape.end() - static_cast<std::ptrdiff_t>(aCoreB) };
             shape_t batch;
-            if (!broadcast_shapes({ &aBatch, &bBatch }, batch))
+            if (!broadcast_shapes({ &aOuterShape, &bOuterShape }, batch))
                 return nullptr;
             shape_t shape = batch;
-            shape.push_back(m);
-            shape.push_back(n);
-            auto* const r = new_unfilled_array(t, shape);
-            shape_t aStrides = broadcast_strides(*a, [&]() { auto s = batch; s.push_back(m); s.push_back(k); return s; }());
-            shape_t bStrides = broadcast_strides(*b, [&]() { auto s = batch; s.push_back(k); s.push_back(n); return s; }());
-            shape_t aOuter{ aStrides.begin(), aStrides.end() - 2 };
-            shape_t bOuter{ bStrides.begin(), bStrides.end() - 2 };
-            shape_t rOuter{ r->strides.begin(), r->strides.end() - 2 };
-            auto const as0 = a->strides[a->ndim() - 2u], as1 = a->strides[a->ndim() - 1u];
-            auto const bs0 = b->strides[b->ndim() - 2u], bs1 = b->strides[b->ndim() - 1u];
-            auto const rs0 = r->strides[r->ndim() - 2u], rs1 = r->strides[r->ndim() - 1u];
-            dispatch(t, [&](auto tag)
+            shape.insert(shape.end(), aResultCore.begin(), aResultCore.end());
+            auto* const r = new_unfilled_array(aType, shape);
+            auto const outer = [&](ndarray const& aArray, std::size_t aCore)
+            {
+                shape_t full = batch;
+                full.insert(full.end(), aArray.shape.end() - static_cast<std::ptrdiff_t>(aCore), aArray.shape.end());
+                auto strides = broadcast_strides(aArray, full);
+                strides.resize(batch.size());
+                return strides;
+            };
+            shape_t const rOuter{ r->strides.begin(), r->strides.begin() + static_cast<std::ptrdiff_t>(batch.size()) };
+            iterate(batch, { aA->pointer(), aB->pointer(), r->pointer() }, { outer(*aA, aCoreA), outer(*aB, aCoreB), rOuter },
+                [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
+                {
+                    aLoop(aCount, aPointers, aStrides, *r);
+                });
+            return r;
+        }
+
+        // the integer matrix product kernel (kernels.hpp, in the CPU's instruction set): NumPy's loop's results (the sums wrap:
+        // their order does not change them)
+        bool integer_matmul(dtype aType, std::int64_t aOuter, unsigned char** aArgs, std::int64_t const* aOuterSteps, std::int64_t aDm,
+            std::int64_t aDn, std::int64_t aDp, std::int64_t const* aSteps)
+        {
+            if (!is_integer(aType))
+                return false;
+            dispatch(aType, [&](auto tag)
             {
                 using T = decltype(tag);
-                using C = std::conditional_t<is_half_v<T>, float, T>;
-                auto const matmul = [&](unsigned char* pa, unsigned char* pb, unsigned char* pr)
+                if constexpr (std::is_integral_v<T> && !is_bool_v<T>)
                 {
-                    for (std::int64_t i = 0; i < m; ++i)
-                        for (std::int64_t j = 0; j < n; ++j)
-                        {
-                            C sum{};
-                            for (std::int64_t l = 0; l < k; ++l)
-                            {
-                                auto const x = cast<C>(read_as<T>(pa + i * as0 + l * as1, a->type));
-                                auto const y = cast<C>(read_as<T>(pb + l * bs0 + j * bs1, b->type));
-                                if constexpr (is_bool_v<C>)
-                                    sum = sum || (x && y);
-                                else
-                                    sum = static_cast<C>(sum + x * y);
-                            }
-                            if constexpr (is_half_v<T>)
-                                write_as(pr + i * rs0 + j * rs1, t, half{ sum });
-                            else
-                                write_as(pr + i * rs0 + j * rs1, t, sum);
-                        }
-                };
-                // (operands of the result's type: the matrix product kernel (kernels.hpp) of the CPU's instruction set, or the baseline's)
-                auto const blocked = [&](unsigned char* pa, unsigned char* pb, unsigned char* pr)
-                {
-                    if constexpr (!is_half_v<T> && !is_bool_v<T>)
+                    unsigned char* pa = aArgs[0];
+                    unsigned char* pb = aArgs[1];
+                    unsigned char* pr = aArgs[2];
+                    for (std::int64_t q = 0; q < aOuter; ++q, pa += aOuterSteps[0], pb += aOuterSteps[1], pr += aOuterSteps[2])
                     {
                         if constexpr (simd::type_of<T>().has_value())
-                            if (simd::matmul(*simd::type_of<T>(), m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1))
-                                return;
-                        baseline::matmul_kernel<T>(m, n, k, pa, as0, as1, pb, bs0, bs1, pr, rs0, rs1);
+                            if (simd::matmul(*simd::type_of<T>(), aDm, aDp, aDn, pa, aSteps[0], aSteps[1], pb, aSteps[2], aSteps[3], pr, aSteps[4], aSteps[5]))
+                                continue;
+                        baseline::matmul_kernel<T>(aDm, aDp, aDn, pa, aSteps[0], aSteps[1], pb, aSteps[2], aSteps[3], pr, aSteps[4], aSteps[5]);
                     }
-                };
-                bool const direct = !is_half_v<T> && !is_bool_v<T> && a->type == t && b->type == t;
-                iterate(batch, { a->pointer(), b->pointer(), r->pointer() }, { aOuter, bOuter, rOuter }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
-                {
-                    auto pa = aPointers[0], pb = aPointers[1], pr = aPointers[2];
-                    for (std::int64_t q = 0; q < aCount; ++q, pa += aStrides[0], pb += aStrides[1], pr += aStrides[2])
-                        if (direct)
-                            blocked(pa, pb, pr);
-                        else
-                            matmul(pa, pb, pr);
-                });
+                }
             });
-            return r;
+            return true;
         }
 
         object* f_matmul(object* aArgs, object* aKwargs)
@@ -1012,8 +1010,8 @@ namespace neos::numpy
             arguments args{ "matmul", aArgs, aKwargs, { "x1", "x2", "out", "*dtype", "*casting", "*order", "*subok", "*axes", "*axis" } };
             if (!args.ok())
                 return nullptr;
-            auto av = array_ref(args[0], {});
-            auto bv = array_ref(args[1], {});
+            auto const av = array_ref(args[0], {});
+            auto const bv = array_ref(args[1], {});
             if (!av || !bv)
                 return nullptr;
             auto* a = array_of(av);
@@ -1022,14 +1020,8 @@ namespace neos::numpy
                 return error("ValueError", "matmul: Input operand " + std::string{ a->ndim() == 0 ? "0" : "1" } + " does not have enough dimensions (has 0, gufunc core with signature (n?,k),(k,m?)->(n?,m?) requires 1)");
             bool const vectorA = a->ndim() == 1u;
             bool const vectorB = b->ndim() == 1u;
-            if (vectorA)
-                av = new_ref(view_of(a, { 1, a->shape[0] }, { 0, a->strides[0] }, a->offset));
-            if (vectorB)
-                bv = new_ref(view_of(b, { b->shape[0], 1 }, { b->strides[0], 0 }, b->offset));
-            a = array_of(av);
-            b = array_of(bv);
             auto const k1 = a->shape[a->ndim() - 1u];
-            auto const k2 = b->shape[b->ndim() - 2u];
+            auto const k2 = vectorB ? b->shape[0] : b->shape[b->ndim() - 2u];
             if (k1 != k2)
                 return error("ValueError", "matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (n?,k),(k,m?)->(n?,m?) (size " +
                     std::to_string(k2) + " is different from " + std::to_string(k1) + ")");
@@ -1039,21 +1031,282 @@ namespace neos::numpy
                 return nullptr;
             if (requested)
                 t = *requested;
-            auto* r = matmul_2d(a, b, t);
+            // (the operands in the loop's type; a vector's missing core dimension has size 1 and stride 0)
+            ref const ac = product_operand(a, t, false);
+            ref const bc = product_operand(b, t, false);
+            a = array_of(ac);
+            b = array_of(bc);
+            auto const dm = vectorA ? 1 : a->shape[a->ndim() - 2u];
+            auto const dn = k1;
+            auto const dp = vectorB ? 1 : b->shape[b->ndim() - 1u];
+            shape_t core;
+            if (!vectorA)
+                core.push_back(dm);
+            if (!vectorB)
+                core.push_back(dp);
+            std::int64_t steps[6] = {
+                vectorA ? 0 : a->strides[a->ndim() - 2u], a->strides[a->ndim() - 1u],
+                vectorB ? b->strides[0] : b->strides[b->ndim() - 2u], vectorB ? 0 : b->strides[b->ndim() - 1u], 0, 0 };
+            auto* const r = gufunc2(a, vectorA ? 1u : 2u, b, vectorB ? 1u : 2u, t, core,
+                [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides, ndarray const& aResult)
+                {
+                    steps[4] = vectorA ? 0 : aResult.strides[aResult.ndim() - (vectorB ? 1u : 2u)];
+                    steps[5] = vectorB ? 0 : aResult.strides[aResult.ndim() - 1u];
+                    if (!integer_matmul(t, aCount, aPointers, aStrides, dm, dn, dp, steps))
+                        blas::matmul(t, aCount, aPointers, aStrides, dm, dn, dp, steps);
+                });
             if (r == nullptr)
                 return nullptr;
-            if (vectorA || vectorB)
-            {
-                shape_t shape{ r->shape.begin(), r->shape.end() - 2 };
-                if (!vectorA)
-                    shape.push_back(r->shape[r->ndim() - 2u]);
-                if (!vectorB)
-                    shape.push_back(r->shape[r->ndim() - 1u]);
-                auto* const reshaped = reshape(r, shape);
-                ctx->release(as_object(r));
-                r = reshaped;
-            }
             return result_object(r);
+        }
+
+        // (NumPy's _bad_strides: data not aligned, or a negative, non-element or zero (in a dimension longer than one) stride)
+        bool bad_strides(ndarray const& aArray)
+        {
+            auto const itemsize = static_cast<std::int64_t>(aArray.itemsize());
+            if (reinterpret_cast<std::uintptr_t>(aArray.pointer()) % static_cast<std::uintptr_t>(itemsize) != 0u)
+                return true;
+            for (std::size_t i = 0u; i < aArray.ndim(); ++i)
+                if (aArray.strides[i] < 0 || aArray.strides[i] % itemsize != 0 || (aArray.strides[i] == 0 && aArray.shape[i] > 1))
+                    return true;
+            return false;
+        }
+
+        object* dot_alignment_error(ndarray const& aA, std::size_t aAxisA, ndarray const& aB, std::size_t aAxisB)
+        {
+            return error("ValueError", "shapes " + shape_repr(aA.shape) + " and " + shape_repr(aB.shape) + " not aligned: " + std::to_string(aA.shape[aAxisA]) +
+                " (dim " + std::to_string(aAxisA) + ") != " + std::to_string(aB.shape[aAxisB]) + " (dim " + std::to_string(aAxisB) + ")");
+        }
+
+        // np.dot of vectors and matrices of a BLAS type (NumPy's cblas_matrixproduct)
+        object* cblas_matrixproduct(ref aAp1, ref aAp2, dtype aType)
+        {
+            enum matrix_shape { Scalar, Column, Row, Matrix };
+            auto const select_matrix_shape = [](ndarray const& aArray)
+            {
+                switch (aArray.ndim())
+                {
+                case 0:
+                    return Scalar;
+                case 1:
+                    return aArray.shape[0] > 1 ? Column : Scalar;
+                case 2:
+                    if (aArray.shape[0] > 1)
+                        return aArray.shape[1] == 1 ? Column : Matrix;
+                    return aArray.shape[1] == 1 ? Scalar : Row;
+                default:
+                    return Matrix;
+                }
+            };
+            // (a copy in C order, or in Fortran order if the array is Fortran contiguous (any order))
+            auto const copy_of = [](ref const& aArray, bool aAnyOrder)
+            {
+                auto const& a = *array_of(aArray);
+                return new_ref(copy_array(a, {}, aAnyOrder && a.f_contiguous() && !a.c_contiguous()));
+            };
+            if (bad_strides(*array_of(aAp1)))
+                aAp1 = copy_of(aAp1, true);
+            if (bad_strides(*array_of(aAp2)))
+                aAp2 = copy_of(aAp2, true);
+            auto ap1shape = select_matrix_shape(*array_of(aAp1));
+            auto ap2shape = select_matrix_shape(*array_of(aAp2));
+            std::int64_t l = 0;
+            std::int64_t ap1stride = 0;
+            shape_t dimensions;
+            if (ap1shape == Scalar || ap2shape == Scalar)
+            {
+                auto const& oap1 = *array_of(aAp1);
+                auto const& oap2 = *array_of(aAp2);
+                ref const oap1ref = aAp1, oap2ref = aAp2;
+                if (ap1shape == Scalar)
+                {
+                    // (ap2 the scalar)
+                    std::swap(aAp1, aAp2);
+                    ap1shape = ap2shape;
+                    ap2shape = Scalar;
+                }
+                auto const& ap1 = *array_of(aAp1);
+                auto const& ap2 = *array_of(aAp2);
+                if (ap1shape == Row)
+                    ap1stride = ap1.strides[1];
+                else if (ap1.ndim() > 0u)
+                    ap1stride = ap1.strides[0];
+                if (ap1.ndim() == 0u || ap2.ndim() == 0u)
+                {
+                    dimensions = ap1.ndim() == 0u ? ap2.shape : ap1.shape;
+                    l = element_count(dimensions);
+                }
+                else
+                {
+                    l = oap1.shape[oap1.ndim() - 1u];
+                    if (oap2.shape[0] != l)
+                        return dot_alignment_error(oap1, oap1.ndim() - 1u, oap2, 0u);
+                    auto const nd = oap1.ndim() + oap2.ndim() - 2u;
+                    if (nd == 1u)
+                    {
+                        dimensions = { oap1.ndim() == 2u ? oap1.shape[0] : oap2.shape[1] };
+                        l = dimensions[0];
+                    }
+                    else if (nd == 2u)
+                    {
+                        dimensions = { oap1.shape[0], oap2.shape[1] };
+                        l = ap1shape == Row ? dimensions[1] : dimensions[0];
+                    }
+                    if (oap1.shape[oap1.ndim() - 1u] == 0)
+                        l = 0;
+                }
+            }
+            else
+            {
+                auto const& ap1 = *array_of(aAp1);
+                auto const& ap2 = *array_of(aAp2);
+                l = ap1.shape[ap1.ndim() - 1u];
+                if (ap2.shape[0] != l)
+                    return dot_alignment_error(ap1, ap1.ndim() - 1u, ap2, 0u);
+                auto const nd = ap1.ndim() + ap2.ndim() - 2u;
+                if (nd == 1u)
+                    dimensions = { ap1.ndim() == 2u ? ap1.shape[0] : ap2.shape[1] };
+                else if (nd == 2u)
+                    dimensions = { ap1.shape[0], ap2.shape[1] };
+            }
+            auto* const out = new_array(aType, dimensions);
+            ref const result = new_ref(out);
+            if (out->size() == 0 || l == 0)
+                return result_object((ctx->retain(result.get()), out));
+            auto const itemsize = static_cast<std::int64_t>(info(aType).itemsize);
+            if (ap2shape == Scalar)
+            {
+                // (multiplication by a scalar: axpy)
+                auto& ap1 = *array_of(aAp1);
+                auto& ap2 = *array_of(aAp2);
+                if (l == 1)
+                {
+                    dispatch(aType, [&](auto tag)
+                    {
+                        using T = decltype(tag);
+                        if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>)
+                            *reinterpret_cast<T*>(out->pointer()) = *reinterpret_cast<T const*>(ap2.pointer()) * *reinterpret_cast<T const*>(ap1.pointer());
+                        else if constexpr (is_complex_v<T>)
+                        {
+                            using R = typename T::value_type;
+                            auto const* const ptr1 = reinterpret_cast<R const*>(ap2.pointer());
+                            auto const* const ptr2 = reinterpret_cast<R const*>(ap1.pointer());
+                            auto* const res = reinterpret_cast<R*>(out->pointer());
+                            res[0] = ptr1[0] * ptr2[0] - ptr1[1] * ptr2[1];
+                            res[1] = ptr1[0] * ptr2[1] + ptr1[1] * ptr2[0];
+                        }
+                    });
+                }
+                else if (ap1shape != Matrix)
+                    blas::axpy(aType, l, ap2.pointer(), ap1.pointer(), ap1stride / itemsize, out->pointer(), 1);
+                else
+                {
+                    std::size_t const maxind = ap1.shape[0] >= ap1.shape[1] ? 0u : 1u;
+                    std::size_t const oind = 1u - maxind;
+                    auto* ptr = ap1.pointer();
+                    auto* optr = out->pointer();
+                    l = ap1.shape[maxind];
+                    auto const a1s = ap1.strides[maxind] / itemsize;
+                    auto const outs = out->strides[maxind] / itemsize;
+                    for (std::int64_t i = 0; i < ap1.shape[oind]; ++i)
+                    {
+                        blas::axpy(aType, l, ap2.pointer(), ptr, a1s, optr, outs);
+                        ptr += ap1.strides[oind];
+                        optr += out->strides[oind];
+                    }
+                }
+            }
+            else if (ap2shape == Column && ap1shape != Matrix)
+            {
+                // (the dot product of vectors)
+                auto& ap1 = *array_of(aAp1);
+                auto& ap2 = *array_of(aAp2);
+                blas::dot(aType, ap1.pointer(), ap1.strides[ap1shape == Row ? 1u : 0u], ap2.pointer(), ap2.strides[0], out->pointer(), l);
+            }
+            else if (ap1shape == Matrix && ap2shape != Matrix)
+            {
+                // (matrix vector: gemv)
+                if (!array_of(aAp1)->c_contiguous() && !array_of(aAp1)->f_contiguous())
+                    aAp1 = copy_of(aAp1, false);
+                auto& ap1 = *array_of(aAp1);
+                auto& ap2 = *array_of(aAp2);
+                blas::order order;
+                std::int64_t lda;
+                if (ap1.c_contiguous())
+                {
+                    order = blas::order::RowMajor;
+                    lda = std::max<std::int64_t>(ap1.shape[1], 1);
+                }
+                else
+                {
+                    order = blas::order::ColMajor;
+                    lda = std::max<std::int64_t>(ap1.shape[0], 1);
+                }
+                blas::gemv(aType, order, blas::transpose::NoTrans, ap1.shape[0], ap1.shape[1], ap1.pointer(), lda, ap2.pointer(), ap2.strides[0] / itemsize, out->pointer());
+            }
+            else if (ap1shape != Matrix && ap2shape == Matrix)
+            {
+                // (vector matrix: gemv)
+                if (!array_of(aAp2)->c_contiguous() && !array_of(aAp2)->f_contiguous())
+                    aAp2 = copy_of(aAp2, false);
+                auto& ap1 = *array_of(aAp1);
+                auto& ap2 = *array_of(aAp2);
+                blas::order order;
+                std::int64_t lda;
+                if (ap2.c_contiguous())
+                {
+                    order = blas::order::RowMajor;
+                    lda = std::max<std::int64_t>(ap2.shape[1], 1);
+                }
+                else
+                {
+                    order = blas::order::ColMajor;
+                    lda = std::max<std::int64_t>(ap2.shape[0], 1);
+                }
+                auto const ap1s = (ap1shape == Row ? ap1.strides[1] : ap1.strides[0]) / itemsize;
+                blas::gemv(aType, order, blas::transpose::Trans, ap2.shape[0], ap2.shape[1], ap2.pointer(), lda, ap1.pointer(), ap1s, out->pointer());
+            }
+            else
+            {
+                // (matrix matrix: gemm, or syrk for a matrix times its transpose)
+                if (!array_of(aAp2)->c_contiguous() && !array_of(aAp2)->f_contiguous())
+                    aAp2 = copy_of(aAp2, false);
+                if (!array_of(aAp1)->c_contiguous() && !array_of(aAp1)->f_contiguous())
+                    aAp1 = copy_of(aAp1, false);
+                auto& ap1 = *array_of(aAp1);
+                auto& ap2 = *array_of(aAp2);
+                auto trans1 = blas::transpose::NoTrans, trans2 = blas::transpose::NoTrans;
+                auto const L = ap1.shape[0], N = ap2.shape[1], M = ap2.shape[0];
+                auto lda = std::max<std::int64_t>(ap1.shape[1], 1);
+                auto ldb = std::max<std::int64_t>(ap2.shape[1], 1);
+                auto const ldc = std::max<std::int64_t>(out->shape[1], 1);
+                if (ap1.f_contiguous())
+                {
+                    trans1 = blas::transpose::Trans;
+                    lda = std::max<std::int64_t>(ap1.shape[0], 1);
+                }
+                if (ap2.f_contiguous())
+                {
+                    trans2 = blas::transpose::Trans;
+                    ldb = std::max<std::int64_t>(ap2.shape[0], 1);
+                }
+                if (ap1.pointer() == ap2.pointer() && ap1.shape[0] == ap2.shape[1] && ap1.shape[1] == ap2.shape[0] &&
+                    ap1.strides[0] == ap2.strides[1] && ap1.strides[1] == ap2.strides[0] && (trans1 == blas::transpose::Trans) != (trans2 == blas::transpose::Trans))
+                {
+                    if (trans1 == blas::transpose::NoTrans)
+                        blas::syrk(aType, blas::order::RowMajor, trans1, N, M, ap1.pointer(), lda, out->pointer(), ldc);
+                    else
+                        blas::syrk(aType, blas::order::RowMajor, trans1, N, M, ap2.pointer(), ldb, out->pointer(), ldc);
+                    // (the lower triangle copied from the upper)
+                    auto* const r = out->pointer();
+                    for (std::int64_t i = 0; i < N; ++i)
+                        for (std::int64_t j = i + 1; j < N; ++j)
+                            std::memcpy(r + j * out->strides[0] + i * out->strides[1], r + i * out->strides[0] + j * out->strides[1], static_cast<std::size_t>(itemsize));
+                }
+                else
+                    blas::gemm(aType, blas::order::RowMajor, trans1, trans2, L, N, M, ap1.pointer(), lda, ap2.pointer(), ldb, out->pointer(), ldc);
+            }
+            return result_object((ctx->retain(result.get()), out));
         }
 
         object* f_dot(object* aArgs, object* aKwargs)
@@ -1065,68 +1318,54 @@ namespace neos::numpy
             auto const bv = array_ref(args[1], {});
             if (!av || !bv)
                 return nullptr;
-            auto* const a = array_of(av);
-            auto* const b = array_of(bv);
+            auto const t = promote(array_of(av)->type, array_of(bv)->type);
+            // (NumPy's PyArray_MatrixProduct2: the operands in the common type)
+            ref const ac = product_operand(array_of(av), t, true);
+            ref const bc = product_operand(array_of(bv), t, true);
+            auto* const a = array_of(ac);
+            auto* const b = array_of(bc);
+            if (a->ndim() <= 2u && b->ndim() <= 2u && blas::is_blas_type(t))
+                return cblas_matrixproduct(ac, bc, t);
             if (a->ndim() == 0 || b->ndim() == 0)
-                return binary("multiply", args[0], args[1]);
-            if (a->ndim() <= 2u && b->ndim() <= 2u)
-            {
-                auto const k1 = a->shape[a->ndim() - 1u];
-                auto const k2 = b->ndim() == 1u ? b->shape[0] : b->shape[b->ndim() - 2u];
-                if (k1 != k2)
-                    return error("ValueError", "shapes " + shape_repr(a->shape) + " and " + shape_repr(b->shape) + " not aligned: " + std::to_string(k1) + " (dim " +
-                        std::to_string(a->ndim() - 1u) + ") != " + std::to_string(k2) + " (dim " + std::to_string(b->ndim() == 1u ? 0u : b->ndim() - 2u) + ")");
-                return f_matmul(aArgs, nullptr);
-            }
-            // dot(a, b)[i,j,k,m] = sum(a[i,j,:] * b[k,:,m])
-            auto const k = a->shape[a->ndim() - 1u];
-            auto const bAxis = b->ndim() - 2u;
-            if (b->shape[bAxis] != k)
-                return error("ValueError", "shapes " + shape_repr(a->shape) + " and " + shape_repr(b->shape) + " not aligned");
-            auto const t = promote(a->type, b->type);
+                return binary("multiply", ac.get(), bc.get());
+            // dot(a, b)[i,j,k,m] = sum(a[i,j,:] * b[k,:,m]): the dot function of every pair of a's and b's vectors (C order)
+            auto const l = a->shape[a->ndim() - 1u];
+            auto const matchDim = b->ndim() > 1u ? b->ndim() - 2u : 0u;
+            if (b->shape[matchDim] != l)
+                return dot_alignment_error(*a, a->ndim() - 1u, *b, matchDim);
             shape_t shape{ a->shape.begin(), a->shape.end() - 1 };
             shape_t bOther;
             for (std::size_t i = 0u; i < b->ndim(); ++i)
-                if (i != bAxis)
+                if (i != matchDim)
                 {
                     shape.push_back(b->shape[i]);
                     bOther.push_back(b->shape[i]);
                 }
             auto* const r = new_array(t, shape);
-            auto const aOuter = a->size() / std::max<std::int64_t>(k, 1);
-            auto const bOuter = b->size() / std::max<std::int64_t>(k, 1);
-            dispatch(t, [&](auto tag)
+            auto const aOuter = element_count({ a->shape.begin(), a->shape.end() - 1 });
+            auto const bOuter = element_count(bOther);
+            auto const is1 = a->strides[a->ndim() - 1u];
+            auto const is2 = b->strides[matchDim];
+            std::vector<std::int64_t> ai(a->ndim() - 1u, 0);
+            auto* out = r->pointer();
+            for (std::int64_t i = 0; i < aOuter; ++i)
             {
-                using T = decltype(tag);
-                using C = std::conditional_t<is_half_v<T>, float, T>;
-                std::vector<std::int64_t> ai(a->ndim() - 1u, 0);
-                auto* out = r->pointer();
-                for (std::int64_t i = 0; i < aOuter; ++i)
+                std::int64_t aOffset = 0;
+                for (std::size_t d = 0u; d + 1u < a->ndim(); ++d)
+                    aOffset += ai[d] * a->strides[d];
+                std::vector<std::int64_t> bi(bOther.size(), 0);
+                for (std::int64_t j = 0; j < bOuter; ++j)
                 {
-                    std::int64_t aOffset = static_cast<std::int64_t>(a->offset);
-                    for (std::size_t d = 0u; d + 1u < a->ndim(); ++d)
-                        aOffset += ai[d] * a->strides[d];
-                    std::vector<std::int64_t> bi(bOther.size(), 0);
-                    for (std::int64_t j = 0; j < bOuter; ++j)
-                    {
-                        std::int64_t bOffset = static_cast<std::int64_t>(b->offset);
-                        for (std::size_t d = 0u, e = 0u; d < b->ndim(); ++d)
-                            if (d != bAxis)
-                                bOffset += bi[e++] * b->strides[d];
-                        C sum{};
-                        for (std::int64_t l = 0; l < k; ++l)
-                        {
-                            auto const x = cast<C>(read_as<T>(a->data->data() + aOffset + l * a->strides[a->ndim() - 1u], a->type));
-                            auto const y = cast<C>(read_as<T>(b->data->data() + bOffset + l * b->strides[bAxis], b->type));
-                            if constexpr (is_bool_v<C>) sum = sum || (x && y); else sum = static_cast<C>(sum + x * y);
-                        }
-                        if constexpr (is_half_v<T>) write_as(out, t, half{ sum }); else write_as(out, t, sum);
-                        out += r->itemsize();
-                        for (std::size_t d = bi.size(); d-- > 0u;) { if (++bi[d] < bOther[d]) break; bi[d] = 0; }
-                    }
-                    for (std::size_t d = ai.size(); d-- > 0u;) { if (++ai[d] < a->shape[d]) break; ai[d] = 0; }
+                    std::int64_t bOffset = 0;
+                    for (std::size_t d = 0u, e = 0u; d < b->ndim(); ++d)
+                        if (d != matchDim)
+                            bOffset += bi[e++] * b->strides[d];
+                    blas::dot(t, a->pointer() + aOffset, is1, b->pointer() + bOffset, is2, out, l);
+                    out += r->itemsize();
+                    for (std::size_t d = bi.size(); d-- > 0u;) { if (++bi[d] < bOther[d]) break; bi[d] = 0; }
                 }
-            });
+                for (std::size_t d = ai.size(); d-- > 0u;) { if (++ai[d] < a->shape[d]) break; ai[d] = 0; }
+            }
             return result_object(r);
         }
 
@@ -1139,13 +1378,136 @@ namespace neos::numpy
             auto const bv = array_ref(args[1], {});
             if (!av || !bv)
                 return nullptr;
-            ref a = new_ref(ravel(array_of(av)));
-            ref const b = new_ref(ravel(array_of(bv)));
-            if (is_complex(array_of(a)->type))
-                a = ref{ unary("conjugate", a.get()) };
-            ref const t{ make_tuple({ a.release(), (ctx->retain(b.get()), b.get()) }) };
-            return f_dot(t.get(), nullptr);
+            auto const t = promote(array_of(av)->type, array_of(bv)->type);
+            // (the operands in the common type, flattened (C order))
+            ref const ac = product_operand(array_of(av), t, false);
+            ref const bc = product_operand(array_of(bv), t, false);
+            ref const a = new_ref(ravel(array_of(ac)));
+            ref const b = new_ref(ravel(array_of(bc)));
+            auto* const ap1 = array_of(a);
+            auto* const ap2 = array_of(b);
+            if (ap1->shape[0] != ap2->shape[0])
+                return error("ValueError", "vectors have different lengths");
+            auto* const r = new_array(t, {});
+            blas::vdot(t, ap1->pointer(), ap1->strides[0], ap2->pointer(), ap2->strides[0], r->pointer(), ap1->shape[0]);
+            return result_object(r);
         }
+
+        // vecdot (n),(n)->(): the first operand conjugated
+        object* f_vecdot(object* aArgs, object* aKwargs)
+        {
+            arguments args{ "vecdot", aArgs, aKwargs, { "x1", "x2", "*out", "*casting", "*order", "*dtype", "*subok", "*signature", "*axes", "*axis" } };
+            if (!args.ok())
+                return nullptr;
+            auto av = array_ref(args[0], {});
+            auto bv = array_ref(args[1], {});
+            if (!av || !bv)
+                return nullptr;
+            if (array_of(av)->ndim() == 0u || array_of(bv)->ndim() == 0u)
+                return error("ValueError", "vecdot: Input operand " + std::string{ array_of(av)->ndim() == 0u ? "0" : "1" } +
+                    " does not have enough dimensions (has 0, gufunc core with signature (n),(n)->() requires 1)");
+            if (args.has(9))
+            {
+                // (axis: the core dimension of both operands)
+                auto const moved = [&](ref const& aArray) -> ref
+                {
+                    std::optional<std::size_t> axis;
+                    if (!optional_axis(args, 9, array_of(aArray)->ndim(), axis))
+                        return ref{};
+                    std::vector<std::size_t> order;
+                    for (std::size_t i = 0u; i < array_of(aArray)->ndim(); ++i)
+                        if (i != *axis)
+                            order.push_back(i);
+                    order.push_back(*axis);
+                    return new_ref(transpose(array_of(aArray), order));
+                };
+                av = moved(av);
+                if (!av)
+                    return nullptr;
+                bv = moved(bv);
+                if (!bv)
+                    return nullptr;
+            }
+            auto const n1 = array_of(av)->shape.back(), n2 = array_of(bv)->shape.back();
+            if (n1 != n2)
+                return error("ValueError", "vecdot: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (n),(n)->() (size " +
+                    std::to_string(n2) + " is different from " + std::to_string(n1) + ")");
+            auto t = promote(array_of(av)->type, array_of(bv)->type);
+            std::optional<dtype> requested;
+            if (!optional_dtype(args, 5, requested))
+                return nullptr;
+            if (requested)
+                t = *requested;
+            ref const ac = product_operand(array_of(av), t, false);
+            ref const bc = product_operand(array_of(bv), t, false);
+            auto* const a = array_of(ac);
+            auto* const b = array_of(bc);
+            auto* const r = gufunc2(a, 1u, b, 1u, t, {}, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides, ndarray const&)
+            {
+                blas::vecdot(t, aCount, aPointers, aStrides, n1, a->strides.back(), b->strides.back());
+            });
+            if (r == nullptr)
+                return nullptr;
+            return result_object(r);
+        }
+
+        // matvec (m,n),(n)->(m) and vecmat (n),(n,m)->(m)
+        object* matrix_vector(char const* aName, object* aArgs, object* aKwargs, bool aVectorFirst)
+        {
+            arguments args{ aName, aArgs, aKwargs, { "x1", "x2", "*out", "*casting", "*order", "*dtype", "*subok", "*signature", "*axes", "*axis" } };
+            if (!args.ok())
+                return nullptr;
+            auto const av = array_ref(args[0], {});
+            auto const bv = array_ref(args[1], {});
+            if (!av || !bv)
+                return nullptr;
+            std::string const name = aName;
+            std::string const signature = aVectorFirst ? "(n),(n,m)->(m)" : "(m,n),(n)->(m)";
+            std::size_t const coreA = aVectorFirst ? 1u : 2u, coreB = aVectorFirst ? 2u : 1u;
+            if (array_of(av)->ndim() < coreA)
+                return error("ValueError", name + ": Input operand 0 does not have enough dimensions (has " + std::to_string(array_of(av)->ndim()) +
+                    ", gufunc core with signature " + signature + " requires " + std::to_string(coreA) + ")");
+            if (array_of(bv)->ndim() < coreB)
+                return error("ValueError", name + ": Input operand 1 does not have enough dimensions (has " + std::to_string(array_of(bv)->ndim()) +
+                    ", gufunc core with signature " + signature + " requires " + std::to_string(coreB) + ")");
+            auto const& x1 = *array_of(av);
+            auto const& x2 = *array_of(bv);
+            auto const dn = aVectorFirst ? x1.shape.back() : x1.shape.back();
+            auto const dn2 = aVectorFirst ? x2.shape[x2.ndim() - 2u] : x2.shape.back();
+            if (dn != dn2)
+                return error("ValueError", name + ": Input operand 1 has a mismatch in its core dimension 0, with gufunc signature " + signature + " (size " +
+                    std::to_string(dn2) + " is different from " + std::to_string(dn) + ")");
+            auto t = promote(x1.type, x2.type);
+            std::optional<dtype> requested;
+            if (!optional_dtype(args, 5, requested))
+                return nullptr;
+            if (requested)
+                t = *requested;
+            ref const ac = product_operand(array_of(av), t, false);
+            ref const bc = product_operand(array_of(bv), t, false);
+            auto* const a = array_of(ac);
+            auto* const b = array_of(bc);
+            auto const dm = aVectorFirst ? b->shape.back() : a->shape[a->ndim() - 2u];
+            auto* const r = gufunc2(a, coreA, b, coreB, t, { dm }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides, ndarray const& aResult)
+            {
+                if (aVectorFirst)
+                {
+                    std::int64_t const steps[4] = { a->strides.back(), b->strides[b->ndim() - 2u], b->strides.back(), aResult.strides.back() };
+                    blas::vecmat(t, aCount, aPointers, aStrides, dn, dm, steps);
+                }
+                else
+                {
+                    std::int64_t const steps[4] = { a->strides[a->ndim() - 2u], a->strides.back(), b->strides.back(), aResult.strides.back() };
+                    blas::matvec(t, aCount, aPointers, aStrides, dm, dn, steps);
+                }
+            });
+            if (r == nullptr)
+                return nullptr;
+            return result_object(r);
+        }
+
+        object* f_matvec(object* aArgs, object* aKwargs) { return matrix_vector("matvec", aArgs, aKwargs, false); }
+        object* f_vecmat(object* aArgs, object* aKwargs) { return matrix_vector("vecmat", aArgs, aKwargs, true); }
 
         object* f_inner(object* aArgs, object* aKwargs)
         {
@@ -2023,7 +2385,7 @@ namespace neos::numpy
             { "cumsum", f_cumsum }, { "cumprod", f_cumprod }, { "cumulative_sum", f_cumsum }, { "cumulative_prod", f_cumprod },
             { "count_nonzero", f_count_nonzero }, { "nonzero", f_nonzero }, { "flatnonzero", f_flatnonzero }, { "argwhere", f_argwhere },
             { "where", f_where }, { "sort", f_sort }, { "argsort", f_argsort }, { "partition", f_partition }, { "argpartition", f_argpartition }, { "unique", f_unique }, { "searchsorted", f_searchsorted },
-            { "matmul", f_matmul }, { "dot", f_dot }, { "vdot", f_vdot }, { "inner", f_inner }, { "outer", f_outer }, { "cross", f_cross },
+            { "matmul", f_matmul }, { "dot", f_dot }, { "vdot", f_vdot }, { "vecdot", f_vecdot }, { "matvec", f_matvec }, { "vecmat", f_vecmat }, { "inner", f_inner }, { "outer", f_outer }, { "cross", f_cross },
             { "trace", f_trace }, { "clip", f_clip }, { "round", f_round }, { "around", f_round }, { "fix", f_fix }, { "diff", f_diff },
             { "isclose", f_isclose }, { "allclose", f_allclose }, { "array_equal", f_array_equal }, { "array_equiv", f_array_equiv },
             { "take", f_take }, { "median", f_median }, { "percentile", f_percentile }, { "quantile", f_quantile }, { "nansum", f_nansum }, { "nanprod", f_nanprod }, { "nanmin", f_nanmin }, { "nanmax", f_nanmax }, { "nanmean", f_nanmean },

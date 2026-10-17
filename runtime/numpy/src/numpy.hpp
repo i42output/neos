@@ -159,15 +159,24 @@ namespace neos::numpy
     scalar_value load(unsigned char const* aPointer, dtype aType);
     void store(unsigned char* aPointer, dtype aType, scalar_value const& aValue); // (cast from aValue.type)
     void cast_element(unsigned char const* aFrom, dtype aFromType, unsigned char* aTo, dtype aToType);
+    // (aCount elements, as cast_element; strides in bytes)
+    void cast_elements(unsigned char const* aFrom, std::int64_t aFromStride, dtype aFromType, unsigned char* aTo, std::int64_t aToStride, dtype aToType, std::int64_t aCount);
 
     // --- arrays
+
+    void advise_large_allocation(void* aData, std::size_t aBytes); // (as NumPy: huge pages for a large array (Linux))
 
     struct storage
     {
         std::unique_ptr<std::uint64_t[]> words;
         std::size_t bytes = 0;
-        explicit storage(std::size_t aBytes) : words{ new std::uint64_t[(aBytes + 15u) / 8u + 1u]() }, bytes{ aBytes } {}
-        storage(std::size_t aBytes, bool aZero) : words{ aZero ? new std::uint64_t[(aBytes + 15u) / 8u + 1u]() : new std::uint64_t[(aBytes + 15u) / 8u + 1u] }, bytes{ aBytes } {}
+        explicit storage(std::size_t aBytes) : storage{ aBytes, true } {}
+        storage(std::size_t aBytes, bool aZero) : words{ new std::uint64_t[(aBytes + 15u) / 8u + 1u] }, bytes{ aBytes } 
+        {
+            advise_large_allocation(words.get(), aBytes);
+            if (aZero)
+                std::memset(words.get(), 0, ((aBytes + 15u) / 8u + 1u) * sizeof(std::uint64_t));
+        }
         unsigned char* data() { return reinterpret_cast<unsigned char*>(words.get()); }
     };
 

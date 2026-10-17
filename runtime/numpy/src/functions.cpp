@@ -352,7 +352,7 @@ namespace neos::numpy
         shape[axis] = 0;
         for (auto* a : arrays)
             shape[axis] += a->shape[axis];
-        auto* const result = new_array(t, shape);
+        auto* const result = new_unfilled_array(t, shape);
         std::int64_t position = 0;
         for (auto* a : arrays)
         {
@@ -361,8 +361,7 @@ namespace neos::numpy
                 {
                     auto from = aPointers[0];
                     auto to = aPointers[1];
-                    for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                        cast_element(from, a->type, to, t);
+                    cast_elements(from, aStrides[0], a->type, to, aStrides[1], t, aCount);
                 });
             position += a->shape[axis];
         }
@@ -603,8 +602,7 @@ namespace neos::numpy
             {
                 auto from = aPointers[0];
                 auto to = aPointers[1];
-                for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                    cast_element(from, v->type, to, a->type);
+                cast_elements(from, aStrides[0], v->type, to, aStrides[1], a->type, aCount);
             });
             return as_object(a);
         }
@@ -648,8 +646,7 @@ namespace neos::numpy
                 {
                     auto from = aPointers[0];
                     auto to = aPointers[1];
-                    for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                        cast_element(from, v->type, to, r->type);
+                    cast_elements(from, aStrides[0], v->type, to, aStrides[1], r->type, aCount);
                 });
             }
             return as_object(r);
@@ -847,8 +844,7 @@ namespace neos::numpy
                     {
                         auto from = aPointers[0];
                         auto to = aPointers[1];
-                        for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                            cast_element(from, s->type, to, ya->type);
+                        cast_elements(from, aStrides[0], s->type, to, aStrides[1], ya->type, aCount);
                     });
             }
             if (args.has(6))
@@ -1880,9 +1876,7 @@ namespace neos::numpy
         {
             iterate(aTo.shape, { aFrom.pointer(), aTo.pointer() }, { aFrom.strides, aTo.strides }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
             {
-                auto p = aPointers[0], q = aPointers[1];
-                for (std::int64_t i = 0; i < aCount; ++i, p += aStrides[0], q += aStrides[1])
-                    cast_element(p, aFrom.type, q, aTo.type);
+                cast_elements(aPointers[0], aStrides[0], aFrom.type, aPointers[1], aStrides[1], aTo.type, aCount);
             });
         }
 

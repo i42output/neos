@@ -97,7 +97,11 @@ bool process_command(neos::context& aContext, bool& aInteractive, const std::str
                 {
                     if (f.source_file_path() != std::nullopt)
                         std::cout << "File '" << *f.source_file_path() << "':" << std::endl;
-                    std::cout << f.source() << std::endl;
+                    // (the source's last line is terminated when it is loaded (terminate_last_line): a newline only if it is not)
+                    std::cout << f.source();
+                    if (f.source().empty() || f.source().back() != '\n')
+                        std::cout << '\n';
+                    std::cout << std::flush;
                 }
         }
         else if (command == "r" || command == "run")

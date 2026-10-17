@@ -60,7 +60,8 @@ namespace neos::numpy::simd
     // the loop of an operation whose operands and result are of one type (typed_binary_loop) in the dispatched
     // instruction set; false: none (the baseline loop is used)
     bool binary(op aOp, type aType, std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides);
-    // the matrix product kernel (matmul_kernel) in the dispatched instruction set; false: none
+    // the integer matrix product kernel (matmul_kernel) in the dispatched instruction set; false: none (the float types'
+    // products are BLAS's: blas.hpp)
     bool matmul(type aType, std::int64_t m, std::int64_t n, std::int64_t k, unsigned char const* pa, std::int64_t as0, std::int64_t as1,
         unsigned char const* pb, std::int64_t bs0, std::int64_t bs1, unsigned char* pr, std::int64_t rs0, std::int64_t rs1);
 

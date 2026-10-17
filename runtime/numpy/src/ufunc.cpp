@@ -1028,9 +1028,7 @@ namespace neos::numpy
                     unsigned char* pointers[3] = { aPointers[0], aPointers[1], temporary };
                     std::int64_t const strides[3] = { aStrides[0], aStrides[1], static_cast<std::int64_t>(info(out).itemsize) };
                     aUfunc.binary(loop, out, ta0, tb0, aCount, pointers, strides);
-                    auto to = aPointers[2];
-                    for (std::int64_t i = 0; i < aCount; ++i, to += aStrides[2])
-                        cast_element(temporary + i * strides[2], out, to, resultType);
+                    cast_elements(temporary, strides[2], out, aPointers[2], aStrides[2], resultType, aCount);
                 }
             });
         if (overlap)
@@ -1093,9 +1091,7 @@ namespace neos::numpy
                     unsigned char* pointers[2] = { aPointers[0], temporary };
                     std::int64_t const strides[2] = { aStrides[0], static_cast<std::int64_t>(info(out).itemsize) };
                     aUfunc.unary(loop, out, t0, aCount, pointers, strides);
-                    auto to = aPointers[1];
-                    for (std::int64_t i = 0; i < aCount; ++i, to += aStrides[1])
-                        cast_element(temporary + i * strides[1], out, to, resultType);
+                    cast_elements(temporary, strides[1], out, aPointers[1], aStrides[1], resultType, aCount);
                 }
             });
         if (aOut != nullptr)
@@ -1380,6 +1376,66 @@ namespace neos::numpy
             else if (is_complex(loop)) initial.type = dtype::Complex128;
         }
         bool const useFirst = !hasInitial && !aUfunc.identity;
+        if (!innerAxes.empty() && !contiguousRuns && !casting && outType == loop && !coalesced)
+        {
+            // (the reduced axes are not the innermost (in memory): the result's elements are combined with each reduced 
+            // slice in turn (as rows), so each element's values are combined in the same order)
+            shape_t reducedShape, reducedStrides;
+            for (auto a : innerAxes)
+            {
+                reducedShape.push_back(aArray->shape[a]);
+                reducedStrides.push_back(aArray->strides[a]);
+            }
+            auto const itemsize = static_cast<std::int64_t>(info(loop).itemsize);
+            bool first = useFirst;
+            if (!useFirst)
+            {
+                unsigned char value[16];
+                store(value, loop, initial);
+                iterate(outerShape, { result->pointer() }, { outerResultStrides }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
+                {
+                    cast_elements(value, 0, loop, aPointers[0], aStrides[0], loop, aCount);
+                });
+            }
+            iterate(reducedShape, { const_cast<unsigned char*>(base) }, { reducedStrides }, [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
+            {
+                auto slice = aPointers[0];
+                for (std::int64_t r = 0; r < aCount; ++r, slice += aStrides[0])
+                {
+                    if (first)
+                    {
+                        iterate(outerShape, { slice, result->pointer() }, { outerStrides, outerResultStrides }, [&](std::int64_t aN, unsigned char** aP, std::int64_t const* aS)
+                        {
+                            cast_elements(aP[0], aS[0], loop, aP[1], aS[1], loop, aN);
+                        });
+                        first = false;
+                        continue;
+                    }
+                    if (outerShape.size() == 1u)
+                    {
+                        // (one outer axis: one loop)
+                        unsigned char* pointers[3] = { result->pointer(), slice, result->pointer() };
+                        std::int64_t const strides[3] = { outerResultStrides[0], outerStrides[0], outerResultStrides[0] };
+                        aUfunc.binary(loop, loop, loop, loop, outerShape[0], pointers, strides);
+                    }
+                    else
+                        iterate(outerShape, { result->pointer(), slice, result->pointer() }, { outerResultStrides, outerStrides, outerResultStrides },
+                            [&](std::int64_t aN, unsigned char** aP, std::int64_t const* aS)
+                            {
+                                aUfunc.binary(loop, loop, loop, loop, aN, aP, aS);
+                            });
+                }
+            });
+            (void)itemsize;
+            if (failed())
+            {
+                ctx->release(as_object(result));
+                return nullptr;
+            }
+            if (aOut != nullptr)
+                return as_object(result);
+            return result_object(result);
+        }
         std::vector<unsigned char*> resultPointer{ result->pointer() };
         dispatch(loop, [&](auto tag)
         {

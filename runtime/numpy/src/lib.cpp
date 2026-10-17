@@ -1458,48 +1458,6 @@ namespace neos::numpy
             return res.method("reshape", int_tuple(shape)).release();
         }
 
-        object* f_vecdot(object* aArgs, object* aKwargs)
-        {
-            arguments args{ "vecdot", aArgs, aKwargs, { "x1", "x2", "*out", "*casting", "*order", "*dtype", "*subok", "*signature", "*axes", "*axis" } };
-            if (!args.ok())
-                return nullptr;
-            auto x1 = asarray(arg(args, 0));
-            auto const x2 = asarray(arg(args, 1));
-            auto const axis = arg(args, 9, -1).to_int();
-            if (is_complex(x1.array()->type))
-                x1 = np("conjugate")(x1);
-            auto const product = x1 * x2;
-            if (x1.array()->shape.empty() || x2.array()->shape.empty())
-                raise("ValueError", "vecdot: Input operand 0 does not have enough dimensions (has 0, gufunc core with signature (n),(n)->() requires 1)");
-            auto const n1 = x1.array()->shape.back(), n2 = x2.array()->shape.back();
-            if (n1 != n2)
-                raise("ValueError", "vecdot: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (n),(n)->() (size " + std::to_string(n2) +
-                    " is different from " + std::to_string(n1) + ")");
-            return np("sum")(product, kw{ "axis", value{ axis } }).release();
-        }
-
-        object* f_matvec(object* aArgs, object* aKwargs)
-        {
-            arguments args{ "matvec", aArgs, aKwargs, { "x1", "x2", "*out", "*casting", "*order", "*dtype", "*subok", "*signature", "*axes", "*axis" } };
-            if (!args.ok())
-                return nullptr;
-            auto const x1 = asarray(arg(args, 0));
-            auto const x2 = asarray(arg(args, 1));
-            return np("matmul")(x1, np("expand_dims")(x2, -1))[tuple({ ellipsis(), 0 })].release();
-        }
-
-        object* f_vecmat(object* aArgs, object* aKwargs)
-        {
-            arguments args{ "vecmat", aArgs, aKwargs, { "x1", "x2", "*out", "*casting", "*order", "*dtype", "*subok", "*signature", "*axes", "*axis" } };
-            if (!args.ok())
-                return nullptr;
-            auto x1 = asarray(arg(args, 0));
-            auto const x2 = asarray(arg(args, 1));
-            if (is_complex(x1.array()->type))
-                x1 = np("conjugate")(x1);
-            return np("matmul")(np("expand_dims")(x1, -2), x2)[tuple({ ellipsis(), 0, all() })].release();
-        }
-
         object* f_broadcast_shapes(object* aArgs, object* aKwargs)
         {
             arguments args{ "broadcast_shapes", aArgs, aKwargs, { "..." } };
@@ -1536,8 +1494,8 @@ namespace neos::numpy
             { "trim_zeros", f_trim_zeros }, { "ediff1d", f_ediff1d }, { "isin", f_isin }, { "in1d", f_in1d }, { "intersect1d", f_intersect1d },
             { "setdiff1d", f_setdiff1d }, { "union1d", f_union1d }, { "setxor1d", f_setxor1d }, { "unique_all", f_unique_all },
             { "unique_counts", f_unique_counts }, { "unique_inverse", f_unique_inverse }, { "unique_values", f_unique_values },
-            { "lexsort", f_lexsort }, { "sort_complex", f_sort_complex }, { "kron", f_kron }, { "tensordot", f_tensordot }, { "vecdot", f_vecdot },
-            { "matvec", f_matvec }, { "vecmat", f_vecmat }, { "broadcast_shapes", f_broadcast_shapes }
+            { "lexsort", f_lexsort }, { "sort_complex", f_sort_complex }, { "kron", f_kron }, { "tensordot", f_tensordot },
+            { "broadcast_shapes", f_broadcast_shapes }
         });
     }
 }

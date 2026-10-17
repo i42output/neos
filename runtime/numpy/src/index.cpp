@@ -562,8 +562,7 @@ namespace neos::numpy
                 {
                     auto from = aPointers[0];
                     auto to = aPointers[1];
-                    for (std::int64_t i = 0; i < aCount; ++i, from += aStrides[0], to += aStrides[1])
-                        cast_element(from, v->type, to, array->type);
+                    cast_elements(from, aStrides[0], v->type, to, aStrides[1], array->type, aCount);
                 });
             return 0;
         }

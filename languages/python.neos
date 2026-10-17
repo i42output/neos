@@ -1,7 +1,7 @@
 %{
     meta: {
         language: "python"
-        description: "Python (int, float, str and bool values are native and statically typed; other values are objects of the Python object protocol)"
+        description: "Python"
         source.file.extension: ".py"
         source.package.specification.file.extension: ".py"
         source.package.implementation.file.extension: ".py"
