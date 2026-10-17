@@ -354,9 +354,9 @@ namespace neos::language
         if (!specifiedPath.has_parent_path() && !specifiedPath.has_extension())
         {
             // (a schema name without path or extension: search relative to where neos is installed, e.g. /usr/local/bin/neos ->
-            // /usr/local/share/neos, else side-by-side with the neos binary)
+            // /usr/local/share/neos/languages, else side-by-side with the neos binary)
             std::filesystem::path const programDirectory{ neolib::program_directory() };
-            for (auto const& candidate : { programDirectory.parent_path() / "share" / "neos" / (aPath + ".neos"), programDirectory / (aPath + ".neos") })
+            for (auto const& candidate : { programDirectory.parent_path() / "share" / "neos" / "languages" / (aPath + ".neos"), programDirectory / (aPath + ".neos") })
                 if (std::filesystem::exists(candidate))
                 {
                     iPath = candidate.string();
