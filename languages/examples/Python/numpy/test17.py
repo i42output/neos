@@ -1,0 +1,91 @@
+import numpy as np
+# products with BLAS (OpenBLAS, as NumPy's): matmul, dot, vdot, inner, vecdot, matvec, vecmat, correlate, tensordot
+def data(shape, seed, dtype=np.float64):
+    n = 1
+    for d in shape:
+        n *= d
+    v = ((np.arange(n, dtype=np.int64) * 7919 + seed * 104729) % 1009) / 1009.0 - 0.5
+    return v.reshape(shape).astype(dtype)
+def show(r):
+    r = np.asarray(r)
+    if r.ndim == 0:
+        print(repr(r.item()))
+    else:
+        f = r.ravel()
+        print(r.shape, r.dtype, f[:3].tolist(), f[-2:].tolist(), repr(f.sum().item()))
+# matmul: small and large matrices, transposed and strided operands, a matrix times its transpose, vectors, batches
+for m, n, p in [(2, 3, 4), (5, 7, 3), (16, 16, 16), (33, 65, 17), (100, 129, 64), (257, 300, 129)]:
+    a = data((m, n), 1)
+    b = data((n, p), 2)
+    show(a @ b)
+    show(a.T.copy().T @ b)
+    show(a @ np.asfortranarray(b))
+    show(a @ a.T)
+    show(a.T @ a)
+    show(data((m, 2 * n), 3)[:, ::2] @ b)
+    show(a @ b[:, 0])
+    show(b[:, 0] @ a.T)
+    show(a[0] @ b)
+    show(a.astype(np.float32) @ b.astype(np.float32))
+for k in [1, 2, 7, 15, 16, 17, 63, 255, 1000, 20001]:
+    x = data((k,), 4)
+    y = data((k,), 5)
+    show(x @ y)
+    show(np.dot(x, y))
+    show(np.dot(x[::-1], y))
+    show(x.astype(np.float32) @ y.astype(np.float32))
+show(data((4, 5, 6), 6) @ data((6, 3), 7))
+show(data((3, 1, 5, 6), 8) @ data((2, 6, 4), 9))
+show(np.arange(12).reshape(3, 4) @ data((4, 5), 10))
+show(np.arange(12).reshape(3, 4) @ np.arange(20).reshape(4, 5))
+show(data((6, 5), 11) @ data((5, 1), 12))
+show(data((1, 5), 13) @ data((5, 6), 14))
+show(data((6, 1), 15) @ data((1, 6), 16))
+z = data((8, 9), 17) + 1j * data((8, 9), 18)
+w = data((9, 7), 19) - 1j * data((9, 7), 20)
+show(z @ w)
+show(z @ w[:, 0])
+show(z.astype(np.complex64) @ w.astype(np.complex64))
+show(z @ z.T)
+# dot: vectors, matrices (C and Fortran order), scalars (axpy), non-contiguous operands, more dimensions
+a = data((40, 30), 21)
+b = data((30, 50), 22)
+show(np.dot(a, b))
+show(np.dot(np.asfortranarray(a), b))
+show(np.dot(a, a.T))
+show(np.dot(a.T, a))
+show(np.dot(a[::2, ::3], b[::3, ::2]))
+show(np.dot(a, b[:, 3]))
+show(np.dot(b[:, 3], a.T))
+show(np.dot(a[3], b))
+show(np.dot(2.5, a))
+show(np.dot(a, np.float64(-1.25)))
+show(np.dot(a[:, :1], data((1,), 23)))
+show(np.dot(data((1, 1), 24), data((1, 9), 25)))
+show(np.dot(data((3, 4, 5), 26), data((2, 5, 6), 27)))
+show(np.dot(data((3, 4, 5), 28), data((5,), 29)))
+show(np.dot(np.arange(6).reshape(2, 3), np.arange(6).reshape(3, 2)))
+show(np.dot(z, w))
+show(np.dot(z[0], z[1]))
+# vdot, inner, vecdot, matvec, vecmat, tensordot
+show(np.vdot(z, z))
+show(np.vdot(z[0], z[1]))
+show(np.vdot(a, a))
+show(np.inner(a, a))
+show(np.inner(data((3, 4, 5), 30), data((2, 5), 31)))
+show(np.vecdot(a, a))
+show(np.vecdot(z, z))
+show(np.vecdot(a, a, axis=0))
+show(np.matvec(a, b[:, 7]))
+show(np.vecmat(b[:, 7], b))
+show(np.matvec(z, w[:, 1]))
+show(np.vecmat(w[:, 1], w))
+show(np.tensordot(data((3, 4, 5), 32), data((4, 5, 6), 33), axes=2))
+# correlate and convolve: kernels of up to 11 elements and longer
+for k in [3, 11, 12, 40]:
+    s = data((300,), 34)
+    t = data((k,), 35)
+    show(np.correlate(s, t))
+    show(np.correlate(s, t, mode='same'))
+    show(np.convolve(s, t))
+    show(np.correlate(s.astype(np.float32), t.astype(np.float32), mode='full'))

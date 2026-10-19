@@ -22,6 +22,7 @@
 #include <neolib/core/scoped.hpp>
 #include <neolib/core/recursion.hpp>
 #include <neolib/core/string_utils.hpp>
+#include <neolib/file/file.hpp>
 #include <neos/language/schema.hpp>
 
 namespace neos::language::schema_parser
@@ -345,17 +346,92 @@ namespace neos::language
         }
     }
 
-    schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries) :
+    namespace
+    {
+        std::vector<std::filesystem::path> schema_folders()
+        {
+            // (relative to where neos is installed, e.g. /usr/local/bin/neos -> /usr/local/share/neos/languages, else side-by-side with the neos binary)
+            std::filesystem::path const programDirectory{ neolib::program_directory() };
+            return { programDirectory.parent_path() / "share" / "neos" / "languages", programDirectory };
+        }
+    }
+
+    std::optional<std::string> schema::find(std::string const& aSourceFileExtension)
+    {
+        for (auto const& folder : schema_folders())
+        {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(folder, ec))
+                continue;
+            for (auto const& entry : std::filesystem::directory_iterator{ folder, ec })
+            {
+                if (entry.path().extension() != ".neos")
+                    continue;
+                try
+                {
+                    // (only the schema's meta is read: its grammars are not parsed)
+                    std::ifstream sourceFile{ entry.path() };
+                    std::stringstream sourceBuffer;
+                    sourceBuffer << sourceFile.rdbuf();
+                    std::string const source = sourceBuffer.str();
+                    auto const metaStart = source.find("%{");
+                    auto const metaEnd = source.find("}%");
+                    if (metaStart == std::string::npos || metaEnd == std::string::npos || metaStart >= metaEnd)
+                        continue;
+                    std::istringstream metaSource{ source.substr(metaStart + 1, metaEnd - metaStart) };
+                    neolib::rjson metaContents{ metaSource };
+                    auto const& root = metaContents.root().as<neolib::rjson_object>();
+                    if (!root.has("meta"))
+                        continue;
+                    for (auto const& meta : root.at("meta"))
+                        if (meta.name() == "source.file.extension")
+                        {
+                            if (meta.type() == neolib::json_type::String)
+                            {
+                                if (std::string{ meta.as<neolib::rjson_string>() } == aSourceFileExtension)
+                                    return entry.path().string();
+                            }
+                            else
+                                for (auto const& ext : meta)
+                                    if (std::string{ ext.as<neolib::rjson_string>() } == aSourceFileExtension)
+                                        return entry.path().string();
+                        }
+                }
+                catch (...)
+                {
+                    // (a schema whose meta cannot be read: skip it)
+                }
+            }
+        }
+        return {};
+    }
+
+    schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries, bool aShowParseTimes, std::optional<std::string> const& aSource) :
         iPath{ aPath },
         iConceptLibraries{ aConceptLibraries }
     {
-        if (!std::filesystem::exists(iPath) && std::filesystem::exists(iPath + ".neos"))
-            iPath += ".neos";
-
-        std::ifstream sourceFile(iPath);
-        std::stringstream sourceBuffer;
-        sourceBuffer << sourceFile.rdbuf();
-        iSource = sourceBuffer.str();
+        std::filesystem::path const specifiedPath{ aPath };
+        if (aSource)
+            iSource = *aSource;
+        else if (!specifiedPath.has_parent_path() && !specifiedPath.has_extension())
+        {
+            // (a schema name without path or extension: search where neos is installed)
+            for (auto const& folder : schema_folders())
+                if (std::filesystem::exists(folder / (aPath + ".neos")))
+                {
+                    iPath = (folder / (aPath + ".neos")).string();
+                    break;
+                }
+        }
+        if (!aSource)
+        {
+            if (!std::filesystem::exists(iPath) && std::filesystem::exists(iPath + ".neos"))
+                iPath += ".neos";
+            std::ifstream sourceFile(iPath);
+            std::stringstream sourceBuffer;
+            sourceBuffer << sourceFile.rdbuf();
+            iSource = sourceBuffer.str();
+        }
         auto part = [&](std::string_view const& keyStart, std::string_view const& keyEnd)
         {
             auto range = keyStart == "%{" ? 
@@ -373,6 +449,9 @@ namespace neos::language
         neolib::rjson metaContents{ metaSource };
         auto const& meta = metaContents.root().as<neolib::rjson_object>().at("meta");
         parse_meta(meta);
+        // (the concept libraries the schema's language uses: each must be loaded)
+        if (metaContents.root().as<neolib::rjson_object>().has("libraries"))
+            parse_meta(metaContents.root().as<neolib::rjson_object>().at("libraries"));
 
         std::map<std::string, std::pair<std::string_view, std::optional<std::string>>> stages;
 
@@ -403,11 +482,12 @@ namespace neos::language
         for (auto const& stage : metaContents.root().as<neolib::rjson_object>().at("pipeline").as<neolib::rjson_array>())
         {
             auto const& stageName = stage->text();
+            std::string const stageKey{ stageName.to_std_string_view() };
             auto symbolMap = iPipeline.empty() ? std::make_shared<std::unordered_map<std::string_view, code_parser::symbol>>() : iPipeline.back()->symbolMap;
             if (iPipeline.empty())
-                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, infix, discard, symbolMap, std::make_shared<parser>()));
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>()));
             else
-                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageName).first, stages.at(stageName).second, infix, discard, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
+                iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
         }
 
         for (auto const& stagePtr : iPipeline)
@@ -416,7 +496,9 @@ namespace neos::language
             neolib::parser<schema_parser::symbol> parser{ schema_parser::parserRules };
             parser.ignore(schema_parser::symbol::Whitespace);
             parser.set_debug_output(std::cerr, false, false);
+            parser.set_debug_timing(aShowParseTimes);
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
+            iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
             parser.create_ast();
             walk_ast(parser, parser.ast(), stage);
         }
@@ -425,6 +507,11 @@ namespace neos::language
     std::string const& schema::path() const
     {
         return iPath;
+    }
+
+    std::chrono::steady_clock::duration schema::parse_time() const
+    {
+        return iParseTime;
     }
 
     language::meta const& schema::meta() const
@@ -451,6 +538,20 @@ namespace neos::language
                     iMeta.copyright = meta.as<neolib::rjson_string>();
                 else if (meta.name() == "version")
                     iMeta.version = meta.as<neolib::rjson_string>();
+                else if (meta.name() == "bigint.promotion")
+                {
+                    std::string const value{ meta.type() == neolib::json_type::Bool ? (meta.as<neolib::rjson_bool>() ? "true" : "false") : 
+                        meta.type() == neolib::json_type::String ? std::string{ meta.as<neolib::rjson_string>() } : std::string{ meta.as<neolib::rjson_keyword>().text } };
+                    if (value != "true" && value != "false")
+                        throw std::runtime_error("bigint.promotion: expected true or false");
+                    iMeta.bigintPromotion = (value == "true");
+                }
+                else if (meta.name() == "prelude")
+                {
+                    for (auto const& package : meta)
+                        iMeta.prelude.push_back(package.type() == neolib::json_type::String ? 
+                            std::string{ package.as<neolib::rjson_string>() } : std::string{ package.as<neolib::rjson_keyword>().text });
+                }
                 else if (meta.name() == "source.file.extension")
                 {
                     if (meta.type() == neolib::json_type::String)

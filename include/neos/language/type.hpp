@@ -47,7 +47,10 @@ namespace neos
             Reference, Pointer, 
             Array, Tuple, Struct, 
             Function,
-            Custom
+            Custom,
+            Object,     ///< an object of a runtime plugin (a handle; see neos/runtime/plugin.h)
+            Integer     ///< an integer of any size (64 bits): a small integer shifted left one bit, or an integer object (a runtime 
+                        ///< plugin's: its handle shifted left one bit, with the low bit set; see NEOS_RT_INTEGER in neos/runtime/plugin.h)
         };
 
         using custom_type_id = neolib::uuid;
@@ -79,6 +82,8 @@ namespace neos
             case type::Struct:    return "struct";
             case type::Function:  return "function";
             case type::Custom:    return "custom";
+            case type::Object:    return "object";
+            case type::Integer:   return "integer";
             default:              return "unknown";
             }
         }
@@ -108,7 +113,9 @@ namespace neos
                 { "tuple",     type::Tuple },
                 { "struct",    type::Struct },
                 { "function",  type::Function },
-                { "custom",    type::Custom }
+                { "custom",    type::Custom },
+                { "object",    type::Object },
+                { "integer",   type::Integer }
             };
             try
             {
@@ -201,7 +208,7 @@ namespace neos
                 v{ value } {}
             data(type_descriptor const& descriptor = {}) requires std::is_default_constructible_v<type_descriptor> :
                 d{ descriptor } {}
-            data(type_descriptor const& descriptor) requires !std::is_default_constructible_v<type_descriptor> :
+            data(type_descriptor const& descriptor) requires (!std::is_default_constructible_v<type_descriptor>) :
                 d{ descriptor } {}
             data(abstract_type const& other) :
                 d{ other.descriptor() },
@@ -549,12 +556,21 @@ namespace neos
             using abstract_type = i_struct_type;
         };
 
+        enum class parameter_direction : std::uint32_t
+        {
+            In,
+            Out,
+            InOut
+        };
+
         struct i_function_parameter
         {
             virtual neolib::i_string const& parameter_name() const = 0;
             virtual void set_parameter_name(neolib::i_string_view const& aParameterName) = 0;
             virtual type parameter_type() const = 0;
             virtual void set_parameter_type(type aParameterType) = 0;
+            virtual parameter_direction direction() const = 0;
+            virtual void set_direction(parameter_direction aDirection) = 0;
         };
 
         using i_function_parameters = neolib::i_vector<i_function_parameter>;
@@ -639,6 +655,7 @@ namespace neos
 
             neolib::string parameterName;
             type parameterType = type::UNKNOWN;
+            parameter_direction parameterDirection = parameter_direction::In;
 
             neolib::i_string const& parameter_name() const final
             {
@@ -656,10 +673,18 @@ namespace neos
             {
                 parameterType = aParameterType;
             }
+            parameter_direction direction() const final
+            {
+                return parameterDirection;
+            }
+            void set_direction(parameter_direction aDirection) final
+            {
+                parameterDirection = aDirection;
+            }
 
             function_parameter() = default;
             function_parameter(i_function_parameter const& other) :
-                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }
+                parameterName{ other.parameter_name() }, parameterType{ other.parameter_type() }, parameterDirection{ other.direction() }
             {}
         };
 

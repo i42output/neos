@@ -17,20 +17,24 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cstdlib>
 #include <neolib/neolib.hpp>
 
+#include <algorithm>
 #include <iostream>
 #include <filesystem>
+#include <sstream>
 
 #include <neolib/core/string_utf.hpp>
 #include <neolib/app/application.hpp>
+#include <neolib/file/file.hpp>
 #include <neos/context.hpp>
 
 namespace neos
 {
     context::context(std::ostream& aCout) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -39,7 +43,7 @@ namespace neos
 
     context::context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) :
         iCout{ aCout },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", {}, {}, {}, ".ncl" }, aServiceProvider) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }, aServiceProvider) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -58,6 +62,9 @@ namespace neos
 
     context::~context()
     {
+        for (auto& t : iThreads)
+            if (t->joinable())
+                t->join();
     }
 
     std::ostream& context::cout()
@@ -89,11 +96,46 @@ namespace neos
         std::string const schemaPath = (aSchemaPath.empty() && iSchema ? schema().path() : aSchemaPath);
         if (schemaPath.empty())
             throw no_schema_path_specified();
-        cout() << "Loading schema '" + schemaPath + "'..." << std::endl;
         iSchema.reset();
-        iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries());
+        iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries(), compiler().show_parse_times());
         for (auto& unit : program().translationUnits)
             unit.schema = iSchema;
+    }
+
+    void context::load_schema(std::string const& aSchemaPath, std::string const& aSchemaSource)
+    {
+        iSchema.reset();
+        iSchema = std::make_shared<language::schema>(aSchemaPath, concept_libraries(), compiler().show_parse_times(), aSchemaSource);
+        for (auto& unit : program().translationUnits)
+            unit.schema = iSchema;
+    }
+
+    void context::add_plugin(neolib::i_plugin& aPlugin)
+    {
+        iAddedPlugins.emplace_back(aPlugin);
+        // a compiler plugin: the code generation of its language
+        neolib::ref_ptr<language::i_language_compiler> languageCompiler;
+        if (aPlugin.discover(languageCompiler))
+        {
+            iCompiler.add_language_compiler(*languageCompiler);
+            return;
+        }
+        neolib::ref_ptr<language::i_concept_library> library(aPlugin);
+        iConceptLibraries[library->name()] = library;
+        auto add_sublibraries = [this](auto& self, auto& aParentLibrary) -> void
+        {
+            for (auto& sublibrary : aParentLibrary.sublibraries())
+            {
+                iConceptLibraries[sublibrary.first()] = sublibrary.second();
+                self(self, *sublibrary.second());
+            }
+        };
+        add_sublibraries(add_sublibraries, *library);
+    }
+
+    void context::add_package(std::string const& aPath, std::string const& aSource)
+    {
+        iPackages[std::filesystem::path{ aPath }.generic_string()] = aSource;
     }
 
     const language::schema& context::schema() const
@@ -106,6 +148,15 @@ namespace neos
     void context::load_program(std::string const& aPath)
     {
         std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? iProgram.translationUnits.front().fragments.front().source_file_path()->to_std_string() : aPath);
+        if (!schema_loaded() && !path.empty())
+        {
+            // (no schema specified: the installed schema for the program's file type)
+            auto const extension = std::filesystem::path{ path }.extension().string();
+            auto const schemaPath = language::schema::find(extension);
+            if (!schemaPath)
+                throw compiler_error("no schema loaded and no schema found for file type '" + extension + "'");
+            load_schema(*schemaPath);
+        }
         iProgram = decltype(iProgram){};
         auto& unit = load_unit(language::source_fragment{ neolib::string{ path } });
     }
@@ -148,11 +199,82 @@ namespace neos
         return false;
     }
 
+    bool context::restricted() const
+    {
+        return iRestricted;
+    }
+
+    void context::set_restricted(bool aRestricted)
+    {
+        iRestricted = aRestricted;
+    }
+
+    void context::set_arguments(std::vector<std::string> const& aArguments)
+    {
+        bytecode::vm::set_program_arguments(aArguments);
+    }
+
     void context::run()
     {
         if (text().empty())
             throw no_text();
-        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text()));
+        for (auto t = iThreads.begin(); t != iThreads.end();)
+        {
+            if ((**t).joinable())
+                (**t).join();
+            t = iThreads.erase(t);
+        }
+        // (source that the program compiles while it runs (e.g. Python's exec): its program (a translation unit of the 
+        // context's schema), compiled by the context's compiler)
+        bytecode::vm::set_compile_service([this](std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
+            std::string const& aOptions, std::string& aError) -> std::optional<neos::text>
+            {
+                if (!schema_loaded() || schema().meta().language != aLanguage)
+                {
+                    aError = "no schema for language '" + aLanguage + "'";
+                    return {};
+                }
+                program_t compiled;
+                neolib::string source{ aSource };
+                if (!source.empty() && source.to_std_string_view().back() != '\n')
+                    source.append("\n", 1u);
+                compiled.translationUnits.push_back(translation_unit_t{ iSchema, { language::source_fragment{ neolib::string{ aSourceName }, source } },
+                    language::ast{ compiled.symbolTable } });
+                compiler().set_language_options(aLanguage, aOptions);
+                compiler().set_quiet(true);
+                struct reset { context& c; std::string const& language; ~reset() { c.compiler().set_language_options(language, {}); c.compiler().set_quiet(false); } } const resetOptions{ *this, aLanguage };
+                try
+                {
+                    if (!compiler().compile(compiled))
+                    {
+                        aError = "compilation failed";
+                        return {};
+                    }
+                }
+                catch (language::compiler_error const& e)
+                {
+                    // (a compile error of the source: its location and message)
+                    aError = e.diagnostic.empty() ? std::string{ e.what() } : e.diagnostic;
+                    return {};
+                }
+                catch (std::exception const& e)
+                {
+                    aError = e.what();
+                    return {};
+                }
+                return compiled.text;
+            });
+        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), std::cin, iRestricted));
+        iThreads.back()->join(); // run to completion: the program reads std::cin, so the console must not read it concurrently
+    }
+
+    int context::exit_status() const
+    {
+        if (iThreads.empty())
+            return EXIT_SUCCESS;
+        if (iThreads.back()->error())
+            return EXIT_FAILURE;
+        return iThreads.back()->exit_status().value_or(EXIT_SUCCESS);
     }
 
     language::data_type context::evaluate(const std::string& aExpression)
@@ -162,7 +284,8 @@ namespace neos
         load_program(stream);
         compile_program();
         run();
-        iThreads.back()->join();
+        if (iThreads.back()->error())
+            throw error(*iThreads.back()->error());
         auto const result = iThreads.back()->result();
         iThreads.pop_back();
         return result;
@@ -178,21 +301,13 @@ namespace neos
 
     void context::init()
     {
+        // (concept libraries (".ncl") and compiler plugins (".ncp"))
+        auto& extensions = iApplication.plugin_manager().plugin_file_extensions();
+        if (std::find(extensions.begin(), extensions.end(), neolib::string{ ".ncp" }) == extensions.end())
+            extensions.push_back(neolib::string{ ".ncp" });
         iApplication.plugin_manager().load_plugins();
         for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
-        {
-            neolib::ref_ptr<language::i_concept_library> library(*plugin);
-            iConceptLibraries[library->name()] = library;
-            auto add_sublibraries = [this](auto& self, auto& aParentLibrary) -> void
-            {
-                for (auto& sublibrary : aParentLibrary.sublibraries())
-                {
-                    iConceptLibraries[sublibrary.first()] = sublibrary.second();
-                    self(self, *sublibrary.second());
-                }
-            };
-            add_sublibraries(add_sublibraries, *library);
-        }
+            add_plugin(*plugin);
     }
 
     context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment)
@@ -226,12 +341,26 @@ namespace neos
             throw invalid_fragment();
 
         auto const sourceFilePath = aFragment.source_file_path().value().to_std_string();
+        // (a package's source that is not a file (see add_package))
+        if (!iPackages.empty() && schema_loaded())
+            for (auto const& ext : schema().meta().sourcecodeFileExtension)
+            {
+                auto const tryPath = (std::filesystem::path{ schema().path() }.parent_path() / "packages" / schema().meta().language / (sourceFilePath + ext)).generic_string();
+                if (auto const package = iPackages.find(tryPath); package != iPackages.end())
+                {
+                    aFragment.source_file_path().value() = tryPath;
+                    std::istringstream packageStream{ package->second };
+                    load_fragment(aFragment, packageStream);
+                    return;
+                }
+            }
         std::optional<std::ifstream> fragmentStream;
         fragmentStream.emplace(sourceFilePath, std::ios::binary);
         if (!*fragmentStream)
             for (auto const& ext : schema().meta().sourcecodeFileExtension)
             {
-                std::string tryPath = "packages/" + schema().meta().language + "/" + sourceFilePath + ext;
+                // (packages live alongside the schema, not relative to the current working directory)
+                std::string tryPath = (std::filesystem::path{ schema().path() }.parent_path() / "packages" / schema().meta().language / (sourceFilePath + ext)).generic_string();
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {
@@ -250,6 +379,16 @@ namespace neos
             throw compiler_error("failed to open source file '" + sourceFilePath + "'");
 
         load_fragment(aFragment, *fragmentStream);
+    }
+
+    namespace
+    {
+        void terminate_last_line(neolib::string& aSource)
+        {
+            // the parser does not recognize a token at the very end of the source so ensure the last line is terminated
+            if (!aSource.empty() && aSource.to_std_string_view().back() != '\n')
+                aSource.append("\n", 1u);
+        }
     }
 
     void context::load_fragment(language::i_source_fragment& aFragment, std::istream& aStream)
@@ -278,6 +417,7 @@ namespace neos
             source.resize(static_cast<language::source_t::size_type>(count));
             aStream.read(&source[0], count);
             source.resize(static_cast<language::source_t::size_type>(aStream.gcount()));
+            terminate_last_line(source);
             aFragment.set_source(source.to_string_view());
         }
         else
@@ -289,6 +429,7 @@ namespace neos
                 source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
             if (aStream.eof())
                 source.append(buffer, static_cast<language::source_t::size_type>(aStream.gcount()));
+            terminate_last_line(source);
             aFragment.set_source(source.to_string_view());
         }
 

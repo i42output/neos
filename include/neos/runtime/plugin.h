@@ -1,0 +1,259 @@
+/*
+  plugin.h
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  This program is free software: you can redistribute it and / or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+  neos runtime plugins (C API)
+
+  A runtime plugin is a shared library (DLL) of ordinary C functions that scripts call directly: the neos VM
+  calls them through libffi, so a plugin needs no glue code per function, only a description of each
+  function's C signature.
+
+  - The plugin for the script namespace "x" is the shared library "neos.runtime.x" (".dll" on Windows, ".so"
+    elsewhere); nested namespaces use dots ("a::b" -> "neos.runtime.a.b").
+  - It is searched for in the directories listed in the NEOS_RUNTIME_PLUGIN_PATH environment variable (';'
+    separated on Windows, ':' elsewhere), then in the directory of the executable and its "plugins" subdirectory.
+  - It exports NEOS_RUNTIME_PLUGIN_ENTRY, which returns a description of the plugin: its namespace and its
+    functions.
+  - A script calls the function "f" of namespace "x" as an import named "x::f" (in neoscript: an "import fn"
+    declared in "namespace x"); the import's types must match the description.
+  - A function that can change the host environment (the file system, the process environment, other processes, 
+    ...) is flagged NEOS_RT_RESTRICTED: a script running in restricted mode cannot call it.
+  - A plugin whose functions can fail (with a runtime error that stops the script, e.g. a language runtime's
+    RangeError) also exports NEOS_RUNTIME_PLUGIN_ERROR, which returns the error raised by the function the calling
+    thread last called (clearing it) or NULL if it raised none. It is optional.
+
+  Types:
+  - NEOS_RT_BOOL is C bool, NEOS_RT_CHAR is char, NEOS_RT_SIZE is size_t; the others are as named.
+  - NEOS_RT_STRING is a NUL terminated "char const*": an argument is valid for the duration of the call; a
+    result is copied by the VM (a null result is the empty string) so it may point to static or thread local storage.
+  - NEOS_RT_OBJECT is a "neos_rt_object*", an object that a plugin implements (the VM only retains and releases it):
+    an argument is borrowed for the duration of the call (a plugin that keeps it retains it); a result is a new
+    reference that the VM takes over (a null result is no object). Scripts see objects as handles (i32; 0 is no
+    object) that the VM validates, so they never see the objects' addresses; they retain and release handles with
+    the VM's functions neos::object_retain and neos::object_release.
+  - NEOS_RT_INTEGER is an integer of any size (int64_t): a small integer shifted left one bit (the low bit clear), or 
+    an object (that the plugin implements, e.g. an arbitrary precision integer) as its "neos_rt_object*" with the low
+    bit set (objects are at least two byte aligned). An object argument is borrowed and an object result is a new 
+    reference, as NEOS_RT_OBJECT's. Scripts see an integer object as its handle shifted left one bit, with the low 
+    bit set.
+*/
+
+#ifndef NEOS_RUNTIME_PLUGIN_H
+#define NEOS_RUNTIME_PLUGIN_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define NEOS_RUNTIME_PLUGIN_VERSION 7
+#define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
+
+#if defined(_WIN32)
+#define NEOS_RUNTIME_PLUGIN_EXPORT __declspec(dllexport)
+#else
+#define NEOS_RUNTIME_PLUGIN_EXPORT __attribute__((visibility("default")))
+#endif
+
+typedef enum neos_rt_type
+{
+    NEOS_RT_VOID,
+    NEOS_RT_BOOL,
+    NEOS_RT_CHAR,
+    NEOS_RT_I32,
+    NEOS_RT_U32,
+    NEOS_RT_I64,
+    NEOS_RT_U64,
+    NEOS_RT_SIZE,
+    NEOS_RT_F32,
+    NEOS_RT_F64,
+    NEOS_RT_STRING,
+    NEOS_RT_OBJECT,
+    NEOS_RT_INTEGER
+} neos_rt_type;
+
+/* an object: its type (whose functions implement it) is its first member; each plugin defines its own types (which
+   can extend neos_rt_object_type with functions of their own) */
+typedef struct neos_rt_object neos_rt_object;
+typedef struct neos_rt_object_type
+{
+    char const* name;                                   /* (for diagnostics) */
+    void (*retain)(neos_rt_object* aObject);            /* add a reference */
+    void (*release)(neos_rt_object* aObject);           /* remove a reference (the last destroys it) */
+} neos_rt_object_type;
+struct neos_rt_object
+{
+    neos_rt_object_type const* type;
+};
+
+#define NEOS_RT_MAX_PARAMETERS 16
+
+/* function flags */
+#define NEOS_RT_RESTRICTED 0x1u /* can change the host environment: not callable by scripts running in restricted mode */
+
+typedef void (*neos_rt_function_pointer)(void);
+
+typedef struct neos_rt_function
+{
+    char const* name;                                   /* the name scripts use */
+    neos_rt_function_pointer function;                  /* the C function (cast with NEOS_RT_FUNCTION) */
+    neos_rt_type result;
+    unsigned parameterCount;
+    neos_rt_type parameters[NEOS_RT_MAX_PARAMETERS];
+    unsigned flags;                                     /* NEOS_RT_RESTRICTED */
+} neos_rt_function;
+
+typedef struct neos_rt_plugin
+{
+    unsigned version;                                   /* NEOS_RUNTIME_PLUGIN_VERSION */
+    char const* name;                                   /* the script namespace, e.g. "c" */
+    char const* description;
+    unsigned functionCount;
+    neos_rt_function const* functions;
+} neos_rt_plugin;
+
+typedef neos_rt_plugin const* (*neos_rt_plugin_entry)(void);
+
+#define NEOS_RUNTIME_PLUGIN_ERROR_NAME "neos_runtime_plugin_error"
+
+typedef char const* (*neos_rt_plugin_error)(void);
+
+/* (optional) the host's functions: a plugin that calls back into the running program (e.g. a function of the program
+   passed to it as a value) defines NEOS_RUNTIME_PLUGIN_SET_HOST { (keep aHost) }, which the host calls when it loads the
+   plugin */
+#define NEOS_RUNTIME_PLUGIN_SET_HOST_NAME "neos_runtime_plugin_set_host"
+
+/* (optional) the end of a program: a plugin that has work to finish before the program's state is destroyed (e.g. 
+   threads that run the program's functions) defines NEOS_RUNTIME_PLUGIN_END { ... }, which the host calls (on the 
+   program's thread) when the program's entry point returns */
+#define NEOS_RUNTIME_PLUGIN_END_NAME "neos_runtime_plugin_end"
+
+typedef void (*neos_rt_plugin_end)(void);
+
+/* a coroutine: code that runs on a stack of its own, which it can suspend (e.g. the body of a generator) */
+typedef struct neos_rt_coroutine neos_rt_coroutine;
+
+typedef union neos_rt_value
+{
+    int b;
+    int i32;
+    unsigned u32;
+    long long i64;
+    unsigned long long u64;
+    float f32;
+    double f64;
+    char const* string;
+    neos_rt_object* object;
+} neos_rt_value;
+
+/* a frame of the running program (see neos_rt_host::frames): a call of one of its functions that has not returned. Its 
+   function's name and its source's name are as the compiler named them (valid while the program is loaded); its line is the 
+   line of the source that it is running (the call it is making: 0 if unknown); its first line is its function's; its program 
+   is the program it belongs to (as thread_context's); its id identifies the call while it runs (the calls running have 
+   different ids) */
+typedef struct neos_rt_frame
+{
+    char const* function;
+    char const* source;
+    unsigned line;
+    unsigned firstLine;
+    void* program;
+    unsigned long long id;
+} neos_rt_frame;
+
+typedef struct neos_rt_host
+{
+    unsigned version;                                   /* NEOS_RUNTIME_PLUGIN_VERSION */
+    /* call function aFunction of the running program (its index, as the program gave it to the plugin) with aCount 
+       arguments of the types aParameters (objects and strings are borrowed); its result (of type aResult) is stored in
+       *aResultValue: an object is a new reference, a string is valid until the next call; returns NULL, or the error
+       message if the program trapped (valid until the next call) */
+    char const* (*call)(unsigned aFunction, unsigned aCount, neos_rt_type const* aParameters, neos_rt_value const* aArguments,
+        neos_rt_type aResult, neos_rt_value* aResultValue);
+    /* coroutines: a new one (aEntry(aData) runs when it is first resumed); resume one (on the calling thread: returns when 
+       it suspends itself (0) or when its entry returns (1)); suspend the running one (from its own code: the code that 
+       resumed it continues); delete one (that has finished, or that is suspended: its stack is discarded) */
+    neos_rt_coroutine* (*coroutine_new)(void (*aEntry)(void* aData), void* aData);
+    int (*coroutine_resume)(neos_rt_coroutine* aCoroutine);
+    void (*coroutine_suspend)(void);
+    void (*coroutine_delete)(neos_rt_coroutine* aCoroutine);
+    /* threads: the running program (as the calling thread runs it), and attaching another thread to it (so that it can 
+       call the program's functions; NULL: detach) */
+    void* (*thread_context)(void);
+    void (*thread_attach)(void* aContext);
+    /* programs compiled while a program runs (e.g. Python's exec): the program of the source aSource in the language 
+       aLanguage (aOptions: the language's options, e.g. a mode) as a context (as thread_context's: it stays until the 
+       process ends; NULL: the error message is stored in *aError (valid until the next call)); run its entry point on the 
+       calling thread (its result: as call's; returns NULL, or the error message if it trapped) */
+    void* (*load)(char const* aLanguage, char const* aSource, char const* aSourceName, char const* aOptions, char const** aError);
+    char const* (*run)(void* aContext, neos_rt_type aResult, neos_rt_value* aResultValue);
+    /* restricted mode: nonzero if the running program (as the calling thread runs it) is running in restricted mode (a plugin's 
+       functions that are not flagged NEOS_RT_RESTRICTED but can change the host environment (e.g. a language's own library's, that 
+       its runtime dispatches) refuse to run) */
+    int (*restricted)(void);
+    /* a trap: the running program (as the calling thread runs it) stops with the runtime error aMessage when the plugin function 
+       that the calling thread is in returns (the plugin reports an error then: its NEOS_RUNTIME_PLUGIN_ERROR's), even if the program 
+       handles plugins' errors (e.g. a language's own library refusing to run in restricted mode) */
+    void (*trap)(char const* aMessage);
+    /* the calling thread's frames, innermost first (the innermost is the call of the plugin's function), across the programs 
+       it is running and the coroutines that resumed the one it is running: the innermost aCount of them (or all, if there are 
+       fewer) are stored in aFrames; returns how many it stored (functions that the compiler did not name (e.g. a language's 
+       helpers) have none) */
+    unsigned (*frames)(neos_rt_frame* aFrames, unsigned aCount);
+    /* a function's frame (as frames' are, but of the function rather than of a call of it): the function aFunction (its index, 
+       as the program gave it to the plugin) of the program aContext (as thread_context's; NULL: the running program, as the 
+       calling thread runs it); its name, source and first line are stored in *aFrame (its line and id are 0); returns 0 if 
+       the function has none (e.g. a language's helpers) */
+    unsigned (*function_frame)(void* aContext, unsigned aFunction, neos_rt_frame* aFrame);
+    /* the program's command line arguments (its own: the program (its path, as it was given) first, then the arguments that 
+       follow it): the first aCount of them (or all, if there are fewer) are stored in aArguments (valid until the process ends); 
+       returns how many there are */
+    unsigned (*arguments)(char const** aArguments, unsigned aCount);
+} neos_rt_host;
+
+typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);
+
+#ifndef NEOS_RUNTIME_PLUGIN_HOST
+/* the entry points a plugin exports (declared here so that they have C linkage in a plugin written in C++) */
+NEOS_RUNTIME_PLUGIN_EXPORT neos_rt_plugin const* neos_runtime_plugin(void);
+NEOS_RUNTIME_PLUGIN_EXPORT char const* neos_runtime_plugin_error(void);
+NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_set_host(neos_rt_host const* aHost);
+NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void);
+#endif
+
+#define NEOS_RT_FUNCTION(f) ((neos_rt_function_pointer)(f))
+
+/* a plugin defines: NEOS_RUNTIME_PLUGIN_ENTRY { return &description; } */
+#define NEOS_RUNTIME_PLUGIN_ENTRY NEOS_RUNTIME_PLUGIN_EXPORT neos_rt_plugin const* neos_runtime_plugin(void)
+
+/* (optional) a plugin whose functions can fail defines: NEOS_RUNTIME_PLUGIN_ERROR { return (the error raised, cleared) or NULL; } */
+#define NEOS_RUNTIME_PLUGIN_ERROR NEOS_RUNTIME_PLUGIN_EXPORT char const* neos_runtime_plugin_error(void)
+
+/* (optional) a plugin that calls back into the program defines: NEOS_RUNTIME_PLUGIN_SET_HOST { (keep aHost) } */
+#define NEOS_RUNTIME_PLUGIN_SET_HOST NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_set_host(neos_rt_host const* aHost)
+
+/* (optional) a plugin with work to finish when a program ends defines: NEOS_RUNTIME_PLUGIN_END { ... } */
+#define NEOS_RUNTIME_PLUGIN_END NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void)
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* NEOS_RUNTIME_PLUGIN_H */

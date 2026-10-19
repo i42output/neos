@@ -53,6 +53,7 @@ namespace neos
     public:
         virtual bool running() const = 0;
         virtual void run() = 0;
+        virtual int exit_status() const = 0;    ///< (of the program last run: failure if it stopped with an error, else the status it exited with (0 if none))
         virtual language::data_type evaluate(std::string const& aExpression) = 0;
         virtual const neolib::i_string& metrics() const = 0;
     public:

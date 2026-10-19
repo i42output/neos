@@ -1,0 +1,10 @@
+import numpy as np
+print(np.unique_values(np.arange(100)[::-1]))
+print(np.unique_values(np.arange(3000) % 1500))
+print(np.unique_values(np.array([7, -3, 255, 1000000, 7, 42, -3], dtype=np.int32)))
+print(np.unique_values(np.array([7, 3, 255, 9, 7], dtype=np.uint8)))
+print(np.unique_values(np.array([7, -3, 255, 9, 7], dtype=np.int16)))
+print(np.unique_values(np.array([3.5, 1.0, 2.0, -7.0, 1.0, 9.0, 0.5])))
+print(np.unique_values(np.array([3.5, 1.0, 2.0, -7.0], dtype=np.float32)))
+print(np.unique_values(np.array([True, False, True])))
+print(np.unique(np.array([5, 3, 9, 3]), sorted=False))

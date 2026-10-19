@@ -1,8 +1,10 @@
+using neo.string;
+
 // functions are pure
 fn test(x, y : i32; z : string) -> i64
 {
     i32 n = -1;
-    return 1 + (2 + 3) * 4 + x / y + length(z) + n;
+    return 1 + (2 + 3) * 4 + x / y + neo::length(z) + n;
 }
 
 proc wibble(foo : out i32)

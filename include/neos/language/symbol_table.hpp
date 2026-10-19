@@ -40,20 +40,24 @@ namespace neos
             virtual ~i_symbol_table_entry() = default;
         public:
             virtual symbol_type type() const = 0;
+            virtual std::uint32_t index() const = 0;
         };
 
         class symbol_table_entry : public i_symbol_table_entry
         {
         public:
-            symbol_table_entry(symbol_type aType) : 
-                iType{ aType }
+            symbol_table_entry(symbol_type aType, std::uint32_t aIndex = 0u) : 
+                iType{ aType },
+                iIndex{ aIndex }
             {}
             symbol_table_entry(i_symbol_table_entry const& aOther) :
-                iType{ aOther.type() }
+                iType{ aOther.type() },
+                iIndex{ aOther.index() }
             {}
             symbol_table_entry& operator=(i_symbol_table_entry const& aOther)
             { 
                 iType = aOther.type();
+                iIndex = aOther.index();
                 return *this; 
             }
         public:
@@ -61,11 +65,16 @@ namespace neos
             {
                 return iType;
             }
+            std::uint32_t index() const final
+            {
+                return iIndex;
+            }
         private:
             symbol_type iType;
+            std::uint32_t iIndex;
         };
 
-        using symbol_table = neolib::unordered_map<i_scope*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;
+        using symbol_table = neolib::unordered_map<i_scope const*, neolib::unordered_multimap<symbol_name, symbol_table_entry>>;
         using i_symbol_table = neolib::maybe_abstract_t<symbol_table>;
     }
 }

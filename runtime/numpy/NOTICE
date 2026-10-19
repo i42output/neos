@@ -1,0 +1,80 @@
+Third-party notices: the neos NumPy runtime plugin (runtime/numpy)
+==================================================================
+
+Portions of the plugin's sources are derived from NumPy 2.5.3, Copyright (c)
+2005-2025, NumPy Developers; All rights reserved. They are used under NumPy's
+BSD 3-Clause licence, whose text is in LICENSE.NumPy.
+
+The files listed below contain code translated from NumPy's C and Python
+sources to C++ and adapted to the neos NumPy runtime's object model; their
+behaviour and messages are NumPy's. Each file's header names the NumPy sources
+it is derived from. (The plugin's other files reproduce NumPy's behaviour but
+are independently written.)
+
+  blas.cpp             numpy/_core/src/umath/matmul.c.src,
+                       numpy/_core/src/multiarray/arraytypes.c.src,
+                       numpy/_core/src/multiarray/vdot.c and
+                       numpy/_core/src/common/npy_cblas.h
+  core.cpp             numpy/_core/src/multiarray/alloc.c and
+                       numpy/_core/src/common/half_private.hpp
+  format.cpp           numpy/_core/arrayprint.py and
+                       numpy/_core/src/multiarray/scalartypes.c.src
+  functions.cpp        numpy/_core/function_base.py, numpy/_core/numeric.py,
+                       numpy/lib/_function_base_impl.py,
+                       numpy/lib/_shape_base_impl.py and
+                       numpy/_core/src/multiarray: shape.c, common.c,
+                       arraytypes.c.src and item_selection.c
+  lib.cpp              numpy/lib: _twodim_base_impl.py, _index_tricks_impl.py,
+                       _shape_base_impl.py, _function_base_impl.py and
+                       _arraysetops_impl.py; numpy/_core: shape_base.py,
+                       numeric.py and fromnumeric.py; and
+                       numpy/_core/src/multiarray/unique.cpp
+  lib2.cpp             numpy/lib: _function_base_impl.py, _histograms_impl.py,
+                       _twodim_base_impl.py, _type_check_impl.py,
+                       _ufunclike_impl.py and _nanfunctions_impl.py;
+                       numpy/_core/numeric.py; and numpy/_core/src/multiarray:
+                       multiarraymodule.c and compiled_base.c
+  lib3.cpp             numpy/lib: _arraypad_impl.py, _index_tricks_impl.py,
+                       _shape_base_impl.py and _type_check_impl.py; and
+                       numpy/_core: numeric.py and getlimits.py
+  math.cpp             numpy/_core/_methods.py,
+                       numpy/lib/_function_base_impl.py and
+                       numpy/_core/src: common/cblasfuncs.c,
+                       common/numpy_tag.h and multiarray/compiled_base.c
+  sort.cpp             numpy/_core/src/npysort: quicksort.hpp,
+                       npysort_heapsort.h and selection.cpp; and
+                       numpy/_core/src/common: numpy_tag.h and npy_sort.h.src
+  ufunc.cpp            numpy/_core/src/npymath/npy_math_internal.h.src,
+                       numpy/_core/src/umath/loops_utils.h.src and
+                       numpy/_core/src/umath/ufunc_type_resolution.c
+  xss.avx2.cpp         numpy/_core/src/npysort: x86_simd_qsort.dispatch.cpp
+  xss.avx512.cpp       and x86_simd_argsort.dispatch.cpp
+  xss.icl.cpp          numpy/_core/src/npysort/x86_simd_qsort_16bit.dispatch.cpp
+
+
+Cephes (src/lib2.cpp)
+---------------------
+
+The coefficients and Chebyshev series of i0 (the modified Bessel function of
+order zero) are, as NumPy's (numpy/lib/_function_base_impl.py), from the
+Cephes Math Library by Stephen L. Moshier.
+
+
+CPython (src/index.cpp)
+-----------------------
+
+src/index.cpp's slice_indices is derived from CPython 3.13's
+PySlice_AdjustIndices (Objects/sliceobject.c), Copyright (c) 2001-2024 Python
+Software Foundation; All Rights Reserved. It is used under the Python Software
+Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes:
+translated from C to C++.
+
+
+Libraries the plugin uses (3rdparty)
+------------------------------------
+
+The plugin links OpenBLAS (3rdparty/OpenBLAS-0.3.34) and x86-simd-sort
+(3rdparty/x86-simd-sort), both under BSD-style licences; their licences
+are in those directories (OpenBLAS: LICENSE and GotoBLAS_00License.txt;
+x86-simd-sort: LICENSE.md) and must accompany a binary distribution of the
+plugin.

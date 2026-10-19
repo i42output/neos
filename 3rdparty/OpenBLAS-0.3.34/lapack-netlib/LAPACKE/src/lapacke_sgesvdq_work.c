@@ -1,0 +1,191 @@
+/*****************************************************************************
+  Copyright (c) 2014, Intel Corp.
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of Intel Corporation nor the names of its contributors
+      may be used to endorse or promote products derived from this software
+      without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+  THE POSSIBILITY OF SUCH DAMAGE.
+*****************************************************************************
+* Contents: Native middle-level C interface to LAPACK function sgesvdq
+* Author: Intel Corporation
+*****************************************************************************/
+
+#include "lapacke_utils.h"
+
+lapack_int LAPACKE_sgesvdq_work( int matrix_layout, char joba, char jobp,
+                           char jobr, char jobu, char jobv,
+                           lapack_int m, lapack_int n, float* a,
+                           lapack_int lda, float* s, float* u, lapack_int ldu,
+                           float* v, lapack_int ldv, lapack_int* numrank,
+                           lapack_int* iwork, lapack_int liwork,
+                           float* work, lapack_int lwork,
+                           float* rwork, lapack_int lrwork )
+{
+    lapack_int info = 0;
+    if( matrix_layout == LAPACK_COL_MAJOR ) {
+        /* Call LAPACK function and adjust info */
+        LAPACK_sgesvdq( &joba, &jobp, &jobr, &jobu, &jobv, &m, &n, a, &lda, s, u, &ldu, v, &ldv,
+                       numrank, iwork, &liwork, work, &lwork, rwork, &lrwork, &info );
+        if( info < 0 ) {
+            info = info - 1;
+        }
+    } else if( matrix_layout == LAPACK_ROW_MAJOR ) {
+
+        lapack_int nrows_u;
+        lapack_int ncols_u;
+        lapack_int nrows_v;
+        lapack_int ncols_v;
+
+        if( LAPACKE_lsame( jobu, 'a' ) ) {
+           nrows_u = m;
+           ncols_u = m;
+        }
+        else if( LAPACKE_lsame( jobu, 's' ) ||
+                LAPACKE_lsame( jobu, 'u' ) ||
+                LAPACKE_lsame( jobu, 'r' ) ) {
+           nrows_u = m;
+           ncols_u = n;
+        }
+        else if( LAPACKE_lsame( jobu, 'f' ) ) {
+           nrows_u = n;
+           ncols_u = n;
+        } else {
+           nrows_u = 1;
+           ncols_u = 1;
+        }
+
+        /* in the case joba == 'e', v_t is used as a workspace */
+        if( LAPACKE_lsame( jobv, 'a' ) ||
+                LAPACKE_lsame( jobv, 'v' ) ||
+                LAPACKE_lsame( jobv, 'r' ) ||
+                LAPACKE_lsame( joba, 'e' ) ) {
+           nrows_v = n;
+           ncols_v = n;
+        } else {
+           nrows_v = 1;
+           ncols_v = 1;
+        }
+
+        lapack_int lda_t = MAX(1,m);
+        lapack_int ldu_t = MAX(1,nrows_u);
+        lapack_int ldv_t = MAX(1,nrows_v);
+        float* a_t = NULL;
+        float* u_t = NULL;
+        float* v_t = NULL;
+        /* Check leading dimension(s) */
+        if( lda < n ) {
+            info = -9;
+            LAPACKE_xerbla( "LAPACKE_sgesvdq_work", info );
+            return info;
+        }
+        if( ldu < ncols_u ) {
+            info = -12;
+            LAPACKE_xerbla( "LAPACKE_sgesvdq_work", info );
+            return info;
+        }
+        if( ldv < ncols_v ) {
+            info = -14;
+            LAPACKE_xerbla( "LAPACKE_sgesvdq_work", info );
+            return info;
+        }
+
+        /* Query optimal working array(s) size if requested */
+        if ( ( liwork == -1 ) || ( lwork == -1 ) || ( lrwork == -1 ) ) {
+            LAPACK_sgesvdq( &joba, &jobp, &jobr, &jobu, &jobv, &m, &n, a, &lda_t,
+                             s, u, &ldu_t, v, &ldv_t, numrank, iwork, &liwork,
+                             work, &lwork, rwork, &lrwork, &info );
+            return (info < 0) ? (info - 1) : info;
+        }
+
+        /* Allocate memory for temporary array(s) */
+        if ( ( m > 0 ) && ( n > 0 ) ){
+            a_t = (float*)LAPACKE_malloc( sizeof(float) * lda_t * MAX(1,n) );
+            if( a_t == NULL ) {
+                info = LAPACK_TRANSPOSE_MEMORY_ERROR;
+                goto exit_level_0;
+            }
+
+            u_t = (float*)LAPACKE_malloc( sizeof(float) * ldu_t * MAX(1,ncols_u) );
+            if( u_t == NULL ) {
+                info = LAPACK_TRANSPOSE_MEMORY_ERROR;
+                goto exit_level_1;
+            }
+
+            v_t = (float*)LAPACKE_malloc( sizeof(float) * ldv_t * MAX(1,ncols_v) );
+            if( v_t == NULL ) {
+                info = LAPACK_TRANSPOSE_MEMORY_ERROR;
+                goto exit_level_2;
+            }
+        }
+
+        /* Transpose input matrices */
+        if ( ( m > 0 ) && ( n > 0 ) ){
+            LAPACKE_sge_trans( matrix_layout, m, n, a, lda, a_t, lda_t );
+        }
+
+        /* Call LAPACK function and adjust info */
+            LAPACK_sgesvdq( &joba, &jobp, &jobr, &jobu, &jobv, &m, &n, a, &lda_t,
+                             s, u, &ldu_t, v, &ldv_t, numrank, iwork, &liwork,
+                             work, &lwork, rwork, &lrwork, &info );
+        if( info < 0 ) {
+            info = info - 1;
+        }
+
+        /* Transpose output matrices */
+        if ( ( m > 0 ) && ( n > 0 ) ){
+            LAPACKE_sge_trans( LAPACK_COL_MAJOR, m, n, a_t, lda_t, a, lda );
+
+            if( LAPACKE_lsame( jobu, 'a' ) ||
+                    LAPACKE_lsame( jobu, 's' ) ||
+                    LAPACKE_lsame( jobu, 'u' ) ||
+                    LAPACKE_lsame( jobu, 'r' ) ||
+                    LAPACKE_lsame( jobu, 'f' ) ) {
+                LAPACKE_sge_trans( LAPACK_COL_MAJOR, nrows_u, ncols_u, u_t, ldu_t,
+                                   u, ldu );
+            }
+
+            /* we do not transpose v_t back to v in the case (joba == 'e') because, in this case, v_t is used as a workspace */
+            if( LAPACKE_lsame( jobv, 'a' ) ||
+                    LAPACKE_lsame( jobv, 'v' ) ||
+                    LAPACKE_lsame( jobv, 'r' )) {
+                LAPACKE_sge_trans( LAPACK_COL_MAJOR, nrows_v, ncols_v, v_t, ldv_t, v,
+                                   ldv );
+            }
+        }
+
+        /* Release memory and exit */
+        if ( ( m > 0 ) && ( n > 0 ) ) { LAPACKE_free( v_t ); v_t = NULL; }
+exit_level_2:
+        if ( ( m > 0 ) && ( n > 0 ) ) { LAPACKE_free( u_t ); u_t = NULL; }
+exit_level_1:
+        if ( ( m > 0 ) && ( n > 0 ) ) { LAPACKE_free( a_t ); a_t = NULL; }
+exit_level_0:
+        if( info == LAPACK_TRANSPOSE_MEMORY_ERROR ) {
+            LAPACKE_xerbla( "LAPACKE_sgesvdq_work", info );
+        }
+    } else {
+        info = -1;
+        LAPACKE_xerbla( "LAPACKE_sgesvdq_work", info );
+    }
+    return info;
+}

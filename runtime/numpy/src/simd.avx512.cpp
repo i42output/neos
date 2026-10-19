@@ -1,0 +1,24 @@
+/*
+  simd.avx512.cpp
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  This program is free software: you can redistribute it and / or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+// (compiled for X86_V4 (AVX-512 F, CD, VL, BW, DQ) without fused multiply-adds: the kernels of simd.hpp)
+
+#define NEOS_NUMPY_ISA avx512
+#include "simd.isa.hpp"

@@ -25,7 +25,7 @@
 
 namespace neos
 {
-    const neolib::version NEOS_VERSION = { 1u, 0u, 0u, 0u, "ED-209" };
+    const neolib::version NEOS_VERSION = { 0u, 1u, 0u, 0u, "ED-209" };
 
     using text = std::vector<std::byte>;
 }

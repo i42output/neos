@@ -1,0 +1,217 @@
+Third-party notices: the neos Python runtime plugin (runtime/python)
+====================================================================
+
+Portions of the plugin's sources are derived from CPython 3.13, Copyright (c)
+2001-2024 Python Software Foundation; All Rights Reserved. They are used under
+the Python Software Foundation License Version 2, whose text (with the history
+of Python's licences) is in LICENSE.PSF.
+
+Summary of the changes made to Python (the PSF License Version 2, clause 3):
+the modules and objects listed below were translated from CPython's Python and
+C sources to C++ and adapted to the neos Python runtime's object model (their
+classes are made of native functions, their objects are the runtime's); their
+behaviour, messages and documentation strings are CPython's. Each file's header
+names the CPython sources it is derived from.
+
+  argparse.cpp         Lib/argparse.py
+  array.cpp            Modules/arraymodule.c
+  bytes.cpp            Objects/bytesobject.c, Objects/bytearrayobject.c and
+                       Objects/bytes_methods.c
+  calendar.cpp         Lib/calendar.py
+  codec_tables.hpp     Lib/encodings: its aliases and its codecs' tables
+  codecs.cpp           Objects/unicodeobject.c, Python/codecs.c and
+                       Lib/encodings
+  collections_abc.cpp  Lib/_collections_abc.py and Lib/collections/abc.py
+  contextlib.cpp       Lib/contextlib.py
+  csv.cpp              Modules/_csv.c and Lib/csv.py
+  dataclasses.cpp      Lib/dataclasses.py
+  datetime.cpp         Modules/_datetimemodule.c and Lib/_strptime.py
+  decimal.cpp          Lib/_pydecimal.py
+  enum.cpp             Lib/enum.py
+  files.cpp            Lib/fnmatch.py, Lib/glob.py, Lib/shutil.py and
+                       Lib/tempfile.py
+  functools.cpp        Lib/functools.py
+  inspect.cpp          Lib/inspect.py
+  itertools.cpp        Modules/itertoolsmodule.c
+  locale.cpp           Lib/locale.py
+  locale_tables.hpp    Lib/locale.py: its tables
+  logging.cpp          Lib/logging/__init__.py
+  os.cpp               Lib/posixpath.py, Lib/ntpath.py and Lib/genericpath.py
+  pprint.cpp           Lib/pprint.py
+  queue.cpp            Lib/queue.py
+  random.cpp           Modules/_randommodule.c and Lib/random.py
+  services.cpp         Lib/platform.py, Lib/keyword.py, Lib/copyreg.py,
+                       Lib/secrets.py and Lib/timeit.py
+  set.cpp              Objects/setobject.c
+  statistics.cpp       Lib/statistics.py and Modules/_statisticsmodule.c
+  str.cpp              Objects/unicodeobject.c
+  string_formatter.cpp Lib/string.py (Formatter) and
+                       Objects/stringlib/unicode_format.h
+  structseq.cpp        Objects/structseq.c
+  text.cpp             Lib/textwrap.py
+  textmodules.cpp      Lib/string.py (Template's pattern)
+  time.cpp             Modules/timemodule.c
+  traceback.cpp        Lib/linecache.py, Lib/traceback.py, Lib/_colorize.py and
+                       Python/suggestions.c
+  typing.cpp           Lib/typing.py and Objects/typevarobject.c
+  typing_docs.hpp      Lib/typing.py (its docstrings, generated)
+  unicode_tables.hpp   Modules/unicodedata.c and str's methods: the Unicode
+                       Character Database as they have it
+  unicodedata.cpp      Modules/unicodedata.c
+  uuid.cpp             Lib/uuid.py
+  warnings.cpp         Lib/warnings.py and Python/_warnings.c
+  weakref.cpp          Objects/weakrefobject.c
+  zlib.cpp             Modules/zlibmodule.c
+
+
+logging (src/logging.cpp)
+-------------------------
+
+Copyright 2001-2022 by Vinay Sajip. All Rights Reserved.
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee is hereby granted,
+provided that the above copyright notice appear in all copies and that
+both that copyright notice and this permission notice appear in
+supporting documentation, and that the name of Vinay Sajip
+not be used in advertising or publicity pertaining to distribution
+of the software without specific, written prior permission.
+VINAY SAJIP DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING
+ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL
+VINAY SAJIP BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR
+ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER
+IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+
+Mersenne Twister (src/random.cpp)
+---------------------------------
+
+src/random.cpp's Mersenne Twister is based on CPython's
+Modules/_randommodule.c, which includes code based on a download from
+http://www.math.keio.ac.jp/~matumoto/MT2002/emt19937ar.html. The following are
+the verbatim comments from the original code:
+
+    A C-program for MT19937, with initialization improved 2002/1/26.
+    Coded by Takuji Nishimura and Makoto Matsumoto.
+
+    Before using, initialize the state by using init_genrand(seed)
+    or init_by_array(init_key, key_length).
+
+    Copyright (C) 1997 - 2002, Makoto Matsumoto and Takuji Nishimura,
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+     1. Redistributions of source code must retain the above copyright
+        notice, this list of conditions and the following disclaimer.
+
+     2. Redistributions in binary form must reproduce the above copyright
+        notice, this list of conditions and the following disclaimer in the
+        documentation and/or other materials provided with the distribution.
+
+     3. The names of its contributors may not be used to endorse or promote
+        products derived from this software without specific prior written
+        permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT
+    OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+    TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+    PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+    Any feedback is very welcome.
+    http://www.math.keio.ac.jp/matumoto/emt.html
+
+
+platform (src/services.cpp)
+---------------------------
+
+Copyright (c) 1999-2000, Marc-Andre Lemburg; mailto:mal@lemburg.com
+Copyright (c) 2000-2010, eGenix.com Software GmbH; mailto:info@egenix.com
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose and without fee or royalty is hereby granted,
+provided that the above copyright notice appear in all copies and that
+both that copyright notice and this permission notice appear in
+supporting documentation or portions thereof, including modifications,
+that you make.
+
+EGENIX.COM SOFTWARE GMBH DISCLAIMS ALL WARRANTIES WITH REGARD TO
+THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS, IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL,
+INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING
+FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION
+WITH THE USE OR PERFORMANCE OF THIS SOFTWARE !
+
+
+textwrap (src/text.cpp)
+-----------------------
+
+Copyright (C) 1999-2001 Gregory P. Ward.
+Copyright (C) 2002, 2003 Python Software Foundation.
+Written by Greg Ward <gward@python.net>
+
+
+collections.abc (src/collections_abc.cpp)
+-----------------------------------------
+
+Copyright 2007 Google, Inc. All Rights Reserved.
+Licensed to PSF under a Contributor Agreement.
+
+
+Unicode Character Database (src/unicode_tables.hpp, src/unicodedata.cpp)
+------------------------------------------------------------------------
+
+src/unicode_tables.hpp is generated from the Unicode Character Database (UCD
+15.1.0 and 3.2.0, as CPython 3.13 has it), which is distributed under the
+following licence:
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.

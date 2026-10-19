@@ -40,6 +40,8 @@ namespace neos
             virtual i_optional_parameter_list const& parameters() const = 0;
             virtual i_optional_parameter_list& parameters() = 0;
             virtual void set_parameters(i_function_parameters const& aFunctionParameters) = 0;
+            virtual i_function_parameters const& locals() const = 0;
+            virtual i_function_parameters& locals() = 0;
             virtual neos::language::type return_type() const = 0;
             virtual void set_return_type(neos::language::type aFunctionReturnType) = 0;
         };
@@ -50,19 +52,22 @@ namespace neos
         {
             neolib::string functionName;
             optional_parameter_list functionParameters;
-            neos::language::type functionReturnType;
+            function_parameters functionLocals;
+            neos::language::type functionReturnType = neos::language::type::Void;
 
             function_signature() = default;
 
             function_signature(i_function_signature const& aOther) :
                 functionName{ aOther.name() },
                 functionParameters{ aOther.parameters() },
+                functionLocals{ aOther.locals() },
                 functionReturnType{ aOther.return_type() } {}
 
             function_signature& operator=(i_function_signature const& aOther)
             {
                 functionName = aOther.name();
                 functionParameters = aOther.parameters();
+                functionLocals = aOther.locals();
                 functionReturnType = aOther.return_type();
                 return *this;
             }
@@ -86,6 +91,14 @@ namespace neos
             void set_parameters(i_function_parameters const& aFunctionParameters) final
             {
                 functionParameters = aFunctionParameters;
+            }
+            function_parameters const& locals() const final
+            {
+                return functionLocals;
+            }
+            function_parameters& locals() final
+            {
+                return functionLocals;
             }
             neos::language::type return_type() const final
             {

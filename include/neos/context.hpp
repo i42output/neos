@@ -20,12 +20,14 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <map>
 #include <string>
 #include <optional>
 #include <vector>
 #include <memory>
 #include <neolib/file/json.hpp>
 #include <neolib/app/i_application.hpp>
+#include <neolib/plugin/i_plugin.hpp>
 #include <neos/language/compiler.hpp>
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/i_context.hpp>
@@ -51,6 +53,10 @@ namespace neos
     public:
         bool schema_loaded() const;
         void load_schema(const std::string& aSchemaPath);
+        void load_schema(const std::string& aSchemaPath, const std::string& aSchemaSource);    ///< (a schema that is not a file (e.g. one built in))
+        void add_plugin(neolib::i_plugin& aPlugin);     ///< (a concept library or compiler plugin that is not a file (e.g. one linked in))
+        void add_package(const std::string& aPath, const std::string& aSource); ///< (a package's source that is not a file (aPath: where the 
+                                                        ///< schema's packages would be, e.g. "<schema folder>/packages/python/builtins.py"))
         const language::schema& schema() const;
         void load_program(std::string const& aPath);
         void load_program(std::istream& aStream);
@@ -60,8 +66,16 @@ namespace neos
         program_t& program();
         const text& text() const;
     public:
+        // restricted mode (off by default): programs cannot call runtime plugin functions that can change the host 
+        // environment (e.g. file I/O)
+        bool restricted() const;
+        void set_restricted(bool aRestricted);
+        // the program's command line arguments (the program (its path, as it was given) first, then the arguments that follow it)
+        void set_arguments(std::vector<std::string> const& aArguments);
+    public:
         bool running() const final;
         void run() final;
+        int exit_status() const final;
         language::data_type evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
     private:
@@ -79,5 +93,8 @@ namespace neos
         language::compiler iCompiler;
         program_t iProgram;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
+        std::vector<neolib::ref_ptr<neolib::i_plugin>> iAddedPlugins;
+        std::map<std::string, std::string> iPackages;
+        bool iRestricted = false;
     };
 }

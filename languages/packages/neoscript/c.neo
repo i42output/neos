@@ -1,0 +1,91 @@
+// neoscript package: c (the C runtime, provided by the runtime plugin neos.runtime.c through libffi)
+
+namespace c
+{
+    // <math.h>
+    import fn sqrt(x : f64) -> f64;
+    import fn cbrt(x : f64) -> f64;
+    import fn pow(x, y : f64) -> f64;
+    import fn exp(x : f64) -> f64;
+    import fn exp2(x : f64) -> f64;
+    import fn log(x : f64) -> f64;
+    import fn log2(x : f64) -> f64;
+    import fn log10(x : f64) -> f64;
+    import fn sin(x : f64) -> f64;
+    import fn cos(x : f64) -> f64;
+    import fn tan(x : f64) -> f64;
+    import fn asin(x : f64) -> f64;
+    import fn acos(x : f64) -> f64;
+    import fn atan(x : f64) -> f64;
+    import fn atan2(y, x : f64) -> f64;
+    import fn sinh(x : f64) -> f64;
+    import fn cosh(x : f64) -> f64;
+    import fn tanh(x : f64) -> f64;
+    import fn floor(x : f64) -> f64;
+    import fn ceil(x : f64) -> f64;
+    import fn trunc(x : f64) -> f64;
+    import fn round(x : f64) -> f64;
+    import fn fabs(x : f64) -> f64;
+    import fn fmod(x, y : f64) -> f64;
+    import fn hypot(x, y : f64) -> f64;
+    import fn fmin(x, y : f64) -> f64;
+    import fn fmax(x, y : f64) -> f64;
+    import fn copysign(x, y : f64) -> f64;
+    import fn sqrtf(x : f32) -> f32;
+    import fn sinf(x : f32) -> f32;
+    import fn cosf(x : f32) -> f32;
+    import fn powf(x, y : f32) -> f32;
+    import fn fabsf(x : f32) -> f32;
+    // <stdlib.h>
+    import fn abs(n : i32) -> i32;
+    import fn llabs(n : i64) -> i64;
+    import fn rand() -> i32;
+    import proc srand(seed : in u32);
+    import fn atoi(s : string) -> i32;
+    import fn atoll(s : string) -> i64;
+    import fn atof(s : string) -> f64;
+    import fn strtoll(s : string; base : i32) -> i64;
+    import fn getenv(name : string) -> string;
+    import fn has_env(name : string) -> bool;
+    // <string.h>
+    import fn strlen(s : string) -> u64;
+    import fn strcmp(a, b : string) -> i32;
+    import fn strncmp(a, b : string; n : u64) -> i32;
+    import fn strstr(haystack, needle : string) -> string;
+    import fn strspn(s, accept : string) -> i64;
+    import fn strcspn(s, reject : string) -> i64;
+    import fn strerror(error : i32) -> string;
+    import fn char_at(s : string; index : i64) -> char;
+    // <ctype.h>
+    import fn toupper(c : i32) -> i32;
+    import fn tolower(c : i32) -> i32;
+    import fn isalpha(c : i32) -> i32;
+    import fn isdigit(c : i32) -> i32;
+    import fn isalnum(c : i32) -> i32;
+    import fn isspace(c : i32) -> i32;
+    import fn isupper(c : i32) -> i32;
+    import fn islower(c : i32) -> i32;
+    import fn ispunct(c : i32) -> i32;
+    import fn isxdigit(c : i32) -> i32;
+    // <stdio.h>
+    import fn puts(s : string) -> i32;
+    import fn putchar(c : i32) -> i32;
+    import fn fflush() -> i32;
+    // <time.h>
+    import fn time() -> i64;
+    import fn clock() -> i64;
+    import fn clocks_per_sec() -> i64;
+    import fn ctime(seconds : i64) -> string;
+    // file I/O: files are identified by handles (fopen returns 0 on failure) (restricted)
+    import fn fopen(path, mode : string) -> i32;
+    import fn fclose(file : i32) -> i32;
+    import fn fputs(s : string; file : i32) -> i32;
+    import fn fgets(file : i32) -> string;
+    import fn feof(file : i32) -> bool;
+    import fn fflush_file(file : i32) -> i32;
+    import fn remove(path : string) -> i32;
+    import fn rename(old_path, new_path : string) -> i32;
+    // processes and the environment (restricted)
+    import fn system(command : string) -> i32;
+    import fn setenv(name, value : string) -> i32;
+}

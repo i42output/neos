@@ -20,6 +20,9 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <chrono>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <boost/functional/hash.hpp>
@@ -41,6 +44,9 @@ namespace neos::language
         std::vector<std::string> sourcecodeModulePackageSpecificationFileExtension;
         std::vector<std::string> sourcecodeModulePackageImplementationFileExtension;
         std::size_t parserRecursionLimit = 256u;
+        std::vector<std::string> prelude; ///< packages implicitly imported by every (non-imported) source fragment
+        bool bigintPromotion = false;   ///< (meta: bigint.promotion) the language's integers are of any size: a result that overflows 
+                                        ///< is promoted to an arbitrary precision integer (e.g. Python's int); the compiler can override it
     };
 
     namespace code_parser
@@ -79,9 +85,13 @@ namespace neos::language
     public:
         static constexpr std::size_t RecursionLimit = 64u;
     public:
-        schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries);
+        schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries, bool aShowParseTimes = false, 
+            std::optional<std::string> const& aSource = {});   ///< (aSource: the schema's source (it is not read from aPath), e.g. one built in)
+    public:
+        static std::optional<std::string> find(std::string const& aSourceFileExtension); ///< (the path of the installed schema whose meta source.file.extension matches)
     public:
         std::string const& path() const;
+        std::chrono::steady_clock::duration parse_time() const; ///< (the time parsing the schema's grammars took)
         language::meta const& meta() const;
         language::pipeline const& pipeline() const;
     private:
@@ -94,5 +104,6 @@ namespace neos::language
         language::meta iMeta;
         language::pipeline iPipeline;
         const concept_libraries_t& iConceptLibraries;
+        std::chrono::steady_clock::duration iParseTime = {};
     };
 }

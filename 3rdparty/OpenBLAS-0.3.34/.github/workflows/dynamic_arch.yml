@@ -1,0 +1,738 @@
+name: continuous build
+
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read # to fetch code (actions/checkout)
+
+jobs:
+  build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS' || github.event_name == 'workflow_dispatch'"
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, ubuntu-24.04-arm]
+        cc: [gcc, clang, clang-21]
+        fortran: [gfortran, flang]
+        build: [cmake, make]
+        exclude:
+          - os: macos-latest
+            cc: gcc
+          - os: macos-latest
+            cc: clang-21
+          - os: macos-latest
+            fortran: flang
+          - os: ubuntu-24.04-arm
+            fortran: flang
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Print system information
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            cat /proc/cpuinfo
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            sysctl -a | grep machdep.cpu
+          else
+            echo "::error::$RUNNER_OS not supported"
+            exit 1
+          fi
+
+      - name: Install Dependencies
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            cat << EOF | sudo tee -a /etc/apt/apt.conf.d/01norecommend
+          APT::Install-Recommends "0";
+          APT::Install-Suggests "0";
+          EOF
+            sudo apt-get update
+            sudo apt-get install -y ccache
+            if [ "${{ matrix.cc }}" == "clang-21" ]; then
+                wget https://apt.llvm.org/llvm.sh
+                chmod +x llvm.sh
+                sudo ./llvm.sh 21
+            fi
+            if [ "${{ matrix.fortran }}" == "flang" ]; then
+              wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.2_amd64.deb
+              sudo apt install ./libtinfo5_6.3-2ubuntu0.2_amd64.deb
+            else
+              sudo apt-get install -y ${{ matrix.fortran }}
+            fi
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            # It looks like "gfortran" isn't working correctly unless "gcc" is re-installed.
+            brew reinstall gcc
+            brew install coreutils ccache
+          else
+            echo "::error::$RUNNER_OS not supported"
+            exit 1
+          fi
+
+      - name: Compilation cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          # We include the commit sha in the cache key, as new cache entries are
+          # only created if there is no existing entry for the key yet.
+          # GNU make and cmake call the compilers differently. It looks like
+          # that causes the cache to mismatch. Keep the ccache for both build
+          # tools separate to avoid polluting each other.
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build }}-${{ matrix.cc }}-${{ matrix.fortran }}-${{ github.ref }}-${{ github.sha }}
+          # Restore a matching ccache cache entry. Prefer same branch and same Fortran compiler.
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build }}-${{ matrix.cc }}-${{ matrix.fortran }}-${{ github.ref }}
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build }}-${{ matrix.cc }}-${{ matrix.fortran }}
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build }}-${{ matrix.cc }}
+
+      - name: Configure ccache
+        run: |
+          if [ "${{ matrix.build }}" = "make" ]; then
+            # Add ccache to path
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              echo "/usr/lib/ccache" >> $GITHUB_PATH
+            elif [ "$RUNNER_OS" = "macOS" ]; then
+              echo "$(brew --prefix)/opt/ccache/libexec" >> $GITHUB_PATH
+            else
+              echo "::error::$RUNNER_OS not supported"
+              exit 1
+            fi
+          fi
+          # Limit the maximum size and switch on compression to avoid exceeding the total disk or cache quota (5 GB).
+          test -d ~/.ccache || mkdir -p ~/.ccache
+          echo "max_size = 300M" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
+          ccache -s
+
+      - name: Add gfortran runtime to link path
+        if: matrix.build == 'make' && runner.os == 'macOS'
+        run: |
+          GFORTRAN_LIBDIR=$(gfortran -print-file-name=libgfortran.dylib | xargs dirname)
+          echo "Using gfortran runtime in $GFORTRAN_LIBDIR"
+          # Preserve whatever LDFLAGS may already contain
+          echo "LDFLAGS=${LDFLAGS:+$LDFLAGS }-L$GFORTRAN_LIBDIR" >> "$GITHUB_ENV"
+
+      - name: Build OpenBLAS
+        run: |
+          if [ "${{ matrix.fortran }}" = "flang" ]; then
+            # download and install classic flang
+            cd /usr/
+            sudo wget -nv https://github.com/flang-compiler/flang/releases/download/flang_20190329/flang-20190329-x86-70.tgz
+            sudo tar xf flang-20190329-x86-70.tgz
+            sudo rm flang-20190329-x86-70.tgz
+            cd -
+          fi
+          case "${{ matrix.build }}" in
+            "make")
+              make -j$(nproc) DYNAMIC_ARCH=1 USE_OPENMP=0 CC="ccache ${{ matrix.cc }}" FC="ccache ${{ matrix.fortran }}"
+              ;;
+            "cmake")
+              mkdir build && cd build
+              cmake -DDYNAMIC_ARCH=1 \
+                    -DNOFORTRAN=0 \
+                    -DBUILD_WITHOUT_LAPACK=0 \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+                    -DCMAKE_Fortran_COMPILER=${{ matrix.fortran }} \
+                    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                    -DCMAKE_Fortran_COMPILER_LAUNCHER=ccache \
+                    ..
+              cmake --build .
+              ;;
+            *)
+              echo "::error::Configuration not supported"
+              exit 1
+              ;;
+          esac
+
+      - name: Show ccache status
+        continue-on-error: true
+        run: ccache -s
+
+      - name: Run tests
+        timeout-minutes: 60
+        run: |
+          case "${{ matrix.build }}" in
+            "make")
+              MAKE_FLAGS='DYNAMIC_ARCH=1 USE_OPENMP=0'
+              echo "::group::Tests in 'test' directory"
+              make -C test $MAKE_FLAGS CC="ccache ${{ matrix.cc }}" FC="ccache ${{ matrix.fortran }}"
+              echo "::endgroup::"
+              echo "::group::Tests in 'ctest' directory"
+              make -C ctest $MAKE_FLAGS CC="ccache ${{ matrix.cc }}" FC="ccache ${{ matrix.fortran }}"
+              echo "::endgroup::"
+              echo "::group::Tests in 'utest' directory"
+              make -C utest $MAKE_FLAGS CC="ccache ${{ matrix.cc }}" FC="ccache ${{ matrix.fortran }}"
+              echo "::endgroup::"
+              ;;
+            "cmake")
+              cd build && ctest
+              ;;
+            *)
+              echo "::error::Configuration not supported"
+              exit 1
+              ;;
+          esac
+
+
+  msys2:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        msystem: [UCRT64, MINGW32, CLANG64]
+        idx: [int32, int64]
+        build-type: [Release]
+        include:
+          - msystem: UCRT64
+            idx: int32
+            target-prefix: mingw-w64-ucrt-x86_64
+            fc-pkg: mingw-w64-ucrt-x86_64-fc
+          - msystem: MINGW32
+            idx: int32
+            target-prefix: mingw-w64-i686
+            fc-pkg:
+          - msystem: CLANG64
+            idx: int32
+            target-prefix: mingw-w64-clang-x86_64
+            fc-pkg: mingw-w64-clang-x86_64-fc
+          - msystem: UCRT64
+            idx: int64
+            idx64-flags: -DBINARY=64 -DINTERFACE64=1
+            target-prefix: mingw-w64-ucrt-x86_64
+            fc-pkg: mingw-w64-ucrt-x86_64-fc
+          - msystem: CLANG64
+            idx: int64
+            idx64-flags: -DBINARY=64 -DINTERFACE64=1
+            target-prefix: mingw-w64-clang-x86_64
+            fc-pkg: mingw-w64-clang-x86_64-fc
+          - msystem: UCRT64
+            idx: int32
+            target-prefix: mingw-w64-ucrt-x86_64
+            fc-pkg: mingw-w64-ucrt-x86_64-fc
+            build-type: None
+        exclude:
+          - msystem: MINGW32
+            idx: int64
+
+    defaults:
+      run:
+        # Use MSYS2 bash as default shell
+        shell: msys2 {0}
+
+    env:
+      CHERE_INVOKING: 1
+
+    steps:
+      - name: Get CPU name
+        shell: pwsh
+        run : |
+          Get-CIMInstance -Class Win32_Processor | Select-Object -Property Name
+
+      - name: Install build dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          release: false  # Use pre-installed version
+          install: >-
+            base-devel
+            ${{ matrix.target-prefix }}-cc
+            ${{ matrix.fc-pkg }}
+            ${{ matrix.target-prefix }}-cmake
+            ${{ matrix.target-prefix }}-ninja
+            ${{ matrix.target-prefix }}-ccache
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Prepare ccache
+        # Get cache location of ccache
+        # Create key that is used in action/cache/restore and action/cache/save steps
+        id: ccache-prepare
+        run: |
+          echo "ccachedir=$(cygpath -m $(ccache -k cache_dir))" >> $GITHUB_OUTPUT
+          # We include the commit sha in the cache key, as new cache entries are
+          # only created if there is no existing entry for the key yet.
+          echo "key=ccache-msys2-${{ matrix.msystem }}-${{ matrix.idx }}-${{ matrix.build-type }}-${{ github.ref }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.ccache-prepare.outputs.ccachedir }}
+          key: ${{ steps.ccache-prepare.outputs.key }}
+          # Restore a matching ccache cache entry. Prefer same branch.
+          restore-keys: |
+            ccache-msys2-${{ matrix.msystem }}-${{ matrix.idx }}-${{ matrix.build-type }}-${{ github.ref }}
+            ccache-msys2-${{ matrix.msystem }}-${{ matrix.idx }}-${{ matrix.build-type }}
+
+      - name: Configure ccache
+        # Limit the maximum size and switch on compression to avoid exceeding the total disk or cache quota.
+        run: |
+          which ccache
+          test -d ${{ steps.ccache-prepare.outputs.ccachedir }} || mkdir -p ${{ steps.ccache-prepare.outputs.ccachedir }}
+          echo "max_size = 250M" > ${{ steps.ccache-prepare.outputs.ccachedir }}/ccache.conf
+          echo "compression = true" >> ${{ steps.ccache-prepare.outputs.ccachedir }}/ccache.conf
+          ccache -p
+          ccache -s
+          echo $HOME
+          cygpath -w $HOME
+
+      - name: Configure OpenBLAS
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
+                -DBUILD_SHARED_LIBS=ON \
+                -DBUILD_STATIC_LIBS=ON \
+                -DDYNAMIC_ARCH=ON \
+                -DUSE_THREAD=ON \
+                -DNUM_THREADS=64 \
+                -DTARGET=CORE2 \
+                ${{ matrix.idx64-flags }} \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_Fortran_COMPILER_LAUNCHER=ccache \
+                ..
+
+      - name: Build OpenBLAS
+        run: cd build && cmake --build .
+
+      - name: Show ccache status
+        continue-on-error: true
+        run: ccache -s
+
+      - name: Save ccache
+        # Save the cache after we are done (successfully) building
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.ccache-prepare.outputs.ccachedir }}
+          key: ${{ steps.ccache-prepare.outputs.key }}
+
+      - name: Run tests
+        id: run-ctest
+        timeout-minutes: 60
+        run: cd build && ctest
+
+      - name: Re-run tests
+        if: always() && (steps.run-ctest.outcome == 'failure')
+        timeout-minutes: 60
+        run: |
+          cd build
+          echo "::group::Re-run ctest"
+          ctest --rerun-failed --output-on-failure || true
+          echo "::endgroup::"
+          echo "::group::Log from these tests"
+          [ ! -f Testing/Temporary/LastTest.log ] || cat Testing/Temporary/LastTest.log
+          echo "::endgroup::"
+
+
+  linux_thread_stress:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    name: ${{ matrix.check-name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: pthread
+            check-name: "linux_thread_stress (pthread)"
+          - backend: openmp
+            check-name: "linux_thread_stress (openmp)"
+          - backend: tsan
+            check-name: linux_thread_sanitizer
+          - backend: tsan-openmp
+            check-name: linux_thread_sanitizer_openmp
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          cat << EOF | sudo tee -a /etc/apt/apt.conf.d/01norecommend
+          APT::Install-Recommends "0";
+          APT::Install-Suggests "0";
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y ccache cmake ninja-build
+          case "${{ matrix.backend }}" in
+            tsan|tsan-openmp) sudo apt-get install -y clang llvm ;;
+          esac
+          if [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+            sudo apt-get install -y libomp-dev
+          fi
+
+      - name: Compilation cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-thread-${{ matrix.backend }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-thread-${{ matrix.backend }}-${{ github.ref }}
+            ccache-${{ runner.os }}-thread-${{ matrix.backend }}
+
+      - name: Configure ccache
+        # Limit the maximum size and switch on compression to avoid exceeding the total disk or cache quota.
+        run: |
+          test -d ~/.ccache || mkdir -p ~/.ccache
+          echo "max_size = 250M" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
+          ccache -s
+
+      - name: Configure OpenBLAS
+        run: |
+          mkdir build && cd build
+          build_type=Release
+          c_compiler=gcc
+          cxx_compiler=g++
+          dynamic_arch=ON
+          use_openmp=OFF
+          cpp_thread_safety_use_openmp=ON
+          dgemm_args="512;12;4"
+          dgemm_mixed_args="524288;16;20"
+          dgemv_args="512;12;4"
+          sanitizer_flags=
+          if [ "${{ matrix.backend }}" = "openmp" ]; then
+            use_openmp=ON
+          elif [ "${{ matrix.backend }}" = "tsan" ] || [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+            build_type=RelWithDebInfo
+            c_compiler=clang
+            cxx_compiler=clang++
+            dynamic_arch=OFF
+            cpp_thread_safety_use_openmp=OFF
+            dgemm_args="64;4;1"
+            dgemm_mixed_args="131072;8;10"
+            dgemv_args="64;4;1"
+            sanitizer_flags="-fsanitize=thread -g -O1 -fno-omit-frame-pointer"
+            if [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+              use_openmp=ON
+              cpp_thread_safety_use_openmp=ON
+            fi
+          fi
+          cmake_args=(
+            -G Ninja
+            "-DCMAKE_BUILD_TYPE=$build_type"
+            "-DCMAKE_C_COMPILER=$c_compiler"
+            "-DCMAKE_CXX_COMPILER=$cxx_compiler"
+            -DBUILD_SHARED_LIBS=ON
+            -DBUILD_STATIC_LIBS=OFF
+            -DBUILD_WITHOUT_LAPACK=ON
+            -DBUILD_SINGLE=OFF
+            -DBUILD_DOUBLE=ON
+            -DBUILD_COMPLEX=OFF
+            -DBUILD_COMPLEX16=OFF
+            "-DDYNAMIC_ARCH=$dynamic_arch"
+            -DNOFORTRAN=ON
+            -DUSE_THREAD=ON
+            "-DUSE_OPENMP=$use_openmp"
+            -DNUM_THREADS=32
+            -DNUM_PARALLEL=2
+            -DTARGET=CORE2
+            -DCPP_THREAD_SAFETY_TEST=ON
+            "-DCPP_THREAD_SAFETY_USE_OPENMP=$cpp_thread_safety_use_openmp"
+            "-DCPP_THREAD_SAFETY_DGEMM_ARGS=$dgemm_args"
+            "-DCPP_THREAD_SAFETY_DGEMM_MIXED_ARGS=$dgemm_mixed_args"
+            "-DCPP_THREAD_SAFETY_DGEMV_ARGS=$dgemv_args"
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          )
+          if [ "${{ matrix.backend }}" = "tsan" ] || [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+            cmake_args+=(
+              "-DCMAKE_C_FLAGS=$sanitizer_flags"
+              "-DCMAKE_CXX_FLAGS=$sanitizer_flags"
+              -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread
+              -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+            )
+          fi
+          cmake "${cmake_args[@]}" ..
+
+      - name: Build OpenBLAS
+        run: |
+          cd build
+          cmake --build . --target dgemm_thread_safety dgemm_thread_safety_mixed dgemv_thread_safety
+
+      - name: Show ccache status
+        continue-on-error: true
+        run: ccache -s
+
+      - name: Run thread stress tests
+        timeout-minutes: 30
+        run: |
+          cd build
+          if [ "${{ matrix.backend }}" = "tsan" ] || [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+            export LLVM_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer
+            export TSAN_OPTIONS=halt_on_error=1:exitcode=66:second_deadlock_stack=1
+          fi
+          if [ "${{ matrix.backend }}" = "tsan-openmp" ]; then
+            # Load Archer (the OMPT tool from Ubuntu's libomp-dev) so TSan
+            # understands libomp's barriers instead of flagging them as false positives. The OpenMP runtime will load this tool automatically if OMP_TOOL_LIBRARIES is set.
+            archer=$(clang -print-file-name=libarcher.so)
+            [ -f "$archer" ] || archer=$(find /usr/lib/llvm-* -name libarcher.so 2>/dev/null | head -1)
+            if [ ! -f "$archer" ]; then
+              echo "::error::libarcher.so not found (expected from libomp-dev)"
+              exit 1
+            fi
+            echo "Using distro Archer: $archer"
+            export OMP_TOOL_LIBRARIES="$archer"
+            export TSAN_OPTIONS="$TSAN_OPTIONS:ignore_noninstrumented_modules=1"
+          fi
+          if [ "${{ matrix.backend }}" != "tsan" ]; then
+            export OMP_NUM_THREADS=16
+          fi
+          export OPENBLAS_NUM_THREADS=8
+          ctest -R 'dgemm_thread_safety|dgemm_thread_safety_mixed|dgemv_thread_safety' --output-on-failure
+
+
+  msys2_thread_stress:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    env:
+      CHERE_INVOKING: 1
+
+    steps:
+      - name: Get CPU name
+        shell: pwsh
+        run : |
+          Get-CIMInstance -Class Win32_Processor | Select-Object -Property Name
+
+      - name: Install build dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          release: false  # Use pre-installed version
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-cc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-ccache
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Prepare ccache
+        # Get cache location of ccache
+        # Create key that is used in action/cache/restore and action/cache/save steps
+        id: ccache-prepare
+        run: |
+          echo "ccachedir=$(cygpath -m $(ccache -k cache_dir))" >> $GITHUB_OUTPUT
+          # We include the commit sha in the cache key, as new cache entries are
+          # only created if there is no existing entry for the key yet.
+          echo "key=ccache-msys2-thread-stress-${{ github.ref }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.ccache-prepare.outputs.ccachedir }}
+          key: ${{ steps.ccache-prepare.outputs.key }}
+          # Restore a matching ccache cache entry. Prefer same branch.
+          restore-keys: |
+            ccache-msys2-thread-stress-${{ github.ref }}
+            ccache-msys2-thread-stress
+
+      - name: Configure ccache
+        # Limit the maximum size and switch on compression to avoid exceeding the total disk or cache quota.
+        run: |
+          which ccache
+          test -d ${{ steps.ccache-prepare.outputs.ccachedir }} || mkdir -p ${{ steps.ccache-prepare.outputs.ccachedir }}
+          echo "max_size = 250M" > ${{ steps.ccache-prepare.outputs.ccachedir }}/ccache.conf
+          echo "compression = true" >> ${{ steps.ccache-prepare.outputs.ccachedir }}/ccache.conf
+          ccache -p
+          ccache -s
+
+      - name: Configure OpenBLAS
+        run: |
+          mkdir build && cd build
+          cmake -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=ON \
+                -DBUILD_STATIC_LIBS=OFF \
+                -DBUILD_WITHOUT_LAPACK=ON \
+                -DBUILD_SINGLE=OFF \
+                -DBUILD_DOUBLE=ON \
+                -DBUILD_COMPLEX=OFF \
+                -DBUILD_COMPLEX16=OFF \
+                -DDYNAMIC_ARCH=OFF \
+                -DNOFORTRAN=ON \
+                -DUSE_THREAD=ON \
+                -DUSE_OPENMP=OFF \
+                -DNUM_THREADS=32 \
+                -DTARGET=CORE2 \
+                -DCPP_THREAD_SAFETY_TEST=ON \
+                -DCPP_THREAD_SAFETY_DGEMM_ARGS="384;8;4" \
+                -DCPP_THREAD_SAFETY_DGEMM_MIXED_ARGS="524288;16;20" \
+                -DCPP_THREAD_SAFETY_DGEMV_ARGS="384;8;4" \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                ..
+
+      - name: Build OpenBLAS
+        run: |
+          cd build
+          cmake --build . --target dgemm_thread_safety dgemm_thread_safety_mixed dgemv_thread_safety
+
+      - name: Show ccache status
+        continue-on-error: true
+        run: ccache -s
+
+      - name: Save ccache
+        # Save the cache after we are done (successfully) building
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.ccache-prepare.outputs.ccachedir }}
+          key: ${{ steps.ccache-prepare.outputs.key }}
+
+      - name: Run thread stress tests
+        timeout-minutes: 30
+        run: |
+          cd build
+          export PATH="$PWD/lib:$PATH"
+          OPENBLAS_NUM_THREADS=8 OMP_NUM_THREADS=16 ctest -R 'dgemm_thread_safety|dgemm_thread_safety_mixed|dgemv_thread_safety' --output-on-failure
+
+
+  cross_build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mips64el
+            triple: mips64el-linux-gnuabi64
+            opts: DYNAMIC_ARCH=1 TARGET=GENERIC
+          - target: riscv64
+            triple: riscv64-linux-gnu
+            opts: TARGET=RISCV64_GENERIC
+          - target: mipsel
+            triple: mipsel-linux-gnu
+            opts: TARGET=MIPS1004K
+          - target: alpha
+            triple: alpha-linux-gnu
+            opts: TARGET=EV4
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache gcc-${{ matrix.triple }} gfortran-${{ matrix.triple }} libgomp1-${{ matrix.target }}-cross
+
+      - name: Compilation cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ matrix.target }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.target }}-${{ github.ref }}
+            ccache-${{ runner.os }}-${{ matrix.target }}
+
+      - name: Configure ccache
+        run: |
+          # Limit the maximum size and switch on compression to avoid exceeding the total disk or cache quota (5 GB).
+          test -d ~/.ccache || mkdir -p ~/.ccache
+          echo "max_size = 300M" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
+          ccache -s
+
+
+      - name: Build OpenBLAS
+        run: |
+          make -j$(nproc) HOSTCC="ccache gcc" CC="ccache ${{ matrix.triple }}-gcc" FC="ccache ${{ matrix.triple }}-gfortran" ARCH=${{ matrix.target }} ${{ matrix.opts }}
+
+  neoverse_build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gfortran make
+
+      - name: Build OpenBLAS
+        run: |
+          make -j${nproc}
+          make -j${nproc} lapack-test
+
+  neoverse_n1_build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gfortran make
+
+      - name: Build OpenBLAS
+        run: |
+          make -j${nproc} TARGET=NEOVERSEN1
+          make -j${nproc} TARGET=NEOVERSEN1 lapack-test
+
+  neoverse_n1_omp_build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gfortran make
+
+      - name: Build OpenBLAS
+        run: |
+          make -j${nproc} TARGET=NEOVERSEN1 USE_OPENMP=1
+
+  neoverse_n1_ilp64_build:
+    if: "github.repository == 'OpenMathLib/OpenBLAS'"
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gfortran make
+
+      - name: Build OpenBLAS
+        run: |
+          make -j${nproc} TARGET=NEOVERSEN1 INTERFACE64=1
+          make -j${nproc} TARGET=NEOVERSEN1 INTERFACE64=1 lapack-test
