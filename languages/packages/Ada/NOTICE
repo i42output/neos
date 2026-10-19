@@ -1,0 +1,24 @@
+Third-party notices: the neos Ada packages (languages/packages/Ada)
+===================================================================
+
+The package specifications listed below are altered copies of the
+specifications of the Ada Reference Manual (ISO/IEC 8652:1995); each file's
+header marks its alterations. The other files in this directory are
+independently written.
+
+  Standard.ads         package Standard (RM A.1)
+  System.ads           package System (RM 13.7)
+  Ada.Text_IO.ads      package Ada.Text_IO (RM A.10.1)
+
+The Ada Reference Manual carries the following notice:
+
+  Copyright © 1992, 1993, 1994, 1995, Intermetrics, Inc.
+
+  This copyright is assigned to the U.S. Government. All rights reserved.
+
+  This document may be copied, in whole or in part, in any form or by any
+  means, as is or with alterations, provided that (1) alterations are clearly
+  marked as alterations and (2) this copyright notice is included unmodified
+  in any copy. Compiled copies of standard library units and examples need
+  not contain this copyright notice so long as the notice is included in all
+  copies of source code and documentation.
