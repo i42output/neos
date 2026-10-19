@@ -3,23 +3,37 @@
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
-  This program is free software: you can redistribute it and / or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 3 of the License, or
-  (at your option) any later version.
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
 
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
 
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
 
-  Portions of this file are derived from CPython 3.13 (Lib/posixpath.py, Lib/ntpath.py and Lib/genericpath.py), Copyright
-  (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation
-  License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the neos Python runtime
-  plugin and adapted to its object model (see runtime/python/NOTICE).
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  Portions of this file are derived from CPython 3.13 (Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py and
+  Modules/errnomodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
+  Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python and C to C++
+  for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
 
 // The modules os, os.path (posixpath and ntpath: CPython 3.13's algorithms) and stat
@@ -3054,9 +3068,240 @@ namespace neos::python_runtime
                     { "ETXTBSY", ETXTBSY },
 #endif
                 };
-                ref errorcode{ make_dict() };
-                for (auto const& c : sCodes)
+#if defined(_WIN32)
+                // (Windows: as CPython's errno: the codes that have Winsock equivalents are Winsock's (not the C runtime's), and Winsock's own
+                // codes (WSAE...))
+                static std::pair<char const*, int> const sWinsockCodes[] =
                 {
+#ifdef WSAEADDRINUSE
+                    { "EADDRINUSE", WSAEADDRINUSE },
+#endif
+#ifdef WSAEADDRNOTAVAIL
+                    { "EADDRNOTAVAIL", WSAEADDRNOTAVAIL },
+#endif
+#ifdef WSAEAFNOSUPPORT
+                    { "EAFNOSUPPORT", WSAEAFNOSUPPORT },
+#endif
+#ifdef WSAEALREADY
+                    { "EALREADY", WSAEALREADY },
+#endif
+#ifdef WSAECONNABORTED
+                    { "ECONNABORTED", WSAECONNABORTED },
+#endif
+#ifdef WSAECONNREFUSED
+                    { "ECONNREFUSED", WSAECONNREFUSED },
+#endif
+#ifdef WSAECONNRESET
+                    { "ECONNRESET", WSAECONNRESET },
+#endif
+#ifdef WSAEDESTADDRREQ
+                    { "EDESTADDRREQ", WSAEDESTADDRREQ },
+#endif
+#ifdef WSAEHOSTUNREACH
+                    { "EHOSTUNREACH", WSAEHOSTUNREACH },
+#endif
+#ifdef WSAEINPROGRESS
+                    { "EINPROGRESS", WSAEINPROGRESS },
+#endif
+#ifdef WSAEISCONN
+                    { "EISCONN", WSAEISCONN },
+#endif
+#ifdef WSAELOOP
+                    { "ELOOP", WSAELOOP },
+#endif
+#ifdef WSAEMSGSIZE
+                    { "EMSGSIZE", WSAEMSGSIZE },
+#endif
+#ifdef WSAENETDOWN
+                    { "ENETDOWN", WSAENETDOWN },
+#endif
+#ifdef WSAENETRESET
+                    { "ENETRESET", WSAENETRESET },
+#endif
+#ifdef WSAENETUNREACH
+                    { "ENETUNREACH", WSAENETUNREACH },
+#endif
+#ifdef WSAENOBUFS
+                    { "ENOBUFS", WSAENOBUFS },
+#endif
+#ifdef WSAENOPROTOOPT
+                    { "ENOPROTOOPT", WSAENOPROTOOPT },
+#endif
+#ifdef WSAENOTCONN
+                    { "ENOTCONN", WSAENOTCONN },
+#endif
+#ifdef WSAENOTSOCK
+                    { "ENOTSOCK", WSAENOTSOCK },
+#endif
+#ifdef WSAEOPNOTSUPP
+                    { "EOPNOTSUPP", WSAEOPNOTSUPP },
+#endif
+#ifdef WSAEPROTONOSUPPORT
+                    { "EPROTONOSUPPORT", WSAEPROTONOSUPPORT },
+#endif
+#ifdef WSAEPROTOTYPE
+                    { "EPROTOTYPE", WSAEPROTOTYPE },
+#endif
+#ifdef WSAETIMEDOUT
+                    { "ETIMEDOUT", WSAETIMEDOUT },
+#endif
+#ifdef WSAEWOULDBLOCK
+                    { "EWOULDBLOCK", WSAEWOULDBLOCK },
+#endif
+#ifdef WSAEHOSTDOWN
+                    { "WSAEHOSTDOWN", WSAEHOSTDOWN },
+#endif
+#ifdef WSAENETDOWN
+                    { "WSAENETDOWN", WSAENETDOWN },
+#endif
+#ifdef WSAENOTSOCK
+                    { "WSAENOTSOCK", WSAENOTSOCK },
+#endif
+#ifdef WSAEHOSTUNREACH
+                    { "WSAEHOSTUNREACH", WSAEHOSTUNREACH },
+#endif
+#ifdef WSAELOOP
+                    { "WSAELOOP", WSAELOOP },
+#endif
+#ifdef WSAEMFILE
+                    { "WSAEMFILE", WSAEMFILE },
+#endif
+#ifdef WSAESTALE
+                    { "WSAESTALE", WSAESTALE },
+#endif
+#ifdef WSAVERNOTSUPPORTED
+                    { "WSAVERNOTSUPPORTED", WSAVERNOTSUPPORTED },
+#endif
+#ifdef WSAENETUNREACH
+                    { "WSAENETUNREACH", WSAENETUNREACH },
+#endif
+#ifdef WSAEPROCLIM
+                    { "WSAEPROCLIM", WSAEPROCLIM },
+#endif
+#ifdef WSAEFAULT
+                    { "WSAEFAULT", WSAEFAULT },
+#endif
+#ifdef WSANOTINITIALISED
+                    { "WSANOTINITIALISED", WSANOTINITIALISED },
+#endif
+#ifdef WSAEUSERS
+                    { "WSAEUSERS", WSAEUSERS },
+#endif
+#ifdef WSAENOPROTOOPT
+                    { "WSAENOPROTOOPT", WSAENOPROTOOPT },
+#endif
+#ifdef WSAECONNABORTED
+                    { "WSAECONNABORTED", WSAECONNABORTED },
+#endif
+#ifdef WSAENAMETOOLONG
+                    { "WSAENAMETOOLONG", WSAENAMETOOLONG },
+#endif
+#ifdef WSAENOTEMPTY
+                    { "WSAENOTEMPTY", WSAENOTEMPTY },
+#endif
+#ifdef WSAESHUTDOWN
+                    { "WSAESHUTDOWN", WSAESHUTDOWN },
+#endif
+#ifdef WSAEAFNOSUPPORT
+                    { "WSAEAFNOSUPPORT", WSAEAFNOSUPPORT },
+#endif
+#ifdef WSAETOOMANYREFS
+                    { "WSAETOOMANYREFS", WSAETOOMANYREFS },
+#endif
+#ifdef WSAEACCES
+                    { "WSAEACCES", WSAEACCES },
+#endif
+#ifdef WSABASEERR
+                    { "WSABASEERR", WSABASEERR },
+#endif
+#ifdef WSAEMSGSIZE
+                    { "WSAEMSGSIZE", WSAEMSGSIZE },
+#endif
+#ifdef WSAEBADF
+                    { "WSAEBADF", WSAEBADF },
+#endif
+#ifdef WSAECONNRESET
+                    { "WSAECONNRESET", WSAECONNRESET },
+#endif
+#ifdef WSAETIMEDOUT
+                    { "WSAETIMEDOUT", WSAETIMEDOUT },
+#endif
+#ifdef WSAENOBUFS
+                    { "WSAENOBUFS", WSAENOBUFS },
+#endif
+#ifdef WSAEDISCON
+                    { "WSAEDISCON", WSAEDISCON },
+#endif
+#ifdef WSAEINTR
+                    { "WSAEINTR", WSAEINTR },
+#endif
+#ifdef WSAEPROTOTYPE
+                    { "WSAEPROTOTYPE", WSAEPROTOTYPE },
+#endif
+#ifdef WSAEADDRINUSE
+                    { "WSAEADDRINUSE", WSAEADDRINUSE },
+#endif
+#ifdef WSAEADDRNOTAVAIL
+                    { "WSAEADDRNOTAVAIL", WSAEADDRNOTAVAIL },
+#endif
+#ifdef WSAEALREADY
+                    { "WSAEALREADY", WSAEALREADY },
+#endif
+#ifdef WSAEPROTONOSUPPORT
+                    { "WSAEPROTONOSUPPORT", WSAEPROTONOSUPPORT },
+#endif
+#ifdef WSASYSNOTREADY
+                    { "WSASYSNOTREADY", WSASYSNOTREADY },
+#endif
+#ifdef WSAEWOULDBLOCK
+                    { "WSAEWOULDBLOCK", WSAEWOULDBLOCK },
+#endif
+#ifdef WSAEPFNOSUPPORT
+                    { "WSAEPFNOSUPPORT", WSAEPFNOSUPPORT },
+#endif
+#ifdef WSAEOPNOTSUPP
+                    { "WSAEOPNOTSUPP", WSAEOPNOTSUPP },
+#endif
+#ifdef WSAEISCONN
+                    { "WSAEISCONN", WSAEISCONN },
+#endif
+#ifdef WSAEDQUOT
+                    { "WSAEDQUOT", WSAEDQUOT },
+#endif
+#ifdef WSAENOTCONN
+                    { "WSAENOTCONN", WSAENOTCONN },
+#endif
+#ifdef WSAEREMOTE
+                    { "WSAEREMOTE", WSAEREMOTE },
+#endif
+#ifdef WSAEINVAL
+                    { "WSAEINVAL", WSAEINVAL },
+#endif
+#ifdef WSAEINPROGRESS
+                    { "WSAEINPROGRESS", WSAEINPROGRESS },
+#endif
+#ifdef WSAESOCKTNOSUPPORT
+                    { "WSAESOCKTNOSUPPORT", WSAESOCKTNOSUPPORT },
+#endif
+#ifdef WSAEDESTADDRREQ
+                    { "WSAEDESTADDRREQ", WSAEDESTADDRREQ },
+#endif
+#ifdef WSAECONNREFUSED
+                    { "WSAECONNREFUSED", WSAECONNREFUSED },
+#endif
+#ifdef WSAENETRESET
+                    { "WSAENETRESET", WSAENETRESET },
+#endif
+                };
+#endif
+                ref errorcode{ make_dict() };
+                for (auto c : sCodes)
+                {
+#if defined(_WIN32)
+                    for (auto const& w : sWinsockCodes)
+                        if (std::strcmp(w.first, c.first) == 0)
+                            c.second = w.second;
+#endif
                     aAttributes.emplace_back(c.first, make_int(c.second));
                     ref const code{ make_int(c.second) };
                     // (errorcode: the first name of a code (EAGAIN before EWOULDBLOCK, as CPython))
@@ -3066,6 +3311,19 @@ namespace neos::python_runtime
                         dict_set(errorcode.get(), code.get(), name.get());
                     }
                 }
+#if defined(_WIN32)
+                for (auto const& w : sWinsockCodes)
+                    if (std::strncmp(w.first, "WSA", 3u) == 0)
+                    {
+                        aAttributes.emplace_back(w.first, make_int(w.second));
+                        ref const code{ make_int(w.second) };
+                        if (dict_find(errorcode.get(), code.get()) < 0)
+                        {
+                            ref const name{ make_str(w.first) };
+                            dict_set(errorcode.get(), code.get(), name.get());
+                        }
+                    }
+#endif
                 aAttributes.emplace_back("errorcode", errorcode.release_ownership());
                 return true;
             }

@@ -3,18 +3,32 @@
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
-  This program is free software: you can redistribute it and / or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 3 of the License, or
-  (at your option) any later version.
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
 
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
 
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Lib/enum.py), Copyright (c) 2001-2024 Python Software Foundation;
   All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
@@ -1271,6 +1285,115 @@ namespace neos::python_runtime
 
             object* create_enum(object* aClass, object* aClassName, object* aNames, object* aModule, object* aQualname, object* aType, object* aStart, object* aBoundary);
 
+            // (EnumType._convert_ (enum.py's): an enumeration of cls's kind of the constants of a module (or of source) whose names pass filter, sorted
+            // by value (or, if their values cannot be ordered, by name); its members are exported to the module (or, as_global, by global_enum) and
+            // it is the module's variable name)
+            object* enum_convert(std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> a;
+                if (!self_arguments("_convert_", aArgs, aKwargs, { "name", "module", "filter", "source", "boundary", "as_global" }, 3u, 0u, a))
+                    return nullptr;
+                auto const cls = aArgs[0];
+                ref const modules{ module_attribute("sys", "modules") };
+                ref const module{ modules ? getitem(modules.get(), a[1]) : nullptr };
+                ref const moduleGlobals{ module ? getattr(module.get(), "__dict__") : nullptr };
+                if (!moduleGlobals)
+                    return nullptr;
+                ref source;
+                if (a[3] != nullptr && truth(a[3]) == 1)
+                    source = ref{ getattr(a[3], "__dict__") };
+                else
+                    source = ref{ (retain(moduleGlobals.get()), moduleGlobals.get()) };
+                ref const items{ source ? call_method_named(source.get(), "items", {}) : nullptr };
+                std::vector<object*> pairs;
+                if (!items || !collect(items.get(), pairs))
+                    return nullptr;
+                std::vector<ref> members;
+                for (auto p : pairs)
+                {
+                    ref const pair{ p };
+                    auto const& item = tuple_items(pair.get());
+                    ref const filterArgs{ make_tuple({ (retain(item[0]), item[0]) }) };
+                    ref const passed{ call(a[2], filterArgs.get(), nullptr) };
+                    if (!passed)
+                        return nullptr;
+                    auto const t = truth(passed.get());
+                    if (t < 0)
+                        return nullptr;
+                    if (t == 1)
+                        members.emplace_back(make_tuple({ (retain(item[0]), item[0]), (retain(item[1]), item[1]) }));
+                }
+                // (sort by value (then name); unless some values aren't comparable, in which case sort by name)
+                bool comparable = true;
+                ref pending;    ///< (an exception (not TypeError) that a comparison raised)
+                auto const less = [&](ref const& aLhs, ref const& aRhs, bool aByValue) -> bool
+                {
+                    if (!comparable && aByValue)
+                        return false;
+                    auto const& l = tuple_items(aLhs.get());
+                    auto const& r = tuple_items(aRhs.get());
+                    if (aByValue)
+                    {
+                        ref const lt{ compare(NEOS_PY_LT, l[1], r[1]) };
+                        ref const gt{ lt ? compare(NEOS_PY_LT, r[1], l[1]) : nullptr };
+                        if (!lt || !gt)
+                        {
+                            ref e{ take_exception() };
+                            if (!exception_is(e.get(), "TypeError"))
+                                pending = std::move(e);
+                            comparable = false;
+                            return false;
+                        }
+                        if (truth(lt.get()) == 1)
+                            return true;
+                        if (truth(gt.get()) == 1)
+                            return false;
+                    }
+                    ref const nameLt{ compare(NEOS_PY_LT, l[0], r[0]) };
+                    return nameLt && truth(nameLt.get()) == 1;
+                };
+                auto sorted = members;
+                std::stable_sort(sorted.begin(), sorted.end(), [&](ref const& aLhs, ref const& aRhs) { return less(aLhs, aRhs, true); });
+                if (pending)
+                {
+                    reraise_exception(pending.get());
+                    return nullptr;
+                }
+                if (!comparable)
+                {
+                    sorted = members;
+                    std::stable_sort(sorted.begin(), sorted.end(), [&](ref const& aLhs, ref const& aRhs) { return less(aLhs, aRhs, false); });
+                }
+                if (failed())
+                    return nullptr;
+                std::vector<object*> names;
+                for (auto const& m : sorted)
+                    names.push_back((retain(m.get()), m.get()));
+                ref const nameList{ make_list(std::move(names)) };
+                ref result{ create_enum(cls, a[0], nameList.get(), a[1], nullptr, nullptr, nullptr, a[4] != nullptr && truth(a[4]) == 1 ? a[4] : s.keep) };
+                if (!result)
+                    return nullptr;
+                if (a[5] != nullptr && truth(a[5]) == 1)
+                {
+                    ref const globalEnum{ module_attribute("enum", "global_enum") };
+                    ref const globalArgs{ make_tuple({ (retain(result.get()), result.get()) }) };
+                    if (!globalEnum || !ref{ call(globalEnum.get(), globalArgs.get(), nullptr) })
+                        return nullptr;
+                }
+                else
+                {
+                    ref const resultModule{ getattr(result.get(), "__module__") };
+                    ref const target{ resultModule ? getitem(modules.get(), resultModule.get()) : nullptr };
+                    ref const targetDict{ target ? getattr(target.get(), "__dict__") : nullptr };
+                    ref const memberMap{ targetDict ? getattr(result.get(), "__members__") : nullptr };
+                    if (!memberMap || !ref{ call_method_named(targetDict.get(), "update", { (retain(memberMap.get()), memberMap.get()) }) })
+                        return nullptr;
+                }
+                if (setitem(moduleGlobals.get(), a[0], result.get()) < 0)
+                    return nullptr;
+                return result.release_ownership();
+            }
+
             builtin_entry const sEnumTypeMethods[] =
             {
                 { "__new__", enum_type_new },
@@ -1378,6 +1501,8 @@ namespace neos::python_runtime
                     } },
                 { "__dir__", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
+                        if (aArgs.empty())
+                            return raise("TypeError", "EnumType.__dir__() missing 1 required positional argument: 'cls'");
                         auto const cls = aArgs[0];
                         std::set<std::string> interesting = { "__class__", "__contains__", "__doc__", "__getitem__", "__iter__", "__len__", "__members__", "__module__",
                             "__name__", "__qualname__" };
@@ -1447,7 +1572,8 @@ namespace neos::python_runtime
                         if (aArgs.size() != 3u)
                             return raise("TypeError", "_add_member_() takes 2 positional arguments");
                         return add_member(aArgs[0], aArgs[1], aArgs[2]) ? new_reference(none()) : nullptr;
-                    } }
+                    } },
+                { "_convert_", enum_convert }
             };
 
             builtin_entry const sEnumTypeClassMethods[] =
@@ -1756,6 +1882,8 @@ namespace neos::python_runtime
                     } },
                 { "__dir__", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
+                        if (aArgs.empty())
+                            return raise("TypeError", "Enum.__dir__() missing 1 required positional argument: 'self'");
                         auto const self = aArgs[0];
                         ref const cls{ class_of(self) };
                         std::set<std::string> interesting = { "__class__", "__doc__", "__eq__", "__hash__", "__module__" };

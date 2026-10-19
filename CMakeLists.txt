@@ -357,6 +357,9 @@ target_compile_definitions(python PRIVATE Z_PREFIX)
 target_include_directories(python PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/python/include")
 target_include_directories(python PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/python/include") # (the names of Unicode's characters)
 target_link_libraries(python PRIVATE neonumeric::neonumeric) # (ints beyond 64 bits)
+if(WIN32)
+    target_link_libraries(python PRIVATE ws2_32) # (Winsock: the modules select and socket)
+endif()
 
 # OpenBLAS (the NumPy runtime plugin's BLAS): the bundled source (3rdparty/OpenBLAS-0.3.34) built (a static library) as
 # NumPy's (scipy-openblas) is: 64-bit integers, kernels for the same CPUs chosen at run time, threads, LAPACK from C (no

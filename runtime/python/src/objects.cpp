@@ -3,18 +3,32 @@
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
-  This program is free software: you can redistribute it and / or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation, either version 3 of the License, or
-  (at your option) any later version.
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
 
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
 
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Objects/floatobject.c, Objects/complexobject.c,
   Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Python/bltinmodule.c,
@@ -5620,12 +5634,21 @@ namespace neos::python_runtime
                     aResult += " (" + std::to_string(n) + (n == 1u ? " sub-exception)" : " sub-exceptions)");
                     return true;
                 }
-            // (OSError(errno, strerror[, filename[, winerror[, filename2]]]): "[Errno n] strerror: 'filename'")
+            // (OSError(errno, strerror[, filename[, winerror[, filename2]]]): "[Errno n] strerror: 'filename'" (Windows: a winerror: "[WinError n] ..."))
             if (e.args.size() >= 2u && kind_of(e.args[0]) == NEOS_PY_INT && is_exception_subclass(e.type, "OSError"))
             {
                 std::string number, message;
                 if (!str_of(e.args[0], number) || !str_of(e.args[1], message))
                     return false;
+#if defined(_WIN32)
+                if (e.args.size() >= 4u && kind_of(e.args[3]) == NEOS_PY_INT)
+                {
+                    if (!str_of(e.args[3], number))
+                        return false;
+                    aResult = "[WinError " + number + "] " + message;
+                }
+                else
+#endif
                 aResult = "[Errno " + number + "] " + message;
                 if (e.args.size() >= 3u && kind_of(e.args[2]) != NEOS_PY_NONE)
                 {
@@ -5771,6 +5794,11 @@ namespace neos::python_runtime
                     return (retain(none()), none());
                 return argument(aName[0] == 'e' ? 0u : aName[0] == 's' ? 1u : aName[8] == '2' ? 4u : 2u);
             }
+#if defined(_WIN32)
+            // (Windows: OSError's winerror (its fourth argument))
+            if (is_exception_subclass(e.type, "OSError") && std::strcmp(aName, "winerror") == 0)
+                return e.args.size() >= 4u ? argument(3u) : (retain(none()), none());
+#endif
             if (is_exception_subclass(e.type, "ImportError") && (std::strcmp(aName, "name") == 0 || std::strcmp(aName, "path") == 0 || 
                 std::strcmp(aName, "msg") == 0 || std::strcmp(aName, "name_from") == 0))
                 return std::strcmp(aName, "msg") == 0 && e.args.size() == 1u ? argument(0u) : (retain(none()), none());
@@ -7539,7 +7567,7 @@ namespace neos::python_runtime
         };
 
         struct bound_method_object { header h; object* function; object* self; ~bound_method_object() { release(function); release(self); } };
-        struct wrapper_object { header h; int kind; object* function; object* setter; object* deleter = nullptr; ~wrapper_object() { release(function); release(setter); release(deleter); } };   // (staticmethod, classmethod or property)
+        struct wrapper_object { header h; int kind; object* function; object* setter; object* deleter = nullptr; object* doc = nullptr; ~wrapper_object() { release(function); release(setter); release(deleter); release(doc); } };   // (staticmethod, classmethod or property (doc: its __doc__, if given or set))
         struct super_object { header h; object* cls; object* self; ~super_object() { release(cls); release(self); } };
 
         enum : int { StaticMethod, ClassMethod, Property, CachedProperty };
@@ -9758,6 +9786,8 @@ namespace neos::python_runtime
                         for (auto f : functions)
                             retain(f);
                         auto* const copy = new wrapper_object{ { { &sWrapperType.base } }, Property, functions[0], functions[1], functions[2] };
+                        if (p.doc != nullptr)
+                            copy->doc = (retain(p.doc), p.doc);
                         return &copy->h.base;
                     }, const_cast<int*>(which), aSelf);
                 }
@@ -9791,6 +9821,9 @@ namespace neos::python_runtime
                     return (retain(w.function), w.function);
                 if (std::strcmp(aName, "fset") == 0)
                     return w.setter != nullptr ? (retain(w.setter), w.setter) : none();
+                // (a property's doc: its own (given or set), if it has one)
+                if (std::strcmp(aName, "__doc__") == 0 && w.kind == Property && w.doc != nullptr)
+                    return (retain(w.doc), w.doc);
                 // (its doc and name: its function's)
                 if (std::strcmp(aName, "__doc__") == 0 || (std::strcmp(aName, "__name__") == 0 && w.kind != StaticMethod && w.kind != ClassMethod) ||
                     (std::strcmp(aName, "__wrapped__") == 0 && (w.kind == StaticMethod || w.kind == ClassMethod)))
@@ -9805,6 +9838,20 @@ namespace neos::python_runtime
                     return (retain(none()), none());
                 }
                 return error("AttributeError", "'property' object has no attribute '" + std::string{ aName } + "'");
+            };
+            // (a property's __doc__ can be set (e.g. collections.namedtuple's fields'))
+            type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
+            {
+                auto& w = *as<wrapper_object>(aSelf);
+                if (w.kind == Property && std::strcmp(aName, "__doc__") == 0)
+                {
+                    retain(aValue);
+                    release(w.doc);
+                    w.doc = aValue;
+                    return 0;
+                }
+                error("AttributeError", "'property' object attribute '" + std::string{ aName } + "' is read-only");
+                return -1;
             };
             type.call = [](neos_py_context*, object* aSelf, object* aArgs, object* aKwargs) -> object*
             {
@@ -9822,6 +9869,9 @@ namespace neos::python_runtime
                 return error("TypeError", std::string{ aName } + " expected 1 argument, got " + std::to_string(aArgs.size()));
             auto const function = [&](std::size_t i) -> object* { return i < aArgs.size() && kind_of(aArgs[i]) != NEOS_PY_NONE ? (retain(aArgs[i]), aArgs[i]) : nullptr; };
             auto* const w = new wrapper_object{ { { &sWrapperType.base } }, aKind, aArgs.empty() ? (retain(none()), none()) : (retain(aArgs[0]), aArgs[0]), function(1u), function(2u) };
+            // (property(fget, fset, fdel, doc): its doc)
+            if (aKind == Property)
+                w->doc = function(3u);
             return &w->h.base;
         }
 
