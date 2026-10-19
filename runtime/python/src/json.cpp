@@ -15,6 +15,11 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from CPython 3.13 (Modules/_json.c), Copyright (c) 2001-2024 Python Software
+  Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
+  object model (see runtime/python/NOTICE).
 */
 
 // The module json (CPython 3.13's encoder and decoder: their output, options and messages)

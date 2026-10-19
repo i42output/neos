@@ -15,6 +15,24 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from V8 (src/numbers/conversions.cc: DoubleToRadixCString, now
+  DoubleToRadixStringView), Copyright 2011 the V8 project authors. All rights reserved. They are used under V8's
+  BSD-style licence (see include/neos/bytecode/LICENSE.v8). Changes: translated to C++ for the neos JavaScript compiler
+  (see compilers/javascript/NOTICE).
+
+  cbrt is derived from FreeBSD's msun (lib/msun/src/s_cbrt.c), which carries this notice:
+
+    ====================================================
+    Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+    Developed at SunPro, a Sun Microsystems, Inc. business.
+    Permission to use, copy, modify, and distribute this
+    software is freely granted, provided that this notice
+    is preserved.
+    ====================================================
+
+    Optimized by Bruce D. Evans.
 */
 
 #pragma once

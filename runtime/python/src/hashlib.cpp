@@ -15,6 +15,11 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Its BLAKE2b and BLAKE2s implementation is derived from Markku-Juhani O. Saarinen's BLAKE2 reference implementation
+  (RFC 7693, Appendix C; https://github.com/mjosaarinen/blake2_mjosref), dedicated to the public domain under CC0 1.0
+  Universal. Changes: translated to C++ (a template for both variants), with BLAKE2's salt and personalization added
+  (see runtime/python/NOTICE).
 */
 
 // The module hashlib: MD5, SHA-1, SHA-2, SHA-3 (and SHAKE), BLAKE2b and BLAKE2s (their reference algorithms), and pbkdf2_hmac

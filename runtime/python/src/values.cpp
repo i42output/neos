@@ -15,6 +15,11 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from CPython 3.13 (Python/ceval.c), Copyright (c) 2001-2024 Python Software
+  Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
+  object model (see runtime/python/NOTICE).
 */
 
 // Functions whose bodies are C++ (values.hpp's make_native_function): e.g. the closures that the modules of the standard library that CPython 

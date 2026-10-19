@@ -15,6 +15,11 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from CPython 3.13 (Objects/floatobject.c), Copyright (c) 2001-2024 Python Software
+  Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: its float floor division and modulo (_float_div_mod) translated from C to the
+  neos compiler's generated code (see runtime/python/NOTICE).
 */
 
 #include <neolib/neolib.hpp>

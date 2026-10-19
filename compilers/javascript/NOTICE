@@ -1,0 +1,29 @@
+Third-party notices: the neos JavaScript compiler (compilers/javascript)
+========================================================================
+
+V8 (include/neos/language/ecmascript.hpp)
+-----------------------------------------
+
+number_to_string(double, int) (Number.prototype.toString with a radix) is
+derived from V8's DoubleToRadixCString (now DoubleToRadixStringView;
+src/numbers/conversions.cc), Copyright 2011 the V8 project authors. All rights
+reserved. It is used under V8's BSD-style licence, whose text is in
+include/neos/bytecode/LICENSE.v8. Changes: translated to C++.
+
+
+fdlibm (include/neos/language/ecmascript.hpp)
+---------------------------------------------
+
+cbrt is derived from FreeBSD's msun (lib/msun/src/s_cbrt.c), which carries
+this notice:
+
+  ====================================================
+  Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+  Developed at SunPro, a Sun Microsystems, Inc. business.
+  Permission to use, copy, modify, and distribute this
+  software is freely granted, provided that this notice
+  is preserved.
+  ====================================================
+
+  Optimized by Bruce D. Evans.

@@ -15,6 +15,13 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from CPython 3.13 (Objects/floatobject.c, Objects/complexobject.c,
+  Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Python/bltinmodule.c,
+  Python/pyhash.c, Modules/mathmodule.c and Modules/cmathmodule.c), Copyright (c) 2001-2024 Python Software Foundation;
+  All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
+  object model (see runtime/python/NOTICE).
 */
 
 /*

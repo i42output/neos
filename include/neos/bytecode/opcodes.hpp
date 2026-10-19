@@ -21,7 +21,7 @@
   The opcode tables in this file have been generated from Chromium
   V8 source code ("v8\src\wasm\wasm-opcodes.h")
   Copyright 2006-2011, the V8 project authors (see LICENSE and 
-  LICENSE.V8 files in this file's directory.
+  LICENSE.v8 files in this file's directory.
 */
 
 #pragma once

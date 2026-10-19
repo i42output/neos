@@ -15,6 +15,11 @@
 
   You should have received a copy of the GNU General Public License
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+  Portions of this file are derived from CPython 3.13 (Lib/traceback.py and Parser/lexer/lexer.c), Copyright (c)
+  2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License
+  Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C and Python to C++ for the neos Python compiler
+  (see runtime/python/NOTICE).
 */
 
 // A module's syntax errors as CPython 3.13 reports them: those of its tokenizer (strings, brackets, indentation), of its parser (that the
