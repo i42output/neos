@@ -37,7 +37,7 @@
 */
 
 // Files: open() and the io module (CPython 3.13's: text files (universal newlines; encodings: see bytes.cpp), binary
-// files, StringIO and BytesIO), and the standard streams (sys.stdin, sys.stdout and sys.stderr)
+// files, StringIO and BytesIO (its classes: see pyio.cpp)), and the standard streams (sys.stdin, sys.stdout and sys.stderr)
 
 #include <algorithm>
 #include <cctype>
@@ -114,6 +114,8 @@ namespace neos::python_runtime
             raise_exception(e.get());
             return nullptr;
         }
+
+        bool pyio_attributes(std::vector<std::pair<std::string, object*>>& aAttributes);   // (the io module's classes (pyio.cpp))
 
         namespace
         {
@@ -1177,10 +1179,7 @@ namespace neos::python_runtime
                 if (!is_exception_class("io.UnsupportedOperation"))
                     user_exception_bases()["io.UnsupportedOperation"] = { "OSError", "ValueError" };
                 aAttributes.emplace_back("UnsupportedOperation", exception_class("io.UnsupportedOperation"));
-                aAttributes.emplace_back("TextIOWrapper", type_object_for("TextIOWrapper", "_io.TextIOWrapper"));
-                aAttributes.emplace_back("BufferedReader", type_object_for("BufferedReader", "_io.BufferedReader"));
-                aAttributes.emplace_back("BufferedWriter", type_object_for("BufferedWriter", "_io.BufferedWriter"));
-                return true;
+                return pyio_attributes(aAttributes);
             }
 
             inline bool const sIO = register_module("io", io_module);

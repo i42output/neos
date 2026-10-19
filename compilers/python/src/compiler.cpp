@@ -7606,6 +7606,114 @@ namespace neos::compilers::python
             put_i32(aFragment, aMarker);
             put(aFragment, opcode::Drop);
         }
+
+        // (the locals that code gets, sets or tees (decoded as py_error_checks decodes a function's body): none if it cannot be decoded)
+        std::set<std::uint32_t> local_references(fragment const& aCode)
+        {
+            std::set<std::uint32_t> result;
+            auto const& code = aCode.fragmentCode;
+            std::size_t p = 0u;
+            auto const leb = [&]() -> std::uint64_t
+            {
+                std::uint64_t value = 0u;
+                for (std::uint32_t shift = 0u; p < code.size(); shift += 7u)
+                {
+                    auto const b = code[p++];
+                    if (shift < 64u)
+                        value |= static_cast<std::uint64_t>(b & 0x7Fu) << shift;
+                    if ((b & 0x80u) == 0u)
+                        break;
+                }
+                return value;
+            };
+            auto const relocated = [&](std::size_t aAt)
+            {
+                for (auto const& r : aCode.fragmentRelocations)
+                    if (r.first() == aAt)
+                        return true;
+                return false;
+            };
+            while (p < code.size())
+            {
+                auto const start = p;
+                auto const op = code[p++];
+                switch (op)
+                {
+                case 0x02u: case 0x03u: case 0x04u:
+                    {
+                        if (p >= code.size())
+                            return {};
+                        auto const blockType = code[p];
+                        if (blockType == 0x40u || (blockType >= 0x7Bu && blockType <= 0x7Fu) || blockType == 0x70u || blockType == 0x6Fu)
+                            ++p;
+                        else
+                            leb();
+                    }
+                    break;
+                case 0x0Cu: case 0x0Du:
+                    leb();
+                    break;
+                case 0x0Eu:
+                    for (auto n = leb() + 1u; n > 0u; --n)
+                        leb();
+                    break;
+                case 0x10u:
+                    // (a relocation's index is 5 bytes: zero until the module is emitted)
+                    if (relocated(start + 1u))
+                        p = start + 6u;
+                    else
+                        leb();
+                    break;
+                case 0x11u:
+                    leb(); leb();
+                    break;
+                case 0x20u: case 0x21u: case 0x22u:
+                    result.insert(static_cast<std::uint32_t>(leb()));
+                    break;
+                case 0x23u: case 0x24u:
+                    leb();
+                    break;
+                case 0x3Fu: case 0x40u:
+                    ++p;
+                    break;
+                case 0x41u:
+                    if (relocated(start + 1u))
+                        p = start + 6u;
+                    else
+                        leb();
+                    break;
+                case 0x42u:
+                    leb();
+                    break;
+                case 0x43u:
+                    p += 4u;
+                    break;
+                case 0x44u:
+                    p += 8u;
+                    break;
+                case 0xFCu:
+                    {
+                        auto const sub = leb();
+                        if (sub == 8u) { leb(); ++p; }
+                        else if (sub == 9u) leb();
+                        else if (sub == 10u) p += 2u;
+                        else if (sub == 11u) ++p;
+                        else if (sub > 7u)
+                            return {};
+                    }
+                    break;
+                default:
+                    if (op >= 0x28u && op <= 0x3Eu)
+                    {
+                        leb(); leb();
+                    }
+                    else if (!(op <= 0x01u || op == 0x05u || op == 0x0Bu || op == 0x0Fu || op == 0x1Au || op == 0x1Bu || (op >= 0x45u && op <= 0xC4u)))
+                        return {};
+                    break;
+                }
+            }
+            return result;
+        }
     }
 
     std::uint32_t compiler::py_depth_global()
@@ -7663,6 +7771,29 @@ namespace neos::compilers::python
         }
     }
 
+    fragment compiler::py_release_temporaries(fragment const& aCode, std::optional<std::uint32_t> aExcept)
+    {
+        // the object temporaries that code uses (except aExcept): released (and zeroed) if they hold objects
+        auto result = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+        if (!in_function())
+            return result;
+        auto const& temporaries = py_function().objectTemporaries;
+        auto const release = runtime_function("neos::object_release", { type::Object }, type::Void);
+        for (auto const t : local_references(aCode))
+        {
+            if (!temporaries.contains(t) || t == aExcept)
+                continue;
+            put_local(result, opcode::LocalGet, t);
+            put_block(result, opcode::If, {});
+            put_local(result, opcode::LocalGet, t);
+            emit_call_to(result, release);
+            put_i32(result, 0);
+            put_local(result, opcode::LocalSet, t);
+            put(result, opcode::End);
+        }
+        return result;
+    }
+
     void compiler::py_try(i_indented_construct const& aView, fragment& aStatement)
     {
         auto aConstruct = parts_of(aView);
@@ -7699,6 +7830,9 @@ namespace neos::compilers::python
         put(aStatement, opcode::Br);
         put_u32(aStatement.fragmentCode.as_std_vector(), 1u);
         put(aStatement, opcode::End);
+        // (an exception: the temporaries of the body's statement that raised it are released (and zeroed), as that statement's end would
+        // have released them (the statements after the handler reuse them))
+        append(aStatement, py_release_temporaries(aConstruct.arms[0]));
         // (an exception: the handlers)
         auto const exception = temporary(type::I32);
         py_function().objectTemporaries.insert(exception);
@@ -7858,6 +7992,9 @@ namespace neos::compilers::python
         put_marker(aStatement, HandlerMarker);
         append_nested(aStatement, aConstruct.arms[0], 1u);
         put(aStatement, opcode::End);
+        // (an exception: the temporaries of the body's statement that raised it are released (and zeroed), as that statement's end would
+        // have released them (the statements after the with statement reuse them if the manager suppresses it))
+        append(aStatement, py_release_temporaries(aConstruct.arms[0], manager));
         // (the manager's exit: an exception that it does not suppress propagates)
         auto const pending = temporary(type::I32);
         put_local(aStatement, opcode::GlobalGet, error);
@@ -8203,44 +8340,48 @@ namespace neos::compilers::python
             put_op(result, opcode::Unreachable);
         put_op(result, opcode::End);
         // (an exception: the function's objects are released)
-        auto const release = runtime_function("neos::object_release", { type::Object }, type::Void);
-        std::set<std::uint32_t> objects{ aFunction.objectVariables.begin(), aFunction.objectVariables.end() };
-        objects.insert(aFunction.objectTemporaries.begin(), aFunction.objectTemporaries.end());
-        for (auto const local : objects)
+        auto const putReleases = [&]()
         {
-            put_op(result, opcode::LocalGet);
-            put_u32(result, local);
-            put_op(result, opcode::CallFunction);
-            relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
-            result.resize(result.size() + 5u);
-        }
-        // (and its ints' integer objects)
-        for (auto const local : std::set<std::uint32_t>{ aFunction.integerVariables.begin(), aFunction.integerVariables.end() })
-        {
-            put_op(result, opcode::LocalGet);
-            put_u32(result, local);
-            put_op(result, opcode::I64Const);
-            put_s64(result, 1);
-            put_op(result, opcode::I64And);
-            put_op(result, opcode::I32ConvertI64);
-            put_op(result, opcode::If);
-            result.push_back(0x40u);
-            put_op(result, opcode::LocalGet);
-            put_u32(result, local);
-            put_op(result, opcode::I64Const);
-            put_s64(result, 1);
-            put_op(result, opcode::I64ShrU);
-            put_op(result, opcode::I32ConvertI64);
-            put_op(result, opcode::CallFunction);
-            relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
-            result.resize(result.size() + 5u);
-            put_op(result, opcode::End);
-        }
+            auto const release = runtime_function("neos::object_release", { type::Object }, type::Void);
+            std::set<std::uint32_t> objects{ aFunction.objectVariables.begin(), aFunction.objectVariables.end() };
+            objects.insert(aFunction.objectTemporaries.begin(), aFunction.objectTemporaries.end());
+            for (auto const local : objects)
+            {
+                put_op(result, opcode::LocalGet);
+                put_u32(result, local);
+                put_op(result, opcode::CallFunction);
+                relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
+                result.resize(result.size() + 5u);
+            }
+            // (and its ints' integer objects)
+            for (auto const local : std::set<std::uint32_t>{ aFunction.integerVariables.begin(), aFunction.integerVariables.end() })
+            {
+                put_op(result, opcode::LocalGet);
+                put_u32(result, local);
+                put_op(result, opcode::I64Const);
+                put_s64(result, 1);
+                put_op(result, opcode::I64And);
+                put_op(result, opcode::I32ConvertI64);
+                put_op(result, opcode::If);
+                result.push_back(0x40u);
+                put_op(result, opcode::LocalGet);
+                put_u32(result, local);
+                put_op(result, opcode::I64Const);
+                put_s64(result, 1);
+                put_op(result, opcode::I64ShrU);
+                put_op(result, opcode::I32ConvertI64);
+                put_op(result, opcode::CallFunction);
+                relocations.emplace_back(static_cast<std::uint32_t>(result.size()), release);
+                result.resize(result.size() + 5u);
+                put_op(result, opcode::End);
+            }
+        };
         if (aFunction.entry && !py_exec_mode())
         {
             // (an exception that the program does not handle: reported (as CPython reports it (SystemExit: the status it 
             // exits with)) and the program exits; it is no longer the program's error (the report may call the program's 
-            // functions, e.g. sys.excepthook))
+            // functions, e.g. sys.excepthook); the program's objects are released after the report (as CPython finalizes
+            // its modules after it): a __del__ that they run does not precede it)
             put_op(result, opcode::GlobalGet);
             put_u32(result, error);
             put_op(result, opcode::I32Const);
@@ -8250,10 +8391,13 @@ namespace neos::compilers::python
             put_op(result, opcode::CallFunction);
             relocations.emplace_back(static_cast<std::uint32_t>(result.size()), runtime_function("python::unhandled", { type::String }, type::I32));
             result.resize(result.size() + 5u);
+            putReleases();
             put_op(result, opcode::CallFunction);
             relocations.emplace_back(static_cast<std::uint32_t>(result.size()), runtime_function("neos::exit", { type::I32 }, type::Void));
             result.resize(result.size() + 5u);
         }
+        else
+            putReleases();
         if (resultType != type::Void)
         {
             auto const t = wasm_type(resultType).value_or(0x7Fu);

@@ -31,9 +31,9 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Objects/floatobject.c, Objects/complexobject.c,
-  Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Python/bltinmodule.c,
-  Python/pyhash.c, Modules/mathmodule.c and Modules/cmathmodule.c), Copyright (c) 2001-2024 Python Software Foundation;
-  All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  Objects/longobject.c, Objects/rangeobject.c, Objects/sliceobject.c, Objects/tupleobject.c, Objects/exceptions.c,
+  Python/bltinmodule.c, Python/pyhash.c, Modules/mathmodule.c and Modules/cmathmodule.c), Copyright (c) 2001-2024 Python
+  Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
   runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
   object model (see runtime/python/NOTICE).
 */
@@ -5650,7 +5650,7 @@ namespace neos::python_runtime
                 else
 #endif
                 aResult = "[Errno " + number + "] " + message;
-                if (e.args.size() >= 3u && kind_of(e.args[2]) != NEOS_PY_NONE)
+                if (e.args.size() >= 3u && kind_of(e.args[2]) != NEOS_PY_NONE && e.attributes.find("characters_written") == nullptr)
                 {
                     std::string filename;
                     if (!repr_of(e.args[2], filename))
@@ -5899,6 +5899,21 @@ namespace neos::python_runtime
                 }
             if (!unicode_error_init(e.get()))
                 return nullptr;
+            // (BlockingIOError(errno, strerror, characters_written): its third argument is the number of characters written (an integer), not a
+            // filename (as CPython's OSError.__init__ has it (Objects/exceptions.c)))
+            if (name == "BlockingIOError")
+            {
+                auto& x = *as<exception_object>(e.get());
+                long long written = 0;
+                if (x.args.size() == 3u && is_int_like(x.args[2]) && to_index(x.args[2], written))
+                {
+                    ref const characters{ make_int(written) };
+                    x.attributes.set("characters_written", characters.get());
+                    x.attributes.set("filename", none());
+                }
+                else if (failed())
+                    clear_error();
+            }
             if (is_exception_subclass(name, "BaseExceptionGroup") && !exception_group_init(e.get()))
                 return nullptr;
             return e.release_ownership();
@@ -6242,10 +6257,12 @@ namespace neos::python_runtime
         {
             if (!failed() || !std::string_view{ error_text() }.starts_with("AttributeError: "))
                 return;
+            // (the previous subject is released last: its release can run a __del__ that notes an AttributeError of its own)
             retain(aObject);
-            release(tErrorSubject);
+            auto const previous = tErrorSubject;
             tErrorSubject = aObject;
             tErrorSubjectText = error_text();
+            release(previous);
         }
 
         void raise_exception(object* aException, bool aContext)

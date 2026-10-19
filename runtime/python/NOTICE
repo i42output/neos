@@ -44,13 +44,22 @@ names the CPython sources it is derived from.
   objects.cpp          Objects/floatobject.c, Objects/complexobject.c,
                        Objects/longobject.c, Objects/rangeobject.c,
                        Objects/sliceobject.c, Objects/tupleobject.c,
-                       Python/bltinmodule.c, Python/pyhash.c (including its
-                       SipHash-1-3), Modules/mathmodule.c and
-                       Modules/cmathmodule.c
+                       Objects/exceptions.c (BlockingIOError's
+                       characters_written), Python/bltinmodule.c,
+                       Python/pyhash.c (including its SipHash-1-3),
+                       Modules/mathmodule.c and Modules/cmathmodule.c
   operator.cpp         Lib/heapq.py and Lib/copy.py
   os.cpp               Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py and
                        Modules/errnomodule.c (errno's Winsock codes)
   pprint.cpp           Lib/pprint.py
+  pyio.cpp             Lib/_pyio.py (the io module's classes), with the
+                       behaviour and messages of Modules/_io/iobase.c,
+                       Modules/_io/bufferedio.c, Modules/_io/textio.c and
+                       Modules/_io/_iomodule.c where they differ from
+                       _pyio's (e.g. BufferedWriter's buffering, IOBase's
+                       finalization, the reprs)
+  pyio_docs.hpp        Modules/_io and Lib/_pyio.py (the io classes'
+                       docstrings, generated)
   pytime.hpp           Python/pytime.c
   queue.cpp            Lib/queue.py
   random.cpp           Modules/_randommodule.c and Lib/random.py
