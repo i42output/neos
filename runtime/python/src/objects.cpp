@@ -49,6 +49,8 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cerrno>
+#include <climits>
 #include <charconv>
 #include <cmath>
 #include <complex>
@@ -1393,6 +1395,21 @@ namespace neos::python_runtime
 
         object* compare(int aOperation, object* aLhs, object* aRhs)
         {
+            // (two strs: their texts' (UTF-8's byte order is its code points'))
+            if (kind_of(aLhs) == NEOS_PY_STR && kind_of(aRhs) == NEOS_PY_STR)
+            {
+                int const order = aLhs == aRhs ? 0 : as<str_object>(aLhs)->value.compare(as<str_object>(aRhs)->value);
+                switch (aOperation)
+                {
+                case NEOS_PY_EQ: return make_bool(order == 0);
+                case NEOS_PY_NE: return make_bool(order != 0);
+                case NEOS_PY_LT: return make_bool(order < 0);
+                case NEOS_PY_LE: return make_bool(order <= 0);
+                case NEOS_PY_GT: return make_bool(order > 0);
+                case NEOS_PY_GE: return make_bool(order >= 0);
+                default: break;
+                }
+            }
             auto const lt = python_type(aLhs);
             auto const rt = python_type(aRhs);
             if (kind_of(aLhs) == NEOS_PY_OTHER && lt != nullptr && lt->compare != nullptr)
@@ -1434,14 +1451,7 @@ namespace neos::python_runtime
         {
             switch (kind_of(aObject))
             {
-            case NEOS_PY_STR:
-                {
-                    long long n = 0;
-                    for (auto c : as<str_object>(aObject)->value)
-                        if ((static_cast<unsigned char>(c) & 0xC0u) != 0x80u)
-                            ++n;
-                    return n;
-                }
+            case NEOS_PY_STR: return as<str_object>(aObject)->len();
             case NEOS_PY_LIST: return static_cast<long long>(as<list_object>(aObject)->items.size());
             case NEOS_PY_TUPLE: return static_cast<long long>(as<tuple_object>(aObject)->items.size());
             case NEOS_PY_DICT: return static_cast<long long>(as<dict_object>(aObject)->items.size());
@@ -1497,7 +1507,17 @@ namespace neos::python_runtime
         {
             long long i = 0;
             if (!to_index(aKey, i))
+            {
+                // (an index too large for an index-sized integer: IndexError (PyNumber_AsSsize_t(key, PyExc_IndexError)); a range's: out of range)
+                ref const e{ take_exception() };
+                if (!exception_is(e.get(), "OverflowError"))
+                {
+                    reraise_exception(e.get());
+                    return false;
+                }
+                error("IndexError", std::strcmp(aWhat, "range object") == 0 ? "range object index out of range" : "cannot fit 'int' into an index-sized integer");
                 return false;
+            }
             if (i < 0)
                 i += static_cast<long long>(aSize);
             if (i < 0 || i >= static_cast<long long>(aSize))
@@ -1568,6 +1588,19 @@ namespace neos::python_runtime
             return result;
         }
 
+        // (the str of an ASCII character: one of the 128 that are made once (they are never released), as CPython's single characters are)
+        object* ascii_character(char aCharacter)
+        {
+            static object* sCharacters[128] = {};
+            auto& character = sCharacters[static_cast<unsigned char>(aCharacter) & 0x7Fu];
+            if (character == nullptr)
+            {
+                character = make_str(std::string(1u, aCharacter), 1u);
+            }
+            retain(character);
+            return character;
+        }
+
         object* getitem(object* aObject, object* aKey)
         {
             auto const k = kind_of(aObject);
@@ -1595,21 +1628,40 @@ namespace neos::python_runtime
             }
             if (k == NEOS_PY_STR)
             {
-                auto const points = code_points(as<str_object>(aObject)->value);
+                auto const& s = *as<str_object>(aObject);
                 if (kind_of(aKey) == NEOS_PY_SLICE)
                 {
                     long long start = 0, stop = 0, step = 0;
-                    if (!slice_indices(aKey, static_cast<long long>(points.size()), start, stop, step))
+                    if (!slice_indices(aKey, s.len(), start, stop, step))
                         return nullptr;
                     std::string result;
+                    if (s.is_ascii())
+                    {
+                        // (ASCII: its characters are its bytes)
+                        if (step == 1)
+                            result.assign(s.value, static_cast<std::size_t>(start), static_cast<std::size_t>(std::max(stop - start, 0LL)));
+                        else
+                            for (auto i : slice_positions(start, stop, step))
+                                result += s.ascii_at(i);
+                        auto const n = result.size();
+                        return make_str(std::move(result), n);    // (known: ASCII)
+                    }
+                    // (its code points: see neos::runtime::string)
+                    std::size_t n = 0u;
                     for (auto i : slice_positions(start, stop, step))
-                        result += points[i];
-                    return make_str(std::move(result));
+                    {
+                        neos::runtime::string_detail::encode(s.at(static_cast<long long>(i)), result);
+                        ++n;
+                    }
+                    return make_str(std::move(result), n);
                 }
                 std::size_t i = 0u;
-                if (!normalize_index(aKey, points.size(), i, "string"))
+                if (!normalize_index(aKey, static_cast<std::size_t>(s.len()), i, "string"))
                     return nullptr;
-                return make_str(std::string{ points[i] });
+                auto const character = s.at(static_cast<long long>(i));
+                if (character < 0x80u)
+                    return ascii_character(static_cast<char>(character));
+                return make_str(neos::runtime::utf8_of(character), 1u);
             }
             if (k == NEOS_PY_RANGE)
             {
@@ -1897,7 +1949,7 @@ namespace neos::python_runtime
                             return nullptr;
                         auto const b = static_cast<unsigned char>(text[it.index]);
                         std::size_t const n = b < 0x80u ? 1u : b < 0xE0u ? 2u : b < 0xF0u ? 3u : 4u;
-                        auto const result = make_str(text.substr(it.index, n));
+                        auto const result = n == 1u ? ascii_character(static_cast<char>(b)) : make_str(text.substr(it.index, n));
                         it.index += n;
                         return result;
                     }
@@ -4762,6 +4814,14 @@ namespace neos::python_runtime
         object* fn_inplace(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(binary(aOperation, aLhs, aRhs, true)); }
         object* fn_unary(std::int32_t aOperation, object* aObject) { return checked(unary(aOperation, aObject)); }
         object* fn_compare(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(compare(aOperation, aLhs, aRhs)); }
+        // (a comparison's truth (e.g. if a == b:): its result is not kept)
+        bool fn_compare_truth(std::int32_t aOperation, object* aLhs, object* aRhs)
+        {
+            ref const result{ compare(aOperation, aLhs, aRhs) };
+            if (result.get() == nullptr)
+                return (checked(nullptr), false);
+            return truth(result.get()) == 1;
+        }
         bool fn_is(object* aLhs, object* aRhs) { return aLhs == aRhs; }
 
         // --- integers of any size (NEOS_RT_INTEGER: a small integer shifted left one bit, or an int object's address with the low
@@ -4872,7 +4932,7 @@ namespace neos::python_runtime
             return fn_str(integer_object(aValue));
         }
 
-        void write_out(std::string const& aText);
+        bool write_out(std::string const& aText);
 
         void fn_print_integer(std::int64_t aValue)
         {
@@ -4919,6 +4979,40 @@ namespace neos::python_runtime
         void fn_setattr(object* aObject, char const* aName, object* aValue) { setattr(aObject, aName, aValue); }
         object* fn_call(object* aCallable, object* aArgs, object* aKwargs) { gil_check(); return signals_check() ? checked(call(aCallable, aArgs, aKwargs)) : nullptr; }
         object* fn_getitem(object* aObject, object* aKey) { return checked(getitem(aObject, aKey)); }
+        // (an item whose key is an integer (NEOS_RT_INTEGER): a str's, list's or tuple's item at a small integer without an int 
+        // object; otherwise getitem's)
+        object* fn_getitem_integer(object* aObject, std::int64_t aKey)
+        {
+            auto const k = kind_of(aObject);
+            if (!integer_is_object(aKey) && (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || k == NEOS_PY_STR))
+            {
+                long long i = aKey >> 1;
+                auto const size = k == NEOS_PY_STR ? as<str_object>(aObject)->len() : static_cast<long long>(k == NEOS_PY_LIST ? 
+                    as<list_object>(aObject)->items.size() : as<tuple_object>(aObject)->items.size());
+                if (i < 0)
+                    i += size;
+                if (i < 0 || i >= size)
+                {
+                    error("IndexError", k == NEOS_PY_LIST ? "list index out of range" : k == NEOS_PY_TUPLE ? "tuple index out of range" : "string index out of range");
+                    return nullptr;
+                }
+                if (k != NEOS_PY_STR)
+                {
+                    auto* const item = (k == NEOS_PY_LIST ? as<list_object>(aObject)->items : as<tuple_object>(aObject)->items)[static_cast<std::size_t>(i)];
+                    retain(item);
+                    return item;
+                }
+                auto const& s = *as<str_object>(aObject);
+                if (s.is_ascii())
+                    return ascii_character(s.ascii_at(static_cast<std::size_t>(i)));
+                auto const character = s.at(i);
+                if (character < 0x80u)
+                    return ascii_character(static_cast<char>(character));
+                return make_str(neos::runtime::utf8_of(character), 1u);
+            }
+            ref const key{ integer_to_object(aKey) };
+            return checked(getitem(aObject, key.get()));
+        }
         void fn_setitem(object* aObject, object* aKey, object* aValue) { setitem(aObject, aKey, aValue); }
         void fn_delitem(object* aObject, object* aKey) { setitem(aObject, aKey, nullptr); }
         void fn_delattr(object* aObject, char const* aName) { setattr(aObject, aName, nullptr); }
@@ -5889,7 +5983,17 @@ namespace neos::python_runtime
             auto args = tuple_items(aArgs);
             for (auto a : args)
                 retain(a);
-            ref e{ make_exception(name, std::move(args)) };
+            // (OSError(errno, strerror[, filename[, winerror[, filename2]]]): the subclass of its errno (Objects/exceptions.c's OSError_new))
+            std::string type = name;
+            if (name == "OSError" && args.size() >= 2u && args.size() <= 5u && kind_of(args[0]) == NEOS_PY_INT)
+            {
+                long long n = 0;
+                if (to_index(args[0], n) && n >= INT_MIN && n <= INT_MAX)
+                    type = errno_exception_type(static_cast<int>(n));
+                else
+                    clear_error();
+            }
+            ref e{ make_exception(type, std::move(args)) };
             if (aKwargs != nullptr)
                 for (auto const& [key, value] : as<dict_object>(aKwargs)->items)
                 {
@@ -6779,18 +6883,25 @@ namespace neos::python_runtime
             return false;
         }
 
-        void write_out(std::string const& aText)
+        bool write_out(std::string const& aText)
         {
             // (sys.stdout, if the program has replaced it (e.g. contextlib.redirect_stdout))
             if (ref const out{ sys_stdout() }; out && !is_standard_output(out.get()))
             {
                 if (kind_of(out.get()) == NEOS_PY_NONE)
-                    return;
+                    return true;
                 ref const r{ call_method_named(out.get(), "write", { make_str(aText) }) };
-                return;
+                return static_cast<bool>(r);
             }
-            std::fwrite(aText.data(), 1u, aText.size(), stdout);
-            std::fflush(stdout);
+            // (an error writing (e.g. EPIPE: the reader has gone, SIGPIPE being ignored) is OSError, as CPython's)
+            if (std::fwrite(aText.data(), 1u, aText.size(), stdout) != aText.size() || std::fflush(stdout) != 0)
+            {
+                int const e = errno;
+                std::clearerr(stdout);
+                raise_os_error(e);
+                return false;
+            }
+            return true;
         }
 
         object* b_print(std::vector<object*> const& aArgs, object* aKwargs)
@@ -6835,7 +6946,8 @@ namespace neos::python_runtime
                 target = ref{ stdout_ };
             if (!target || is_standard_output(target.get()))
             {
-                write_out(line + terminator);
+                if (!write_out(line + terminator))
+                    return nullptr;
                 return none();
             }
             ref const text{ make_str(line + terminator) };
@@ -10576,7 +10688,8 @@ namespace neos::python_runtime
                 std::string prompt;
                 if (!str_of(aArgs[0], prompt))
                     return nullptr;
-                write_out(prompt);
+                if (!write_out(prompt))
+                    return nullptr;
             }
             std::string line;
             char buffer[256];
@@ -10642,7 +10755,7 @@ namespace neos::python_runtime
             { "__closure", b_closure }, { "__generator", b_generator }, { "open", b_open }, { "__yield", b_yield }, { "__yield_from", b_yield_from },
             { "__with_items", b_with_items }, { "__match", b_match },
             { "__coroutine", b_coroutine }, { "__async_generator", b_async_generator }, { "__await", b_await }, { "__async_iter", b_async_iter },
-            { "__async_with", b_async_with }, { "__annotate", b_annotate }, { "__type_param", b_type_param }, { "__type_alias", b_type_alias }, { "__generic_base", b_generic_base }, { "__generic_function", b_generic_function }, { "__exception_group", b_exception_group }, { "exec", b_exec }, { "eval", b_eval }, { "compile", b_compile }, { "__exec_result", b_exec_result }
+            { "__async_with", b_async_with }, { "__annotate", b_annotate }, { "__type_param", b_type_param }, { "__type_alias", b_type_alias }, { "__generic_base", b_generic_base }, { "__generic_function", b_generic_function }, { "__exception_group", b_exception_group }, { "exec", b_exec }, { "eval", b_eval }, { "__import__", b_import }, { "compile", b_compile }, { "__exec_result", b_exec_result }
         };
 
         // (the builtin classes)
@@ -11307,8 +11420,17 @@ namespace neos::python_runtime
                     return true;
                 }
             case NEOS_PY_STR:
-                aResult = str_hash(as<str_object>(aObject)->value);
-                return true;
+                {
+                    // (found once: a str is immutable)
+                    auto const& s = *as<str_object>(aObject);
+                    if (!s.hashed)
+                    {
+                        s.hash = str_hash(s.value);
+                        s.hashed = true;
+                    }
+                    aResult = s.hash;
+                    return true;
+                }
             case NEOS_PY_TUPLE:
                 return tuple_hash(as<tuple_object>(aObject)->items, aResult);
             case NEOS_PY_RANGE:
@@ -14094,6 +14216,7 @@ namespace neos::python_runtime
             { "inplace", NEOS_RT_FUNCTION(fn_inplace), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
             { "unary", NEOS_RT_FUNCTION(fn_unary), OBJ, 2u, { I32, OBJ }, 0u },
             { "compare", NEOS_RT_FUNCTION(fn_compare), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
+            { "compare_truth", NEOS_RT_FUNCTION(fn_compare_truth), BOOL, 3u, { I32, OBJ, OBJ }, 0u },
             { "is", NEOS_RT_FUNCTION(fn_is), BOOL, 2u, { OBJ, OBJ }, 0u },
             { "contains", NEOS_RT_FUNCTION(fn_contains), BOOL, 2u, { OBJ, OBJ }, 0u },
             { "getattr", NEOS_RT_FUNCTION(fn_getattr), OBJ, 2u, { OBJ, STR }, 0u },
@@ -14101,10 +14224,12 @@ namespace neos::python_runtime
             { "call", NEOS_RT_FUNCTION(fn_call), OBJ, 3u, { OBJ, OBJ, OBJ }, 0u },
             { "function", NEOS_RT_FUNCTION(fn_function), OBJ, 4u, { STR, I32, STR, OBJ }, 0u },
             { "getitem", NEOS_RT_FUNCTION(fn_getitem), OBJ, 2u, { OBJ, OBJ }, 0u },
+            { "getitem_integer", NEOS_RT_FUNCTION(fn_getitem_integer), OBJ, 2u, { OBJ, INT }, 0u },
             { "setitem", NEOS_RT_FUNCTION(fn_setitem), VOID, 3u, { OBJ, OBJ, OBJ }, 0u },
             { "delitem", NEOS_RT_FUNCTION(fn_delitem), VOID, 2u, { OBJ, OBJ }, 0u },
             { "delattr", NEOS_RT_FUNCTION(fn_delattr), VOID, 2u, { OBJ, STR }, 0u },
             { "len", NEOS_RT_FUNCTION(fn_len), I64, 1u, { OBJ }, 0u },
+            { "__yield(object)", NEOS_RT_FUNCTION(fn_yield), OBJ, 1u, { OBJ }, 0u },
             { "iter", NEOS_RT_FUNCTION(fn_iter), OBJ, 1u, { OBJ }, 0u },
             { "next", NEOS_RT_FUNCTION(fn_next), OBJ, 1u, { OBJ }, 0u },
             { "range_length", NEOS_RT_FUNCTION(fn_range_length), NEOS_RT_I64, 1u, { OBJ }, 0u },

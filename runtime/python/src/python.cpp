@@ -60,8 +60,9 @@ namespace neos::python_runtime
         thread_local std::string tError;
         thread_local std::string tReportedError;
         thread_local bool tFailed = false;
-        // (a trap requested: the plugin's error when the function returns)
+        // (a trap requested: the plugin's error when the function returns (tTrapped: if one is; a flag that is cheap to test))
         thread_local std::optional<std::string> tTrap;
+        thread_local bool tTrapped = false;
     }
 
     void trap(std::string const& aMessage)
@@ -70,6 +71,7 @@ namespace neos::python_runtime
             h->trap(aMessage.c_str());
         if (!tTrap)
             tTrap = aMessage;
+        tTrapped = true;
     }
 
     char const* result(std::string aValue)
@@ -264,6 +266,7 @@ neos_rt_host const*& neos::python_runtime::host()
 NEOS_RUNTIME_PLUGIN_SET_HOST
 {
     neos::python_runtime::host() = aHost;
+    neos::python_runtime::detail::signals_start();
 }
 
 NEOS_RUNTIME_PLUGIN_END
@@ -277,21 +280,42 @@ NEOS_RUNTIME_PLUGIN_ENTRY
     return &sPlugin;
 }
 
+namespace neos::python_runtime
+{
+    namespace
+    {
+        // (the error to report: see NEOS_RUNTIME_PLUGIN_ERROR (apart from it, so that the test it makes first is cheap))
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        char const* reported_error()
+        {
+            if (tTrapped)
+            {
+                tTrapped = false;
+                tFailed = false;
+                tReportedError = std::move(*tTrap);
+                tTrap.reset();
+                return tReportedError.c_str();
+            }
+            if (!tFailed)
+                return nullptr;
+            tFailed = false;
+            // (the frames that it is raised in)
+            neos::python_runtime::detail::frames_reported(tError);
+            tReportedError = std::move(tError);
+            return tReportedError.c_str();
+        }
+    }
+}
+
 NEOS_RUNTIME_PLUGIN_ERROR
 {
     using namespace neos::python_runtime;
-    if (tTrap)
-    {
-        tFailed = false;
-        tReportedError = std::move(*tTrap);
-        tTrap.reset();
-        return tReportedError.c_str();
-    }
-    if (!tFailed)
+    // (tested after every call of the plugin's functions: no error is the common case)
+    if (!tFailed && !tTrapped)
         return nullptr;
-    tFailed = false;
-    // (the frames that it is raised in)
-    neos::python_runtime::detail::frames_reported(tError);
-    tReportedError = std::move(tError);
-    return tReportedError.c_str();
+    return reported_error();
 }

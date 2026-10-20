@@ -29,6 +29,12 @@
   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  Portions of this file are derived from CPython 3.13 (Python/bltinmodule.c's __import__, Python/import.c's
+  PyImport_ImportModuleLevelObject and resolve_name, and Lib/importlib/_bootstrap.py's _handle_fromlist), Copyright (c)
+  2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License
+  Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C and Python to C++ for the neos Python runtime
+  plugin and adapted to its object model (see runtime/python/NOTICE).
 */
 
 // exec, eval and compile: source that the program compiles while it runs is a program of its own (the host's load: the
@@ -39,6 +45,7 @@
 // globals(): a module's namespace (a dict: the values of its names (its getter's), refreshed by each call; names that are
 // bound in it that the module does not bind are found by its names' lookups (python::global_lookup))
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -699,6 +706,255 @@ namespace neos::python_runtime
             if (!aEval)
                 return (retain(none()), none());
             return (retain(result.get()), result.get());
+        }
+
+        // --- __import__ (Python/bltinmodule.c's builtin___import__, which is Python/import.c's PyImport_ImportModuleLevelObject and
+        // resolve_name, and Lib/importlib/_bootstrap.py's _handle_fromlist): a module that the program has not imported is imported
+        // by an import statement run as exec's source (the compiler finds its source and compiles it); a name that is not a dotted
+        // name of identifiers is no module's (ModuleNotFoundError: it is not source)
+        namespace
+        {
+            bool module_name(std::string const& aName)
+            {
+                static std::set<std::string_view> const sKeywords = { "False", "None", "True", "and", "as", "assert", "async", "await",
+                    "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+                    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield" };
+                std::size_t start = 0u;
+                for (;;)
+                {
+                    auto const dot = std::min(aName.find('.', start), aName.size());
+                    auto const part = std::string_view{ aName }.substr(start, dot - start);
+                    if (part.empty() || sKeywords.contains(part) || !py{ std::string{ part } }.method("isidentifier").truthy())
+                        return false;
+                    if (dot == aName.size())
+                        return true;
+                    start = dot + 1u;
+                }
+            }
+
+            [[noreturn]] void module_not_found(std::string const& aMessage, std::string const& aName)
+            {
+                py_raise(builtin("ModuleNotFoundError").call({ py{ aMessage } }, { { "name", py{ aName } } }));
+            }
+
+            // (import_get_module and import_find_and_load: an absolute name's module (its parent's first))
+            py find_and_load(std::string const& aName)
+            {
+                py const modules = import_attribute("sys", "modules");
+                py const key{ aName };
+                auto const existing = [&]() -> py
+                {
+                    if (!modules.contains(key))
+                        return {};
+                    py m = modules[key];
+                    if (m.is_none())
+                        module_not_found("import of " + aName + " halted; None in sys.modules", aName);
+                    return m;
+                };
+                if (auto m = existing(); !m.empty())
+                    return m;
+                auto const dot = aName.rfind('.');
+                py parent;
+                if (dot != std::string::npos && dot > 0u)
+                    parent = find_and_load(aName.substr(0u, dot));
+                if (auto m = existing(); !m.empty())
+                    return m;
+                if (!module_name(aName))
+                    module_not_found("No module named " + key.repr(), aName);
+                try
+                {
+                    builtin("exec")(py{ "import " + aName }, py_dict());
+                }
+                catch (raised const&)
+                {
+                    // (its traceback: without the import statement's frame (as CPython's remove_importlib_frames))
+                    py const e = py_take_exception();
+                    py tb = e.attr("__traceback__");
+                    while (!tb.is_none() && tb.attr("tb_frame").attr("f_code").attr("co_filename").str() != "<string>")
+                        tb = tb.attr("tb_next");
+                    if (!tb.is_none())
+                        e.method("with_traceback", { tb.attr("tb_next") });
+                    py_reraise(e);
+                }
+                if (auto m = existing(); !m.empty())
+                    return m;
+                // (a module that is its parent's (e.g. os.path) but not in sys.modules)
+                if (!parent.empty())
+                {
+                    py const child = builtin("getattr")(parent, py{ aName.substr(dot + 1u) }, py::none());
+                    if (isinstance(child, type_of(parent)))
+                        return child;
+                }
+                module_not_found("No module named " + key.repr(), aName);
+            }
+
+            // (a dict's item: empty if it has none)
+            py item_of(py const& aDict, char const* aKey)
+            {
+                py const key{ aKey };
+                return aDict.contains(key) ? aDict[key] : py{};
+            }
+
+            // (resolve_name: a relative import's absolute name)
+            std::string resolve_name(std::string const& aName, py const& aGlobals, long long aLevel)
+            {
+                if (aGlobals.empty())
+                    py_raise(builtin("KeyError")(py{ "'__name__' not in globals" }));
+                if (!isinstance(aGlobals, builtin("dict")))
+                    py_raise("TypeError", "globals must be a dict");
+                py package = item_of(aGlobals, "__package__");
+                if (!package.empty() && package.is_none())
+                    package = py{};
+                py const spec = item_of(aGlobals, "__spec__");
+                py const str = builtin("str");
+                auto const warn = [](char const* aMessage, char const* aCategory)
+                {
+                    import_attribute("warnings", "warn")(py{ aMessage }, builtin(aCategory));
+                };
+                if (!package.empty())
+                {
+                    if (!isinstance(package, str))
+                        py_raise("TypeError", "package must be a string");
+                    else if (!spec.empty() && !spec.is_none() && package != spec.attr("parent"))
+                        warn("__package__ != __spec__.parent", "DeprecationWarning");
+                }
+                else if (!spec.empty() && !spec.is_none())
+                {
+                    package = spec.attr("parent");
+                    if (!isinstance(package, str))
+                        py_raise("TypeError", "__spec__.parent must be a string");
+                }
+                else
+                {
+                    warn("can't resolve package from __spec__ or __package__, falling back on __name__ and __path__", "ImportWarning");
+                    package = item_of(aGlobals, "__name__");
+                    if (package.empty())
+                        py_raise(builtin("KeyError")(py{ "'__name__' not in globals" }));
+                    if (!isinstance(package, str))
+                        py_raise("TypeError", "__name__ must be a string");
+                    if (!aGlobals.contains(py{ "__path__" }))
+                    {
+                        auto const name = package.str();
+                        auto const dot = name.rfind('.');
+                        if (dot == std::string::npos)
+                            py_raise("ImportError", "attempted relative import with no known parent package");
+                        package = py{ name.substr(0u, dot) };
+                    }
+                }
+                auto const base = package.str();
+                auto lastDot = base.size();
+                if (lastDot == 0u)
+                    py_raise("ImportError", "attempted relative import with no known parent package");
+                for (long long levelUp = 1; levelUp < aLevel; ++levelUp)
+                {
+                    auto const dot = lastDot == 0u ? std::string::npos : base.rfind('.', lastDot - 1u);
+                    if (dot == std::string::npos)
+                        py_raise("ImportError", "attempted relative import beyond top-level package");
+                    lastDot = dot;
+                }
+                return aName.empty() ? base.substr(0u, lastDot) : base.substr(0u, lastDot) + "." + aName;
+            }
+
+            // (a package (its submodules can be in a fromlist): it has __path__, or its source is a package's (__init__.py))
+            bool is_package(py const& aModule)
+            {
+                if (builtin("hasattr")(aModule, py{ "__path__" }).truthy())
+                    return true;
+                py const file = builtin("getattr")(aModule, py{ "__file__" }, py::none());
+                if (!isinstance(file, builtin("str")))
+                    return false;
+                auto const path = file.str();
+                auto const slash = path.find_last_of("/\\");
+                return path.substr(slash == std::string::npos ? 0u : slash + 1u) == "__init__.py";
+            }
+
+            // (_handle_fromlist)
+            void handle_fromlist(py const& aModule, py const& aFromlist, bool aRecursive)
+            {
+                for (auto const& x : aFromlist.items())
+                {
+                    if (!isinstance(x, builtin("str")))
+                    {
+                        auto const where = aRecursive ? aModule.attr("__name__").str() + ".__all__" : std::string{ "``from list''" };
+                        py_raise("TypeError", "Item in " + where + " must be str, not " + type_of(x).attr("__name__").str());
+                    }
+                    else if (x.str() == "*")
+                    {
+                        if (!aRecursive && builtin("hasattr")(aModule, py{ "__all__" }).truthy())
+                            handle_fromlist(aModule, aModule.attr("__all__"), true);
+                    }
+                    else if (!builtin("hasattr")(aModule, x).truthy())
+                    {
+                        auto const fromName = aModule.attr("__name__").str() + "." + x.str();
+                        try
+                        {
+                            find_and_load(fromName);
+                        }
+                        catch (raised const&)
+                        {
+                            // (backwards-compatibility dictates that failed imports triggered by fromlist for modules that don't exist
+                            // are ignored)
+                            py const e = py_take_exception();
+                            py const modules = import_attribute("sys", "modules");
+                            py const key{ fromName };
+                            if (!exception_is(e.get(), "ModuleNotFoundError") || e.attr("name") != key ||
+                                (modules.contains(key) && modules[key].is_none()))
+                                py_reraise(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        object* b_import(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            return py_guarded([&]() -> py
+            {
+                std::vector<object*> a;
+                py_checked(parse_arguments("__import__", aArgs, aKwargs, { "name", "globals", "locals", "fromlist", "level" }, 1u, 0u, a));
+                py const name = py::borrowed(a[0]);
+                py const globals = a[1] != nullptr ? py::borrowed(a[1]) : py{};
+                py const fromlist = a[3] != nullptr ? py::borrowed(a[3]) : py{};
+                long long const level = a[4] != nullptr ? py::borrowed(a[4]).as_index() : 0;
+                if (!isinstance(name, builtin("str")))
+                    py_raise("TypeError", "module name must be a string");
+                if (level < 0)
+                    py_raise("ValueError", "level must be >= 0");
+                auto const text = name.str();
+                std::string absName;
+                if (level > 0)
+                    absName = resolve_name(text, globals, level);
+                else
+                {
+                    if (text.empty())
+                        py_raise("ValueError", "Empty module name");
+                    absName = text;
+                }
+                py const module = find_and_load(absName);
+                bool const hasFrom = !fromlist.empty() && !fromlist.is_none() && fromlist.truthy();
+                if (!hasFrom)
+                {
+                    if (level == 0 || !text.empty())
+                    {
+                        auto const dot = text.find('.');
+                        if (dot == std::string::npos)
+                            return module;
+                        if (level == 0)
+                            return find_and_load(text.substr(0u, dot));
+                        auto const cutOff = text.size() - dot;
+                        auto const toReturn = absName.substr(0u, absName.size() - cutOff);
+                        py const modules = import_attribute("sys", "modules");
+                        py const key{ toReturn };
+                        if (!modules.contains(key))
+                            py_raise(builtin("KeyError")(py{ key.repr() + " not in sys.modules as expected" }));
+                        return modules[key];
+                    }
+                    return module;
+                }
+                if (is_package(module))
+                    handle_fromlist(module, fromlist, false);
+                return module;
+            });
         }
 
         object* b_exec(std::vector<object*> const& aArgs, object* aKwargs)

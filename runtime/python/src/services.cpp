@@ -30,10 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/platform.py, Lib/keyword.py, Lib/copyreg.py, Lib/secrets.py and
-  Lib/timeit.py), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python
-  Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the
-  neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
+  Portions of this file are derived from CPython 3.13 (Lib/platform.py, Lib/keyword.py, Lib/copyreg.py, Lib/secrets.py,
+  Lib/timeit.py and Modules/signalmodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They
+  are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated
+  from Python and C to C++ for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 
   Lib/platform.py's copyright and permission notice:
 
@@ -1638,6 +1638,21 @@ namespace neos::python_runtime
             inline bool const sCopyreg = register_module("copyreg", copyreg_module);
             inline bool const sAtexit = register_module("atexit", atexit_module);
             inline bool const sGc = register_module("gc", gc_module);
+        }
+
+        // (the signals that the interpreter ignores from its start (Modules/signalmodule.c's signal_install_handlers): writing to a pipe or socket
+        // whose other end is closed raises BrokenPipeError instead of ending the program, and exceeding the file size limit raises OSError)
+        void signals_start()
+        {
+#if defined(SIGPIPE)
+            std::signal(SIGPIPE, SIG_IGN);
+#endif
+#if defined(SIGXFZ)
+            std::signal(SIGXFZ, SIG_IGN);
+#endif
+#if defined(SIGXFSZ)
+            std::signal(SIGXFSZ, SIG_IGN);
+#endif
         }
 
         // (the signals that have arrived: their Python handlers are called (false: a handler raised an exception))

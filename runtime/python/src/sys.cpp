@@ -273,7 +273,8 @@ namespace neos::python_runtime
                             std::string text;
                             if (!repr_of(aArgs[0], text))
                                 return nullptr;
-                            write_out(text + "\n");
+                            if (!write_out(text + "\n"))
+                                return nullptr;
                         }
                         return none();
                     } },

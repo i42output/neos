@@ -299,21 +299,32 @@ namespace neos::compilers::python
                 // (nothing to rewrite: no nested functions, decorators or lambdas that need closures)
                 bool needed = !iStripped.empty();
                 for (auto const& s : iScopes)
-                    if (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : (!s->frees.empty() || has_defaults(*s)))
+                    if (s->kind == scope::Function ? (s->parent != &iModule || !s->decorators.empty() || s->generator || s->classBody || conditional(*s)) : (!s->frees.empty() || has_defaults(*s) || s->generator))
                         needed = true;
                 if (!needed)
                     return iText;
                 aChanged = true;
                 number_functions(iModule);
+                iAddedLines.clear();
                 std::string result = render(0u, iText.size(), &iModule, 0u);
-                // (the lines of the result: the module's are its own (its functions' regions are blank lines); the functions at the 
-                // end of the module are their definitions')
+                // (the lines of the result: the module's are its own (its functions' regions are blank lines), and a line that it 
+                // added (the cells' initializers of a function of the module whose body starts with a compound statement) is the 
+                // line after it; the functions at the end of the module are their definitions')
                 if (aLines != nullptr)
                 {
                     aLines->clear();
                     auto const lines = static_cast<std::size_t>(std::count(result.begin(), result.end(), '\n')) + 1u;
-                    for (std::size_t l = 0u; l < lines; ++l)
-                        aLines->push_back(l);
+                    auto added = iAddedLines.begin();
+                    for (std::size_t l = 0u; aLines->size() < lines;)
+                    {
+                        if (added != iAddedLines.end() && *added == l)
+                        {
+                            ++added;
+                            aLines->push_back(l);
+                        }
+                        else
+                            aLines->push_back(l++);
+                    }
                 }
                 for (std::size_t i = 0u; i < iHoisted.size(); ++i)
                 {
@@ -1124,7 +1135,7 @@ namespace neos::compilers::python
                             brackets.pop_back();
                         continue;
                     }
-                    if (k.kind == token::Name && text(k) == "yield" && iOwners[aLine][t]->kind == scope::Function)
+                    if (k.kind == token::Name && text(k) == "yield" && (iOwners[aLine][t]->kind == scope::Function || iOwners[aLine][t]->kind == scope::Lambda))
                         iOwners[aLine][t]->generator = iOwners[aLine][t]->yields = true;
                     if (k.kind != token::Name || iSkip[aLine][t] || keywords().contains(text(k)))
                         continue;
@@ -1277,6 +1288,33 @@ namespace neos::compilers::python
                     t = e + 1u;
                 }
                 auto body = render_tokens(l, aLambda.colon + 1u, aLambda.last, &aLambda);
+                if (aLambda.generator)
+                {
+                    // (a lambda whose body yields: a generator function, whose body is a function at the end of the module (as a
+                    // generator def's): "lambda x: __generator(_gN_lambda, '<lambda>', qualname, cells..., x)")
+                    auto const function = "_g" + std::to_string(++iFunctions) + "_lambda";
+                    std::string generator = "__generator(" + function + ", '<lambda>', '" + aLambda.qualname + "'";
+                    std::string functionParameters = cell_parameters(aLambda);
+                    for (auto const& f : aLambda.frees)
+                        generator += ", " + cell(f);
+                    bool star = false;
+                    for (auto const& p : aLambda.parameters)
+                    {
+                        std::string item;
+                        switch (p.kind)
+                        {
+                        case scope::parameter::Positional: item = p.name; generator += ", " + p.name; break;
+                        case scope::parameter::VarArgs: item = "*" + p.name; star = true; generator += ", *" + p.name; break;
+                        case scope::parameter::VarKeywords: item = "**" + p.name; generator += ", **" + p.name; break;
+                        case scope::parameter::KeywordOnly: item = (star ? "" : "*, ") + p.name; star = true; generator += ", " + p.name + "=" + p.name; break;
+                        }
+                        functionParameters += (functionParameters.empty() ? "" : ", ") + item;
+                    }
+                    iHoisted.push_back("def " + function + "(" + functionParameters + "):\n    return " + body + "\n");
+                    auto const line = physical_line(tok(l, aLambda.first).begin);
+                    iHoistedLines.push_back({ line, line });
+                    body = generator + ")";
+                }
                 if (aLambda.frees.empty() && defaults.empty() && aLambda.cells.empty())
                     return "lambda " + parameters + ": " + body;
                 if (!aLambda.cells.empty())
@@ -1543,6 +1581,13 @@ namespace neos::compilers::python
             {
                 (void)aIndent;
                 (void)aScope;
+                // (the module's rendering is the outermost (see iAddedLines); the functions hoisted to its end are rendered within it)
+                ++iRenderDepth;
+                struct leave
+                {
+                    std::size_t& depth;
+                    ~leave() { --depth; }
+                } const leaving{ iRenderDepth };
                 std::string result;
                 auto position = aBegin;
                 auto const emit = [&](std::size_t aTo)
@@ -1706,8 +1751,24 @@ namespace neos::compilers::python
                             }
                         if (inlineGenerator)
                             break;
+                        // (the start of a function's body: its cells (before its first statement, e.g. a yield expression))
+                        if (auto const initializers = body_start(l, t); !initializers.empty())
+                        {
+                            emit(k.begin);
+                            auto const first = text(l, t);
+                            bool const compound = first == "if" || first == "for" || first == "while" || first == "try" || first == "with" ||
+                                first == "def" || first == "class" || first == "async" || first == "@";
+                            if (compound)
+                            {
+                                result += initializers + "\n" + std::string(line.indent, ' ');
+                                if (iRenderDepth == 1u)
+                                    iAddedLines.push_back(physical_line(iLines[l].begin));
+                            }
+                            else
+                                result += initializers + "; ";
+                        }
                         // (a yield expression: __yield(value) or __yield_from(iterable))
-                        if (is_name(l, t, "yield") && owner->kind == scope::Function && owner->generator)
+                        if (is_name(l, t, "yield") && (owner->kind == scope::Function || owner->kind == scope::Lambda) && owner->generator)
                         {
                             bool const from = is_name(l, t + 1u, "from");
                             auto const first = t + (from ? 2u : 1u);
@@ -1750,18 +1811,6 @@ namespace neos::compilers::python
                             t = first - 1u;
                             continue;
                         }
-                        // (the start of a function's body: its cells)
-                        if (auto const initializers = body_start(l, t); !initializers.empty())
-                        {
-                            emit(k.begin);
-                            auto const first = text(l, t);
-                            bool const compound = first == "if" || first == "for" || first == "while" || first == "try" || first == "with" ||
-                                first == "def" || first == "class" || first == "async" || first == "@";
-                            if (compound)
-                                result += initializers + "\n" + std::string(line.indent, ' ');
-                            else
-                                result += initializers + "; ";
-                        }
                         // (a lambda)
                         if (is_name(l, t, "lambda"))
                         {
@@ -1803,9 +1852,9 @@ namespace neos::compilers::python
                             }
                         }
                     }
-                    // (yield expressions that end with the line)
+                    // (yield expressions that end with the line, if this renders its end (not, e.g., a lambda's body within it))
                     for (auto c = iClosers.begin(); c != iClosers.end();)
-                        if (c->first.first == l && c->first.second >= line.tokens.size())
+                        if (c->first.first == l && c->first.second >= line.tokens.size() && line.tokens.back().end <= aEnd)
                         {
                             emit(std::min(line.tokens.back().end, aEnd));
                             result += c->second;
@@ -1830,6 +1879,8 @@ namespace neos::compilers::python
             std::size_t iFunctions = 0u;
             std::vector<std::string> iHoisted;
             std::vector<std::vector<std::size_t>> iHoistedLines;    ///< (the line of the text that each of a hoisted function's lines is)
+            std::vector<std::size_t> iAddedLines;                   ///< (the lines of the text before which the module's rendering added a line)
+            std::size_t iRenderDepth = 0u;
             std::vector<std::size_t> iLineStarts;
             std::set<scope const*> iBodies;     ///< (generators whose bodies are being rendered)
             annotations_t* iAnnotations = nullptr;

@@ -31,14 +31,14 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
   Portions of this file are derived from CPython 3.13 (Lib/_pyio.py, and Modules/_io/iobase.c, Modules/_io/bufferedio.c,
-  Modules/_io/textio.c and Modules/_io/_iomodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights
-  Reserved. They are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF).
+  Modules/_io/textio.c, Modules/_io/_iomodule.c, Modules/_io/fileio.c and Python/fileutils.c (_Py_read, _Py_write and
+  set_inheritable)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF).
   Changes: translated from Python and C to C++ for the neos Python runtime plugin and adapted to its object model (see
   runtime/python/NOTICE).
 */
 
 // The io module's classes (CPython 3.13's Lib/_pyio.py): the abstract base classes IOBase, RawIOBase, BufferedIOBase and TextIOBase,
-// and the buffered and text layers over a stream (BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom, TextIOWrapper and
+// FileIO (Modules/_io/fileio.c: a raw stream of a file descriptor), and the buffered and text layers over a stream (BufferedReader, BufferedWriter, BufferedRWPair, BufferedRandom, TextIOWrapper and
 // IncrementalNewlineDecoder). Their classes are made (by abc.ABCMeta) of closures, so a program's subclasses (e.g. socket.SocketIO, a
 // RawIOBase) override their methods. The files that open() returns, and StringIO and BytesIO, are the runtime's own (io.cpp): they are
 // registered as virtual subclasses of these classes (as CPython's io.py registers _io's classes with its ABCs). Where _pyio's behaviour differs
@@ -46,10 +46,30 @@
 // finalization, the reprs and the checks of the streams that buffered streams are made of; BufferedReader's reads of its raw stream are
 // _pyio's (their sizes can differ from _io's).
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -249,6 +269,24 @@ namespace neos::python_runtime::detail
                     throw;
                 return {};
             }
+        }
+
+        // (the raw stream of a buffered stream and the buffer of a TextIOWrapper: _io's ValueError once it has been detached
+        // (Modules/_io/bufferedio.c's CHECK_INITIALIZED and Modules/_io/textio.c's CHECK_ATTACHED))
+        py attached_raw(py const& aSelf)
+        {
+            py raw = aSelf.attr("_raw");
+            if (raw.is_none())
+                py_raise("ValueError", "raw stream has been detached");
+            return raw;
+        }
+
+        py attached_buffer(py const& aSelf)
+        {
+            py buffer = aSelf.attr("_buffer");
+            if (buffer.is_none())
+                py_raise("ValueError", "underlying buffer has been detached");
+            return buffer;
         }
 
         [[noreturn]] void raise_unsupported(py const& aMessage) { py_raise(state().unsupportedOperation(aMessage)); }
@@ -551,6 +589,802 @@ namespace neos::python_runtime::detail
             });
         }
 
+        // --- FileIO (Modules/_io/fileio.c: a raw stream of a file descriptor; its state is native (fileio_new's), its file's reads and
+        // writes are Python/fileutils.c's _Py_read and _Py_write)
+
+        struct fileio_state
+        {
+            int fd = -1;
+            bool created = false;
+            bool readable = false;
+            bool writable = false;
+            bool appending = false;
+            int seekable = -1;      ///< (-1: not known)
+            bool closefd = true;
+        };
+
+        std::map<object*, fileio_state>& fileio_states()
+        {
+            static auto* sStates = new std::map<object*, fileio_state>{};
+            return *sStates;
+        }
+
+        fileio_state& fileio_of(py const& aSelf) { return fileio_states()[aSelf.get()]; }
+
+        [[noreturn]] void err_closed() { py_raise("ValueError", "I/O operation on closed file"); }
+        [[noreturn]] void err_mode(char const* aAction) { raise_unsupported(S(std::string{ "File not open for " } + aAction)); }
+        [[noreturn]] void raise_errno(int aErrno, py const& aFilename = {})
+        {
+            raise_os_error(aErrno, aFilename.empty() ? nullptr : aFilename.get());
+            throw raised{};
+        }
+
+#if defined(_WIN32)
+        constexpr std::size_t kReadMax = INT_MAX;
+        constexpr std::size_t kWriteMax = INT_MAX;
+        constexpr int kErrorNoData = 232;   // (ERROR_NO_DATA)
+#else
+        constexpr std::size_t kReadMax = static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max());
+        constexpr std::size_t kWriteMax = kReadMax;
+#endif
+
+        // (_Py_read: at most aCount bytes; interrupted by a signal: retried, unless its handler raises; -1: an exception was raised (errno:
+        // its error))
+        long long fd_read(int aFd, void* aBuffer, std::size_t aCount)
+        {
+            aCount = std::min(aCount, kReadMax);
+            long long n = 0;
+            int error = 0;
+            for (;;)
+            {
+                gil_release();
+                errno = 0;
+#if defined(_WIN32)
+                _doserrno = 0;
+                n = ::_read(aFd, aBuffer, static_cast<unsigned>(aCount));
+                // (read() on a non-blocking empty pipe fails with EINVAL, which is mapped from the Windows error code ERROR_NO_DATA)
+                if (n < 0 && errno == EINVAL && _doserrno == kErrorNoData)
+                    errno = EAGAIN;
+#else
+                n = ::read(aFd, aBuffer, aCount);
+#endif
+                error = errno;
+                gil_acquire();
+                if (n < 0 && error == EINTR)
+                {
+                    if (!signals_check())
+                    {
+                        errno = error;
+                        return -1;
+                    }
+                    continue;
+                }
+                break;
+            }
+            if (n < 0)
+            {
+                raise_os_error(error);
+                errno = error;
+                return -1;
+            }
+            return n;
+        }
+
+        // (_Py_write: as fd_read)
+        long long fd_write(int aFd, void const* aBuffer, std::size_t aCount)
+        {
+#if defined(_WIN32)
+            // (the Windows console returns an error (12: not enough space) on writing into stdout if stdout mode is binary and the length is
+            // greater than 66,000 bytes (or less, depending on heap usage))
+            if (aCount > 32767u)
+            {
+                gil_release();
+                bool const tty = ::_isatty(aFd) != 0;
+                gil_acquire();
+                if (tty)
+                    aCount = 32767u;
+            }
+#endif
+            aCount = std::min(aCount, kWriteMax);
+            long long n = 0;
+            int error = 0;
+            for (;;)
+            {
+                gil_release();
+                errno = 0;
+#if defined(_WIN32)
+                // (write() on a non-blocking pipe fails with ENOSPC on Windows if the pipe lacks available space for the entire buffer)
+                int c = static_cast<int>(aCount);
+                do
+                {
+                    _doserrno = 0;
+                    n = ::_write(aFd, aBuffer, static_cast<unsigned>(c));
+                    if (n >= 0 || errno != ENOSPC || _doserrno != 0)
+                        break;
+                    errno = EAGAIN;
+                    c /= 2;
+                } while (c > 0);
+#else
+                n = ::write(aFd, aBuffer, aCount);
+#endif
+                error = errno;
+                gil_acquire();
+                if (n < 0 && error == EINTR)
+                {
+                    if (!signals_check())
+                    {
+                        errno = error;
+                        return -1;
+                    }
+                    continue;
+                }
+                break;
+            }
+            if (n < 0)
+            {
+                raise_os_error(error);
+                errno = error;
+                return -1;
+            }
+            return n;
+        }
+
+        // (internal_close: the descriptor is closed (OSError if that fails))
+        void internal_close(fileio_state& f)
+        {
+            if (f.fd < 0)
+                return;
+            int const fd = f.fd;
+            f.fd = -1;
+            gil_release();
+#if defined(_WIN32)
+            int const result = ::_close(fd);
+#else
+            int const result = ::close(fd);
+#endif
+            int const error = errno;
+            gil_acquire();
+            if (result < 0)
+                raise_errno(error);
+        }
+
+        // (portable_lseek: the position (whence 0, 1 or 2); the stream's seekable is known once it has been tried)
+        py portable_lseek(fileio_state& f, py const& aPosition, int aWhence, bool aSuppressPipeError)
+        {
+            long long const position = aPosition.empty() ? 0 : aPosition.as_index();
+            int const whence = aWhence == 0 ? SEEK_SET : aWhence == 1 ? SEEK_CUR : aWhence == 2 ? SEEK_END : aWhence;
+            gil_release();
+#if defined(_WIN32)
+            long long result = ::_lseeki64(f.fd, position, whence);
+#else
+            long long result = static_cast<long long>(::lseek(f.fd, static_cast<off_t>(position), whence));
+#endif
+            int const error = errno;
+            gil_acquire();
+            if (f.seekable < 0)
+                f.seekable = result >= 0 ? 1 : 0;
+            if (result < 0)
+            {
+                if (aSuppressPipeError && error == ESPIPE)
+                    result = 0;
+                else
+                    raise_errno(error);
+            }
+            return py{ result };
+        }
+
+        // (mode_string)
+        char const* mode_string(fileio_state const& f)
+        {
+            if (f.created)
+                return f.readable ? "xb+" : "xb";
+            if (f.appending)
+                return f.readable ? "ab+" : "ab";
+            if (f.readable)
+                return f.writable ? "rb+" : "rb";
+            return "wb";
+        }
+
+        // (Python/fileutils.c's set_inheritable (not inheritable): aAtomicFlagWorks: whether O_CLOEXEC is known to work (-1: not known))
+#if !defined(_WIN32)
+        void set_non_inheritable(int aFd, int* aAtomicFlagWorks)
+        {
+            if (aAtomicFlagWorks != nullptr && *aAtomicFlagWorks != 0)
+            {
+                if (*aAtomicFlagWorks == -1)
+                {
+                    int const flags = ::fcntl(aFd, F_GETFD);
+                    if (flags == -1)
+                        raise_errno(errno);
+                    *aAtomicFlagWorks = (flags & FD_CLOEXEC) != 0 ? 1 : 0;
+                }
+                if (*aAtomicFlagWorks == 1)
+                    return;
+            }
+            int const flags = ::fcntl(aFd, F_GETFD);
+            if (flags < 0)
+                raise_errno(errno);
+            if ((flags & FD_CLOEXEC) != 0)
+                return;
+            if (::fcntl(aFd, F_SETFD, flags | FD_CLOEXEC) < 0)
+                raise_errno(errno);
+        }
+#endif
+
+        // (PyUnicode_FSConverter: a path's bytes (str: UTF-8 (the file system's encoding)); a null byte: ValueError)
+        std::string fs_path(py const& aName)
+        {
+            py const path = import_attribute("os", "fspath")(aName);
+            std::string result;
+            if (isinstance(path, builtin("str")))
+                result = path.str();
+            else
+            {
+                std::string_view bytes;
+                if (!bytes_like(path.get(), bytes))
+                    py_raise("TypeError", "expected str, bytes or os.PathLike object, not " + class_name(path).str());
+                result = std::string{ bytes };
+            }
+            if (result.find('\0') != std::string::npos)
+                py_raise("ValueError", "embedded null byte");
+            return result;
+        }
+
+        void make_fileio()
+        {
+            char const* const c = "FileIO";
+            // (__init__(file, mode='r', closefd=True, opener=None): its arguments as the argument clinic checks them)
+            py const init = make_native_function("__init__", "FileIO.__init__", "Initialize self.  See help(type(self)) for accurate signature.", "_io",
+                [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    std::vector<object*> rest;
+                    for (std::size_t i = 1u; i < aArgs.size(); ++i)
+                        rest.push_back(aArgs[i].get());
+                    std::vector<object*> a;
+                    py_checked(parse_arguments("FileIO", rest, aKwargs, { "file", "mode", "closefd", "opener" }, 1u, 0u, a));
+                    py const& self = aArgs.at(0);
+                    py const nameobj = py::borrowed(a[0]);
+                    std::string mode = "r";
+                    if (a[1] != nullptr)
+                    {
+                        py const m = py::borrowed(a[1]);
+                        if (!isinstance(m, builtin("str")))
+                            py_raise("TypeError", "FileIO() argument 'mode' must be str, not " + class_name(m).str());
+                        mode = m.str();
+                        if (mode.find('\0') != std::string::npos)
+                            py_raise("ValueError", "embedded null character");
+                    }
+                    bool const closefd = a[2] == nullptr || py::borrowed(a[2]).truthy();
+                    py const opener = a[3] != nullptr ? py::borrowed(a[3]) : none();
+                    auto& f = fileio_of(self);
+                    if (f.fd >= 0)
+                    {
+                        // (have to close the existing file first)
+                        if (f.closefd)
+                            internal_close(f);
+                        else
+                            f.fd = -1;
+                    }
+                    if (isinstance(nameobj, builtin("bool")))
+                        import_attribute("warnings", "warn")(S("bool is used as a file descriptor"), builtin("RuntimeWarning"));
+                    // (a file descriptor (an int that is one), else a path)
+                    long long fd = -1;
+                    bool isDescriptor = false;
+                    if (is_int_like(nameobj.get()) || hasattr(nameobj, "__index__"))
+                    {
+                        long long n = 0;
+                        if (to_index(nameobj.get(), n) && n >= INT_MIN && n <= INT_MAX)
+                        {
+                            if (n < 0)
+                                py_raise("ValueError", "negative file descriptor");
+                            fd = n;
+                            isDescriptor = true;
+                        }
+                        else
+                            clear_error();
+                    }
+                    std::string name;
+                    if (!isDescriptor)
+                        name = fs_path(nameobj);
+                    int flags = 0;
+                    bool rwa = false;
+                    bool plus = false;
+                    fileio_state opened;
+                    auto const badMode = []()
+                    {
+                        py_raise("ValueError", "Must have exactly one of create/read/write/append mode and at most one plus");
+                    };
+                    for (char const ch : mode)
+                        switch (ch)
+                        {
+                        case 'x':
+                            if (rwa)
+                                badMode();
+                            rwa = true;
+                            opened.created = opened.writable = true;
+                            flags |= O_EXCL | O_CREAT;
+                            break;
+                        case 'r':
+                            if (rwa)
+                                badMode();
+                            rwa = true;
+                            opened.readable = true;
+                            break;
+                        case 'w':
+                            if (rwa)
+                                badMode();
+                            rwa = true;
+                            opened.writable = true;
+                            flags |= O_CREAT | O_TRUNC;
+                            break;
+                        case 'a':
+                            if (rwa)
+                                badMode();
+                            rwa = true;
+                            opened.writable = opened.appending = true;
+                            flags |= O_APPEND | O_CREAT;
+                            break;
+                        case 'b':
+                            break;
+                        case '+':
+                            if (plus)
+                                badMode();
+                            opened.readable = opened.writable = true;
+                            plus = true;
+                            break;
+                        default:
+                            py_raise("ValueError", "invalid mode: " + mode.substr(0u, 200u));
+                        }
+                    if (!rwa)
+                        badMode();
+                    flags |= opened.readable && opened.writable ? O_RDWR : opened.readable ? O_RDONLY : O_WRONLY;
+#if defined(O_BINARY)
+                    flags |= O_BINARY;
+#endif
+#if defined(_WIN32)
+                    flags |= O_NOINHERIT;
+#elif defined(O_CLOEXEC)
+                    flags |= O_CLOEXEC;
+#endif
+                    // (a file opened to write (or created): restricted (a descriptor's is its opener's), as open())
+                    if (!isDescriptor && opened.writable)
+                        py_checked(host_unrestricted("open"));
+                    bool fdIsOwn = false;
+                    auto const fail = [&]()
+                    {
+                        // (the error: the descriptor that it opened is closed)
+                        if (!fdIsOwn)
+                            f.fd = -1;
+                        if (f.fd >= 0)
+                        {
+                            py const e = py_take_exception();
+                            try
+                            {
+                                internal_close(f);
+                            }
+                            catch (raised const&)
+                            {
+                                py const other = py_take_exception();
+                                other.set_attr("__context__", e);
+                                py_reraise(other);
+                            }
+                            py_reraise(e);
+                        }
+                        throw raised{};
+                    };
+                    try
+                    {
+                        if (isDescriptor)
+                        {
+                            opened.fd = static_cast<int>(fd);
+                            opened.closefd = closefd;
+                            f = opened;
+                        }
+                        else
+                        {
+                            opened.closefd = true;
+                            if (!closefd)
+                                py_raise("ValueError", "Cannot use closefd=False with file name");
+#if !defined(_WIN32) && defined(O_CLOEXEC)
+                            static int sOpenCloexecWorks = -1;
+                            int* atomicFlagWorks = &sOpenCloexecWorks;
+#elif !defined(_WIN32)
+                            int* atomicFlagWorks = nullptr;
+#endif
+                            if (opener.is_none())
+                            {
+#if defined(_WIN32)
+                                std::wstring wide;
+                                if (!name.empty())
+                                {
+                                    int const size = ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
+                                    wide.resize(static_cast<std::size_t>(size));
+                                    ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide.data(), size);
+                                }
+#endif
+                                int result = -1;
+                                int error = 0;
+                                for (;;)
+                                {
+                                    gil_release();
+                                    errno = 0;
+#if defined(_WIN32)
+                                    result = ::_wopen(wide.c_str(), flags, 0666);
+#else
+                                    result = ::open(name.c_str(), flags, 0666);
+#endif
+                                    error = errno;
+                                    gil_acquire();
+                                    if (result < 0 && error == EINTR)
+                                    {
+                                        py_checked(signals_check());
+                                        continue;
+                                    }
+                                    break;
+                                }
+                                if (result < 0)
+                                    raise_errno(error, nameobj);
+                                opened.fd = result;
+                            }
+                            else
+                            {
+#if !defined(_WIN32)
+                                // (the opener may clear the atomic flag)
+                                atomicFlagWorks = nullptr;
+#endif
+                                py const fdobj = opener(nameobj, py{ flags });
+                                if (!isinstance(fdobj, builtin("int")))
+                                    py_raise("TypeError", "expected integer from opener");
+                                long long const n = fdobj.as_index();
+                                if (n < 0)
+                                    py_raise("ValueError", "opener returned " + std::to_string(n));
+                                opened.fd = static_cast<int>(n);
+                            }
+                            f = opened;
+                            fdIsOwn = true;
+#if !defined(_WIN32)
+                            set_non_inheritable(f.fd, atomicFlagWorks);
+#endif
+                        }
+                        long long blksize = DEFAULT_BUFFER_SIZE;
+                        gil_release();
+#if defined(_WIN32)
+                        struct _stat64 status{};
+                        int const statResult = ::_fstat64(f.fd, &status);
+                        int const statError = errno;
+                        bool const invalidHandle = statResult < 0 && ::GetLastError() == ERROR_INVALID_HANDLE;
+#else
+                        struct stat status{};
+                        int const statResult = ::fstat(f.fd, &status);
+                        int const statError = errno;
+#endif
+                        gil_acquire();
+                        if (statResult < 0)
+                        {
+                            // (fstat() errors other than EBADF are tolerated (e.g. an anonymous file on a Virtual Box shared folder
+                            // filesystem raises ENOENT))
+#if defined(_WIN32)
+                            if (invalidHandle)
+                                raise_errno(EBADF);
+#else
+                            if (statError == EBADF)
+                                raise_errno(statError);
+#endif
+                        }
+                        else
+                        {
+#if !defined(_WIN32)
+                            // (on Unix, open succeeds for directories: there should be no file objects referring to directories)
+                            if (S_ISDIR(status.st_mode))
+                                raise_errno(EISDIR, nameobj);
+                            if (status.st_blksize > 1)
+                                blksize = static_cast<long long>(status.st_blksize);
+#endif
+                        }
+#if defined(_WIN32)
+                        // (newlines are not translated (\r\n <=> \n))
+                        ::_setmode(f.fd, O_BINARY);
+#endif
+                        self.set_attr("_blksize", py{ blksize });
+                        self.set_attr("name", nameobj);
+                        // (for consistent behaviour, explicitly seek to the end of the file (otherwise, it might be done only on the first write()))
+                        if (f.appending)
+                            portable_lseek(f, {}, 2, true);
+                    }
+                    catch (raised const&)
+                    {
+                        fail();
+                    }
+                    return none();
+                });
+            auto const opened = [](py const& aSelf) -> fileio_state&
+            {
+                auto& f = fileio_of(aSelf);
+                if (f.fd < 0)
+                    err_closed();
+                return f;
+            };
+            make_class(c, { cls("RawIOBase") }, {
+                { "__init__", init },
+                { "_blksize", py{ 0 } },
+                { "_finalizing", boolean(false) },
+                { "read", method(c, "read", { py_positional("size", py{ -1 }) }, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        if (!f.readable)
+                            err_mode("reading");
+                        long long size = size_argument(a[1]);
+                        if (size < 0)
+                            return a[0].method("readall");
+                        std::string data(static_cast<std::size_t>(std::min<unsigned long long>(static_cast<unsigned long long>(size), kReadMax)), '\0');
+                        auto const n = fd_read(f.fd, data.data(), data.size());
+                        if (n == -1)
+                        {
+                            if (errno == EAGAIN)
+                            {
+                                py_take_exception();
+                                return none();
+                            }
+                            throw raised{};
+                        }
+                        data.resize(static_cast<std::size_t>(n));
+                        return B(data);
+                    }) },
+                { "readall", method(c, "readall", {}, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        // (a real file: a buffer one byte larger than the rest of the file (then EOF without enlarging it))
+                        gil_release();
+#if defined(_WIN32)
+                        long long pos = ::_lseeki64(f.fd, 0, SEEK_CUR);
+                        struct _stat64 status{};
+                        bool const stat = ::_fstat64(f.fd, &status) == 0;
+#else
+                        long long pos = static_cast<long long>(::lseek(f.fd, 0, SEEK_CUR));
+                        struct stat status{};
+                        bool const stat = ::fstat(f.fd, &status) == 0;
+#endif
+                        gil_acquire();
+                        long long const end = stat ? static_cast<long long>(status.st_size) : -1;
+                        constexpr std::size_t kSmallChunk = 8u * 1024u;
+                        std::size_t bufsize = end > 0 && end >= pos && pos >= 0 ? static_cast<std::size_t>(end - pos + 1) : kSmallChunk;
+                        std::string result(bufsize, '\0');
+                        std::size_t bytesRead = 0u;
+                        for (;;)
+                        {
+                            if (bytesRead >= bufsize)
+                            {
+                                // (new_buffersize: expanded in proportion to its size (amortized linear time); for bigger sizes, by less than double)
+                                std::size_t addend = bytesRead > 65536u ? bytesRead >> 3 : 256u + bytesRead;
+                                if (addend < kSmallChunk)
+                                    addend = kSmallChunk;   // (avoid tiny read() calls)
+                                bufsize = addend + bytesRead;
+                                if (result.size() < bufsize)
+                                    result.resize(bufsize);
+                            }
+                            auto const n = fd_read(f.fd, result.data() + bytesRead, bufsize - bytesRead);
+                            if (n == 0)
+                                break;
+                            if (n == -1)
+                            {
+                                if (errno == EAGAIN)
+                                {
+                                    py_take_exception();
+                                    if (bytesRead > 0u)
+                                        break;
+                                    return none();
+                                }
+                                throw raised{};
+                            }
+                            bytesRead += static_cast<std::size_t>(n);
+                            pos += n;
+                        }
+                        result.resize(bytesRead);
+                        return B(result);
+                    }) },
+                { "readinto", method(c, "readinto", { py_positional_only("buffer") }, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        if (!f.readable)
+                            err_mode("reading");
+                        buffer_info buffer;
+                        if (!buffer_of(a[1].get(), buffer) || buffer.readonly)
+                            py_raise("TypeError", "readinto() argument 1 must be read-write bytes-like object, not " + class_name(a[1]).str());
+                        auto const n = fd_read(f.fd, buffer.data, buffer.size);
+                        if (n == -1)
+                        {
+                            if (errno == EAGAIN)
+                            {
+                                py_take_exception();
+                                return none();
+                            }
+                            throw raised{};
+                        }
+                        return py{ n };
+                    }) },
+                { "write", method(c, "write", { py_positional_only("b") }, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        if (!f.writable)
+                            err_mode("writing");
+                        std::string_view data;
+                        if (!bytes_like(a[1].get(), data))
+                            py_raise("TypeError", "a bytes-like object is required, not '" + class_name(a[1]).str() + "'");
+                        auto const n = fd_write(f.fd, data.data(), data.size());
+                        if (n < 0)
+                        {
+                            if (errno == EAGAIN)
+                            {
+                                py_take_exception();
+                                return none();
+                            }
+                            throw raised{};
+                        }
+                        return py{ n };
+                    }) },
+                { "seek", method(c, "seek", { py_positional_only("pos"), py_positional_only("whence", py{ 0 }) }, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        return portable_lseek(f, a[1], static_cast<int>(a[2].as_index()), false);
+                    }) },
+                { "tell", method(c, "tell", {}, [opened](std::vector<py> const& a) { return portable_lseek(opened(a[0]), {}, 1, false); }) },
+                { "truncate", method(c, "truncate", { py_positional_only("size", none()) }, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        if (!f.writable)
+                            err_mode("writing");
+                        // (the current position, by default)
+                        py const posobj = a[1].is_none() ? portable_lseek(f, {}, 1, false) : a[1];
+                        long long const pos = posobj.as_index();
+                        gil_release();
+                        errno = 0;
+#if defined(_WIN32)
+                        int const result = ::_chsize_s(f.fd, pos) == 0 ? 0 : -1;
+#else
+                        int const result = ::ftruncate(f.fd, static_cast<off_t>(pos));
+#endif
+                        int const error = errno;
+                        gil_acquire();
+                        if (result != 0)
+                            raise_errno(error);
+                        return posobj;
+                    }) },
+                { "close", method(c, "close", {}, [](std::vector<py> const& a)
+                    {
+                        auto& f = fileio_of(a[0]);
+                        py result;
+                        py e;
+                        try
+                        {
+                            result = cls("RawIOBase").attr("close")(a[0]);
+                        }
+                        catch (raised const&)
+                        {
+                            e = py_take_exception();
+                        }
+                        if (!f.closefd)
+                        {
+                            f.fd = -1;
+                            if (!e.empty())
+                                py_reraise(e);
+                            return result;
+                        }
+                        try
+                        {
+                            internal_close(f);
+                        }
+                        catch (raised const&)
+                        {
+                            py const other = py_take_exception();
+                            if (!e.empty())
+                                other.set_attr("__context__", e);
+                            py_reraise(other);
+                        }
+                        if (!e.empty())
+                            py_reraise(e);
+                        return result;
+                    }) },
+                { "seekable", method(c, "seekable", {}, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        if (f.seekable < 0)
+                        {
+                            // (portable_lseek() sets seekable)
+                            try
+                            {
+                                portable_lseek(f, {}, 1, false);
+                            }
+                            catch (raised const&)
+                            {
+                                py_take_exception();
+                            }
+                        }
+                        return boolean(f.seekable == 1);
+                    }) },
+                { "readable", method(c, "readable", {}, [opened](std::vector<py> const& a) { return boolean(opened(a[0]).readable); }) },
+                { "writable", method(c, "writable", {}, [opened](std::vector<py> const& a) { return boolean(opened(a[0]).writable); }) },
+                { "fileno", method(c, "fileno", {}, [opened](std::vector<py> const& a) { return py{ opened(a[0]).fd }; }) },
+                { "isatty", method(c, "isatty", {}, [opened](std::vector<py> const& a)
+                    {
+                        auto& f = opened(a[0]);
+                        gil_release();
+#if defined(_WIN32)
+                        bool const result = ::_isatty(f.fd) != 0;
+#else
+                        bool const result = ::isatty(f.fd) != 0;
+#endif
+                        gil_acquire();
+                        return boolean(result);
+                    }) },
+                // (fileio_dealloc_warn: an unclosed file (that it would close) is a ResourceWarning)
+                { "_dealloc_warn", method(c, "_dealloc_warn", { py_positional_only("source") }, [](std::vector<py> const& a)
+                    {
+                        auto const& f = fileio_of(a[0]);
+                        if (f.fd >= 0 && f.closefd)
+                        {
+                            try
+                            {
+                                import_attribute("warnings", "warn").call({ S("unclosed file " + a[1].repr()), builtin("ResourceWarning") },
+                                    { { "stacklevel", py{ 1 } }, { "source", a[1] } });
+                            }
+                            catch (raised const&)
+                            {
+                                // (spurious errors can appear at shutdown: a warning that is an error is reported, others are dropped)
+                                py const e = py_take_exception();
+                                if (exception_is(e.get(), "Warning"))
+                                {
+                                    reraise_exception(e.get());
+                                    write_unraisable(a[0].get());
+                                }
+                            }
+                        }
+                        return none();
+                    }) },
+                { "__getstate__", method(c, "__getstate__", {}, [](std::vector<py> const& a) -> py
+                    {
+                        py_raise("TypeError", "cannot pickle " + class_name(a[0]).repr() + " instances");
+                    }) },
+                // ('closed' and 'mode' are attributes for backwards compatibility reasons)
+                { "closed", property(c, "closed", [](std::vector<py> const& a) { return boolean(fileio_of(a[0]).fd < 0); }) },
+                { "closefd", property(c, "closefd", [](std::vector<py> const& a) { return boolean(fileio_of(a[0]).closefd); }) },
+                { "mode", property(c, "mode", [](std::vector<py> const& a) { return S(mode_string(fileio_of(a[0]))); }) },
+                // (fileio_repr)
+                { "__repr__", method(c, "__repr__", {}, [](std::vector<py> const& a)
+                    {
+                        auto const& f = fileio_of(a[0]);
+                        std::string const typeName = type_name_of(a[0]);
+                        if (f.fd < 0)
+                            return S("<" + typeName + " [closed]>");
+                        std::string const closefd = f.closefd ? "True" : "False";
+                        py const nameobj = getattr_or_none(a[0], "name");
+                        if (!hasattr(a[0], "name"))
+                            return S("<" + typeName + " fd=" + std::to_string(f.fd) + " mode='" + mode_string(f) + "' closefd=" + closefd + ">");
+                        static std::set<object*> sReprs;
+                        if (sReprs.contains(a[0].get()))
+                            py_raise("RuntimeError", "reentrant call inside " + typeName + ".__repr__");
+                        sReprs.insert(a[0].get());
+                        py result;
+                        try
+                        {
+                            result = S("<" + typeName + " name=" + nameobj.repr() + " mode='" + mode_string(f) + "' closefd=" + closefd + ">");
+                        }
+                        catch (raised const&)
+                        {
+                            sReprs.erase(a[0].get());
+                            throw;
+                        }
+                        sReprs.erase(a[0].get());
+                        return result;
+                    }) },
+                // (fileio_dealloc: finalized as IOBase is (_PyIOBase_finalize), then its state is freed)
+                { "__del__", method(c, "__del__", {}, [](std::vector<py> const& a)
+                    {
+                        try_finally([&]() { return cls("IOBase").attr("__del__")(a[0]); }, [&]() { fileio_states().erase(a[0].get()); });
+                        return none();
+                    }) }
+            });
+        }
+
         // --- BufferedIOBase
 
         void make_buffered_iobase()
@@ -620,11 +1454,11 @@ namespace neos::python_runtime::detail
                 // ### Positioning ###
                 { "seek", method(c, "seek", { py_positional("pos"), py_positional("whence", py{ 0 }) }, [](std::vector<py> const& a)
                     {
-                        return checked_position(a[0].attr("raw").method("seek", { a[1], a[2] }));
+                        return checked_position(attached_raw(a[0]).method("seek", { a[1], a[2] }));
                     }) },
                 { "tell", method(c, "tell", {}, [](std::vector<py> const& a)
                     {
-                        return checked_position(a[0].attr("raw").method("tell"));
+                        return checked_position(attached_raw(a[0]).method("tell"));
                     }) },
                 { "truncate", method(c, "truncate", { py_positional("pos", none()) }, [](std::vector<py> const& a)
                     {
@@ -636,40 +1470,39 @@ namespace neos::python_runtime::detail
                         // current file state)
                         a[0].method("flush");
                         py const pos = a[1].is_none() ? a[0].method("tell") : a[1];
-                        return a[0].attr("raw").method("truncate", { pos });
+                        return attached_raw(a[0]).method("truncate", { pos });
                     }) },
                 // ### Flush and close ###
                 { "flush", method(c, "flush", {}, [](std::vector<py> const& a)
                     {
                         if (a[0].attr("closed").truthy())
                             py_raise("ValueError", "flush of closed file");
-                        a[0].attr("raw").method("flush");
+                        attached_raw(a[0]).method("flush");
                         return none();
                     }) },
                 { "close", method(c, "close", {}, [](std::vector<py> const& a)
                     {
-                        if (!a[0].attr("raw").is_none() && !a[0].attr("closed").truthy())
+                        if (!a[0].attr("closed").truthy())
                         {
                             // (may raise BlockingIOError or BrokenPipeError etc)
-                            try_finally([&]() { return a[0].method("flush"); }, [&]() { a[0].attr("raw").method("close"); });
+                            try_finally([&]() { return a[0].method("flush"); }, [&]() { attached_raw(a[0]).method("close"); });
                         }
                         return none();
                     }) },
                 { "detach", method(c, "detach", {}, [](std::vector<py> const& a)
                     {
-                        if (a[0].attr("raw").is_none())
-                            py_raise("ValueError", "raw stream already detached");
+                        attached_raw(a[0]); // (_io's check (Modules/_io/bufferedio.c's CHECK_INITIALIZED))
                         a[0].method("flush");
                         py const raw = a[0].attr("_raw");
                         a[0].set_attr("_raw", none());
                         return raw;
                     }) },
                 // ### Inquiries ###
-                { "seekable", method(c, "seekable", {}, [](std::vector<py> const& a) { return a[0].attr("raw").method("seekable"); }) },
+                { "seekable", method(c, "seekable", {}, [](std::vector<py> const& a) { return attached_raw(a[0]).method("seekable"); }) },
                 { "raw", property(c, "raw", [](std::vector<py> const& a) { return a[0].attr("_raw"); }) },
-                { "closed", property(c, "closed", [](std::vector<py> const& a) { return a[0].attr("raw").attr("closed"); }) },
-                { "name", property(c, "name", [](std::vector<py> const& a) { return a[0].attr("raw").attr("name"); }) },
-                { "mode", property(c, "mode", [](std::vector<py> const& a) { return a[0].attr("raw").attr("mode"); }) },
+                { "closed", property(c, "closed", [](std::vector<py> const& a) { return attached_raw(a[0]).attr("closed"); }) },
+                { "name", property(c, "name", [](std::vector<py> const& a) { return attached_raw(a[0]).attr("name"); }) },
+                { "mode", property(c, "mode", [](std::vector<py> const& a) { return attached_raw(a[0]).attr("mode"); }) },
                 { "__getstate__", method(c, "__getstate__", {}, [](std::vector<py> const& a) -> py
                     {
                         py_raise("TypeError", "cannot pickle " + class_name(a[0]).repr() + " object");
@@ -691,8 +1524,8 @@ namespace neos::python_runtime::detail
                         return none();
                     }) },
                 // ### Lower-level APIs ###
-                { "fileno", method(c, "fileno", {}, [](std::vector<py> const& a) { return a[0].attr("raw").method("fileno"); }) },
-                { "isatty", method(c, "isatty", {}, [](std::vector<py> const& a) { return a[0].attr("raw").method("isatty"); }) }
+                { "fileno", method(c, "fileno", {}, [](std::vector<py> const& a) { return attached_raw(a[0]).method("fileno"); }) },
+                { "isatty", method(c, "isatty", {}, [](std::vector<py> const& a) { return attached_raw(a[0]).method("isatty"); }) }
             });
         }
 
@@ -712,7 +1545,7 @@ namespace neos::python_runtime::detail
                         a[0].set_attr("_read_lock", import_attribute("_thread", "allocate_lock")());
                         return none();
                     }) },
-                { "readable", method(c, "readable", {}, [](std::vector<py> const& a) { return a[0].attr("raw").method("readable"); }) },
+                { "readable", method(c, "readable", {}, [](std::vector<py> const& a) { return attached_raw(a[0]).method("readable"); }) },
                 { "_reset_read_buf", method(c, "_reset_read_buf", {}, [](std::vector<py> const& a)
                     {
                         a[0].set_attr("_read_buf", B(""));
@@ -737,9 +1570,9 @@ namespace neos::python_runtime::detail
                         if (a[1].is_none() || a[1] == py{ -1 })
                         {
                             self.method("_reset_read_buf");
-                            if (hasattr(self.attr("raw"), "readall"))
+                            if (hasattr(attached_raw(self), "readall"))
                             {
-                                py const chunk = self.attr("raw").method("readall");
+                                py const chunk = attached_raw(self).method("readall");
                                 if (chunk.is_none())
                                 {
                                     py const rest = from(buf, pos);
@@ -752,7 +1585,7 @@ namespace neos::python_runtime::detail
                             for (;;)
                             {
                                 // (read until EOF or until read() would block)
-                                py const chunk = self.attr("raw").method("read");
+                                py const chunk = attached_raw(self).method("read");
                                 if (emptyValues.contains(chunk))
                                 {
                                     nodataVal = chunk;
@@ -777,7 +1610,7 @@ namespace neos::python_runtime::detail
                         py const wanted = builtin("max")(self.attr("buffer_size"), n);
                         while (avail < n)
                         {
-                            py const chunk = self.attr("raw").method("read", { wanted });
+                            py const chunk = attached_raw(self).method("read", { wanted });
                             if (emptyValues.contains(chunk))
                             {
                                 nodataVal = chunk;
@@ -806,7 +1639,7 @@ namespace neos::python_runtime::detail
                         if (have < want || have <= py{ 0 })
                         {
                             py const toRead = self.attr("buffer_size") - have;
-                            py const current = self.attr("raw").method("read", { toRead });
+                            py const current = attached_raw(self).method("read", { toRead });
                             if (current.truthy())
                             {
                                 self.set_attr("_read_buf", from(self.attr("_read_buf"), self.attr("_read_pos")) + current);
@@ -869,7 +1702,7 @@ namespace neos::python_runtime::detail
                                 // (if remaining space in callers buffer is larger than internal buffer, read directly into callers buffer)
                                 if (py{ size - written } > self.attr("buffer_size"))
                                 {
-                                    py const n = self.attr("raw").method("readinto", { from(buf, py{ written }) });
+                                    py const n = attached_raw(self).method("readinto", { from(buf, py{ written }) });
                                     if (!n.truthy())
                                         break; // (eof)
                                     written += n.as_index();
@@ -899,7 +1732,7 @@ namespace neos::python_runtime::detail
                         py const& self = a[0];
                         check_whence(a[2]);
                         self.method("_checkClosed", { S("seek of closed file") });
-                        check_seekable(self.attr("raw"));
+                        check_seekable(attached_raw(self));
                         return with_lock(self.attr("_read_lock"), [&]()
                         {
                             py pos = a[1];
@@ -933,7 +1766,7 @@ namespace neos::python_runtime::detail
                 try
                 {
                     errno = 0;
-                    result = aSelf.attr("raw").method("write", { aData });
+                    result = attached_raw(aSelf).method("write", { aData });
                     tRawErrno = errno;
                     break;
                 }
@@ -966,7 +1799,7 @@ namespace neos::python_runtime::detail
                         a[0].set_attr("_write_lock", import_attribute("_thread", "allocate_lock")());
                         return none();
                     }) },
-                { "writable", method(c, "writable", {}, [](std::vector<py> const& a) { return a[0].attr("raw").method("writable"); }) },
+                { "writable", method(c, "writable", {}, [](std::vector<py> const& a) { return attached_raw(a[0]).method("writable"); }) },
                 // (write(): _io's policy (Modules/_io/bufferedio.c's _io_BufferedWriter_write_impl): data that fits is buffered; otherwise the
                 // buffer is flushed and the data is written to the raw stream until less than a buffer's worth remains, which is buffered (_pyio's
                 // buffers everything and then flushes all of it))
@@ -1045,8 +1878,8 @@ namespace neos::python_runtime::detail
                         return with_lock(a[0].attr("_write_lock"), [&]()
                         {
                             a[0].method("_flush_unlocked");
-                            py const pos = a[1].is_none() ? a[0].attr("raw").method("tell") : a[1];
-                            return a[0].attr("raw").method("truncate", { pos });
+                            py const pos = a[1].is_none() ? attached_raw(a[0]).method("tell") : a[1];
+                            return attached_raw(a[0]).method("truncate", { pos });
                         });
                     }) },
                 { "flush", method(c, "flush", {}, [](std::vector<py> const& a)
@@ -1078,7 +1911,7 @@ namespace neos::python_runtime::detail
                     {
                         check_whence(a[2]);
                         check_closed(a[0], "seek of closed file");
-                        check_seekable(a[0].attr("raw"));
+                        check_seekable(attached_raw(a[0]));
                         return with_lock(a[0].attr("_write_lock"), [&]()
                         {
                             a[0].method("_flush_unlocked");
@@ -1090,7 +1923,7 @@ namespace neos::python_runtime::detail
                         py const& self = a[0];
                         bool const done = with_lock(self.attr("_write_lock"), [&]()
                         {
-                            return boolean(self.attr("raw").is_none() || self.attr("closed").truthy());
+                            return boolean(self.attr("closed").truthy());
                         }).truthy();
                         if (done)
                             return none();
@@ -1102,7 +1935,7 @@ namespace neos::python_runtime::detail
                             return self.method("flush");
                         }, [&]()
                         {
-                            with_lock(self.attr("_write_lock"), [&]() { return self.attr("raw").method("close"); });
+                            with_lock(self.attr("_write_lock"), [&]() { return attached_raw(self).method("close"); });
                         });
                         return none();
                     }) }
@@ -1161,7 +1994,7 @@ namespace neos::python_runtime::detail
             // (undo read ahead)
             auto const undoReadAhead = [](py const& aSelf)
             {
-                aSelf.attr("raw").method("seek", { aSelf.attr("_read_pos") - len(aSelf.attr("_read_buf")), py{ 1 } });
+                attached_raw(aSelf).method("seek", { aSelf.attr("_read_pos") - len(aSelf.attr("_read_buf")), py{ 1 } });
             };
             make_class(c, { cls("BufferedWriter"), cls("BufferedReader") }, {
                 { "__init__", method(c, "__init__", { py_positional("raw"), py_positional("buffer_size", py{ DEFAULT_BUFFER_SIZE }) }, [reader, writer](std::vector<py> const& a)
@@ -1177,12 +2010,12 @@ namespace neos::python_runtime::detail
                         py const& self = a[0];
                         check_whence(a[2]);
                         check_closed(self, "seek of closed file");
-                        check_seekable(self.attr("raw"));
+                        check_seekable(attached_raw(self));
                         self.method("flush");
                         if (self.attr("_read_buf").truthy())
                             with_lock(self.attr("_read_lock"), [&]() { undoReadAhead(self); return none(); });
                         // (first do the raw seek, then empty the read buffer, so that if the raw seek fails, we don't lose buffered data forever)
-                        py const pos = self.attr("raw").method("seek", { a[1], a[2] });
+                        py const pos = attached_raw(self).method("seek", { a[1], a[2] });
                         with_lock(self.attr("_read_lock"), [&]() { return self.method("_reset_read_buf"); });
                         if (pos < py{ 0 })
                             py_raise("OSError", "seek() returned invalid position");
@@ -1398,6 +2231,294 @@ namespace neos::python_runtime::detail
             return aPosition | (aDecFlags << py{ 64 }) | (aBytesToFeed << py{ 128 }) | (aCharsToSkip << py{ 192 }) | (py{ aNeedEof ? 1 : 0 } << py{ 256 });
         }
 
+        // --- TextIOWrapper's readline (Modules/_io/textio.c's _textiowrapper_readline and _PyIO_find_line_ending): its line ending is found in
+        // its decoded chars where they are (their UTF-8: a line ending is ASCII), not in a copy of them
+
+        // (the number of characters of UTF-8 text [aBegin, aEnd))
+        long long char_count(std::string_view aText, std::size_t aBegin, std::size_t aEnd)
+        {
+            long long n = 0;
+            for (auto i = aBegin; i < aEnd; ++i)
+                if ((static_cast<unsigned char>(aText[i]) & 0xC0u) != 0x80u)
+                    ++n;
+            return n;
+        }
+
+        // (the offset of the character aChars characters after aBegin)
+        std::size_t advance_chars(std::string_view aText, std::size_t aBegin, long long aChars)
+        {
+            auto i = aBegin;
+            for (; aChars > 0 && i < aText.size(); --aChars)
+            {
+                ++i;
+                while (i < aText.size() && (static_cast<unsigned char>(aText[i]) & 0xC0u) == 0x80u)
+                    ++i;
+            }
+            return i;
+        }
+
+        // (the byte offset of a str's character: the offset that was found last is remembered (a TextIOWrapper's reads advance through its decoded
+        // chunk); the str is kept (so it is the same str))
+        struct char_offset
+        {
+            ref text;
+            long long chars = 0;
+            std::size_t bytes = 0u;
+        };
+        char_offset& last_char_offset()
+        {
+            static auto* sLast = new char_offset{};
+            return *sLast;
+        }
+        std::size_t byte_offset(py const& aText, long long aChars)
+        {
+            // (ASCII: its characters are its bytes)
+            auto const& s = *as<str_object>(aText.get());
+            if (s.is_ascii())
+                return static_cast<std::size_t>(aChars);
+            auto& last = last_char_offset();
+            std::string_view const value = s.value;
+            long long chars = 0;
+            std::size_t bytes = 0u;
+            if (last.text.get() == aText.get() && last.chars <= aChars)
+            {
+                chars = last.chars;
+                bytes = last.bytes;
+            }
+            bytes = advance_chars(value, bytes, aChars - chars);
+            last.text = ref::borrowed(aText.get());
+            last.chars = aChars;
+            last.bytes = bytes;
+            return bytes;
+        }
+
+        // (_PyIO_find_line_ending: the end of the line in aText from aStart (its offset after its line ending), else aConsumed: how much of it can
+        // be put aside (it has no line ending))
+        std::optional<std::size_t> find_line_ending(bool aTranslated, bool aUniversal, std::string_view aReadnl, std::string_view aText, std::size_t aStart,
+            std::size_t& aConsumed)
+        {
+            if (aTranslated)
+            {
+                // (newlines are already translated, only search for \n)
+                auto const pos = aText.find('\n', aStart);
+                if (pos != std::string_view::npos)
+                    return pos + 1u;
+                aConsumed = aText.size();
+                return {};
+            }
+            if (aUniversal)
+            {
+                // (universal newline search: find any of \r, \r\n, \n; the decoder ensures that \r\n are not split in two pieces)
+                auto const pos = aText.find_first_of("\r\n", aStart);
+                if (pos == std::string_view::npos)
+                {
+                    aConsumed = aText.size();
+                    return {};
+                }
+                if (aText[pos] == '\r' && pos + 1u < aText.size() && aText[pos + 1u] == '\n')
+                    return pos + 2u;
+                return pos + 1u;
+            }
+            // (non-universal mode)
+            if (aReadnl.size() == 1u)
+            {
+                auto const pos = aText.find(aReadnl[0], aStart);
+                if (pos != std::string_view::npos)
+                    return pos + 1u;
+                aConsumed = aText.size();
+                return {};
+            }
+            auto s = aStart;
+            auto e = aText.size() >= aReadnl.size() - 1u ? aText.size() - (aReadnl.size() - 1u) : 0u;
+            if (e < s)
+                e = s;
+            while (s < e)
+            {
+                auto const pos = aText.find(aReadnl[0], s);
+                if (pos == std::string_view::npos || pos >= e)
+                    break;
+                if (aText.compare(pos, aReadnl.size(), aReadnl) == 0)
+                    return pos + aReadnl.size();
+                s = pos + 1u;
+            }
+            auto const pos = aText.find(aReadnl[0], e);
+            aConsumed = pos == std::string_view::npos ? aText.size() : pos;
+            return {};
+        }
+
+        // (a TextIOWrapper's closed: its buffer's; a BufferedReader's, BufferedWriter's or BufferedRandom's of a FileIO: whether its file is
+        // closed (Modules/_io/textio.c's CHECK_CLOSED))
+        bool text_closed(py const& aSelf)
+        {
+            if (type_of(aSelf).is(cls("TextIOWrapper")))
+            {
+                py const buffer = aSelf.attr("_buffer");
+                py const type = type_of(buffer);
+                if (type.is(cls("BufferedReader")) || type.is(cls("BufferedRandom")) || type.is(cls("BufferedWriter")))
+                {
+                    py const raw = buffer.attr("_raw");
+                    if (type_of(raw).is(cls("FileIO")))
+                        return fileio_of(raw).fd < 0;
+                }
+            }
+            return aSelf.attr("closed").truthy();
+        }
+
+        // (_textiowrapper_readline: a line (at most aLimit characters (-1: no limit)); empty if its decoded chars are not strs (the port's
+        // readline then reads it))
+        std::optional<py> fast_readline(py const& aSelf, long long aLimit, std::function<void()> const& aBeforeReading)
+        {
+            auto const decodedChars = [&]() -> std::optional<py>
+            {
+                py chars = aSelf.attr("_decoded_chars");
+                if (kind_of(chars.get()) != NEOS_PY_STR)
+                    return {};
+                return chars;
+            };
+            auto const setDecodedChars = [&](py const& aChars)
+            {
+                aSelf.set_attr("_decoded_chars", aChars);
+                aSelf.set_attr("_decoded_chars_used", py{ 0 });
+            };
+            {
+                auto const first = decodedChars();
+                if (!first)
+                    return {};
+            }
+            bool checked = false;
+            bool const translated = aSelf.attr("_readtranslate").truthy();
+            bool const universal = aSelf.attr("_readuniversal").truthy();
+            py const readnlObject = aSelf.attr("_readnl");
+            std::string const readnl = readnlObject.is_none() ? std::string{} : readnlObject.str();
+            std::string chunks;             // (the text put aside)
+            long long chunked = 0;          // (its characters)
+            std::string remaining;
+            bool haveRemaining = false;
+            std::string concatenated;
+            py decoded;
+            std::string_view text;          // (the line's text: the decoded chars (or what remained of the previous ones and them))
+            bool ascii = false;             // (its characters are its bytes)
+            bool haveLine = false;
+            auto const count_of = [&](std::string_view aText, std::size_t aBegin, std::size_t aEnd)
+            {
+                return ascii ? static_cast<long long>(aEnd - aBegin) : char_count(aText, aBegin, aEnd);
+            };
+            auto const advance_of = [&](std::string_view aText, std::size_t aBegin, long long aChars)
+            {
+                return ascii ? std::min(aBegin + static_cast<std::size_t>(aChars), aText.size()) : advance_chars(aText, aBegin, aChars);
+            };
+            long long start = 0;
+            long long endpos = 0;
+            long long offsetToBuffer = 0;
+            std::size_t startByte = 0u;
+            std::size_t endByte = 0u;
+            std::size_t offsetToBufferBytes = 0u;
+            for (;;)
+            {
+                // (first, get some data if necessary)
+                bool more = true;
+                for (;;)
+                {
+                    auto const chars = decodedChars();
+                    if (!chars)
+                        return {};
+                    decoded = *chars;
+                    if (!as<str_object>(decoded.get())->value.empty())
+                        break;
+                    if (!checked)
+                    {
+                        aBeforeReading();
+                        checked = true;
+                    }
+                    more = aSelf.method("_read_chunk").truthy();
+                    if (!more)
+                        break;
+                }
+                if (!more)
+                {
+                    // (end of file)
+                    setDecodedChars(S(""));
+                    aSelf.set_attr("_snapshot", none());
+                    haveLine = false;
+                    break;
+                }
+                if (!haveRemaining)
+                {
+                    auto const& chars = *as<str_object>(decoded.get());
+                    ascii = chars.is_ascii();
+                    text = chars.value;
+                    start = aSelf.attr("_decoded_chars_used").as_index();
+                    startByte = byte_offset(decoded, start);
+                    offsetToBuffer = 0;
+                    offsetToBufferBytes = 0u;
+                }
+                else
+                {
+                    concatenated = remaining + as<str_object>(decoded.get())->value;
+                    text = concatenated;
+                    ascii = false;
+                    start = 0;
+                    startByte = 0u;
+                    offsetToBuffer = char_count(remaining, 0u, remaining.size());
+                    offsetToBufferBytes = remaining.size();
+                    remaining.clear();
+                    haveRemaining = false;
+                }
+                haveLine = true;
+                std::size_t consumed = 0u;
+                if (auto const found = find_line_ending(translated, universal, readnl, text, startByte, consumed))
+                {
+                    endByte = *found;
+                    endpos = start + count_of(text, startByte, endByte);
+                    if (aLimit >= 0 && (endpos - start) + chunked >= aLimit)
+                    {
+                        endpos = start + aLimit - chunked;
+                        endByte = advance_of(text, startByte, aLimit - chunked);
+                    }
+                    break;
+                }
+                // (we can put aside up to endpos)
+                endByte = consumed;
+                endpos = start + count_of(text, startByte, endByte);
+                if (aLimit >= 0 && (endpos - start) + chunked >= aLimit)
+                {
+                    // (didn't find line ending, but reached length limit)
+                    endpos = start + aLimit - chunked;
+                    endByte = advance_of(text, startByte, aLimit - chunked);
+                    break;
+                }
+                if (endByte > startByte)
+                {
+                    // (no line ending seen yet - put aside current data)
+                    chunks.append(text.substr(startByte, endByte - startByte));
+                    chunked += endpos - start;
+                }
+                // (there may be some remaining bytes we'll have to prepend to the next chunk of data)
+                if (endByte < text.size())
+                {
+                    remaining = std::string{ text.substr(endByte) };
+                    haveRemaining = true;
+                }
+                haveLine = false;
+                // (we have consumed the buffer)
+                setDecodedChars(S(""));
+            }
+            std::string result = std::move(chunks);
+            if (haveRemaining)
+                result += remaining;
+            if (haveLine)
+            {
+                // (our line ends in the current buffer)
+                aSelf.set_attr("_decoded_chars_used", py{ endpos - offsetToBuffer });
+                auto& last = last_char_offset();
+                last.text = ref::borrowed(decoded.get());
+                last.chars = endpos - offsetToBuffer;
+                last.bytes = endByte - offsetToBufferBytes;
+                result.append(text.substr(startByte, endByte - startByte));
+            }
+            return S(result);
+        }
+
         void make_text_io_wrapper()
         {
             char const* const c = "TextIOWrapper";
@@ -1416,6 +2537,126 @@ namespace neos::python_runtime::detail
             };
             auto const getDecoder = [](py const& aSelf) { py const d = aSelf.attr("_decoder"); return d.truthy() ? d : aSelf.method("_get_decoder"); };
             auto const getEncoder = [](py const& aSelf) { py const e = aSelf.attr("_encoder"); return e.truthy() ? e : aSelf.method("_get_encoder"); };
+            // (readline(size=None))
+            auto const readline = [getDecodedChars, setDecodedChars](py const& aSelf, py const& aSize) -> py
+                {
+                    py const& self = aSelf;
+                    // (_io's checks and messages (Modules/_io/textio.c): its size is an index (not None))
+                    long long const size = aSize.as_index();
+                    if (text_closed(self))
+                        py_raise("ValueError", "I/O operation on closed file.");
+                    auto const readable = [&]()
+                    {
+                        if (!self.method("readable").truthy())
+                            raise_unsupported(S("not readable"));
+                        // (make the decoder if it doesn't already exist)
+                        if (!self.attr("_decoder").truthy())
+                            self.method("_get_decoder");
+                    };
+                    // (its decoded chars are read without the checks of reading more (as Modules/_io/textio.c's are))
+                    if (auto const line = fast_readline(self, size, readable))
+                        return *line;
+                    readable();
+                    // (grab all the decoded text (we will rewind any extra bits later))
+                    py line = getDecodedChars(self);
+                    long long start = 0;
+                    // (make the decoder if it doesn't already exist)
+                    if (!self.attr("_decoder").truthy())
+                        self.method("_get_decoder");
+                    long long endpos = 0;
+                    auto const find = [&](char const* aText, long long aStart) { return line.method("find", { S(aText), py{ aStart } }).as_index(); };
+                    for (;;)
+                    {
+                        if (self.attr("_readtranslate").truthy())
+                        {
+                            // (newlines are already translated, only search for \n)
+                            long long const pos = find("\n", start);
+                            if (pos >= 0)
+                            {
+                                endpos = pos + 1;
+                                break;
+                            }
+                            start = line.size();
+                        }
+                        else if (self.attr("_readuniversal").truthy())
+                        {
+                            // (universal newline search: find any of \r, \r\n, \n; the decoder ensures that \r\n are not split in two pieces)
+                            long long const nlpos = find("\n", start);
+                            long long const crpos = find("\r", start);
+                            if (crpos == -1)
+                            {
+                                if (nlpos == -1)
+                                {
+                                    // (nothing found)
+                                    start = line.size();
+                                }
+                                else
+                                {
+                                    // (found \n)
+                                    endpos = nlpos + 1;
+                                    break;
+                                }
+                            }
+                            else if (nlpos == -1)
+                            {
+                                // (found lone \r)
+                                endpos = crpos + 1;
+                                break;
+                            }
+                            else if (nlpos < crpos)
+                            {
+                                // (found \n)
+                                endpos = nlpos + 1;
+                                break;
+                            }
+                            else if (nlpos == crpos + 1)
+                            {
+                                // (found \r\n)
+                                endpos = crpos + 2;
+                                break;
+                            }
+                            else
+                            {
+                                // (found \r)
+                                endpos = crpos + 1;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            // (non-universal)
+                            long long const pos = line.method("find", { self.attr("_readnl") }).as_index();
+                            if (pos >= 0)
+                            {
+                                endpos = pos + self.attr("_readnl").size();
+                                break;
+                            }
+                        }
+                        if (size >= 0 && line.size() >= size)
+                        {
+                            endpos = size; // (reached length size)
+                            break;
+                        }
+                        // (no line ending seen yet - get more data)
+                        while (self.method("_read_chunk").truthy())
+                            if (self.attr("_decoded_chars").truthy())
+                                break;
+                        if (self.attr("_decoded_chars").truthy())
+                            line = line + getDecodedChars(self);
+                        else
+                        {
+                            // (end of file)
+                            setDecodedChars(self, S(""));
+                            self.set_attr("_snapshot", none());
+                            return line;
+                        }
+                    }
+                    if (size >= 0 && endpos > size)
+                        endpos = size;  // (don't exceed size)
+                    // (rewind _decoded_chars to just after the line ending we found)
+                    self.method("_rewind_decoded_chars", { py{ line.size() - endpos } });
+                    return upto(line, py{ endpos });
+                };
             make_class(c, { cls("TextIOBase") }, {
                 { "_CHUNK_SIZE", py{ 2048 } },
                 // (initialize _buffer as soon as possible since it's used by __del__() which calls close())
@@ -1456,10 +2697,10 @@ namespace neos::python_runtime::detail
                         self.set_attr("_decoded_chars", S(""));        // (buffer for text returned from decoder)
                         self.set_attr("_decoded_chars_used", py{ 0 }); // (offset into _decoded_chars for read())
                         self.set_attr("_snapshot", none());            // (info for reconstructing decoder state)
-                        py const seekable = self.attr("buffer").method("seekable");
+                        py const seekable = attached_buffer(self).method("seekable");
                         self.set_attr("_seekable", seekable);
                         self.set_attr("_telling", seekable);
-                        self.set_attr("_has_read1", boolean(hasattr(self.attr("buffer"), "read1")));
+                        self.set_attr("_has_read1", boolean(hasattr(attached_buffer(self), "read1")));
                         self.method("_configure", { encoding, errors, a[4], a[5], a[6] });
                         return none();
                     }) },
@@ -1491,7 +2732,7 @@ namespace neos::python_runtime::detail
                         // (don't write a BOM in the middle of a file)
                         if (self.attr("_seekable").truthy() && self.method("writable").truthy())
                         {
-                            py const position = self.attr("buffer").method("tell");
+                            py const position = attached_buffer(self).method("tell");
                             if (position != py{ 0 })
                             {
                                 try
@@ -1565,24 +2806,24 @@ namespace neos::python_runtime::detail
                             py_raise("ValueError", "I/O operation on closed file.");
                         return a[0].attr("_seekable");
                     }) },
-                { "readable", method(c, "readable", {}, [](std::vector<py> const& a) { return a[0].attr("buffer").method("readable"); }) },
-                { "writable", method(c, "writable", {}, [](std::vector<py> const& a) { return a[0].attr("buffer").method("writable"); }) },
+                { "readable", method(c, "readable", {}, [](std::vector<py> const& a) { return attached_buffer(a[0]).method("readable"); }) },
+                { "writable", method(c, "writable", {}, [](std::vector<py> const& a) { return attached_buffer(a[0]).method("writable"); }) },
                 { "flush", method(c, "flush", {}, [](std::vector<py> const& a)
                     {
-                        a[0].attr("buffer").method("flush");
+                        attached_buffer(a[0]).method("flush");
                         a[0].set_attr("_telling", a[0].attr("_seekable"));
                         return none();
                     }) },
                 { "close", method(c, "close", {}, [](std::vector<py> const& a)
                     {
-                        if (!a[0].attr("buffer").is_none() && !a[0].attr("closed").truthy())
-                            try_finally([&]() { return a[0].method("flush"); }, [&]() { a[0].attr("buffer").method("close"); });
+                        if (!a[0].attr("closed").truthy())
+                            try_finally([&]() { return a[0].method("flush"); }, [&]() { attached_buffer(a[0]).method("close"); });
                         return none();
                     }) },
-                { "closed", property(c, "closed", [](std::vector<py> const& a) { return a[0].attr("buffer").attr("closed"); }) },
-                { "name", property(c, "name", [](std::vector<py> const& a) { return a[0].attr("buffer").attr("name"); }) },
-                { "fileno", method(c, "fileno", {}, [](std::vector<py> const& a) { return a[0].attr("buffer").method("fileno"); }) },
-                { "isatty", method(c, "isatty", {}, [](std::vector<py> const& a) { return a[0].attr("buffer").method("isatty"); }) },
+                { "closed", property(c, "closed", [](std::vector<py> const& a) { return attached_buffer(a[0]).attr("closed"); }) },
+                { "name", property(c, "name", [](std::vector<py> const& a) { return attached_buffer(a[0]).attr("name"); }) },
+                { "fileno", method(c, "fileno", {}, [](std::vector<py> const& a) { return attached_buffer(a[0]).method("fileno"); }) },
+                { "isatty", method(c, "isatty", {}, [](std::vector<py> const& a) { return attached_buffer(a[0]).method("isatty"); }) },
                 { "write", method(c, "write", { py_positional("s") }, [setDecodedChars, getEncoder](std::vector<py> const& a)
                     {
                         py const& self = a[0];
@@ -1601,7 +2842,7 @@ namespace neos::python_runtime::detail
                         py const encoder = getEncoder(self);
                         // (XXX what if we were just reading?)
                         py const b = encoder.method("encode", { s });
-                        self.attr("buffer").method("write", { b });
+                        attached_buffer(self).method("write", { b });
                         if (self.attr("_line_buffering").truthy() && (haslf || s.contains(S("\r"))))
                             self.method("flush");
                         if (!self.attr("_snapshot").is_none())
@@ -1677,7 +2918,7 @@ namespace neos::python_runtime::detail
                             // (given this, we know there was a valid snapshot point len(dec_buffer) bytes ago with decoder state (b'', dec_flags))
                         }
                         // (read a chunk, decode it, and put the result in self._decoded_chars)
-                        py const inputChunk = self.attr("buffer").method(self.attr("_has_read1").truthy() ? "read1" : "read", { self.attr("_CHUNK_SIZE") });
+                        py const inputChunk = attached_buffer(self).method(self.attr("_has_read1").truthy() ? "read1" : "read", { self.attr("_CHUNK_SIZE") });
                         bool const eof = !inputChunk.truthy();
                         py const decodedChars = self.attr("_decoder").method("decode", { inputChunk, boolean(eof) });
                         setDecodedChars(self, decodedChars);
@@ -1717,7 +2958,7 @@ namespace neos::python_runtime::detail
                         if (!self.attr("_telling").truthy())
                             py_raise("OSError", "telling position disabled by next() call");
                         self.method("flush");
-                        py position = self.attr("buffer").method("tell");
+                        py position = attached_buffer(self).method("tell");
                         py const decoder = self.attr("_decoder");
                         if (decoder.is_none() || self.attr("_snapshot").is_none())
                         {
@@ -1835,12 +3076,11 @@ namespace neos::python_runtime::detail
                     {
                         a[0].method("flush");
                         py const pos = a[1].is_none() ? a[0].method("tell") : a[1];
-                        return a[0].attr("buffer").method("truncate", { pos });
+                        return attached_buffer(a[0]).method("truncate", { pos });
                     }) },
                 { "detach", method(c, "detach", {}, [](std::vector<py> const& a)
                     {
-                        if (a[0].attr("buffer").is_none())
-                            py_raise("ValueError", "buffer is already detached");
+                        attached_buffer(a[0]); // (_io's check (Modules/_io/textio.c's CHECK_ATTACHED))
                         a[0].method("flush");
                         py const buffer = a[0].attr("_buffer");
                         a[0].set_attr("_buffer", none());
@@ -1888,7 +3128,7 @@ namespace neos::python_runtime::detail
                             if (cookie != py{ 0 })
                                 raise_unsupported(S("can't do nonzero end-relative seeks"));
                             self.method("flush");
-                            py const position = self.attr("buffer").method("seek", { py{ 0 }, whence });
+                            py const position = attached_buffer(self).method("seek", { py{ 0 }, whence });
                             setDecodedChars(self, S(""));
                             self.set_attr("_snapshot", none());
                             if (self.attr("_decoder").truthy())
@@ -1909,7 +3149,7 @@ namespace neos::python_runtime::detail
                         py const& needEof = cookieParts[3];
                         py const& charsToSkip = cookieParts[4];
                         // (seek back to the safe start point)
-                        self.attr("buffer").method("seek", { startPos });
+                        attached_buffer(self).method("seek", { startPos });
                         setDecodedChars(self, S(""));
                         self.set_attr("_snapshot", none());
                         // (restore the decoder to its state from the safe start point)
@@ -1924,7 +3164,7 @@ namespace neos::python_runtime::detail
                         if (charsToSkip.truthy())
                         {
                             // (just like _read_chunk, feed the decoder and save a snapshot)
-                            py const inputChunk = self.attr("buffer").method("read", { bytesToFeed });
+                            py const inputChunk = attached_buffer(self).method("read", { bytesToFeed });
                             setDecodedChars(self, self.attr("_decoder").method("decode", { inputChunk, needEof }));
                             self.set_attr("_snapshot", py_tuple({ decFlags, inputChunk }));
                             // (skip chars_to_skip of the decoded characters)
@@ -1948,7 +3188,7 @@ namespace neos::python_runtime::detail
                         if (size < py{ 0 })
                         {
                             // (read everything)
-                            py const result = getDecodedChars(self) + decoder.method("decode", { self.attr("buffer").method("read") }, { { "final", boolean(true) } });
+                            py const result = getDecodedChars(self) + decoder.method("decode", { attached_buffer(self).method("read") }, { { "final", boolean(true) } });
                             if (!self.attr("_snapshot").is_none())
                             {
                                 setDecodedChars(self, S(""));
@@ -1966,10 +3206,11 @@ namespace neos::python_runtime::detail
                         }
                         return result;
                     }) },
-                { "__next__", method(c, "__next__", {}, [](std::vector<py> const& a)
+                { "__next__", method(c, "__next__", {}, [readline](std::vector<py> const& a)
                     {
                         a[0].set_attr("_telling", boolean(false));
-                        py const line = a[0].method("readline");
+                        // (TextIOWrapper's own readline, unless a subclass's (Modules/_io/textio.c's textiowrapper_iternext))
+                        py const line = type_of(a[0]).is(cls("TextIOWrapper")) ? readline(a[0], py{ -1 }) : a[0].method("readline");
                         if (!line.truthy())
                         {
                             a[0].set_attr("_snapshot", none());
@@ -1978,119 +3219,13 @@ namespace neos::python_runtime::detail
                         }
                         return line;
                     }) },
-                { "readline", method(c, "readline", { py_positional("size", none()) }, [getDecodedChars, setDecodedChars](std::vector<py> const& a)
-                    {
-                        py const& self = a[0];
-                        // (_io's checks and messages (Modules/_io/textio.c))
-                        long long const size = size_argument(a[1]);
-                        if (self.attr("closed").truthy())
-                            py_raise("ValueError", "I/O operation on closed file.");
-                        if (!self.method("readable").truthy())
-                            raise_unsupported(S("not readable"));
-                        // (grab all the decoded text (we will rewind any extra bits later))
-                        py line = getDecodedChars(self);
-                        long long start = 0;
-                        // (make the decoder if it doesn't already exist)
-                        if (!self.attr("_decoder").truthy())
-                            self.method("_get_decoder");
-                        long long endpos = 0;
-                        auto const find = [&](char const* aText, long long aStart) { return line.method("find", { S(aText), py{ aStart } }).as_index(); };
-                        for (;;)
-                        {
-                            if (self.attr("_readtranslate").truthy())
-                            {
-                                // (newlines are already translated, only search for \n)
-                                long long const pos = find("\n", start);
-                                if (pos >= 0)
-                                {
-                                    endpos = pos + 1;
-                                    break;
-                                }
-                                start = line.size();
-                            }
-                            else if (self.attr("_readuniversal").truthy())
-                            {
-                                // (universal newline search: find any of \r, \r\n, \n; the decoder ensures that \r\n are not split in two pieces)
-                                long long const nlpos = find("\n", start);
-                                long long const crpos = find("\r", start);
-                                if (crpos == -1)
-                                {
-                                    if (nlpos == -1)
-                                    {
-                                        // (nothing found)
-                                        start = line.size();
-                                    }
-                                    else
-                                    {
-                                        // (found \n)
-                                        endpos = nlpos + 1;
-                                        break;
-                                    }
-                                }
-                                else if (nlpos == -1)
-                                {
-                                    // (found lone \r)
-                                    endpos = crpos + 1;
-                                    break;
-                                }
-                                else if (nlpos < crpos)
-                                {
-                                    // (found \n)
-                                    endpos = nlpos + 1;
-                                    break;
-                                }
-                                else if (nlpos == crpos + 1)
-                                {
-                                    // (found \r\n)
-                                    endpos = crpos + 2;
-                                    break;
-                                }
-                                else
-                                {
-                                    // (found \r)
-                                    endpos = crpos + 1;
-                                    break;
-                                }
-                            }
-                            else
-                            {
-                                // (non-universal)
-                                long long const pos = line.method("find", { self.attr("_readnl") }).as_index();
-                                if (pos >= 0)
-                                {
-                                    endpos = pos + self.attr("_readnl").size();
-                                    break;
-                                }
-                            }
-                            if (size >= 0 && line.size() >= size)
-                            {
-                                endpos = size; // (reached length size)
-                                break;
-                            }
-                            // (no line ending seen yet - get more data)
-                            while (self.method("_read_chunk").truthy())
-                                if (self.attr("_decoded_chars").truthy())
-                                    break;
-                            if (self.attr("_decoded_chars").truthy())
-                                line = line + getDecodedChars(self);
-                            else
-                            {
-                                // (end of file)
-                                setDecodedChars(self, S(""));
-                                self.set_attr("_snapshot", none());
-                                return line;
-                            }
-                        }
-                        if (size >= 0 && endpos > size)
-                            endpos = size;  // (don't exceed size)
-                        // (rewind _decoded_chars to just after the line ending we found)
-                        self.method("_rewind_decoded_chars", { py{ line.size() - endpos } });
-                        return upto(line, py{ endpos });
-                    }) },
+                { "readline", method(c, "readline", { py_positional("size", py{ -1 }) }, [readline](std::vector<py> const& a) { return readline(a[0], a[1]); }) },
                 { "newlines", property(c, "newlines", [](std::vector<py> const& a)
                     {
+                        attached_buffer(a[0]);
+                        // (_io's: None if its decoder has none (Modules/_io/textio.c's textiowrapper_newlines_get))
                         py const decoder = a[0].attr("_decoder");
-                        return decoder.truthy() ? decoder.attr("newlines") : none();
+                        return decoder.truthy() ? getattr_or_none(decoder, "newlines") : none();
                     }) },
                 { "_dealloc_warn", method(c, "_dealloc_warn", { py_positional("source") }, [](std::vector<py> const& a)
                     {
@@ -2123,6 +3258,7 @@ namespace neos::python_runtime::detail
                 }
                 make_iobase();
                 make_raw_iobase();
+                make_fileio();
                 make_buffered_iobase();
                 make_buffered_io_mixin();
                 make_buffered_reader();
@@ -2141,7 +3277,7 @@ namespace neos::python_runtime::detail
                 cls("TextIOBase").method("register", { py{ type_object_for("StringIO", "_io.StringIO") } });
                 s.made = true;
             }
-            for (char const* name : { "IOBase", "RawIOBase", "BufferedIOBase", "TextIOBase", "BufferedReader", "BufferedWriter", "BufferedRWPair",
+            for (char const* name : { "IOBase", "RawIOBase", "FileIO", "BufferedIOBase", "TextIOBase", "BufferedReader", "BufferedWriter", "BufferedRWPair",
                 "BufferedRandom", "TextIOWrapper", "IncrementalNewlineDecoder" })
                 aAttributes.emplace_back(name, cls(name).reference());
             aAttributes.emplace_back("BlockingIOError", builtin("BlockingIOError").release());

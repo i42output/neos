@@ -113,6 +113,23 @@ namespace neos
                     std::uint64_t size = 0u;
                 };
 
+                // the host's objects (see neos/runtime/plugin.h): a handle is the index of a slot (0: no object), which counts the 
+                // references the program holds (a slot that is in use holds one reference to its object); a free slot's count is 
+                // 0 and its next is the next free slot (0: none). Generated code uses the slots itself (and calls the host's object 
+                // functions (see host_interface) for the rest: a new slot when none is free, and errors)
+                struct object_slot
+                {
+                    void* object = nullptr;
+                    std::uint32_t count = 0u;
+                    std::uint32_t next = 0u;
+                };
+                struct object_table
+                {
+                    object_slot* slots = nullptr;   ///< (updated by the VM when they move or grow)
+                    std::uint32_t size = 0u;
+                    std::uint32_t free = 0u;        ///< (the first free slot: 0 if none)
+                };
+
                 // the host's objects (see neos/runtime/plugin.h) and runtime plugins' errors, for the imports generated code calls 
                 // directly (each function may throw: the call traps)
                 struct host_interface
@@ -134,6 +151,7 @@ namespace neos
                     std::vector<value>* globals = nullptr;
                     std::vector<std::uint8_t> const* globalTypes = nullptr;
                     memory const* linearMemory = nullptr;
+                    object_table* objects = nullptr;    ///< (null: generated code calls the host's object functions)
                     host_interface host;
                 };
 

@@ -29,6 +29,9 @@ names the CPython sources it is derived from.
   datetime.cpp         Modules/_datetimemodule.c and Lib/_strptime.py
   decimal.cpp          Lib/_pydecimal.py
   enum.cpp             Lib/enum.py
+  exec.cpp             Python/bltinmodule.c and Python/import.c (__import__:
+                       PyImport_ImportModuleLevelObject and resolve_name)
+                       and Lib/importlib/_bootstrap.py (_handle_fromlist)
   files.cpp            Lib/fnmatch.py, Lib/glob.py, Lib/shutil.py and
                        Lib/tempfile.py
   fractions.cpp        Lib/fractions.py
@@ -57,7 +60,9 @@ names the CPython sources it is derived from.
                        Modules/_io/bufferedio.c, Modules/_io/textio.c and
                        Modules/_io/_iomodule.c where they differ from
                        _pyio's (e.g. BufferedWriter's buffering, IOBase's
-                       finalization, the reprs)
+                       finalization, the reprs); Modules/_io/fileio.c
+                       (FileIO) and Python/fileutils.c (_Py_read,
+                       _Py_write and set_inheritable)
   pyio_docs.hpp        Modules/_io and Lib/_pyio.py (the io classes'
                        docstrings, generated)
   pytime.hpp           Python/pytime.c
@@ -67,7 +72,8 @@ names the CPython sources it is derived from.
                        (PyObject_AsFileDescriptor)
   selectors.cpp        Lib/selectors.py
   services.cpp         Lib/platform.py, Lib/keyword.py, Lib/copyreg.py,
-                       Lib/secrets.py and Lib/timeit.py
+                       Lib/secrets.py, Lib/timeit.py and
+                       Modules/signalmodule.c (signal_install_handlers)
   set.cpp              Objects/setobject.c
   socket.cpp           Modules/socketmodule.c, Python/fileutils.c
                        (set_inheritable) and Lib/encodings/idna.py (its

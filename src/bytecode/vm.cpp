@@ -63,6 +63,56 @@
 #include <list>
 #include <mutex>
 
+// coroutines' switches (see host_coroutine_resume) on x86-64 System V (ELF): the registers that a call preserves, MXCSR and the x87
+// control word, saved on the stack being left (its stack pointer stored in *aSave), then restored from the stack switched to (aTo) 
+// (ucontext's swapcontext also saves and restores the signal mask: a system call each switch)
+#if !defined(_WIN32) && defined(__x86_64__) && (defined(__linux__) || defined(__FreeBSD__))
+#define NEOS_VM_SWITCH_CONTEXT
+extern "C" void neos_vm_switch_context(void** aSave, void* aTo);
+extern "C" void neos_vm_coroutine_trampoline();
+asm(R"(
+    .text
+    .p2align 4
+    .globl neos_vm_switch_context
+    .hidden neos_vm_switch_context
+    .type neos_vm_switch_context, @function
+neos_vm_switch_context:
+    pushq %rbp
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    subq $8, %rsp
+    stmxcsr (%rsp)
+    fnstcw 4(%rsp)
+    movq %rsp, (%rdi)
+    movq %rsi, %rsp
+    ldmxcsr (%rsp)
+    fldcw 4(%rsp)
+    addq $8, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    popq %rbp
+    ret
+    .size neos_vm_switch_context, .-neos_vm_switch_context
+
+    .p2align 4
+    .globl neos_vm_coroutine_trampoline
+    .hidden neos_vm_coroutine_trampoline
+    .type neos_vm_coroutine_trampoline, @function
+neos_vm_coroutine_trampoline:
+    movq %r12, %rdi
+    andq $-16, %rsp
+    callq *%r13
+    ud2
+    .size neos_vm_coroutine_trampoline, .-neos_vm_coroutine_trampoline
+)");
+#endif
+
 namespace neos
 {
     namespace bytecode
@@ -391,6 +441,7 @@ namespace neos
                         module.globals = &iGlobals;
                         module.globalTypes = &iGlobalTypes;
                         module.linearMemory = &iMemoryView;
+                        module.objects = &iObjectTable;
                         module.host = jit::host_interface{ this,
                             [](void* aHost, std::uint32_t aHandle) { return static_cast<machine*>(aHost)->object_pointer(aHandle); },
                             [](void* aHost, void* aObject) { return static_cast<machine*>(aHost)->object_handle(aObject); },
@@ -1275,10 +1326,10 @@ namespace neos
                         if (aObject == nullptr)
                             return 0u;
                         std::uint32_t handle;
-                        if (!iFreeObjects.empty())
+                        if (iObjectTable.free != 0u)
                         {
-                            handle = iFreeObjects.back();
-                            iFreeObjects.pop_back();
+                            handle = iObjectTable.free;
+                            iObjectTable.free = iObjects[handle].next;
                         }
                         else
                         {
@@ -1286,8 +1337,10 @@ namespace neos
                                 throw trap{ "too many objects" };
                             handle = static_cast<std::uint32_t>(iObjects.size());
                             iObjects.emplace_back();
+                            iObjectTable.slots = iObjects.data();
+                            iObjectTable.size = static_cast<std::uint32_t>(iObjects.size());
                         }
-                        iObjects[handle] = object_slot{ aObject, 1u };
+                        iObjects[handle] = jit::object_slot{ aObject, 1u, 0u };
                         return handle;
                     }
                     void retain_object(std::uint32_t aHandle)
@@ -1304,8 +1357,8 @@ namespace neos
                         auto* const object = static_cast<neos_rt_object*>(object_pointer(aHandle));
                         if (--iObjects[aHandle].count != 0u)
                             return;
-                        iObjects[aHandle] = {};
-                        iFreeObjects.push_back(aHandle);
+                        iObjects[aHandle] = jit::object_slot{ nullptr, 0u, iObjectTable.free };
+                        iObjectTable.free = aHandle;
                         object->type->release(object);
                     }
                     std::uint32_t allocate_string(std::string_view aValue)
@@ -1724,13 +1777,8 @@ namespace neos
                         [this](std::uint32_t aHandle) { return object_pointer(aHandle); },
                         [this](void* aObject) { return object_handle(aObject); }
                     };
-                    struct object_slot
-                    {
-                        void* object = nullptr;
-                        std::uint32_t count = 0u;
-                    };
-                    std::vector<object_slot> iObjects = std::vector<object_slot>(1u); ///< (0 is no object)
-                    std::vector<std::uint32_t> iFreeObjects;
+                    std::vector<jit::object_slot> iObjects = std::vector<jit::object_slot>(1u); ///< (0 is no object)
+                    jit::object_table iObjectTable = { iObjects.data(), 1u, 0u }; ///< (the slots, as generated code uses them)
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
                     std::optional<std::uint32_t> iHeap;
@@ -1781,7 +1829,7 @@ namespace neos
                     return tRunning.program->call_from_plugin(tRunning.native, aFunction, aCount, aParameters, aArguments, aResult, aResultValue);
                 }
 
-                // --- coroutines (a stack of their own: Windows fibers, else ucontext)
+                // --- coroutines (a stack of their own: Windows fibers, else neos_vm_switch_context (or ucontext))
 
                 struct coroutine
                 {
@@ -1798,13 +1846,66 @@ namespace neos
 #else
                     static constexpr std::size_t StackSize = 8u * 1024u * 1024u;
                     static constexpr std::size_t GuardSize = 64u * 1024u;
+#if defined(NEOS_VM_SWITCH_CONTEXT)
+                    void* sp = nullptr;             ///< (its stack pointer, while it is suspended (see neos_vm_switch_context))
+                    void* resumerSp = nullptr;      ///< (the stack pointer of the code that resumed it, while it runs)
+#else
                     ucontext_t context{};
                     ucontext_t resumer{};
+#endif
                     void* stack = nullptr;
 #endif
                 };
 
                 thread_local coroutine* tCoroutine = nullptr;
+
+#if !defined(_WIN32)
+                // (coroutines' stacks: those of coroutines deleted are reused (mapping one takes system calls))
+                struct free_stacks
+                {
+                    std::mutex mutex;
+                    std::vector<void*> stacks;
+                };
+                free_stacks& the_free_stacks()
+                {
+                    static auto& sFreeStacks = *new free_stacks{};  // (never destroyed: coroutines can be deleted as the process ends)
+                    return sFreeStacks;
+                }
+                constexpr std::size_t MaxFreeStacks = 16u;
+
+                void* acquire_stack()
+                {
+                    {
+                        auto& free = the_free_stacks();
+                        std::lock_guard<std::mutex> lock{ free.mutex };
+                        if (!free.stacks.empty())
+                        {
+                            auto const stack = free.stacks.back();
+                            free.stacks.pop_back();
+                            return stack;
+                        }
+                    }
+                    auto const stack = ::mmap(nullptr, coroutine::StackSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    if (stack == MAP_FAILED)
+                        return nullptr;
+                    ::mprotect(stack, coroutine::GuardSize, PROT_NONE);
+                    return stack;
+                }
+
+                void release_stack(void* aStack)
+                {
+                    {
+                        auto& free = the_free_stacks();
+                        std::lock_guard<std::mutex> lock{ free.mutex };
+                        if (free.stacks.size() < MaxFreeStacks)
+                        {
+                            free.stacks.push_back(aStack);
+                            return;
+                        }
+                    }
+                    ::munmap(aStack, coroutine::StackSize);
+                }
+#endif
 
 #if defined(_WIN32)
                 void __stdcall coroutine_start(void* aCoroutine)
@@ -1814,6 +1915,16 @@ namespace neos
                     c.finished = true;
                     ::SwitchToFiber(c.resumer);
                 }
+#elif defined(NEOS_VM_SWITCH_CONTEXT)
+                // (its first resume returns to neos_vm_coroutine_trampoline, which calls this (r13) with it (r12))
+                void coroutine_start(void* aCoroutine)
+                {
+                    auto& c = *static_cast<coroutine*>(aCoroutine);
+                    c.entry(c.data);
+                    c.finished = true;
+                    neos_vm_switch_context(&c.sp, c.resumerSp);
+                    std::abort();   // (a finished coroutine is not resumed)
+                }
 #else
                 void coroutine_start(unsigned aLow, unsigned aHigh)
                 {
@@ -1822,7 +1933,9 @@ namespace neos
                     c.finished = true;
                     // (returns to its uc_link: the context that resumed it)
                 }
+#endif
 
+#if !defined(_WIN32)
                 std::uint64_t coroutine_stack_low(coroutine const* aCoroutine)
                 {
                     return aCoroutine != nullptr ? reinterpret_cast<std::uint64_t>(aCoroutine->stack) + coroutine::GuardSize : 0u;
@@ -1842,13 +1955,26 @@ namespace neos
                         return nullptr;
                     }
 #else
-                    c->stack = ::mmap(nullptr, coroutine::StackSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                    if (c->stack == MAP_FAILED)
+                    c->stack = acquire_stack();
+                    if (c->stack == nullptr)
                     {
                         delete c;
                         return nullptr;
                     }
-                    ::mprotect(c->stack, coroutine::GuardSize, PROT_NONE);
+#if defined(NEOS_VM_SWITCH_CONTEXT)
+                    // (its stack, as neos_vm_switch_context leaves one: its first resume returns to neos_vm_coroutine_trampoline)
+                    auto* frame = reinterpret_cast<std::uint64_t*>((reinterpret_cast<std::uintptr_t>(c->stack) + coroutine::StackSize) & ~std::uintptr_t{ 15u });
+                    *--frame = 0u;                                                                      // (no return address)
+                    *--frame = reinterpret_cast<std::uint64_t>(&neos_vm_coroutine_trampoline);
+                    *--frame = 0u;                                                                      // rbp
+                    *--frame = 0u;                                                                      // rbx
+                    *--frame = reinterpret_cast<std::uint64_t>(c);                                      // r12
+                    *--frame = reinterpret_cast<std::uint64_t>(static_cast<void(*)(void*)>(&coroutine_start)); // r13
+                    *--frame = 0u;                                                                      // r14
+                    *--frame = 0u;                                                                      // r15
+                    *--frame = (std::uint64_t{ 0x037Fu } << 32u) | 0x1F80u;                             // (MXCSR and the x87 control word: their defaults)
+                    c->sp = frame;
+#else
                     ::getcontext(&c->context);
                     c->context.uc_stack.ss_sp = static_cast<char*>(c->stack) + coroutine::GuardSize;
                     c->context.uc_stack.ss_size = coroutine::StackSize - coroutine::GuardSize;
@@ -1856,6 +1982,7 @@ namespace neos
                     auto const address = reinterpret_cast<std::uintptr_t>(c);
                     ::makecontext(&c->context, reinterpret_cast<void (*)()>(coroutine_start), 2, static_cast<unsigned>(address & 0xFFFFFFFFu), 
                         static_cast<unsigned>(address >> 32u));
+#endif
 #endif
                     return reinterpret_cast<neos_rt_coroutine*>(c);
                 }
@@ -1877,7 +2004,11 @@ namespace neos
                         ::ConvertFiberToThread();
 #else
                     jit::set_coroutine_stack(coroutine_stack_low(&c));
+#if defined(NEOS_VM_SWITCH_CONTEXT)
+                    neos_vm_switch_context(&c.resumerSp, c.sp);
+#else
                     ::swapcontext(&c.resumer, &c.context);
+#endif
                     jit::set_coroutine_stack(coroutine_stack_low(c.previous));
 #endif
                     c.activations = tActivation;
@@ -1894,6 +2025,8 @@ namespace neos
 #if defined(_WIN32)
                     c->suspended = ::GetCurrentFiber();
                     ::SwitchToFiber(c->resumer);
+#elif defined(NEOS_VM_SWITCH_CONTEXT)
+                    neos_vm_switch_context(&c->sp, c->resumerSp);
 #else
                     ::swapcontext(&c->context, &c->resumer);
 #endif
@@ -1907,7 +2040,7 @@ namespace neos
 #if defined(_WIN32)
                     ::DeleteFiber(c->fiber);
 #else
-                    ::munmap(c->stack, coroutine::StackSize);
+                    release_stack(c->stack);
 #endif
                     delete c;
                 }

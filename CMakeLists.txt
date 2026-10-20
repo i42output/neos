@@ -360,6 +360,15 @@ target_link_libraries(python PRIVATE neonumeric::neonumeric) # (ints beyond 64 b
 if(WIN32)
     target_link_libraries(python PRIVATE ws2_32) # (Winsock: the modules select and socket)
 endif()
+# (its thread-locals (dynamic: it is loaded by dlopen) found through TLS descriptors: cheaper than calls of __tls_get_addr, and 
+# every call of its functions uses some)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag(-mtls-dialect=gnu2 NEOS_HAVE_TLS_DESCRIPTORS)
+    if(NEOS_HAVE_TLS_DESCRIPTORS)
+        target_compile_options(python PRIVATE -mtls-dialect=gnu2)
+    endif()
+endif()
 
 # OpenBLAS (the NumPy runtime plugin's BLAS): the bundled source (3rdparty/OpenBLAS-0.3.34) built (a static library) as
 # NumPy's (scipy-openblas) is: 64-bit integers, kernels for the same CPUs chosen at run time, threads, LAPACK from C (no

@@ -1055,13 +1055,17 @@ namespace neos::python_runtime
             return is_coroutine_object(aObject);
         }
 
-        // __yield(value): the value sent (None for next())
+        // __yield(value): the value sent (None for next()) (fn_yield: compiled yields' (python::__yield))
         object* b_yield(std::vector<object*> const& aArgs, object*)
+        {
+            return fn_yield(aArgs.empty() ? none() : aArgs[0]);
+        }
+        object* fn_yield(object* aValue)
         {
             auto* const g = tCurrent;
             if (g == nullptr)
                 return error("SystemError", "yield outside of a generator");
-            auto const value = aArgs.empty() ? none() : aArgs[0];
+            auto const value = aValue;
             retain(value);
             release(g->transfer);
             g->transfer = value;

@@ -43,14 +43,16 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <sys/types.h>
+#include <sys/stat.h>
 #if defined(_WIN32)
 #include <io.h>
 #else
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 #include "objects.hpp"
@@ -59,7 +61,8 @@ namespace neos::python_runtime
 {
     namespace detail
     {
-        std::nullptr_t raise_os_error(int aErrno, object* aFilename, object* aFilename2)
+        // (the subclass of OSError of an errno value (Objects/exceptions.c's errnomap))
+        char const* errno_exception_type(int aErrno)
         {
             char const* type = "OSError";
             switch (aErrno)
@@ -86,6 +89,12 @@ namespace neos::python_runtime
             case ETIMEDOUT: type = "TimeoutError"; break;
             default: break;
             }
+            return type;
+        }
+
+        std::nullptr_t raise_os_error(int aErrno, object* aFilename, object* aFilename2)
+        {
+            char const* const type = errno_exception_type(aErrno);
             // (an os.PathLike filename: its path)
             auto const filename = [](object* aName) -> object*
             {
@@ -136,6 +145,7 @@ namespace neos::python_runtime
                 int stream = -1;                ///< (0, 1 or 2 for the standard streams)
                 std::string encoding = "utf-8";
                 std::string errors = "strict";
+                int regular = -1;               ///< (a regular file (1), or not (0); -1: not known)
                 object* newline = nullptr;      ///< (None: universal newlines; '' or a line ending)
                 bool translated = true;         ///< (writes translate "\n" to the platform's line ending (Windows: "\r\n"))
                 ~file_object()
@@ -180,31 +190,154 @@ namespace neos::python_runtime
                 return false;
             }
 
-            // (the bytes up to and including the end of a line (universal newlines: \r\n and \r are \n); aLimit: bytes (-1: none))
-            std::string read_line_bytes(file_object& f, long long aLimit)
+            // (the file's characters from its buffer, without locking it for each (it is locked for the line))
+            struct locked_file
             {
-                std::string line;
-                auto const ending = newline_value(f);
+                std::FILE* file;
+#if defined(_WIN32)
+                explicit locked_file(std::FILE* aFile) : file{ aFile } { ::_lock_file(file); }
+                ~locked_file() { ::_unlock_file(file); }
+                int get() const { return _getc_nolock(file); }     // (MinGW's is a macro)
+#if defined(_MSC_VER)
+                void unget(int aCharacter) const { ::_ungetc_nolock(aCharacter, file); }
+#else
+                void unget(int aCharacter) const { std::ungetc(aCharacter, file); }   // (its lock is recursive)
+#endif
+#else
+                explicit locked_file(std::FILE* aFile) : file{ aFile } { ::flockfile(file); }
+                ~locked_file() { ::funlockfile(file); }
+                int get() const { return getc_unlocked(file); }
+                void unget(int aCharacter) const { std::ungetc(aCharacter, file); }
+#endif
+            };
+
+#if !defined(_WIN32)
+            // (a line read from the file's buffer by getdelim (memchr) (false: it cannot be (a limit; a \r that may end a line of a file that is
+            // not a regular file (it would be read past)))
+            bool read_line_delimited(file_object& f, std::string const& aEnding, std::string& aLine)
+            {
+                bool const universalText = f.text && universal(f);
+                bool const untranslated = f.text && !universal(f) && aEnding.empty();
+                bool const crEnds = f.text && aEnding == "\r";
+                bool const crlfEnds = f.text && aEnding == "\r\n";
+                bool const loneCrEnds = universalText || untranslated;
+                if (loneCrEnds)
+                {
+                    if (f.regular < 0)
+                    {
+                        struct stat status{};
+                        f.regular = ::fstat(::fileno(f.file), &status) == 0 && S_ISREG(status.st_mode) ? 1 : 0;
+                    }
+                    if (f.regular == 0)
+                        return false;
+                }
+                struct delimited_buffer
+                {
+                    char* data = nullptr;
+                    std::size_t capacity = 0u;
+                    ~delimited_buffer() { std::free(data); }
+                };
+                thread_local delimited_buffer tBuffer;
                 for (;;)
                 {
-                    if (aLimit >= 0 && static_cast<long long>(line.size()) >= aLimit)
+                    auto const n = ::getdelim(&tBuffer.data, &tBuffer.capacity, crEnds ? '\r' : '\n', f.file);
+                    if (n <= 0)
                         break;
-                    int const c = std::fgetc(f.file);
+                    std::string_view part{ tBuffer.data, static_cast<std::size_t>(n) };
+                    if (loneCrEnds)
+                    {
+                        // (a \r that is not followed by \n ends the line: what was read after it is unread)
+                        auto const cr = part.find('\r');
+                        if (cr != std::string_view::npos && !(cr + 1u < part.size() && part[cr + 1u] == '\n'))
+                        {
+                            auto const excess = part.size() - (cr + 1u);
+                            if (excess > 0u && ::fseeko(f.file, -static_cast<off_t>(excess), SEEK_CUR) != 0)
+                                return false;
+                            part = part.substr(0u, cr + 1u);
+                        }
+                    }
+                    aLine.append(part);
+                    // (\r\n: a \n alone does not end the line)
+                    if (crlfEnds && aLine.back() == '\n' && !aLine.ends_with("\r\n"))
+                        continue;
+                    break;
+                }
+                // (universal newlines: \r\n and \r are \n)
+                if (universalText && !aLine.empty() && (aLine.back() == '\r' || aLine.ends_with("\r\n")))
+                {
+                    if (aLine.back() == '\n')
+                        aLine.pop_back();
+                    aLine.back() = '\n';
+                }
+                return true;
+            }
+#endif
+
+            // (the bytes up to and including the end of a line (universal newlines: \r\n and \r are \n); aLimit: characters (UTF-8 text's) or
+            // bytes (-1: none))
+            std::string read_line_bytes(file_object& f, long long aLimit)
+            {
+                // (the line is built in the thread's string (cleared: its capacity is kept, so appending to it does not reallocate it), then copied)
+                thread_local std::string tLine;
+                auto& line = tLine;
+                line.clear();
+                auto const ending = newline_value(f);
+#if !defined(_WIN32)
+                if (aLimit < 0 && read_line_delimited(f, ending, line))
+                    return line;
+#endif
+                // (the line endings: the file's (as of this line))
+                bool const universalText = f.text && universal(f);
+                bool const newlineEnds = !f.text || universal(f) || ending.empty() || ending == "\n";
+                bool const crlfEnds = f.text && ending == "\r\n";
+                bool const crEnds = f.text && ending == "\r";
+                bool const untranslated = f.text && !universal(f) && ending.empty();   // (newline='': \r, \r\n and \n end lines, untranslated)
+                bool const utf8Text = f.text && f.encoding == "utf-8";
+                long long count = 0;
+                locked_file const file{ f.file };
+                for (;;)
+                {
+                    if (aLimit >= 0 && count >= aLimit)
+                    {
+                        // (the last character's continuation bytes)
+                        for (int next = utf8Text ? file.get() : EOF; next != EOF; next = file.get())
+                        {
+                            if ((static_cast<unsigned>(next) & 0xC0u) != 0x80u)
+                            {
+                                file.unget(next);
+                                break;
+                            }
+                            line += static_cast<char>(next);
+                        }
+                        break;
+                    }
+                    int const c = file.get();
                     if (c == EOF)
                         break;
-                    if (f.text && universal(f) && c == '\r')
+                    if (universalText && c == '\r')
                     {
-                        int const next = std::fgetc(f.file);
+                        int const next = file.get();
                         if (next != '\n' && next != EOF)
-                            std::ungetc(next, f.file);
+                            file.unget(next);
                         line += '\n';
                         break;
                     }
                     line += static_cast<char>(c);
-                    if (c == '\n' && (!f.text || universal(f) || ending.empty() || ending == "\n" || (ending == "\r\n" && line.ends_with("\r\n"))))
+                    if (!utf8Text || (static_cast<unsigned>(c) & 0xC0u) != 0x80u)
+                        ++count;
+                    if (c == '\n' && (newlineEnds || (crlfEnds && line.ends_with("\r\n"))))
                         break;
-                    if (f.text && ending == "\r" && c == '\r')
+                    if (crEnds && c == '\r')
                         break;
+                    if (untranslated && c == '\r')
+                    {
+                        int const next = aLimit < 0 || count < aLimit ? file.get() : EOF;
+                        if (next == '\n')
+                            line += '\n';
+                        else if (next != EOF)
+                            file.unget(next);
+                        break;
+                    }
                 }
                 return line;
             }
@@ -244,6 +377,12 @@ namespace neos::python_runtime
             {
                 if (!f.text)
                     return make_bytes(std::move(aData));
+                // (ASCII is its UTF-8)
+                if (f.encoding == "utf-8" && std::all_of(aData.begin(), aData.end(), [](char c) { return (static_cast<unsigned char>(c) & 0x80u) == 0u; }))
+                {
+                    auto const n = aData.size();
+                    return make_str(std::move(aData), n);   // (known: ASCII)
+                }
                 std::string text;
                 if (!decode(aData, f.encoding, f.errors, text))
                     return nullptr;
@@ -367,7 +506,10 @@ namespace neos::python_runtime
                     count = static_cast<long long>(data.size());
                 }
                 if (f.stream == 1)
-                    write_out(data);
+                {
+                    if (!write_out(data))
+                        return nullptr;
+                }
                 else
                 {
                     if (f.appending)
@@ -575,12 +717,15 @@ namespace neos::python_runtime
                     } },
                 { "__next__", [](file_object& f, object*, std::vector<object*> const&, object*) -> object*
                     {
-                        ref line{ file_readline(f, -1) };
-                        if (!line)
+                        // (the end of the file: no bytes)
+                        if (!check_open(f))
                             return nullptr;
-                        if (length(line.get()) == 0)
+                        if (!f.readable)
+                            return (unsupported("not readable"), nullptr);
+                        auto bytes = read_line_bytes(f, -1);
+                        if (bytes.empty())
                             return error("StopIteration", "");
-                        return line.release_ownership();
+                        return text_result(f, std::move(bytes));
                     } }
             };
 
@@ -637,12 +782,16 @@ namespace neos::python_runtime
                 };
                 type.next = [](neos_py_context*, object* aSelf) -> object*
                 {
-                    ref line{ file_readline(as_file(aSelf), -1) };
-                    if (!line)
+                    // (the end of the file: no bytes)
+                    auto& f = as_file(aSelf);
+                    if (!check_open(f))
                         return nullptr;
-                    if (length(line.get()) == 0)
+                    if (!f.readable)
+                        return (unsupported("not readable"), nullptr);
+                    auto bytes = read_line_bytes(f, -1);
+                    if (bytes.empty())
                         return nullptr;
-                    return line.release_ownership();
+                    return text_result(f, std::move(bytes));
                 };
                 return type;
             }
@@ -937,7 +1086,7 @@ namespace neos::python_runtime
                         return (retain(none()), none());
                     if (m.text && std::strcmp(aName, "encoding") == 0)
                         return (retain(none()), none());
-                    return error("AttributeError", std::string{ "'_io." } + aSelf->type->name + "' object has no attribute '" + aName + "'");
+                    return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
                 };
                 type.iter = [](neos_py_context*, object* aSelf) -> object*
                 {

@@ -134,6 +134,7 @@ namespace neos
                         value* globals;
                         memory const* linearMemory;
                         compiled_module* module;
+                        object_table* objects;
                         // (while generated code calls an import: the frame (rbp) of the function that calls it and the token of 
                         // the call, so that its frames can be walked (see walk))
                         std::uint64_t exitFrame;
@@ -153,6 +154,14 @@ namespace neos
                     constexpr std::int32_t ContextResults = static_cast<std::int32_t>(offsetof(context, results));
                     constexpr std::int32_t ContextExitFrame = static_cast<std::int32_t>(offsetof(context, exitFrame));
                     constexpr std::int32_t ContextExitSite = static_cast<std::int32_t>(offsetof(context, exitSite));
+                    constexpr std::int32_t ContextObjects = static_cast<std::int32_t>(offsetof(context, objects));
+                    constexpr std::int32_t TableSlots = static_cast<std::int32_t>(offsetof(object_table, slots));
+                    constexpr std::int32_t TableSize = static_cast<std::int32_t>(offsetof(object_table, size));
+                    constexpr std::int32_t TableFree = static_cast<std::int32_t>(offsetof(object_table, free));
+                    constexpr std::int32_t SlotObject = static_cast<std::int32_t>(offsetof(object_slot, object));
+                    constexpr std::int32_t SlotCount = static_cast<std::int32_t>(offsetof(object_slot, count));
+                    constexpr std::int32_t SlotNext = static_cast<std::int32_t>(offsetof(object_slot, next));
+                    static_assert(sizeof(object_slot) == 16u);
 
                     // value types
                     constexpr std::uint8_t I32 = 0x7Fu;
@@ -956,6 +965,33 @@ namespace neos
                     std::uint32_t object_release(context* aContext, std::uint32_t, value* aBuffer, char const*) noexcept
                     {
                         return guarded(aContext, [&](module_description const& aModule) { aModule.host.objectRelease(aModule.host.host, static_cast<std::uint32_t>(aBuffer[0])); });
+                    }
+
+                    // --- the slow paths of the object table's uses that generated code makes itself (see object_table)
+
+                    // (an argument (aValue) that is an object's handle (aInteger: an integer's value that can be one) that generated
+                    // code did not find in the table: the host's (which traps if it is not valid))
+                    std::uint32_t host_object_argument(context* aContext, std::uint32_t, value* aValue, char const* aInteger) noexcept
+                    {
+                        return guarded(aContext, [&](module_description const& aModule)
+                        {
+                            auto const& host = aModule.host;
+                            auto& v = *aValue;
+                            if (aInteger == nullptr)
+                                v = static_cast<value>(reinterpret_cast<std::uintptr_t>(host.objectPointer(host.host, static_cast<std::uint32_t>(v))));
+                            else if ((v & 1u) != 0u)
+                                v = static_cast<value>(reinterpret_cast<std::uintptr_t>(host.objectPointer(host.host, static_cast<std::uint32_t>(v >> 1u)))) | 1u;
+                        });
+                    }
+
+                    // (the object of a slot that generated code freed (in aBuffer[0]): its reference released)
+                    std::uint32_t object_freed(context* aContext, std::uint32_t, value* aBuffer, char const*) noexcept
+                    {
+                        return guarded(aContext, [&](module_description const&)
+                        {
+                            auto* const object = reinterpret_cast<neos_rt_object*>(static_cast<std::uintptr_t>(aBuffer[0]));
+                            object->type->release(object);
+                        });
                     }
 
                     // signed division by a constant: multiplier and shift (Hacker's Delight, 10-1)
@@ -3024,9 +3060,13 @@ namespace neos
                         // there too)
                         void direct_call(std::uint32_t aFunction, function_description const& aCallee)
                         {
+                            bool const table = iModule.objects != nullptr;
                             if (aCallee.call != import_call::Plugin)
                             {
-                                direct_helper(aCallee.call == import_call::ObjectRetain ? &object_retain : &object_release, aFunction, false);
+                                if (table)
+                                    object_reference(aFunction, aCallee.call == import_call::ObjectRetain);
+                                else
+                                    direct_helper(aCallee.call == import_call::ObjectRetain ? &object_retain : &object_release, aFunction, false);
                                 return;
                             }
                             auto const& f = *aCallee.plugin;
@@ -3034,7 +3074,20 @@ namespace neos
                             {
                                 return aType == NEOS_RT_BOOL || aType == NEOS_RT_CHAR || aType == NEOS_RT_OBJECT || aType == NEOS_RT_INTEGER;
                             };
-                            if (std::any_of(f.parameters.begin(), f.parameters.end(), converted))
+                            auto const handle = [](std::uint8_t aType) { return aType == NEOS_RT_OBJECT || aType == NEOS_RT_INTEGER; };
+                            // (the arguments are converted here if the table is available (objects' handles become their addresses))
+                            if (table)
+                            {
+                                for (std::size_t i = 0u; i < f.parameters.size(); ++i)
+                                {
+                                    auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(i);
+                                    if (handle(f.parameters[i]))
+                                        object_argument(aFunction, disp, f.parameters[i] == NEOS_RT_INTEGER);
+                                    else if (converted(f.parameters[i]))
+                                        byte_value(disp, f.parameters[i] == NEOS_RT_BOOL, true);
+                                }
+                            }
+                            else if (std::any_of(f.parameters.begin(), f.parameters.end(), converted))
                                 direct_helper(&plugin_arguments, aFunction, false);
                             std::vector<native_argument> arguments;
                             for (auto const p : f.parameters)
@@ -3046,7 +3099,31 @@ namespace neos
                                 a.store(true, RSP, ShadowSpace, RAX);
                             if (f.error != nullptr)
                                 native_call(reinterpret_cast<void const*>(f.error), {}, false); // (rax: its error)
-                            if (f.error != nullptr || converted(f.result))
+                            if (table && (f.error != nullptr || converted(f.result)))
+                            {
+                                // (the result is converted here (an object's address becomes a handle for its new reference); an error 
+                                // is the host's)
+                                auto const resume = a.new_label();
+                                auto const result = [&]()
+                                {
+                                    if (handle(f.result))
+                                        object_result(aFunction, f.result == NEOS_RT_INTEGER, resume);
+                                    else if (converted(f.result))
+                                        byte_value(ShadowSpace, f.result == NEOS_RT_BOOL, false);
+                                };
+                                if (f.error != nullptr)
+                                {
+                                    auto const error = a.new_label();
+                                    a.test_rr(true, RAX, RAX);
+                                    a.jcc(NE, error);
+                                    result();
+                                    slow_path(error, resume, [&]() { direct_helper(&plugin_result, aFunction, true); });
+                                }
+                                else
+                                    result();
+                                a.bind(resume);
+                            }
+                            else if (f.error != nullptr || converted(f.result))
                                 direct_helper(&plugin_result, aFunction, f.error != nullptr);
                             auto const& results = *aCallee.results;
                             for (std::size_t i = 0u; i < results.size(); ++i)
@@ -3054,23 +3131,176 @@ namespace neos
                         }
                         // (a helper of a direct call (see plugin_arguments): its error argument is rax if aError, else null; a 
                         // trap if it fails)
-                        void direct_helper(std::uint32_t (*aHelper)(context*, std::uint32_t, value*, char const*), std::uint32_t aFunction, bool aError)
+                        void direct_helper(std::uint32_t (*aHelper)(context*, std::uint32_t, value*, char const*), std::uint32_t aFunction, bool aError, 
+                            std::int32_t aDisp = ShadowSpace, std::uint32_t aFlag = 0u)
                         {
                             save_pinned_xmms();
                             save_pinned_gprs();
                             if (aError)
                                 a.mov_rr(true, NativeIntegerArguments[3], RAX);
                             else
-                                a.mov_ri(NativeIntegerArguments[3], 0u, false);
+                                a.mov_ri(NativeIntegerArguments[3], aFlag, false);
                             a.mov_rr(true, NativeIntegerArguments[0], R15);
                             a.mov_ri(NativeIntegerArguments[1], aFunction, false);
-                            a.lea(NativeIntegerArguments[2], RSP, ShadowSpace);
+                            a.lea(NativeIntegerArguments[2], RSP, aDisp);
                             a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aHelper), true);
                             a.call_r(RAX);
                             restore_pinned_xmms();
                             restore_pinned_gprs();
                             a.test_rr(false, RAX, RAX);
                             a.jcc(NE, iTrapLabels[TrapHostException]);
+                        }
+                        // --- the object table (see object_table), used here rather than through the host (the registers used are 
+                        // scratch registers: free at a call)
+                        // (code that is rarely executed (at aLabel; it continues at aResume): cold code, if this is not)
+                        template <typename Code>
+                        void slow_path(std::size_t aLabel, std::size_t aResume, Code const& aCode)
+                        {
+                            bool const cold = !a.in_cold();
+                            auto const skip = a.new_label();
+                            if (cold)
+                                a.begin_cold();
+                            else
+                                a.jmp(skip);
+                            a.bind(aLabel);
+                            aCode();
+                            a.jmp(aResume);
+                            if (cold)
+                                a.end_cold();
+                            else
+                                a.bind(skip);
+                        }
+                        // (rdx: the slot of the handle in eax (rcx: the table); else to aInvalid (an invalid handle))
+                        void object_slot_of(std::size_t aInvalid)
+                        {
+                            a.load(true, RCX, R15, ContextObjects);
+                            a.alu_rm(7, false, RAX, RCX, TableSize);
+                            a.jcc(AE, aInvalid);
+                            a.mov_rr(true, RDX, RAX);
+                            a.shift_ri(4, true, RDX, 4);
+                            a.alu_rm(0, true, RDX, RCX, TableSlots);
+                        }
+                        // (the argument at aDisp: an object's handle (aInteger: an integer's value, which is one if its low bit is 
+                        // set (shifted)) becomes its address)
+                        void object_argument(std::uint32_t aFunction, std::int32_t aDisp, bool aInteger)
+                        {
+                            auto const resume = a.new_label();
+                            auto const store = a.new_label();
+                            auto const slow = a.new_label();
+                            if (aInteger)
+                            {
+                                a.load(true, RAX, RSP, aDisp);
+                                a.test_ri(RAX, 1);
+                                a.jcc(E, resume);
+                                a.shift_ri(5, true, RAX, 1);
+                                a.mov_rr(false, RAX, RAX);
+                            }
+                            else
+                                a.load(false, RAX, RSP, aDisp);
+                            a.test_rr(false, RAX, RAX);
+                            a.jcc(E, store);    // (no object: null)
+                            object_slot_of(slow);
+                            a.alu_mi(7, false, RDX, SlotCount, 0);
+                            a.jcc(E, slow);
+                            a.load(true, RAX, RDX, SlotObject);
+                            if (aInteger)
+                                a.alu_ri(1, true, RAX, 1);
+                            a.bind(store);
+                            a.store(true, RSP, aDisp, RAX);
+                            slow_path(slow, resume, [&]() { direct_helper(&host_object_argument, aFunction, false, aDisp, aInteger ? 1u : 0u); });
+                            a.bind(resume);
+                        }
+                        // (a bool (aBool) or char at aDisp, as a C function takes it (aArgument) or as a value (see plugin_arguments
+                        // and plugin_result))
+                        void byte_value(std::int32_t aDisp, bool aBool, bool aArgument)
+                        {
+                            a.load(false, RAX, RSP, aDisp);
+                            if (aBool)
+                            {
+                                if (!aArgument)
+                                    a.movzx8(RAX, RAX);
+                                a.test_rr(false, RAX, RAX);
+                                a.setcc(NE, RAX);
+                                a.movzx8(RAX, RAX);
+                            }
+                            else
+                            {
+                                a.movsx8(RAX, RAX);
+                                if (aArgument)
+                                    a.movsxd(RAX, RAX);
+                            }
+                            a.store(true, RSP, aDisp, RAX);
+                        }
+                        // (the result: an object's address (aInteger: an integer's value, which is one if its low bit is set) becomes 
+                        // a handle for its new reference (a new slot), then to aResume)
+                        void object_result(std::uint32_t aFunction, bool aInteger, std::size_t aResume)
+                        {
+                            auto const slow = a.new_label();
+                            a.load(true, RDX, RSP, ShadowSpace);
+                            if (aInteger)
+                            {
+                                a.test_ri(RDX, 1);
+                                a.jcc(E, aResume);
+                                a.alu_ri(4, true, RDX, -2);
+                            }
+                            a.test_rr(true, RDX, RDX);
+                            a.jcc(E, aResume);   // (no object: no handle (0, or 1 for an integer))
+                            a.load(true, RCX, R15, ContextObjects);
+                            a.load(false, RAX, RCX, TableFree);
+                            a.test_rr(false, RAX, RAX);
+                            a.jcc(E, slow);     // (no free slot: the host's (which grows the table))
+                            a.mov_rr(true, R8, RAX);
+                            a.shift_ri(4, true, R8, 4);
+                            a.alu_rm(0, true, R8, RCX, TableSlots);
+                            a.load(false, R9, R8, SlotNext);
+                            a.store(false, RCX, TableFree, R9);
+                            a.store(true, R8, SlotObject, RDX);
+                            a.store_imm(false, R8, SlotCount, 1);
+                            a.store_imm(false, R8, SlotNext, 0);
+                            if (aInteger)
+                            {
+                                a.shift_ri(4, true, RAX, 1);
+                                a.alu_ri(1, true, RAX, 1);
+                            }
+                            a.store(true, RSP, ShadowSpace, RAX);
+                            slow_path(slow, aResume, [&]() { direct_helper(&plugin_result, aFunction, false); });
+                        }
+                        // neos::object_retain and neos::object_release (of the handle in the outgoing area): a slot's count (a 
+                        // release of its last reference frees it, and its object's reference is released)
+                        void object_reference(std::uint32_t aFunction, bool aRetain)
+                        {
+                            auto const resume = a.new_label();
+                            auto const slow = a.new_label();
+                            a.load(false, RAX, RSP, ShadowSpace);
+                            a.test_rr(false, RAX, RAX);
+                            a.jcc(E, resume);
+                            object_slot_of(slow);
+                            a.load(false, R8, RDX, SlotCount);
+                            a.test_rr(false, R8, R8);
+                            a.jcc(E, slow);     // (an invalid handle: the host's (which traps))
+                            if (aRetain)
+                                a.alu_mi(0, false, RDX, SlotCount, 1);
+                            else
+                            {
+                                auto const last = a.new_label();
+                                a.alu_ri(7, false, R8, 1);
+                                a.jcc(E, last);
+                                a.alu_mi(5, false, RDX, SlotCount, 1);
+                                slow_path(last, resume, [&]()
+                                {
+                                    // (the last reference: the slot is freed, then its object's reference released)
+                                    a.load(true, R8, RDX, SlotObject);
+                                    a.load(false, R9, RCX, TableFree);
+                                    a.store_imm(true, RDX, SlotObject, 0);
+                                    a.store_imm(false, RDX, SlotCount, 0);
+                                    a.store(false, RDX, SlotNext, R9);
+                                    a.store(false, RCX, TableFree, RAX);
+                                    a.store(true, RSP, ShadowSpace, R8);
+                                    direct_helper(&object_freed, aFunction, false);
+                                });
+                            }
+                            slow_path(slow, resume, [&]() { direct_helper(aRetain ? &object_retain : &object_release, aFunction, false); });
+                            a.bind(resume);
                         }
                         // checked integer arithmetic (see jit::checked_arithmetic): the operation, then a trap if it overflowed (OF, or CF 
                         // for unsigned addition and subtraction)
@@ -4115,6 +4345,7 @@ namespace neos
                     c.globals = aModule.description.globals->data();
                     c.linearMemory = aModule.description.linearMemory;
                     c.module = &aModule;
+                    c.objects = aModule.description.objects;
                     struct invoked
                     {
                         invocation* i;

@@ -35,6 +35,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <cstdint>
@@ -46,6 +47,7 @@
 #include <vector>
 #include <neonumeric/integer.hpp>
 #include <neos/runtime/python/object.h>
+#include <neos/runtime/string.hpp>
 #include "python.hpp"
 
 namespace neos::python_runtime
@@ -143,7 +145,25 @@ namespace neos::python_runtime
         };
         struct float_object { header h; double value; };
         struct complex_object { header h; double real; double imag; };
-        struct str_object { header h; std::string value; };
+        // (a str: its text (UTF-8; immutable once it is made, so what is found about it is kept: its length and the last character that at()
+        // found (its offset)); len() and at() are its characters (code points), ascii_len() and ascii_at() are its bytes (its encoding is
+        // ignored: e.g. for finding ASCII characters (a line's \r and \n)); its text is ASCII if len() == ascii_len())
+        struct str_object
+        {
+            header h;
+            neos::runtime::string const text;           ///< (immutable: see neos/runtime/string.hpp)
+            std::string const& value = text.utf8();     ///< (its UTF-8: text's (which does not move))
+            mutable bool hashed = false;                ///< (its hash: found once)
+            mutable long long hash = 0;
+
+            long long len() const { return static_cast<long long>(text.len()); }
+            // (the code point at aIndex (0 <= aIndex < len()))
+            char32_t at(long long aIndex) const { return text.at(static_cast<std::size_t>(aIndex)); }
+            char32_t operator[](long long aIndex) const { return at(aIndex); }
+            bool is_ascii() const { return text.is_ascii(); }
+            std::size_t ascii_len() const { return value.size(); }
+            char ascii_at(std::size_t aIndex) const { return value[aIndex]; }
+        };
         struct list_object { header h; std::vector<object*> items; ~list_object() { for (auto i : items) release(i); } };
         struct tuple_object { header h; std::vector<object*> items; ~tuple_object() { for (auto i : items) release(i); } };
         struct dict_object 
@@ -193,21 +213,28 @@ namespace neos::python_runtime
         inline singleton sTrue{ &sBoolType.base };
         inline singleton sFalse{ &sBoolType.base };
 
+        inline int kind_of_other(object* aObject);
+        // (the commonest kinds here (inline); the rest: kind_of_other)
         inline int kind_of(object* aObject)
         {
             if (aObject == nullptr)
                 return NEOS_PY_OTHER;
             auto const type = aObject->type;
-            if (type == &sNoneType.base) return NEOS_PY_NONE;
-            if (type == &sNotImplementedType.base) return NEOS_PY_NOT_IMPLEMENTED;
-            if (type == &sEllipsisType.base) return NEOS_PY_ELLIPSIS;
-            if (type == &sBoolType.base) return NEOS_PY_BOOL;
-            if (type == &sIntType.base) return NEOS_PY_INT;
-            if (type == &sFloatType.base) return NEOS_PY_FLOAT;
-            if (type == &sComplexType.base) return NEOS_PY_COMPLEX;
             if (type == &sStrType.base) return NEOS_PY_STR;
+            if (type == &sIntType.base) return NEOS_PY_INT;
             if (type == &sListType.base) return NEOS_PY_LIST;
             if (type == &sTupleType.base) return NEOS_PY_TUPLE;
+            return kind_of_other(aObject);
+        }
+        inline int kind_of_other(object* aObject)
+        {
+            auto const type = aObject->type;
+            if (type == &sBoolType.base) return NEOS_PY_BOOL;
+            if (type == &sNoneType.base) return NEOS_PY_NONE;
+            if (type == &sFloatType.base) return NEOS_PY_FLOAT;
+            if (type == &sNotImplementedType.base) return NEOS_PY_NOT_IMPLEMENTED;
+            if (type == &sEllipsisType.base) return NEOS_PY_ELLIPSIS;
+            if (type == &sComplexType.base) return NEOS_PY_COMPLEX;
             if (type == &sDictType.base) return NEOS_PY_DICT;
             if (type == &sSliceType.base) return NEOS_PY_SLICE;
             if (type == &sRangeType.base) return NEOS_PY_RANGE;
@@ -230,7 +257,11 @@ namespace neos::python_runtime
         }
         inline object* make_float(double aValue) { return &(new float_object{ { { &sFloatType.base } }, aValue })->h.base; }
         inline object* make_complex(double aReal, double aImag) { return &(new complex_object{ { { &sComplexType.base } }, aReal, aImag })->h.base; }
-        inline object* make_str(std::string aValue) { return &(new str_object{ { { &sStrType.base } }, std::move(aValue) })->h.base; }
+        // (aLength: its code points, if known (its size: it is ASCII))
+        inline object* make_str(std::string aValue, std::size_t aLength = neos::runtime::string::npos) 
+        { 
+            return &(new str_object{ { { &sStrType.base } }, neos::runtime::string{ std::move(aValue), aLength } })->h.base; 
+        }
         inline object* make_list(std::vector<object*> aItems = {}) { return &(new list_object{ { { &sListType.base } }, std::move(aItems) })->h.base; }
         inline object* make_tuple(std::vector<object*> aItems = {}) { return &(new tuple_object{ { { &sTupleType.base } }, std::move(aItems) })->h.base; }
         inline object* make_dict() { return &(new dict_object{ { { &sDictType.base } }, {} })->h.base; }
@@ -512,6 +543,7 @@ namespace neos::python_runtime
         object* b_exec_result(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_compile(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_exec(std::vector<object*> const& aArgs, object* aKwargs);
+        object* b_import(std::vector<object*> const& aArgs, object* aKwargs);   // (__import__ (exec.cpp))
         object* b_eval(std::vector<object*> const& aArgs, object* aKwargs);
         void* current_program();                        // (the program that runs (exec's): null for the program)
         void* switch_program(void* aProgram);           // (the previous one)
@@ -556,7 +588,7 @@ namespace neos::python_runtime
         void fn_depth_check(std::int32_t aDepth);       // (the depth of calls: RecursionError beyond the limit)
         object* call_method_named(object* aObject, char const* aName, std::vector<object*> aArgs);  // (steals the arguments)
         object* fn_import(char const* aName);
-        void write_out(std::string const& aText);
+        bool write_out(std::string const& aText);      // (false: an exception (e.g. BrokenPipeError) has been raised)
 
         object* imported_modules();                     // (sys.modules: a new reference)
         bool modules_imported(char const* aName);
@@ -661,6 +693,7 @@ namespace neos::python_runtime
         }
         void run_exit_functions();                      // (atexit's: the program ends (services.cpp))
         bool signals_check();                           // (the Python handlers of signals that have arrived are called: false if one raised)
+        void signals_start();                           // (the signals ignored from the start (SIGPIPE: BrokenPipeError instead))
         void fn_finish();
 
         // --- files (io.cpp)
@@ -671,6 +704,7 @@ namespace neos::python_runtime
         object* b_open(std::vector<object*> const& aArgs, object* aKwargs);
         // (OSError (FileNotFoundError, ...) for an errno value, with a filename)
         std::nullptr_t raise_os_error(int aErrno, object* aFilename = nullptr, object* aFilename2 = nullptr);
+        char const* errno_exception_type(int aErrno);   // (the subclass of OSError of an errno value (io.cpp))
 
         // --- threads (threads.cpp): the global interpreter lock (once a thread has been started): released around blocking 
         // operations; gil_check lets a thread that has waited for it run
@@ -683,6 +717,7 @@ namespace neos::python_runtime
 
         object* b_generator(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_yield(std::vector<object*> const& aArgs, object* aKwargs);
+        object* fn_yield(object* aValue);
         object* b_yield_from(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_coroutine(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_async_generator(std::vector<object*> const& aArgs, object* aKwargs);

@@ -259,6 +259,7 @@ namespace neos::compilers::python
         }
 
         std::optional<std::uint32_t> held_by(fragment const& aValue, std::vector<std::uint32_t> const& aPending);
+        std::set<std::uint32_t> local_references(fragment const& aCode);
 
         void put_local(fragment& aFragment, opcode aOpcode, std::uint32_t aLocal)
         {
@@ -2509,7 +2510,23 @@ namespace neos::compilers::python
         if (from == type::Object)
         {
             if (aTarget == type::Boolean)
-                aValue = py_runtime_call("python::truth", { type::Object }, type::Boolean, { aValue });
+            {
+                // (a comparison's truth: python::compare_truth (no object for its result) if it is held only by its temporary)
+                auto const comparison = in_function() ? py_function().pyComparisons.find(aValue.fragmentCode.as_std_vector()) : 
+                    std::map<std::vector<std::uint8_t>, std::array<fragment, 3u>>::iterator{};
+                auto const holder = in_function() && comparison != py_function().pyComparisons.end() ? held_by(aValue, py_function().pendingObjects) : std::nullopt;
+                if (holder)
+                {
+                    auto& function = py_function();
+                    function.pendingObjects.erase(std::find(function.pendingObjects.begin(), function.pendingObjects.end(), *holder));
+                    function.freeObjects.push_back(*holder);
+                    auto const operands = comparison->second;
+                    function.pyComparisons.erase(comparison);
+                    aValue = py_runtime_call("python::compare_truth", { type::I32, type::Object, type::Object }, type::Boolean, { operands[0], operands[1], operands[2] });
+                }
+                else
+                    aValue = py_runtime_call("python::truth", { type::Object }, type::Boolean, { aValue });
+            }
             else if (aTarget == type::String)
                 aValue = py_runtime_call("python::str", { type::Object }, type::String, { aValue });
             else if (is_float(aTarget))
@@ -2538,7 +2555,17 @@ namespace neos::compilers::python
             else if (from == type::Boolean)
                 aValue = py_runtime_call("python::from_bool", { type::Boolean }, type::Object, { aValue });
             else if (from == type::String)
+            {
+                if (auto constant = py_constant_str(aValue))
+                {
+                    // (a literal's str is made once: a borrowed reference, held by a global)
+                    aValue = std::move(*constant);
+                    aValue.fragmentKind = kind;
+                    aValue.fragmentSource = source;
+                    return;
+                }
                 aValue = py_runtime_call("python::from_str", { type::String }, type::Object, { aValue });
+            }
             else if (is_float(from))
                 aValue = py_runtime_call("python::from_float", { type::F64 }, type::Object, { aValue });
             else if (is_numeric(from))
@@ -3865,8 +3892,8 @@ namespace neos::compilers::python
         // (a module whose namespace (globals()) can bind names: one of those, or a builtin)
         if (iPyIntrospective.contains(py_module_name()))
             return py_owned(py_runtime_call("python::global_lookup", { type::String, type::String }, type::Object, { py_string(py_module_name()), py_string(aName) }));
-        // a builtin (as an object; NameError if there is no such builtin)
-        return py_owned(py_runtime_call("python::builtin", { type::String }, type::Object, { py_string(aName) }));
+        // a builtin (as an object; NameError if there is no such builtin): found once (the runtime's builtins do not change)
+        return py_made_once("__neos_py_builtin_" + aName, py_runtime_call("python::builtin", { type::String }, type::Object, { py_string(aName) }));
     }
 
     // --- variables
@@ -4321,8 +4348,12 @@ namespace neos::compilers::python
             fragment op;
             put_i32(op, aOperator);
             op.valueType = type::I32;
-            value(py_owned(py_runtime_call("python::compare", { type::I32, type::Object, type::Object }, type::Object,
-                { op, py_object(*lhs), py_object(rhs) })));
+            auto l = py_object(*lhs);
+            auto r = py_object(rhs);
+            auto result = py_owned(py_runtime_call("python::compare", { type::I32, type::Object, type::Object }, type::Object, { op, l, r }));
+            // (its truth, if that is all that is used of it: see py_coerce)
+            py_function().pyComparisons[result.fragmentCode.as_std_vector()] = { op, l, r };
+            value(result);
         };
         auto const object_unary = [&](std::int32_t aOperator)
         {
@@ -6838,7 +6869,21 @@ namespace neos::compilers::python
                     break;
                 if (!stack.empty() && !(stack.back().holds_alternative<i_fragment>() && stack.back().get<i_fragment>().kind() != fragment_kind::Value))
                     generator().emit_statement(aSource);
+                // (a statement that follows a header's colon (if x: y): the temporaries of the header's condition (a value below it, 
+                // not yet tested) are released by its Condition, not here)
+                auto& function = py_function();
+                std::vector<std::uint32_t> kept;
+                for (std::size_t i = operand_base(); i + 1u < stack.size(); ++i)
+                    if (stack[i].holds_alternative<i_fragment>() && stack[i].get<i_fragment>().kind() == fragment_kind::Value)
+                    {
+                        auto const references = local_references(fragment{ stack[i].get<i_fragment>() });
+                        for (auto const t : function.pendingObjects)
+                            if (references.contains(t) && std::find(kept.begin(), kept.end(), t) == kept.end())
+                                kept.push_back(t);
+                    }
+                std::erase_if(function.pendingObjects, [&](std::uint32_t t) { return std::find(kept.begin(), kept.end(), t) != kept.end(); });
                 auto const release = py_flush();
+                function.pendingObjects.insert(function.pendingObjects.begin(), kept.begin(), kept.end());
                 if (!release.fragmentCode.empty() && !stack.empty() && stack.back().holds_alternative<i_fragment>())
                 {
                     fragment statement{ stack.back().get<i_fragment>() };
@@ -7109,6 +7154,7 @@ namespace neos::compilers::python
                 }
                 auto object = py_object(receiver);
                 fragment key;
+                std::optional<fragment> integerKey;
                 // (receiver[*a, b]: the key is a tuple of the items (a's unpacked))
                 auto const starred = [&](fragment const& aItem) { return trimmed(aItem.source().to_std_string_view()).starts_with("*"); };
                 if (std::any_of(items.begin(), items.end(), starred))
@@ -7123,7 +7169,13 @@ namespace neos::compilers::python
                     key.valueType = type::Object;
                 }
                 else if (items.size() == 1u && top_level(trimmed(aSource.to_std_string_view()).substr(1u), ',').empty())
-                    key = py_object(operand_type{ items[0] });
+                {
+                    key = materialize(operand_type{ items[0] });
+                    if (key.valueType == type::Integer)
+                        integerKey = key;
+                    if (key.valueType != type::Object)
+                        coerce(key, type::Object);
+                }
                 else
                 {
                     fragment count;
@@ -7143,7 +7195,11 @@ namespace neos::compilers::python
                     put_local(key, opcode::LocalGet, tuple);
                     key.valueType = type::Object;
                 }
-                auto result = py_owned(py_runtime_call("python::getitem", { type::Object, type::Object }, type::Object, { object, key }));
+                // (an integer key (e.g. s[i]): not made an int object (see python::getitem_integer); a target's is (only one of 
+                // them is used))
+                auto result = integerKey ?
+                    py_owned(py_runtime_call("python::getitem_integer", { type::Object, type::Integer }, type::Object, { object, *integerKey })) :
+                    py_owned(py_runtime_call("python::getitem", { type::Object, type::Object }, type::Object, { object, key }));
                 result.fragmentSource = aSource;
                 state().pyAccesses[aSource.to_std_string_view().data()] = fragment_state::py_access{ object, key, {} };
                 push_operand(operand_type{ result });
@@ -7726,6 +7782,60 @@ namespace neos::compilers::python
         auto& global = define_global("__neos_py_depth", type::I32);
         generator().function_global(neolib::string{ "__neos_py_depth" });
         return global.index();
+    }
+
+    std::optional<fragment> compiler::py_constant_str(fragment const& aValue)
+    {
+        // a string literal (a string that is an i32.const: its address): its str, made the first time it is used (a global holds it)
+        auto const& code = aValue.fragmentCode.as_std_vector();
+        if (!aValue.fragmentRelocations.empty() || code.size() < 2u || code.size() > 6u || code[0] != static_cast<std::uint8_t>(opcode::I32Const))
+            return {};
+        std::int64_t address = 0;
+        unsigned shift = 0u;
+        std::size_t i = 1u;
+        for (; i < code.size(); ++i, shift += 7u)
+        {
+            address |= static_cast<std::int64_t>(code[i] & 0x7Fu) << shift;
+            if ((code[i] & 0x80u) == 0u)
+            {
+                if ((code[i] & 0x40u) != 0u)
+                    address |= -(static_cast<std::int64_t>(1) << (shift + 7u));
+                break;
+            }
+        }
+        if (i + 1u != code.size())
+            return {};
+        if (address <= 0 || address > std::numeric_limits<std::int32_t>::max())
+            return {};
+        // (a literal's address is its (strings are interned): the name of its global)
+        return py_made_once("__neos_py_str_" + std::to_string(address), py_runtime_call("python::from_str", { type::String }, type::Object, { aValue }));
+    }
+
+    fragment compiler::py_made_once(std::string const& aName, fragment const& aMake)
+    {
+        // an object that does not change (aMake makes it (a new reference)): made the first time it is used (the global aName 
+        // holds it); a borrowed reference
+        auto const& name = aName;
+        generator().function_global(neolib::string{ name });
+        std::uint32_t global;
+        if (auto* const existing = find_symbol(generator().global_scope(), neolib::string_view{ neolib::string{ name } }, true); existing != nullptr && is_global(*existing))
+            global = existing->index();
+        else
+        {
+            global = define_global(name, type::I32).index();
+            generator().function_global(neolib::string{ name });
+        }
+        fragment result;
+        put_local(result, opcode::GlobalGet, global);
+        put(result, opcode::I32Eqz);
+        put_block(result, opcode::If, {});
+        append(result, aMake);
+        put_local(result, opcode::GlobalSet, global);
+        put(result, opcode::End);
+        put_local(result, opcode::GlobalGet, global);
+        result.valueType = type::Object;
+        result.fragmentKind = fragment_kind::Value;
+        return result;
     }
 
     std::uint32_t compiler::py_error_global()

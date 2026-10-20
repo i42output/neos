@@ -169,6 +169,8 @@ namespace neos::compilers::python
             std::vector<std::uint32_t> consumedObjects; ///< object temporaries of int expressions that other code took over
                                                         ///< (reusable after the statement)
             std::map<std::vector<std::uint8_t>, fragment> pyIntegerStrings; ///< str() of an int: the int (by the str's code)
+            std::map<std::vector<std::uint8_t>, std::array<fragment, 3u>> pyComparisons; ///< comparisons of objects: the operator and 
+                                                        ///< the operands (by the comparison's code)
             std::map<std::uint32_t, std::pair<std::int64_t, std::int64_t>> pyCounters; ///< int variables that only for loops over 
                                                         ///< ranges bind (small integers): their values' range
             std::vector<std::string> pyBindingOrder;    ///< the names that the function binds (in the order of their first bindings)
@@ -302,6 +304,8 @@ namespace neos::compilers::python
         void py_error_checks(std::uint32_t aFunction);
         std::uint32_t py_error_global();
         std::uint32_t py_depth_global();
+        std::optional<fragment> py_constant_str(fragment const& aValue);
+        fragment py_made_once(std::string const& aName, fragment const& aMake);
     private:
         std::vector<fragment_state> iFragments;
         std::map<std::uint32_t, function_state> iFunctions;
