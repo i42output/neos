@@ -64,9 +64,24 @@ namespace neos::python_runtime
             std::atomic<long> references{ 1 };
         };
 
+        // (references are counted by the thread that holds the GIL (see threads.cpp): one thread at a time runs the program (as 
+        // CPython's GIL build: plain increments and decrements, not atomic ones (which are many times slower)); the GIL's mutex 
+        // makes them visible to the next thread that holds it)
+        inline void add_reference(header& aHeader)
+        {
+            aHeader.references.store(aHeader.references.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
+        // (the number of references that remain)
+        inline long remove_reference(header& aHeader)
+        {
+            auto const remaining = aHeader.references.load(std::memory_order_relaxed) - 1;
+            aHeader.references.store(remaining, std::memory_order_relaxed);
+            return remaining;
+        }
+
         inline void retain_object(neos_rt_object* aObject)
         {
-            reinterpret_cast<header*>(aObject)->references.fetch_add(1, std::memory_order_relaxed);
+            add_reference(*reinterpret_cast<header*>(aObject));
         }
 
         // (weak references (weakref.cpp): the number of objects that have weak references, and an object's weak references cleared (their 
@@ -77,7 +92,7 @@ namespace neos::python_runtime
         template <typename T>
         inline void release_object(neos_rt_object* aObject)
         {
-            if (reinterpret_cast<header*>(aObject)->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            if (remove_reference(*reinterpret_cast<header*>(aObject)) == 0)
             {
                 if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
                     clear_weak_references(reinterpret_cast<neos_py_object*>(aObject));
@@ -138,12 +153,18 @@ namespace neos::python_runtime
             header h; 
             long long value; 
             std::unique_ptr<big_integer> big; ///< (the value if it is not a 64-bit integer)
-            // (ints are made and released at a high rate (e.g. by iteration over a range): their storage is reused (a free list for 
-            // each thread))
+            // (ints are made and released at a high rate (e.g. by iteration over a range): their storage is a pool's (see objects.cpp))
             static void* operator new(std::size_t aSize);
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
-        struct float_object { header h; double value; };
+        struct float_object 
+        { 
+            header h; 
+            double value; 
+            // (as int's)
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
+        };
         struct complex_object { header h; double real; double imag; };
         // (a str: its text (UTF-8; immutable once it is made, so what is found about it is kept: its length and the last character that at()
         // found (its offset)); len() and at() are its characters (code points), ascii_len() and ascii_at() are its bytes (its encoding is
@@ -163,6 +184,9 @@ namespace neos::python_runtime
             bool is_ascii() const { return text.is_ascii(); }
             std::size_t ascii_len() const { return value.size(); }
             char ascii_at(std::size_t aIndex) const { return value[aIndex]; }
+            // (as int's: a pool's (see objects.cpp))
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
         struct list_object { header h; std::vector<object*> items; ~list_object() { for (auto i : items) release(i); } };
         struct tuple_object { header h; std::vector<object*> items; ~tuple_object() { for (auto i : items) release(i); } };

@@ -58,6 +58,7 @@ namespace neos::compilers::python
     std::string rewrite_class_namespaces(std::string const& aText, bool& aChanged);
     // (comprehensions: their variables are their own (statements.cpp))
     std::string rewrite_comprehensions(std::string const& aText, bool& aChanged, bool aBuiltins = true);
+    std::string rewrite_int_loops(std::string const& aText, bool& aChanged, std::vector<std::size_t>& aLines);
 
     // (a syntax error as CPython reports it (syntax.cpp): its stage (the first error of a stage is reported: the tokenizer's and parser's (in 
     // source order), then the symbol table's, then the compiler's), type, message and location (a line and a character offset, 1-based))

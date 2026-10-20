@@ -56,6 +56,27 @@
 // return of a class body); closures.cpp defines it at the end of the module (_aN_C) and its closure is made into the class
 // where the class statement is ("C = __build_class(__closure(_aN_C, ...))").
 //
+// Int loops (rewrite_int_loops: lines are added): a loop of a function over a list or tuple of ints runs as two loops: one whose
+// variables are ints (type::Integer: native integers, as a range loop's) while the items are small ints, then the loop as written,
+// from the item where the first stopped (if it did not end). "for x in xs:" (its body binding t, which is used outside it) is:
+//
+//     _sN_ = (xs); _kN_ = 0; _vN_ = __is_int(t); _fN_t = __as_int(t) if _vN_ else 0
+//     for _iN_x in (_sN_ if _vN_ else None):
+//         <its body: x is _iN_x, t is _fN_t (each variable that it binds is renamed)>
+//     if _vN_: t = _fN_t
+//     for x in _sN_:
+//         <its body>
+//     _sN_ = None
+//
+// (the compiler's py_for_in: an "_iN_" loop's variable is an int; its _kN_ is where it stopped (-1: it ended, else the position of 
+// the item that is not a small int, or 0 if it is not a list or tuple), where the "for ... in _sN_:" loop starts). The variables 
+// that its body binds and that are used outside it (or before its body binds them) are carried into and out of the first loop
+// (they are ints, or the first loop has no items); they are bound before the loop (by a statement that precedes it in its block 
+// or an enclosing one, or as parameters). The loop's own variable is not used outside it. The function has no nested functions, 
+// classes or lambdas, yields, or global, nonlocal or del statements, and nothing that sees its variables by name (locals(), ...); 
+// the loop is not in a try or with statement and has no else clause; its body has no try or with statements, f-strings or 
+// strings of several lines.
+//
 // Comprehensions (rewrite_comprehensions): a comprehension's variables are its own: "[x for x in xs]" is "[_q1_x for _q1_x 
 // in xs]" (its first iterable is not renamed: it is evaluated where the comprehension is); in a class's body a comprehension 
 // is a lambda's ("(lambda _qit: [... for ... in _qit])(xs)"), whose scope is not the class's. super() in a method is super(__class__, <its first 
@@ -1267,7 +1288,7 @@ namespace neos::compilers::python
                 static std::set<std::string_view> const sNames = { "__class", "__closure", "__cell", "__generator", "__yield", "__yield_from", 
                     "__bytes", "__with_items", "__build_class", "__fstring", "__match", "__await", "__async_iter", "__async_with",
                     "__coroutine", "__async_generator", "__type_alias", "__type_param", "__generic_base", "__generic_function", "__annotate", "__exception_group", "__ns_bind",
-                    "__any_items", "__all_items" };
+                    "__any_items", "__all_items", "__is_int", "__as_int" };
                 return sNames.contains(aName) || aName.starts_with("__neos");
             }
             void classes()
@@ -1810,5 +1831,608 @@ namespace neos::compilers::python
             aChanged = true;
         }
         return text;
+    }
+    namespace
+    {
+        using namespace tokens;
+
+        class int_loop_rewriter
+        {
+        public:
+            explicit int_loop_rewriter(std::string const& aText) : iText{ aText }, iLines{ tokenize(aText) }
+            {
+                for (std::size_t i = 0u; i < iText.size(); ++i)
+                    if (iText[i] == '\n')
+                        iNewlines.push_back(i);
+                iDepths.resize(iLines.size());
+                for (std::size_t l = 0u; l < iLines.size(); ++l)
+                {
+                    int depth = 0;
+                    for (auto const& t : iLines[l].tokens)
+                    {
+                        auto const x = text(t);
+                        if (t.kind == token::Op && (x == ")" || x == "]" || x == "}") && depth > 0)
+                            --depth;
+                        iDepths[l].push_back(depth);
+                        if (t.kind == token::Op && (x == "(" || x == "[" || x == "{"))
+                            ++depth;
+                    }
+                }
+            }
+        public:
+            std::string rewrite(bool& aChanged, std::vector<std::size_t>& aLines)
+            {
+                std::vector<std::size_t> lineStarts{ 0u };
+                for (auto n : iNewlines)
+                    lineStarts.push_back(n + 1u);
+                auto const physicalCount = lineStarts.size();
+                std::vector<std::pair<std::size_t, std::vector<std::pair<std::string, std::size_t>>>> regions; // (first physical line, the lines that replace it and those up to the next)
+                std::vector<std::size_t> regionEnds;
+                for (std::size_t l = 0u; l < iLines.size(); ++l)
+                {
+                    std::size_t end = 0u;
+                    std::vector<std::pair<std::string, std::size_t>> replacement;
+                    if (!loop(l, end, replacement))
+                        continue;
+                    regions.emplace_back(physical(iLines[l].begin), std::move(replacement));
+                    regionEnds.push_back(end);
+                    // (loops in its body are not int loops (they are copied))
+                    while (l + 1u < iLines.size() && physical(iLines[l + 1u].begin) < end)
+                        ++l;
+                }
+                if (regions.empty())
+                    return iText;
+                aChanged = true;
+                std::string result;
+                aLines.clear();
+                std::size_t r = 0u;
+                for (std::size_t p = 0u; p < physicalCount;)
+                {
+                    if (r < regions.size() && regions[r].first == p)
+                    {
+                        for (auto const& [line, original] : regions[r].second)
+                        {
+                            result += line;
+                            result += '\n';
+                            aLines.push_back(original);
+                        }
+                        p = regionEnds[r];
+                        ++r;
+                        continue;
+                    }
+                    auto const begin = lineStarts[p];
+                    auto const finish = p + 1u < physicalCount ? lineStarts[p + 1u] : iText.size();
+                    result.append(iText, begin, finish - begin);
+                    aLines.push_back(p);
+                    ++p;
+                }
+                // (a line for each of the result's (the last: what follows its last newline))
+                auto const resultLines = static_cast<std::size_t>(std::count(result.begin(), result.end(), '\n')) + 1u;
+                while (aLines.size() < resultLines)
+                    aLines.push_back(aLines.empty() ? 0u : aLines.back());
+                aLines.resize(resultLines);
+                return result;
+            }
+        private:
+            struct names
+            {
+                std::set<std::string> reads;
+                std::set<std::string> stores;
+                std::set<std::string> definite;     ///< (stores that a statement makes whenever it runs)
+                bool unsupported = false;
+            };
+        private:
+            std::string_view text(token const& aToken) const { return std::string_view{ iText }.substr(aToken.begin, aToken.end - aToken.begin); }
+            std::string_view text(std::size_t aLine, std::size_t aToken) const { return text(iLines[aLine].tokens[aToken]); }
+            std::size_t count(std::size_t aLine) const { return iLines[aLine].tokens.size(); }
+            bool is_op(std::size_t aLine, std::size_t aToken, std::string_view aOp) const
+            {
+                return aToken < count(aLine) && iLines[aLine].tokens[aToken].kind == token::Op && text(aLine, aToken) == aOp;
+            }
+            bool is_name(std::size_t aLine, std::size_t aToken, std::string_view aName) const
+            {
+                return aToken < count(aLine) && iLines[aLine].tokens[aToken].kind == token::Name && text(aLine, aToken) == aName;
+            }
+            std::size_t physical(std::size_t aOffset) const
+            {
+                return static_cast<std::size_t>(std::lower_bound(iNewlines.begin(), iNewlines.end(), aOffset) - iNewlines.begin());
+            }
+            bool single_physical(std::size_t aLine) const { return physical(iLines[aLine].begin) == physical(iLines[aLine].end); }
+            // (a name that is a variable: not a keyword, an attribute or a keyword argument)
+            bool variable(std::size_t aLine, std::size_t aToken) const
+            {
+                auto const& t = iLines[aLine].tokens[aToken];
+                if (t.kind != token::Name || keywords().contains(text(t)))
+                    return false;
+                if (aToken > 0u && is_op(aLine, aToken - 1u, "."))
+                    return false;
+                if (iDepths[aLine][aToken] > 0 && is_op(aLine, aToken + 1u, "="))
+                    return false;
+                return true;
+            }
+            // (the first ':' at depth 0 from aFrom (the token count if none))
+            std::size_t colon(std::size_t aLine, std::size_t aFrom) const
+            {
+                for (auto t = aFrom; t < count(aLine); ++t)
+                    if (iDepths[aLine][t] == 0 && is_op(aLine, t, ":"))
+                        return t;
+                return count(aLine);
+            }
+            void reads(std::size_t aLine, std::size_t aBegin, std::size_t aEnd, names& aNames) const
+            {
+                for (auto t = aBegin; t < aEnd && t < count(aLine); ++t)
+                    if (variable(aLine, t) && !is_op(aLine, t + 1u, ":="))
+                        aNames.reads.insert(std::string{ text(aLine, t) });
+            }
+            // (assignment targets: names (bound), else reads (attributes, items))
+            void targets(std::size_t aLine, std::size_t aBegin, std::size_t aEnd, bool aDefinite, names& aNames) const
+            {
+                // (its elements: separated by commas at its depth)
+                auto const base = aBegin < aEnd ? iDepths[aLine][aBegin] : 0;
+                std::size_t element = aBegin;
+                for (auto t = aBegin; t <= aEnd; ++t)
+                {
+                    if (t < aEnd && !(iDepths[aLine][t] == base && is_op(aLine, t, ",")))
+                        continue;
+                    auto b = element;
+                    auto e = t;
+                    element = t + 1u;
+                    if (b < e && is_op(aLine, b, "*"))
+                        ++b;
+                    if (b >= e)
+                        continue;
+                    if (e - b == 1u && iLines[aLine].tokens[b].kind == token::Name && variable(aLine, b))
+                    {
+                        aNames.stores.insert(std::string{ text(aLine, b) });
+                        if (aDefinite)
+                            aNames.definite.insert(std::string{ text(aLine, b) });
+                    }
+                    else if ((is_op(aLine, b, "(") && is_op(aLine, e - 1u, ")")) || (is_op(aLine, b, "[") && is_op(aLine, e - 1u, "]")))
+                    {
+                        // (a group: its targets, if the brackets enclose it)
+                        bool enclosed = true;
+                        for (auto i = b + 1u; i + 1u < e; ++i)
+                            if (iDepths[aLine][i] <= iDepths[aLine][b])
+                                enclosed = false;
+                        if (enclosed)
+                            targets(aLine, b + 1u, e - 1u, aDefinite, aNames);
+                        else
+                            reads(aLine, b, e, aNames);
+                    }
+                    else
+                        reads(aLine, b, e, aNames);
+                }
+            }
+            void simple(std::size_t aLine, std::size_t aBegin, std::size_t aEnd, bool aDefinite, names& aNames) const
+            {
+                if (aBegin >= aEnd)
+                    return;
+                static std::set<std::string_view> const sAugmented = { "+=", "-=", "*=", "/=", "//=", "%=", "**=", ">>=", "<<=", "&=", "|=", "^=", "@=" };
+                // (assignment expressions bind their names whether or not they are evaluated)
+                for (auto t = aBegin; t + 1u < aEnd; ++t)
+                    if (variable(aLine, t) && is_op(aLine, t + 1u, ":="))
+                        aNames.stores.insert(std::string{ text(aLine, t) });
+                std::vector<std::size_t> assignments;
+                for (auto t = aBegin; t < aEnd; ++t)
+                {
+                    if (iDepths[aLine][t] != 0 || iLines[aLine].tokens[t].kind != token::Op)
+                        continue;
+                    auto const x = text(aLine, t);
+                    if (sAugmented.contains(x))
+                    {
+                        // (an augmented assignment: its target is read, then bound)
+                        reads(aLine, aBegin, aEnd, aNames);
+                        if (t == aBegin + 1u && variable(aLine, aBegin))
+                        {
+                            aNames.stores.insert(std::string{ text(aLine, aBegin) });
+                            if (aDefinite)
+                                aNames.definite.insert(std::string{ text(aLine, aBegin) });
+                        }
+                        return;
+                    }
+                    if (x == "=")
+                        assignments.push_back(t);
+                    else if (x == ":")
+                        aNames.unsupported = true;   // (an annotation)
+                }
+                if (assignments.empty())
+                {
+                    reads(aLine, aBegin, aEnd, aNames);
+                    return;
+                }
+                reads(aLine, assignments.back() + 1u, aEnd, aNames);
+                auto b = aBegin;
+                for (auto a : assignments)
+                {
+                    targets(aLine, b, a, aDefinite, aNames);
+                    b = a + 1u;
+                }
+            }
+            void statements(std::size_t aLine, std::size_t aBegin, std::size_t aEnd, bool aDefinite, names& aNames) const
+            {
+                auto b = aBegin;
+                for (auto t = aBegin; t <= aEnd; ++t)
+                    if (t == aEnd || (iDepths[aLine][t] == 0 && is_op(aLine, t, ";")))
+                    {
+                        simple(aLine, b, t, aDefinite, aNames);
+                        b = t + 1u;
+                    }
+            }
+            // (a line's names; aDefinite: its simple statements' bindings are definite (if it runs, they are made))
+            void line_names(std::size_t aLine, bool aDefinite, names& aNames) const
+            {
+                auto const n = count(aLine);
+                if (is_name(aLine, 0u, "if") || is_name(aLine, 0u, "elif") || is_name(aLine, 0u, "while"))
+                {
+                    auto const c = colon(aLine, 1u);
+                    reads(aLine, 1u, c, aNames);
+                    statements(aLine, c + 1u, n, false, aNames);
+                }
+                else if (is_name(aLine, 0u, "else"))
+                    statements(aLine, colon(aLine, 1u) + 1u, n, false, aNames);
+                else if (is_name(aLine, 0u, "for"))
+                {
+                    std::size_t in = 1u;
+                    while (in < n && !(iDepths[aLine][in] == 0 && is_name(aLine, in, "in")))
+                        ++in;
+                    auto const c = colon(aLine, in);
+                    targets(aLine, 1u, in, false, aNames);
+                    reads(aLine, in + 1u, c, aNames);
+                    statements(aLine, c + 1u, n, false, aNames);
+                }
+                else
+                    statements(aLine, 0u, n, aDefinite, aNames);
+            }
+            bool compound(std::size_t aLine) const
+            {
+                static std::set<std::string_view> const sHeaders = { "if", "elif", "else", "while", "for", "try", "except", "finally", "with", "def", 
+                    "class", "async", "match", "case" };
+                return count(aLine) > 0u && iLines[aLine].tokens[0].kind == token::Name && sHeaders.contains(text(aLine, 0u));
+            }
+            // (names that a loop's body or its function cannot have)
+            bool excluded(std::size_t aBegin, std::size_t aEnd, bool aFunction) const
+            {
+                static std::set<std::string_view> const sBody = { "try", "except", "finally", "with", "async", "await", "__await", "yield", "__yield", 
+                    "__yield_from", "global", "nonlocal", "del", "import", "lambda", "def", "class", "locals", "vars", "eval", "exec", "globals", "dir", 
+                    "breakpoint", "__class__" };
+                static std::set<std::string_view> const sFunction = { "yield", "__yield", "__yield_from", "global", "nonlocal", "del", "lambda", "def",
+                    "class", "locals", "vars", "eval", "exec", "globals", "dir", "breakpoint", "__class__" };
+                auto const& forbidden = aFunction ? sFunction : sBody;
+                for (auto l = aBegin; l < aEnd; ++l)
+                {
+                    if (!single_physical(l))
+                        return true;
+                    if (is_name(l, 0u, "from"))
+                        return true;
+                    for (std::size_t t = 0u; t < count(l); ++t)
+                    {
+                        auto const& k = iLines[l].tokens[t];
+                        if (k.kind == token::Name && forbidden.contains(text(k)))
+                            return true;
+                        if (k.kind == token::String && !aFunction)
+                        {
+                            auto const x = text(k);
+                            auto const quote = x.find_first_of("'\"");
+                            if (x.substr(0u, quote).find_first_of("fF") != std::string_view::npos)
+                                return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            std::size_t block_end(std::size_t aLine) const
+            {
+                auto l = aLine + 1u;
+                while (l < iLines.size() && iLines[l].indent > iLines[aLine].indent)
+                    ++l;
+                return l;
+            }
+            // (whether a variable is bound before a line of a function (aDef: its def): by a simple statement that precedes it in its block or an 
+            // enclosing one, by an enclosing for loop, or as a parameter)
+            bool bound_before(std::string const& aName, std::size_t aLine, std::size_t aDef, std::set<std::string> const& aParameters) const
+            {
+                auto level = iLines[aLine].indent;
+                for (auto k = aLine; k > aDef + 1u;)
+                {
+                    --k;
+                    auto const indent = iLines[k].indent;
+                    if (indent > level)
+                        continue;
+                    if (indent < level)
+                    {
+                        level = indent;
+                        if (is_name(k, 0u, "for"))
+                        {
+                            names n;
+                            line_names(k, false, n);
+                            if (n.stores.contains(aName))
+                                return true;
+                        }
+                        continue;
+                    }
+                    if (compound(k))
+                        continue;
+                    names n;
+                    line_names(k, true, n);
+                    if (n.definite.contains(aName))
+                        return true;
+                }
+                return aParameters.contains(aName);
+            }
+            std::set<std::string> parameters(std::size_t aDef) const
+            {
+                std::set<std::string> result;
+                std::size_t t = 0u;
+                while (t < count(aDef) && !is_op(aDef, t, "("))
+                    ++t;
+                bool start = true;
+                for (++t; t < count(aDef); ++t)
+                {
+                    auto const depth = iDepths[aDef][t];
+                    if (depth == 0)
+                        break;
+                    if (depth == 1 && is_op(aDef, t, ","))
+                    {
+                        start = true;
+                        continue;
+                    }
+                    if (!start || depth != 1)
+                        continue;
+                    if (is_op(aDef, t, "*") || is_op(aDef, t, "**") || is_op(aDef, t, "/"))
+                        continue;
+                    if (iLines[aDef].tokens[t].kind == token::Name)
+                        result.insert(std::string{ text(aDef, t) });
+                    start = false;
+                }
+                return result;
+            }
+            // (a line's text with variables renamed (from token aFrom))
+            std::string renamed(std::size_t aLine, std::size_t aFrom, std::map<std::string, std::string> const& aNames) const
+            {
+                auto const& line = iLines[aLine];
+                auto const begin = aFrom < count(aLine) ? line.tokens[aFrom].begin : line.end;
+                std::string result;
+                auto at = begin;
+                for (auto t = aFrom; t < count(aLine); ++t)
+                {
+                    if (!variable(aLine, t))
+                        continue;
+                    auto const found = aNames.find(std::string{ text(aLine, t) });
+                    if (found == aNames.end())
+                        continue;
+                    result.append(iText, at, line.tokens[t].begin - at);
+                    result += found->second;
+                    at = line.tokens[t].end;
+                }
+                result.append(iText, at, line.end - at);
+                return result;
+            }
+            std::string line_text(std::size_t aPhysical) const
+            {
+                auto const begin = aPhysical == 0u ? 0u : iNewlines[aPhysical - 1u] + 1u;
+                auto const end = aPhysical < iNewlines.size() ? iNewlines[aPhysical] : iText.size();
+                return iText.substr(begin, end - begin);
+            }
+            // a loop that is an int loop: the lines that replace it (and the physical line after it)
+            bool loop(std::size_t aLine, std::size_t& aEnd, std::vector<std::pair<std::string, std::size_t>>& aReplacement)
+            {
+                if (!is_name(aLine, 0u, "for") || !single_physical(aLine))
+                    return false;
+                auto const n = count(aLine);
+                // (one variable)
+                if (n < 5u || iLines[aLine].tokens[1].kind != token::Name || !variable(aLine, 1u) || !is_name(aLine, 2u, "in"))
+                    return false;
+                auto const target = std::string{ text(aLine, 1u) };
+                if (target.starts_with("__"))
+                    return false;
+                auto const c = colon(aLine, 3u);
+                if (c >= n || c == 3u)
+                    return false;
+                for (auto t = 3u; t < c; ++t)
+                    if (is_op(aLine, t, ":=") || is_name(aLine, t, "lambda") || is_name(aLine, t, "yield") || is_name(aLine, t, "await"))
+                        return false;
+                // (its function: the innermost enclosing def (not a class's body: see rewrite_classes))
+                std::optional<std::size_t> def;
+                {
+                    auto level = iLines[aLine].indent;
+                    for (auto k = aLine; k > 0u;)
+                    {
+                        --k;
+                        if (iLines[k].indent >= level)
+                            continue;
+                        level = iLines[k].indent;
+                        if (is_name(k, 0u, "def"))
+                        {
+                            def = k;
+                            break;
+                        }
+                        if (is_name(k, 0u, "try") || is_name(k, 0u, "except") || is_name(k, 0u, "finally") || is_name(k, 0u, "with") ||
+                            is_name(k, 0u, "async") || is_name(k, 0u, "class"))
+                            return false;
+                        if (is_name(k, 0u, "else"))
+                        {
+                            // (a try statement's else clause)
+                            for (auto e = k; e > 0u;)
+                            {
+                                --e;
+                                if (iLines[e].indent < iLines[k].indent)
+                                    break;
+                                if (iLines[e].indent == iLines[k].indent && (is_name(e, 0u, "try") || is_name(e, 0u, "except")))
+                                    return false;
+                                if (iLines[e].indent == iLines[k].indent && compound(e) && !is_name(e, 0u, "else"))
+                                    break;
+                            }
+                        }
+                    }
+                }
+                if (!def || count(*def) < 2u || text(*def, 1u).starts_with("_b"))
+                    return false;
+                auto const function = *def;
+                auto const functionEnd = block_end(function);
+                if (excluded(function + 1u, functionEnd, true))
+                    return false;
+                // (its body: the rest of its line, or the lines that follow it)
+                bool const inlineBody = c + 1u < n;
+                auto const bodyEnd = inlineBody ? aLine + 1u : block_end(aLine);
+                if (!inlineBody && bodyEnd == aLine + 1u)
+                    return false;
+                if (excluded(aLine + 1u, bodyEnd, false) || excluded(aLine, aLine + 1u, false))
+                    return false;
+                // (no else clause)
+                if (bodyEnd < iLines.size() && iLines[bodyEnd].indent == iLines[aLine].indent && is_name(bodyEnd, 0u, "else"))
+                    return false;
+                // (the names that its body binds, and those that it reads before it binds them)
+                names body;
+                std::set<std::string> live;
+                {
+                    std::set<std::string> bound;
+                    auto const group = [&](names const& aGroup)
+                    {
+                        for (auto const& r : aGroup.reads)
+                            if (!bound.contains(r))
+                                live.insert(r);
+                        bound.insert(aGroup.definite.begin(), aGroup.definite.end());
+                        body.reads.insert(aGroup.reads.begin(), aGroup.reads.end());
+                        body.stores.insert(aGroup.stores.begin(), aGroup.stores.end());
+                        body.unsupported = body.unsupported || aGroup.unsupported;
+                    };
+                    if (inlineBody)
+                    {
+                        names g;
+                        statements(aLine, c + 1u, n, true, g);
+                        group(g);
+                    }
+                    else
+                    {
+                        auto const indent = iLines[aLine + 1u].indent;
+                        for (auto l = aLine + 1u; l < bodyEnd;)
+                        {
+                            names g;
+                            line_names(l, !compound(l), g);
+                            auto next = l + 1u;
+                            if (iLines[l].indent == indent)
+                                while (next < bodyEnd && iLines[next].indent > indent)
+                                {
+                                    names nested;
+                                    line_names(next, false, nested);
+                                    g.reads.insert(nested.reads.begin(), nested.reads.end());
+                                    g.stores.insert(nested.stores.begin(), nested.stores.end());
+                                    g.unsupported = g.unsupported || nested.unsupported;
+                                    ++next;
+                                }
+                            if (compound(l))
+                                g.definite.clear();
+                            group(g);
+                            l = next;
+                        }
+                    }
+                }
+                if (body.unsupported)
+                    return false;
+                // (the names used outside it (in its function, and its iterable))
+                std::set<std::string> outside;
+                for (auto l = function + 1u; l < functionEnd; ++l)
+                {
+                    if (l >= aLine && l < bodyEnd)
+                        continue;
+                    for (std::size_t t = 0u; t < count(l); ++t)
+                        if (variable(l, t))
+                            outside.insert(std::string{ text(l, t) });
+                }
+                for (auto t = 3u; t < c; ++t)
+                    if (variable(aLine, t))
+                        outside.insert(std::string{ text(aLine, t) });
+                if (outside.contains(target))
+                    return false;
+                auto const params = parameters(function);
+                std::vector<std::string> carried;
+                for (auto const& v : body.stores)
+                {
+                    if (v == target)
+                        continue;
+                    if (v.starts_with("__"))
+                        return false;
+                    if (live.contains(v) || outside.contains(v))
+                    {
+                        if (!bound_before(v, aLine, function, params))
+                            return false;
+                        carried.push_back(v);
+                    }
+                }
+                // (the loop's lines)
+                auto const number = std::to_string(++iCount);
+                auto const s = "_s" + number + "_";
+                auto const k = "_k" + number + "_";
+                auto const g = "_v" + number + "_";
+                std::map<std::string, std::string> renames;
+                renames[target] = "_i" + number + "_" + target;
+                for (auto const& v : body.stores)
+                    if (v != target)
+                        renames[v] = "_f" + number + "_" + v;
+                auto const header = physical(iLines[aLine].begin);
+                auto const headerText = line_text(header);
+                auto const indent = headerText.substr(0u, headerText.find_first_not_of(" \t"));
+                auto const& tokens = iLines[aLine].tokens;
+                std::string const iterable = iText.substr(tokens[3].begin, tokens[c - 1u].end - tokens[3].begin);
+                std::string prelude = indent + s + " = (" + iterable + "); " + k + " = 0; " + g + " = ";
+                if (carried.empty())
+                    prelude += "True";
+                for (std::size_t i = 0u; i < carried.size(); ++i)
+                    prelude += (i > 0u ? " and __is_int(" : "__is_int(") + carried[i] + ")";
+                for (auto const& v : carried)
+                    prelude += "; " + renames[v] + " = __as_int(" + v + ") if " + g + " else 0";
+                aReplacement.emplace_back(prelude, header);
+                auto const inlineText = [&](std::map<std::string, std::string> const& aNames) -> std::string
+                {
+                    if (!inlineBody)
+                        return {};
+                    return iText.substr(tokens[c].end, tokens[c + 1u].begin - tokens[c].end) + renamed(aLine, c + 1u, aNames);
+                };
+                aReplacement.emplace_back(indent + "for " + renames[target] + " in (" + s + " if " + g + " else None):" + inlineText(renames), header);
+                auto const bodyLast = inlineBody ? header : physical(iLines[bodyEnd - 1u].end);
+                // (the body's lines, renamed (each logical line is a physical line; others (blank lines, comments) are copied))
+                {
+                    std::size_t l = aLine + 1u;
+                    for (auto p = header + 1u; p <= bodyLast && !inlineBody; ++p)
+                    {
+                        while (l < bodyEnd && physical(iLines[l].begin) < p)
+                            ++l;
+                        if (l < bodyEnd && physical(iLines[l].begin) == p)
+                        {
+                            auto const lineText = line_text(p);
+                            auto const offset = iLines[l].tokens[0].begin - (p == 0u ? 0u : iNewlines[p - 1u] + 1u);
+                            aReplacement.emplace_back(lineText.substr(0u, offset) + renamed(l, 0u, renames), p);
+                        }
+                        else
+                            aReplacement.emplace_back(line_text(p), p);
+                    }
+                }
+                if (!carried.empty())
+                {
+                    std::string back = indent + "if " + g + ": ";
+                    for (std::size_t i = 0u; i < carried.size(); ++i)
+                        back += (i > 0u ? "; " : "") + carried[i] + " = " + renames[carried[i]];
+                    aReplacement.emplace_back(back, header);
+                }
+                aReplacement.emplace_back(indent + "for " + target + " in " + s + ":" + inlineText({}), header);
+                for (auto p = header + 1u; p <= bodyLast && !inlineBody; ++p)
+                    aReplacement.emplace_back(line_text(p), p);
+                aReplacement.emplace_back(indent + s + " = None", header);
+                aEnd = bodyLast + 1u;
+                return true;
+            }
+        private:
+            std::string const& iText;
+            std::vector<logical_line> iLines;
+            std::vector<std::size_t> iNewlines;
+            std::vector<std::vector<int>> iDepths;
+            std::size_t iCount = 0u;
+        };
+    }
+
+    std::string rewrite_int_loops(std::string const& aText, bool& aChanged, std::vector<std::size_t>& aLines)
+    {
+        int_loop_rewriter r{ aText };
+        return r.rewrite(aChanged, aLines);
     }
 }

@@ -60,6 +60,7 @@
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <unordered_map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -109,76 +110,109 @@ namespace neos::python_runtime
 
         namespace
         {
-            // (a thread's free list of int objects' storage: its head and length; the list's owner frees it when the thread ends (the
-            // storage of an int released after that is not reused))
-            constexpr std::size_t MaxFreeInts = 1024u;
-            // (one thread-local (finding one is not free in a plugin): its head and length)
-            struct free_int_list
+            // (the storage of objects of one size that are made and released at a high rate (ints and floats): cells carved from 
+            // blocks that are kept for reuse (as CPython's small object allocator's arenas are, apart from being returned to the 
+            // system), and a list of the free cells; its users hold the GIL (see threads.cpp), so it needs no lock (nor a 
+            // thread-local, which is not free to find in a plugin); its blocks are never freed (objects can be released as the 
+            // process ends))
+            template <std::size_t Size>
+            struct object_pool
             {
-                void* head = nullptr;
-                std::size_t count = 0u;
-            };
-            thread_local free_int_list tFreeInts;
-            struct free_ints_owner
-            {
-                ~free_ints_owner()
+                static constexpr std::size_t CellSize = (Size + alignof(std::max_align_t) - 1u) / alignof(std::max_align_t) * alignof(std::max_align_t);
+                static constexpr std::size_t BlockSize = 64u * 1024u;
+                void* free = nullptr;
+                char* next = nullptr;
+                char* end = nullptr;
+                void* allocate()
                 {
-                    while (tFreeInts.head != nullptr)
+                    if (free != nullptr)
                     {
-                        auto const next = *static_cast<void**>(tFreeInts.head);
-                        ::operator delete(tFreeInts.head);
-                        tFreeInts.head = next;
+                        auto const result = free;
+                        free = *static_cast<void**>(result);
+                        return result;
                     }
-                    tFreeInts.count = MaxFreeInts;
+                    if (next == end)
+                    {
+                        next = static_cast<char*>(::operator new(BlockSize));
+                        end = next + BlockSize / CellSize * CellSize;
+                    }
+                    auto const result = next;
+                    next += CellSize;
+                    return result;
+                }
+                void deallocate(void* aCell) noexcept
+                {
+                    *static_cast<void**>(aCell) = free;
+                    free = aCell;
                 }
             };
-            thread_local free_ints_owner tFreeIntsOwner;
+            object_pool<sizeof(int_object)> sIntPool;
+            object_pool<sizeof(float_object)> sFloatPool;
+            object_pool<sizeof(str_object)> sStrPool;
         }
 
         void* int_object::operator new(std::size_t aSize)
         {
-            auto& list = tFreeInts;
-            if (aSize == sizeof(int_object) && list.head != nullptr)
-            {
-                auto const result = list.head;
-                list.head = *static_cast<void**>(result);
-                --list.count;
-                return result;
-            }
-            return ::operator new(aSize);
+            return aSize == sizeof(int_object) ? sIntPool.allocate() : ::operator new(aSize);
         }
 
         void int_object::operator delete(void* aObject, std::size_t aSize) noexcept
         {
-            auto& list = tFreeInts;
-            if (aSize == sizeof(int_object) && list.count < MaxFreeInts)
-            {
-                if (list.count == 0u)
-                    (void)&tFreeIntsOwner; // (the owner is constructed (its destructor runs when the thread ends))
-                *static_cast<void**>(aObject) = list.head;
-                list.head = aObject;
-                ++list.count;
-                return;
-            }
-            ::operator delete(aObject);
+            if (aSize == sizeof(int_object))
+                sIntPool.deallocate(aObject);
+            else
+                ::operator delete(aObject);
+        }
+
+        void* float_object::operator new(std::size_t aSize)
+        {
+            return aSize == sizeof(float_object) ? sFloatPool.allocate() : ::operator new(aSize);
+        }
+
+        void float_object::operator delete(void* aObject, std::size_t aSize) noexcept
+        {
+            if (aSize == sizeof(float_object))
+                sFloatPool.deallocate(aObject);
+            else
+                ::operator delete(aObject);
+        }
+
+        void* str_object::operator new(std::size_t aSize)
+        {
+            return aSize == sizeof(str_object) ? sStrPool.allocate() : ::operator new(aSize);
+        }
+
+        void str_object::operator delete(void* aObject, std::size_t aSize) noexcept
+        {
+            if (aSize == sizeof(str_object))
+                sStrPool.deallocate(aObject);
+            else
+                ::operator delete(aObject);
         }
 
         // (the ints -5 to 256: the same object for each value (as CPython's); never released)
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        object* const* small_ints()
+        {
+            static object* ints[262];
+            for (long long v = -5; v <= 256; ++v)
+            {
+                auto* const i = new int_object{ { { &sIntType.base } }, v };
+                i->h.references.store(1L << 30);
+                ints[v + 5] = &i->h.base;
+            }
+            return ints;
+        }
         object* small_int(long long aValue)
         {
-            static object* const* const sInts = []()
-            {
-                static object* ints[262];
-                for (long long v = -5; v <= 256; ++v)
-                {
-                    auto* const i = new int_object{ { { &sIntType.base } }, v };
-                    i->h.references.store(1L << 30);
-                    ints[v + 5] = &i->h.base;
-                }
-                return ints;
-            }();
+            // (made once (apart: this is called often))
+            static object* const* const sInts = small_ints();
             auto const result = sInts[aValue + 5];
-            retain(result);
+            retain_object(result);
             return result;
         }
 
@@ -1011,12 +1045,29 @@ namespace neos::python_runtime
                 return true;
             }
             count = is_big(aCount) ? 0 : std::max(0ll, int_value(aCount));
-            for (long long i = 0; i < count; ++i)
-                for (auto item : aItems)
+            if (count == 0 || aItems.empty())
+                return true;
+            if (static_cast<unsigned long long>(count) > aResult.max_size() / aItems.size())
+            {
+                error("MemoryError", "");
+                return true;
+            }
+            // (each item's references: added at once (as CPython's), if they are counted in its header)
+            for (auto item : aItems)
+                if (item != nullptr && item->type->retain == &retain_object)
                 {
-                    retain(item);
-                    aResult.push_back(item);
+                    auto& h = *reinterpret_cast<header*>(item);
+                    h.references.store(h.references.load(std::memory_order_relaxed) + static_cast<long>(count), std::memory_order_relaxed);
                 }
+                else
+                    for (long long i = 0; i < count; ++i)
+                        retain(item);
+            aResult.reserve(aResult.size() + static_cast<std::size_t>(count) * aItems.size());
+            if (aItems.size() == 1u)
+                aResult.insert(aResult.end(), static_cast<std::size_t>(count), aItems[0]);
+            else
+                for (long long i = 0; i < count; ++i)
+                    aResult.insert(aResult.end(), aItems.begin(), aItems.end());
             return true;
         }
 
@@ -4639,11 +4690,21 @@ namespace neos::python_runtime
 
         // --- the functions scripts call (an exception stops the script: see python.cpp's plugin error)
 
-        // (a result that is a new reference, or null if an exception was raised)
-        object* checked(object* aResult)
+        // (a result that is a new reference, or null if an exception was raised (its test apart: a result is the common case))
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        void null_result()
         {
-            if (aResult == nullptr && !failed())
+            if (!failed())
                 python_runtime::raise("SystemError", "error return without exception set");
+        }
+        inline object* checked(object* aResult)
+        {
+            if (aResult == nullptr)
+                null_result();
             return aResult;
         }
 
@@ -4840,17 +4901,122 @@ namespace neos::python_runtime
             return is_small_int(aLhs) && is_small_int(aRhs) && (aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT || 
                 aOperation == NEOS_PY_MULTIPLY || aOperation == NEOS_PY_TRUE_DIVIDE || aOperation == NEOS_PY_FLOOR_DIVIDE || aOperation == NEOS_PY_REMAINDER);
         }
+        // (and the commonest: a sum or difference that does not overflow)
+        inline object* small_sum(std::int32_t aOperation, object* aLhs, object* aRhs)
+        {
+            if (!is_small_int(aLhs) || !is_small_int(aRhs))
+                return nullptr;
+            auto const a = as<int_object>(aLhs)->value;
+            auto const b = as<int_object>(aRhs)->value;
+            long long r = 0;
+            if (aOperation == NEOS_PY_ADD ? !add_overflow(a, b, &r) : aOperation == NEOS_PY_SUBTRACT && !subtract_overflow(a, b, &r))
+                return make_int(r);
+            return nullptr;
+        }
         object* fn_binary(std::int32_t aOperation, object* aLhs, object* aRhs) 
         { 
+            if (auto const sum = small_sum(aOperation, aLhs, aRhs))
+                return sum;
             if (small_arithmetic(aOperation, aLhs, aRhs))
                 return checked(int_binary(aOperation, as<int_object>(aLhs)->value, as<int_object>(aRhs)->value));
             return checked(binary(aOperation, aLhs, aRhs, false)); 
         }
         object* fn_inplace(std::int32_t aOperation, object* aLhs, object* aRhs) 
         { 
+            if (auto const sum = small_sum(aOperation, aLhs, aRhs))
+                return sum;
             if (small_arithmetic(aOperation, aLhs, aRhs))
                 return checked(int_binary(aOperation, as<int_object>(aLhs)->value, as<int_object>(aRhs)->value));
             return checked(binary(aOperation, aLhs, aRhs, true)); 
+        }
+        // (an int (NEOS_RT_INTEGER: e.g. an int loop's variable) and an object (python::binary_io: the int is the left operand; 
+        // python::binary_oi: the right; aOperation: the operator, with 0x100 set if it is in place): small ints are not made objects)
+        object* integer_as_object(std::int64_t aInteger)
+        {
+            if (integer_is_object(aInteger))
+            {
+                auto const result = integer_object(aInteger);
+                retain(result);
+                return result;
+            }
+            return make_int(aInteger >> 1);
+        }
+        object* small_binary(std::int32_t aOperation, long long a, long long b)
+        {
+            long long r = 0;
+            if (aOperation == NEOS_PY_ADD && !add_overflow(a, b, &r))
+                return make_int(r);
+            if (aOperation == NEOS_PY_SUBTRACT && !subtract_overflow(a, b, &r))
+                return make_int(r);
+            if (aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT || aOperation == NEOS_PY_MULTIPLY || aOperation == NEOS_PY_TRUE_DIVIDE || 
+                aOperation == NEOS_PY_FLOOR_DIVIDE || aOperation == NEOS_PY_REMAINDER)
+                return checked(int_binary(aOperation, a, b));
+            return nullptr;
+        }
+        object* fn_binary_io(std::int32_t aOperation, std::int64_t aInteger, object* aObject)
+        {
+            auto const op = aOperation & 0xFF;
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                if (auto const result = small_binary(op, aInteger >> 1, as<int_object>(aObject)->value); result != nullptr || failed())
+                    return result;
+            ref const lhs{ integer_as_object(aInteger) };
+            return checked(binary(op, lhs.get(), aObject, (aOperation & 0x100) != 0));
+        }
+        object* fn_binary_oi(std::int32_t aOperation, object* aObject, std::int64_t aInteger)
+        {
+            auto const op = aOperation & 0xFF;
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                if (auto const result = small_binary(op, as<int_object>(aObject)->value, aInteger >> 1); result != nullptr || failed())
+                    return result;
+            ref const rhs{ integer_as_object(aInteger) };
+            return checked(binary(op, aObject, rhs.get(), (aOperation & 0x100) != 0));
+        }
+        // (and comparisons: their truth (python::compare_io_truth and compare_oi_truth: no object for the result), or the result)
+        bool small_compare(std::int32_t aOperation, long long a, long long b)
+        {
+            switch (aOperation)
+            {
+            case NEOS_PY_LT: return a < b;
+            case NEOS_PY_LE: return a <= b;
+            case NEOS_PY_EQ: return a == b;
+            case NEOS_PY_NE: return a != b;
+            case NEOS_PY_GT: return a > b;
+            default: return a >= b;
+            }
+        }
+        object* fn_compare_io(std::int32_t aOperation, std::int64_t aInteger, object* aObject)
+        {
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                return make_bool(small_compare(aOperation, aInteger >> 1, as<int_object>(aObject)->value));
+            ref const lhs{ integer_as_object(aInteger) };
+            return checked(compare(aOperation, lhs.get(), aObject));
+        }
+        object* fn_compare_oi(std::int32_t aOperation, object* aObject, std::int64_t aInteger)
+        {
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                return make_bool(small_compare(aOperation, as<int_object>(aObject)->value, aInteger >> 1));
+            ref const rhs{ integer_as_object(aInteger) };
+            return checked(compare(aOperation, aObject, rhs.get()));
+        }
+        bool fn_compare_io_truth(std::int32_t aOperation, std::int64_t aInteger, object* aObject)
+        {
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                return small_compare(aOperation, aInteger >> 1, as<int_object>(aObject)->value);
+            ref const lhs{ integer_as_object(aInteger) };
+            ref const result{ compare(aOperation, lhs.get(), aObject) };
+            if (result.get() == nullptr)
+                return (checked(nullptr), false);
+            return truth(result.get()) == 1;
+        }
+        bool fn_compare_oi_truth(std::int32_t aOperation, object* aObject, std::int64_t aInteger)
+        {
+            if (!integer_is_object(aInteger) && is_small_int(aObject))
+                return small_compare(aOperation, as<int_object>(aObject)->value, aInteger >> 1);
+            ref const rhs{ integer_as_object(aInteger) };
+            ref const result{ compare(aOperation, aObject, rhs.get()) };
+            if (result.get() == nullptr)
+                return (checked(nullptr), false);
+            return truth(result.get()) == 1;
         }
         object* fn_unary(std::int32_t aOperation, object* aObject) { return checked(unary(aOperation, aObject)); }
         object* fn_compare(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(compare(aOperation, aLhs, aRhs)); }
@@ -4861,6 +5027,44 @@ namespace neos::python_runtime
             if (result.get() == nullptr)
                 return (checked(nullptr), false);
             return truth(result.get()) == 1;
+        }
+        object* compare_made_text(std::int32_t aOperation, object* aObject, char const* aText);
+        // (a str that the program has as text (e.g. a variable bound to a literal) compared (== or !=) with an object (aOperation: the 
+        // operator, with 0x100 set if the text is the left operand): as text if the object is a str (no str is made for the text), 
+        // else as compare's)
+        inline object* compare_text(std::int32_t aOperation, object* aObject, char const* aText, int& aResult)
+        {
+            auto const op = aOperation & 0xFF;
+            if (kind_of(aObject) == NEOS_PY_STR && (op == NEOS_PY_EQ || op == NEOS_PY_NE))
+            {
+                auto const& value = as<str_object>(aObject)->value;
+                bool const equal = value.compare(aText) == 0;
+                aResult = equal == (op == NEOS_PY_EQ) ? 1 : 0;
+                return nullptr;
+            }
+            return compare_made_text(aOperation, aObject, aText);
+        }
+        object* compare_made_text(std::int32_t aOperation, object* aObject, char const* aText)
+        {
+            auto const op = aOperation & 0xFF;
+            ref const text{ make_str(aText) };
+            return (aOperation & 0x100) != 0 ? compare(op, text.get(), aObject) : compare(op, aObject, text.get());
+        }
+        object* fn_compare_text(std::int32_t aOperation, object* aObject, char const* aText)
+        {
+            int result = -1;
+            auto const r = compare_text(aOperation, aObject, aText, result);
+            return result >= 0 ? make_bool(result == 1) : checked(r);
+        }
+        bool fn_compare_text_truth(std::int32_t aOperation, object* aObject, char const* aText)
+        {
+            int result = -1;
+            ref const r{ compare_text(aOperation, aObject, aText, result) };
+            if (result >= 0)
+                return result == 1;
+            if (r.get() == nullptr)
+                return (checked(nullptr), false);
+            return truth(r.get()) == 1;
         }
         bool fn_is(object* aLhs, object* aRhs) { return aLhs == aRhs; }
 
@@ -5075,6 +5279,43 @@ namespace neos::python_runtime
                 return r.start < r.stop ? static_cast<long long>((static_cast<unsigned long long>(r.stop - r.start) - 1u) / static_cast<unsigned long long>(r.step) + 1u) : 0;
             return r.start > r.stop ? static_cast<long long>((static_cast<unsigned long long>(r.start - r.stop) - 1u) / (0u - static_cast<unsigned long long>(r.step)) + 1u) : 0;
         }
+        // (a list's or tuple's length (else -1), and its item at an index (a new reference; null if it has no such item (a list can 
+        // become shorter while it is iterated over)): the loops that compiled code makes over them)
+        long long fn_sequence_length(object* aObject)
+        {
+            auto const k = kind_of(aObject);
+            if (k == NEOS_PY_LIST)
+                return static_cast<long long>(as<list_object>(aObject)->items.size());
+            if (k == NEOS_PY_TUPLE)
+                return static_cast<long long>(as<tuple_object>(aObject)->items.size());
+            return -1;
+        }
+        object* fn_sequence_item(object* aObject, std::int64_t aIndex)
+        {
+            auto const& items = kind_of(aObject) == NEOS_PY_LIST ? as<list_object>(aObject)->items : as<tuple_object>(aObject)->items;
+            if (aIndex < 0 || static_cast<std::size_t>(aIndex) >= items.size())
+                return nullptr;
+            auto const item = items[static_cast<std::size_t>(aIndex)];
+            retain(item);
+            return item;
+        }
+        // (an int loop's item (see the compiler's py_for_in): a small int (shifted left one bit, as NEOS_RT_INTEGER's), or 1 (none: the 
+        // end) or 3 (an item that is not a small int, e.g. a bool))
+        std::int64_t fn_sequence_int(object* aObject, std::int64_t aIndex)
+        {
+            auto const& items = kind_of(aObject) == NEOS_PY_LIST ? as<list_object>(aObject)->items : as<tuple_object>(aObject)->items;
+            if (aIndex < 0 || static_cast<std::size_t>(aIndex) >= items.size())
+                return 1;
+            auto const item = items[static_cast<std::size_t>(aIndex)];
+            if (!is_small_int(item))
+                return 3;
+            auto const value = as<int_object>(item)->value;
+            if (value < -sSmallIntegerLimit || value >= sSmallIntegerLimit)
+                return 3;
+            return static_cast<std::int64_t>(static_cast<std::uint64_t>(value) << 1u);
+        }
+        // (whether an int loop can bind a variable to its int (see the compiler's int loops): an int (not a bool))
+        bool fn_is_int(object* aObject) { return aObject != nullptr && aObject->type == &sIntType.base; }
         long long fn_range_start(object* aObject) { return as<range_object>(aObject)->start; }
         long long fn_range_step(object* aObject) { return as<range_object>(aObject)->step; }
         object* fn_tuple(std::int64_t aSize) { return ctx_tuple_new(context(), static_cast<std::size_t>(aSize)); }
@@ -5409,6 +5650,16 @@ namespace neos::python_runtime
         // --- exceptions (instances of BaseException's classes)
 
         // (the attributes of an instance (or of an exception): its __dict__ (made when it is first needed))
+        // (a key of an attribute dict that is the name aName: its size and last byte (names often share a prefix, e.g. "_") are 
+        // compared first)
+        inline bool attribute_name(object* aKey, std::string_view aName)
+        {
+            if (kind_of(aKey) != NEOS_PY_STR)
+                return false;
+            auto const& key = as<str_object>(aKey)->value;
+            return key.size() == aName.size() && (aName.empty() || (key.back() == aName.back() && std::memcmp(key.data(), aName.data(), aName.size()) == 0));
+        }
+
         struct attribute_dict
         {
             object* dict = nullptr;
@@ -5419,8 +5670,9 @@ namespace neos::python_runtime
             {
                 if (dict == nullptr)
                     return nullptr;
-                for (auto const& item : as<dict_object>(dict)->items)
-                    if (kind_of(item.first) == NEOS_PY_STR && as<str_object>(item.first)->value == aName)
+                auto const& d = *as<dict_object>(dict);
+                for (auto const& item : d.items)
+                    if (attribute_name(item.first, aName))
                         return item.second;
                 return nullptr;
             }
@@ -5434,7 +5686,7 @@ namespace neos::python_runtime
             {
                 if (dict != nullptr)
                     for (auto& item : as<dict_object>(dict)->items)
-                        if (kind_of(item.first) == NEOS_PY_STR && as<str_object>(item.first)->value == aName)
+                        if (attribute_name(item.first, aName))
                         {
                             retain(aValue);
                             release(item.second);
@@ -5450,7 +5702,7 @@ namespace neos::python_runtime
                     return false;
                 auto& d = *as<dict_object>(dict);
                 for (std::size_t i = 0u; i < d.items.size(); ++i)
-                    if (kind_of(d.items[i].first) == NEOS_PY_STR && as<str_object>(d.items[i].first)->value == aName)
+                    if (attribute_name(d.items[i].first, aName))
                     {
                         dict_erase(d, i);
                         return true;
@@ -7744,6 +7996,11 @@ namespace neos::python_runtime
             std::vector<object*> subclasses;    ///< (not owned: a subclass removes itself when it is destroyed)
             std::optional<std::vector<std::string>> slots;  ///< (its instances' attributes, if it and its bases define __slots__ (without __dict__))
             object* nativeBase = nullptr;   ///< (the type of a module it derives from (e.g. collections.deque), if any: its instances have a value of it)
+            // (class_lookup's: names found (the class that has each, and its position in its attributes (null: none has it)), while no 
+            // class's attributes or bases change (see sClassGeneration))
+            struct lookup_hash { using is_transparent = void; std::size_t operator()(std::string_view aName) const { return std::hash<std::string_view>{}(aName); } };
+            mutable std::unordered_map<std::string, std::pair<object*, std::size_t>, lookup_hash, std::equal_to<>> lookups;
+            mutable std::uint64_t lookupsGeneration = 0u;
             ~class_object();
         };
 
@@ -7788,8 +8045,12 @@ namespace neos::python_runtime
             return is_class(aObject) ? as<class_object>(aObject)->metaclass : nullptr;
         }
 
+        void classes_changed();
+
         class_object::~class_object()
         {
+            // (class_lookup's cache (of classes by address) is stale)
+            classes_changed();
             for (auto b : bases)
                 if (b->type == &sClassType.base)
                     std::erase(reinterpret_cast<class_object*>(b)->subclasses, &h.base);
@@ -7859,10 +8120,133 @@ namespace neos::python_runtime
         }
 
         // (an attribute of a class: in its MRO; borrowed; null if none)
+        // (classes' attributes or bases changed: class_lookup's caches are stale)
+        std::uint64_t sClassGeneration = 1u;
+        void classes_changed()
+        {
+            ++sClassGeneration;
+        }
+
+        object* class_lookup_uncached(object* aClass, std::string_view aName, object** aOwner);
+
+        namespace
+        {
+            // (class_lookup's cache of the names found recently (as CPython's type attribute cache): by the class's address and the 
+            // name's size and first and last eight bytes (all of a name of up to 16 bytes; the rest of a longer one is checked too); its 
+            // users hold the GIL (see threads.cpp))
+            struct lookup_key
+            {
+                std::size_t size = 0u;
+                std::uint64_t first = 0u;
+                std::uint64_t last = 0u;
+                explicit lookup_key(std::string_view aName) : size{ aName.size() }
+                {
+                    if (size >= 8u)
+                    {
+                        std::memcpy(&first, aName.data(), 8u);
+                        std::memcpy(&last, aName.data() + size - 8u, 8u);
+                    }
+                    else
+                        for (std::size_t i = 0u; i < size; ++i)
+                            first |= static_cast<std::uint64_t>(static_cast<unsigned char>(aName[i])) << (8u * i);
+                }
+                lookup_key() = default;
+                bool operator==(lookup_key const&) const = default;
+                std::size_t hash(object const* aClass) const
+                {
+                    return static_cast<std::size_t>(((first * 0x9E3779B97F4A7C15ull) ^ (last * 0xC2B2AE3D27D4EB4Full) ^ (size << 7u) ^ 
+                        ((reinterpret_cast<std::uintptr_t>(aClass) >> 4u) * 0x94D049BB133111EBull)) >> 32u);
+                }
+            };
+            struct lookup_entry
+            {
+                object const* cls = nullptr;
+                std::uint64_t generation = 0u;
+                lookup_key key;
+                object* owner = nullptr;
+                std::size_t position = 0u;
+                std::string middle;     ///< (a name of more than 16 bytes: its bytes between the first and last eight)
+            };
+            constexpr std::size_t LookupCacheSize = 1024u;
+            lookup_entry sLookupCache[LookupCacheSize];
+            std::string_view middle_of(std::string_view aName)
+            {
+                return aName.size() > 16u ? aName.substr(8u, aName.size() - 16u) : std::string_view{};
+            }
+        }
+
+        object* class_lookup_cached(object* aClass, std::string_view aName, object** aOwner, lookup_key const& key, lookup_entry& entry);
+
         object* class_lookup(object* aClass, std::string_view aName, object** aOwner = nullptr)
         {
             if (aClass == nullptr)
                 return nullptr;
+            lookup_key const key{ aName };
+            auto& entry = sLookupCache[key.hash(aClass) % LookupCacheSize];
+            if (entry.cls == aClass && entry.generation == sClassGeneration && entry.key == key && (key.size <= 16u || entry.middle == middle_of(aName))) [[likely]]
+            {
+                if (entry.owner == nullptr)
+                    return nullptr;
+                if (aOwner != nullptr)
+                    *aOwner = entry.owner;
+                return as<class_object>(entry.owner)->attributes[entry.position].second;
+            }
+            return class_lookup_cached(aClass, aName, aOwner, key, entry);
+        }
+
+        // (not in the cache of recent names: the class's own)
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        object* class_lookup_cached(object* aClass, std::string_view aName, object** aOwner, lookup_key const& key, lookup_entry& entry)
+        {
+            // (found before: the class that has it (and where), or none)
+            auto const& cls = *as<class_object>(aClass);
+            auto const remember = [&](object* aFound, std::size_t aPosition)
+            {
+                entry.cls = aClass;
+                entry.generation = sClassGeneration;
+                entry.key = key;
+                entry.owner = aFound;
+                entry.position = aPosition;
+                entry.middle.assign(middle_of(aName));
+            };
+            if (cls.lookupsGeneration != sClassGeneration)
+            {
+                cls.lookups.clear();
+                cls.lookupsGeneration = sClassGeneration;
+            }
+            if (auto const found = cls.lookups.find(aName); found != cls.lookups.end())
+            {
+                auto const [owner, position] = found->second;
+                remember(owner, position);
+                if (owner == nullptr)
+                    return nullptr;
+                if (aOwner != nullptr)
+                    *aOwner = owner;
+                return as<class_object>(owner)->attributes[position].second;
+            }
+            object* owner = nullptr;
+            auto const result = class_lookup_uncached(aClass, aName, &owner);
+            std::size_t position = 0u;
+            if (result != nullptr)
+            {
+                // (its position: by its name (attributes can have the same value, e.g. a small int))
+                auto const& attributes = as<class_object>(owner)->attributes;
+                while (position < attributes.size() && attributes[position].first != aName)
+                    ++position;
+                if (aOwner != nullptr)
+                    *aOwner = owner;
+            }
+            if (result == nullptr || position < as<class_object>(owner)->attributes.size())
+                cls.lookups.emplace(std::string{ aName }, std::make_pair(result != nullptr ? owner : nullptr, position));
+            return result;
+        }
+
+        object* class_lookup_uncached(object* aClass, std::string_view aName, object** aOwner)
+        {
             auto const find = [&](object* c) -> object*
             {
                 for (auto& a : as<class_object>(c)->attributes)
@@ -8578,7 +8962,7 @@ namespace neos::python_runtime
         void release_instance(neos_rt_object* aObject)
         {
             auto& instance = *reinterpret_cast<instance_object*>(aObject);
-            if (instance.h.references.fetch_sub(1, std::memory_order_acq_rel) != 1)
+            if (remove_reference(instance.h) != 0)
                 return;
             if (!instance.finalized)
                 if (auto const del = class_lookup(instance.cls, "__del__"))
@@ -8596,7 +8980,7 @@ namespace neos::python_runtime
                         if (pending)
                             fn_raise(pending.get());
                     }
-                    if (instance.h.references.fetch_sub(1, std::memory_order_acq_rel) != 1)
+                    if (remove_reference(instance.h) != 0)
                         return;
                 }
             if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
@@ -9019,6 +9403,7 @@ namespace neos::python_runtime
             for (auto m : cls.mro)
                 release(m);
             cls.mro = std::move(mro);
+            classes_changed();
             for (auto s : std::vector<object*>{ cls.subclasses })
                 if (!relinearize(s))
                     return false;
@@ -9068,6 +9453,7 @@ namespace neos::python_runtime
             for (auto b : bases)
                 retain(b);
             cls.bases = bases;
+            classes_changed();
             for (auto m : previousMro)
                 retain(m);
             if (!relinearize(aSelf))
@@ -9079,6 +9465,7 @@ namespace neos::python_runtime
                 for (auto m : cls.mro)
                     release(m);
                 cls.mro = previousMro;
+                classes_changed();
                 for (auto b : previous)
                     as<class_object>(b)->subclasses.push_back(aSelf);
                 return -1;
@@ -9126,6 +9513,7 @@ namespace neos::python_runtime
                     {
                         release(a->second);
                         attributes.erase(a);
+                        classes_changed();
                         return 0;
                     }
                     retain(aValue);
@@ -9140,6 +9528,7 @@ namespace neos::python_runtime
             }
             retain(aValue);
             attributes.emplace_back(aName, aValue);
+            classes_changed();
             return 0;
         }
 
@@ -9478,6 +9867,7 @@ namespace neos::python_runtime
                 return nullptr;
             for (auto m : mro)
                 cls->mro.push_back((retain(m), m));
+            classes_changed();
             for (auto b : cls->bases)
                 as<class_object>(b)->subclasses.push_back(&cls->h.base);
             // (its bases' metaclass)
@@ -9530,10 +9920,12 @@ namespace neos::python_runtime
                 {
                     retain(item.second);
                     cls->attributes.emplace_back(key, &(new wrapper_object{ { { &sWrapperType.base } }, ClassMethod, item.second, nullptr })->h.base);
+                    classes_changed();
                     continue;
                 }
                 retain(item.second);
                 cls->attributes.emplace_back(key, item.second);
+                classes_changed();
                 // (a method's function (_cN_Class_method): its name is the method's)
                 auto function = item.second;
                 if (function->type == &sWrapperType.base)
@@ -11404,7 +11796,9 @@ namespace neos::python_runtime
         long long str_hash(std::string_view aText)
         {
             // (CPython hashes a str's canonical representation: its code points as 1, 2 or 4 bytes each (little-endian), 
-            // as its largest needs)
+            // as its largest needs; ASCII's is its UTF-8)
+            if (std::all_of(aText.begin(), aText.end(), [](char c) { return (static_cast<unsigned char>(c) & 0x80u) == 0u; }))
+                return bytes_hash(aText);
             std::vector<char32_t> codePoints;
             char32_t largest = 0;
             for (std::size_t i = 0u; i < aText.size();)
@@ -14279,6 +14673,14 @@ namespace neos::python_runtime
             { "unary", NEOS_RT_FUNCTION(fn_unary), OBJ, 2u, { I32, OBJ }, 0u },
             { "compare", NEOS_RT_FUNCTION(fn_compare), OBJ, 3u, { I32, OBJ, OBJ }, 0u },
             { "compare_truth", NEOS_RT_FUNCTION(fn_compare_truth), BOOL, 3u, { I32, OBJ, OBJ }, 0u },
+            { "binary_io", NEOS_RT_FUNCTION(fn_binary_io), OBJ, 3u, { I32, INT, OBJ }, 0u },
+            { "binary_oi", NEOS_RT_FUNCTION(fn_binary_oi), OBJ, 3u, { I32, OBJ, INT }, 0u },
+            { "compare_io", NEOS_RT_FUNCTION(fn_compare_io), OBJ, 3u, { I32, INT, OBJ }, 0u },
+            { "compare_oi", NEOS_RT_FUNCTION(fn_compare_oi), OBJ, 3u, { I32, OBJ, INT }, 0u },
+            { "compare_io_truth", NEOS_RT_FUNCTION(fn_compare_io_truth), BOOL, 3u, { I32, INT, OBJ }, 0u },
+            { "compare_oi_truth", NEOS_RT_FUNCTION(fn_compare_oi_truth), BOOL, 3u, { I32, OBJ, INT }, 0u },
+            { "compare_text", NEOS_RT_FUNCTION(fn_compare_text), OBJ, 3u, { I32, OBJ, STR }, 0u },
+            { "compare_text_truth", NEOS_RT_FUNCTION(fn_compare_text_truth), BOOL, 3u, { I32, OBJ, STR }, 0u },
             { "is", NEOS_RT_FUNCTION(fn_is), BOOL, 2u, { OBJ, OBJ }, 0u },
             { "contains", NEOS_RT_FUNCTION(fn_contains), BOOL, 2u, { OBJ, OBJ }, 0u },
             { "getattr", NEOS_RT_FUNCTION(fn_getattr), OBJ, 2u, { OBJ, STR }, 0u },
@@ -14297,6 +14699,9 @@ namespace neos::python_runtime
             { "iter", NEOS_RT_FUNCTION(fn_iter), OBJ, 1u, { OBJ }, 0u },
             { "next", NEOS_RT_FUNCTION(fn_next), OBJ, 1u, { OBJ }, 0u },
             { "range_length", NEOS_RT_FUNCTION(fn_range_length), NEOS_RT_I64, 1u, { OBJ }, 0u },
+            { "sequence_length", NEOS_RT_FUNCTION(fn_sequence_length), NEOS_RT_I64, 1u, { OBJ }, 0u },
+            { "sequence_item", NEOS_RT_FUNCTION(fn_sequence_item), OBJ, 2u, { OBJ, I64 }, 0u },
+            { "sequence_int", NEOS_RT_FUNCTION(fn_sequence_int), NEOS_RT_I64, 2u, { OBJ, I64 }, 0u },
             { "range_start", NEOS_RT_FUNCTION(fn_range_start), NEOS_RT_I64, 1u, { OBJ }, 0u },
             { "range_step", NEOS_RT_FUNCTION(fn_range_step), NEOS_RT_I64, 1u, { OBJ }, 0u },
             { "tuple", NEOS_RT_FUNCTION(fn_tuple), OBJ, 1u, { I64 }, 0u },
@@ -14362,7 +14767,9 @@ namespace neos::python_runtime
             { "int(object)", NEOS_RT_FUNCTION(fn_to_integer), INT, 1u, { OBJ }, 0u },
             { "float(object)", NEOS_RT_FUNCTION(fn_to_float), F64, 1u, { OBJ }, 0u },
             { "abs(object)", NEOS_RT_FUNCTION(fn_abs_object), OBJ, 1u, { OBJ }, 0u },
-            { "bool(object)", NEOS_RT_FUNCTION(fn_bool_object), BOOL, 1u, { OBJ }, 0u }
+            { "bool(object)", NEOS_RT_FUNCTION(fn_bool_object), BOOL, 1u, { OBJ }, 0u },
+            { "__is_int(object)", NEOS_RT_FUNCTION(fn_is_int), BOOL, 1u, { OBJ }, 0u },
+            { "__as_int(object)", NEOS_RT_FUNCTION(fn_to_integer), INT, 1u, { OBJ }, 0u }
         };
         return sFunctions;
     }

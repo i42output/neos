@@ -86,6 +86,9 @@ namespace neos
                 // (for calling it directly) its C function, its C signature (neos_rt_type values: aParameters and aResult) and its
                 // plugin's error function (null if it has none)
                 void const* c_function(function const& aFunction, std::vector<std::uint8_t>& aParameters, std::uint8_t& aResult, char const* (*&aError)());
+                // (and) its plugin's error pending flag: nonzero if its error function may return an error (null if it has none: its 
+                // error function is called after every call)
+                long const* error_pending(function const& aFunction);
                 // call it (arguments and results are raw WebAssembly values: the arguments are in aBuffer; its result, if 
                 // any, replaces the first)
                 void call(function const& aFunction, value* aBuffer, marshaller const& aMarshaller);

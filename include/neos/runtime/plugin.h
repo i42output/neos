@@ -51,6 +51,9 @@
   - A plugin whose functions can fail (with a runtime error that stops the script, e.g. a language runtime's
     RangeError) also exports NEOS_RUNTIME_PLUGIN_ERROR, which returns the error raised by the function the calling
     thread last called (clearing it) or NULL if it raised none. It is optional.
+  - Such a plugin can also export NEOS_RUNTIME_PLUGIN_ERROR_PENDING, which returns the address of a long that is zero
+    whenever NEOS_RUNTIME_PLUGIN_ERROR would return NULL on every thread (e.g. a count of the threads that have an error
+    to report): native code calls NEOS_RUNTIME_PLUGIN_ERROR only when it is nonzero. It is optional.
 
   Types:
   - NEOS_RT_BOOL is C bool, NEOS_RT_CHAR is char, NEOS_RT_SIZE is size_t; the others are as named.
@@ -148,6 +151,11 @@ typedef neos_rt_plugin const* (*neos_rt_plugin_entry)(void);
 #define NEOS_RUNTIME_PLUGIN_ERROR_NAME "neos_runtime_plugin_error"
 
 typedef char const* (*neos_rt_plugin_error)(void);
+
+/* (optional) whether a plugin's functions may have raised errors (see NEOS_RUNTIME_PLUGIN_ERROR_PENDING) */
+#define NEOS_RUNTIME_PLUGIN_ERROR_PENDING_NAME "neos_runtime_plugin_error_pending"
+
+typedef long const* (*neos_rt_plugin_error_pending)(void);
 
 /* (optional) the host's functions: a plugin that calls back into the running program (e.g. a function of the program
    passed to it as a value) defines NEOS_RUNTIME_PLUGIN_SET_HOST { (keep aHost) }, which the host calls when it loads the
@@ -248,6 +256,7 @@ typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);
 /* the entry points a plugin exports (declared here so that they have C linkage in a plugin written in C++) */
 NEOS_RUNTIME_PLUGIN_EXPORT neos_rt_plugin const* neos_runtime_plugin(void);
 NEOS_RUNTIME_PLUGIN_EXPORT char const* neos_runtime_plugin_error(void);
+NEOS_RUNTIME_PLUGIN_EXPORT long const* neos_runtime_plugin_error_pending(void);
 NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_set_host(neos_rt_host const* aHost);
 NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void);
 #endif
@@ -259,6 +268,9 @@ NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void);
 
 /* (optional) a plugin whose functions can fail defines: NEOS_RUNTIME_PLUGIN_ERROR { return (the error raised, cleared) or NULL; } */
 #define NEOS_RUNTIME_PLUGIN_ERROR NEOS_RUNTIME_PLUGIN_EXPORT char const* neos_runtime_plugin_error(void)
+
+/* (optional) and defines: NEOS_RUNTIME_PLUGIN_ERROR_PENDING { return (the address of a long that is zero while it raises none); } */
+#define NEOS_RUNTIME_PLUGIN_ERROR_PENDING NEOS_RUNTIME_PLUGIN_EXPORT long const* neos_runtime_plugin_error_pending(void)
 
 /* (optional) a plugin that calls back into the program defines: NEOS_RUNTIME_PLUGIN_SET_HOST { (keep aHost) } */
 #define NEOS_RUNTIME_PLUGIN_SET_HOST NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_set_host(neos_rt_host const* aHost)

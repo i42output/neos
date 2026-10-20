@@ -1948,7 +1948,9 @@ namespace neos::python_runtime
                         if (!slice_indices(aKey, static_cast<long long>(data.size()), start, stop, step))
                             return nullptr;
                         std::string result;
-                        if (step > 0)
+                        if (step == 1)
+                            result.assign(data, static_cast<std::size_t>(start), static_cast<std::size_t>(std::max(stop - start, 0LL)));
+                        else if (step > 0)
                             for (long long i = start; i < stop; i += step)
                                 result += data[static_cast<std::size_t>(i)];
                         else

@@ -82,6 +82,7 @@ namespace neos
                     std::vector<std::uint8_t> parameters;
                     std::uint8_t result = 0u;
                     char const* (*error)() = nullptr;
+                    long const* errorPending = nullptr;     ///< (if not null: error is called only if it is nonzero)
                 };
 
                 // how generated code calls an imported function
@@ -142,6 +143,10 @@ namespace neos
                     // (the error a runtime plugin function (aFunction) raised: thrown, or kept for the program (the function's result 
                     // is then zero))
                     void (*pluginError)(void* aHost, std::uint32_t aFunction, char const* aError) = nullptr;
+                    // (strings: a string in memory (its address) as a C function takes it, in place (linear memory does not move: valid
+                    // while the string is); and a C function's string result copied into memory (its address))
+                    char const* (*stringPointer)(void* aHost, std::uint32_t aAddress) = nullptr;
+                    std::uint32_t (*stringAddress)(void* aHost, char const* aText) = nullptr;
                 };
 
                 struct module_description

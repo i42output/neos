@@ -447,7 +447,18 @@ namespace neos
                             [](void* aHost, void* aObject) { return static_cast<machine*>(aHost)->object_handle(aObject); },
                             [](void* aHost, std::uint32_t aHandle) { static_cast<machine*>(aHost)->retain_object(aHandle); },
                             [](void* aHost, std::uint32_t aHandle) { static_cast<machine*>(aHost)->release_object(aHandle); },
-                            [](void* aHost, std::uint32_t aFunction, char const* aError) { static_cast<machine*>(aHost)->plugin_error(aFunction, aError); } };
+                            [](void* aHost, std::uint32_t aFunction, char const* aError) { static_cast<machine*>(aHost)->plugin_error(aFunction, aError); },
+                            [](void* aHost, std::uint32_t aAddress) 
+                            { 
+                                auto const pointer = static_cast<machine*>(aHost)->string_pointer(aAddress);
+                                if (pointer == nullptr)
+                                    throw trap{ "a string that is not NUL terminated" };
+                                return pointer;
+                            },
+                            [](void* aHost, char const* aText) 
+                            { 
+                                return static_cast<machine*>(aHost)->allocate_string(aText != nullptr ? std::string_view{ aText } : std::string_view{}); 
+                            } };
                         return jit::compile(module, [this](std::uint32_t aFunction, value* aBuffer)
                         {
                             call_import(aFunction, aBuffer);
@@ -1646,6 +1657,7 @@ namespace neos
                                 return {};
                             jit::plugin_function result;
                             result.function = runtime::c_function(f, result.parameters, result.result, result.error);
+                            result.errorPending = runtime::error_pending(f);
                             return result;
                         }
                         catch (...)

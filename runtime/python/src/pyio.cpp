@@ -104,7 +104,7 @@ namespace neos::python_runtime::detail
             return *sState;
         }
 
-        py cls(char const* aName) { return state().classes.at(aName); }
+        py const& cls(char const* aName) { return state().classes.at(aName); }
 
         // (the abstract base classes are io's; the other classes are _io's (as CPython's are))
         char const* module_of(std::string_view aClass)
@@ -2350,14 +2350,20 @@ namespace neos::python_runtime::detail
         // closed (Modules/_io/textio.c's CHECK_CLOSED))
         bool text_closed(py const& aSelf)
         {
-            if (type_of(aSelf).is(cls("TextIOWrapper")))
+            // (the classes: found once (they are made once))
+            static py const& textIOWrapper = cls("TextIOWrapper");
+            static py const& bufferedReader = cls("BufferedReader");
+            static py const& bufferedRandom = cls("BufferedRandom");
+            static py const& bufferedWriter = cls("BufferedWriter");
+            static py const& fileIO = cls("FileIO");
+            if (type_of(aSelf).is(textIOWrapper))
             {
                 py const buffer = aSelf.attr("_buffer");
                 py const type = type_of(buffer);
-                if (type.is(cls("BufferedReader")) || type.is(cls("BufferedRandom")) || type.is(cls("BufferedWriter")))
+                if (type.is(bufferedReader) || type.is(bufferedRandom) || type.is(bufferedWriter))
                 {
                     py const raw = buffer.attr("_raw");
-                    if (type_of(raw).is(cls("FileIO")))
+                    if (type_of(raw).is(fileIO))
                         return fileio_of(raw).fd < 0;
                 }
             }

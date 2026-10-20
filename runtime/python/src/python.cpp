@@ -322,6 +322,13 @@ namespace neos::python_runtime
     }
 }
 
+NEOS_RUNTIME_PLUGIN_ERROR_PENDING
+{
+    // (zero when no thread has an error to report: see NEOS_RUNTIME_PLUGIN_ERROR)
+    static_assert(sizeof(std::atomic<long>) == sizeof(long) && std::atomic<long>::is_always_lock_free);
+    return reinterpret_cast<long const*>(&neos::python_runtime::sPendingThreads);
+}
+
 NEOS_RUNTIME_PLUGIN_ERROR
 {
     using namespace neos::python_runtime;

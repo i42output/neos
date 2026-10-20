@@ -61,6 +61,7 @@
 #include <algorithm>
 #include <type_traits>
 #include <compare>
+#include <cstring>
 
 namespace neos::runtime
 {
@@ -75,6 +76,23 @@ namespace neos::runtime
     namespace string_detail
     {
         inline constexpr std::size_t npos = static_cast<std::size_t>(-1);
+
+        // (whether UTF-8 is ASCII: eight bytes at a time)
+        inline bool is_ascii(std::string_view aText)
+        {
+            auto const* p = aText.data();
+            auto n = aText.size();
+            std::uint64_t bits = 0u;
+            for (; n >= 8u; p += 8, n -= 8u)
+            {
+                std::uint64_t word;
+                std::memcpy(&word, p, sizeof(word));
+                bits |= word;
+            }
+            for (; n > 0u; ++p, --n)
+                bits |= static_cast<unsigned char>(*p);
+            return (bits & 0x8080808080808080ull) == 0u;
+        }
 
         // (UTF-8: the code point that starts at aOffset (which moves past it); U+FFFD for bytes that are not UTF-8 (each a code
         // point); surrogates' three byte forms are code points (as Python's surrogateescape and surrogatepass make them))
@@ -200,7 +218,7 @@ namespace neos::runtime
         bool is_ascii() const
         {
             if (iAscii < 0)
-                iAscii = std::all_of(iText.begin(), iText.end(), [](char c) { return (static_cast<unsigned char>(c) & 0x80u) == 0u; }) ? 1 : 0;
+                iAscii = string_detail::is_ascii(iText) ? 1 : 0;
             return iAscii > 0;
         }
         char32_t at(std::size_t aIndex) const

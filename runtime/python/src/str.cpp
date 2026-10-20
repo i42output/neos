@@ -338,9 +338,15 @@ namespace neos::python_runtime
                 return make_text(result);
             }
 
-            // (find, rfind, index, rindex and count: the substring and the range)
+            // (find, rfind, index, rindex and count: the substring and the range (aAscii: if the text and the substring are ASCII, their 
+            // bytes (a code point each) rather than their code points))
+            struct ascii_search
+            {
+                std::string_view text;
+                std::string_view sub;
+            };
             bool search_arguments(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs, char const* aName, std::u32string& aText,
-                std::u32string& aSub, long long& aStart, long long& aEnd)
+                std::u32string& aSub, long long& aStart, long long& aEnd, std::optional<ascii_search>* aAscii = nullptr)
             {
                 std::vector<object*> a;
                 if (!parse_arguments(aName, aArgs, aKwargs, { "sub", "start", "end" }, 1u, 3u, a))
@@ -352,28 +358,54 @@ namespace neos::python_runtime
                 }
                 if (!slice_index(a[1], 0, aStart) || !slice_index(a[2], std::numeric_limits<long long>::max(), aEnd))
                     return false;
+                if (aAscii != nullptr && as<str_object>(aSelf)->is_ascii() && as<str_object>(a[0])->is_ascii())
+                {
+                    *aAscii = ascii_search{ as<str_object>(aSelf)->value, as<str_object>(a[0])->value };
+                    adjust_indices(aStart, aEnd, static_cast<long long>((*aAscii)->text.size()));
+                    return true;
+                }
                 aText = to_code_points(as<str_object>(aSelf)->value);
                 aSub = to_code_points(as<str_object>(a[0])->value);
                 adjust_indices(aStart, aEnd, static_cast<long long>(aText.size()));
                 return true;
             }
 
-            long long find_in(std::u32string const& aText, std::u32string const& aSub, long long aStart, long long aEnd, bool aReverse)
+            template <typename Char>
+            long long find_in(std::basic_string_view<Char> aText, std::basic_string_view<Char> aSub, long long aStart, long long aEnd, bool aReverse)
             {
                 if (aStart > static_cast<long long>(aText.size()) || aEnd - aStart < static_cast<long long>(aSub.size()))
                     return -1;
-                std::u32string_view const range{ aText.data() + aStart, static_cast<std::size_t>(aEnd - aStart) };
+                std::basic_string_view<Char> const range{ aText.data() + aStart, static_cast<std::size_t>(aEnd - aStart) };
                 auto const i = aReverse ? range.rfind(aSub) : range.find(aSub);
-                return i == std::u32string_view::npos ? -1 : static_cast<long long>(i) + aStart;
+                return i == std::basic_string_view<Char>::npos ? -1 : static_cast<long long>(i) + aStart;
+            }
+            long long find_in(std::u32string const& aText, std::u32string const& aSub, long long aStart, long long aEnd, bool aReverse)
+            {
+                return find_in(std::u32string_view{ aText }, std::u32string_view{ aSub }, aStart, aEnd, aReverse);
+            }
+
+            template <typename Char>
+            long long count_in(std::basic_string_view<Char> aText, std::basic_string_view<Char> aSub, long long aStart, long long aEnd)
+            {
+                if (aStart > static_cast<long long>(aText.size()) || aEnd < aStart)
+                    return 0;
+                if (aSub.empty())
+                    return aEnd - aStart + 1;
+                long long n = 0;
+                std::basic_string_view<Char> const range{ aText.data() + aStart, static_cast<std::size_t>(aEnd - aStart) };
+                for (auto i = range.find(aSub); i != std::basic_string_view<Char>::npos; i = range.find(aSub, i + aSub.size()))
+                    ++n;
+                return n;
             }
 
             object* find_method(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs, char const* aName, bool aReverse, bool aRaise)
             {
                 std::u32string text, sub;
                 long long start = 0, end = 0;
-                if (!search_arguments(aSelf, aArgs, aKwargs, aName, text, sub, start, end))
+                std::optional<ascii_search> ascii;
+                if (!search_arguments(aSelf, aArgs, aKwargs, aName, text, sub, start, end, &ascii))
                     return nullptr;
-                auto const i = find_in(text, sub, start, end, aReverse);
+                auto const i = ascii ? find_in(ascii->text, ascii->sub, start, end, aReverse) : find_in(text, sub, start, end, aReverse);
                 if (i < 0 && aRaise)
                     return error("ValueError", "substring not found");
                 return make_int(i);
@@ -558,6 +590,29 @@ namespace neos::python_runtime
                     candidates.push_back(a[0]);
                 else
                     return error("TypeError", bare + " first arg must be str or a tuple of str, not " + type_name(a[0]));
+                // (as UTF-8 (its code points are its bytes if it is ASCII; a prefix or suffix of its code points is one of its bytes): if 
+                // it is ASCII or the whole of it is searched)
+                auto const& self = *as<str_object>(aSelf);
+                if (self.is_ascii() || (start == 0 && end == std::numeric_limits<long long>::max()))
+                {
+                    std::string_view const bytes{ self.value };
+                    for (auto c : candidates)
+                    {
+                        if (kind_of(c) != NEOS_PY_STR)
+                            return error("TypeError", "tuple for " + bare + " must only contain str, not " + type_name(c));
+                        std::string_view const affix{ as<str_object>(c)->value };
+                        auto s = start;
+                        auto e = end;
+                        adjust_indices(s, e, static_cast<long long>(bytes.size()));
+                        e -= static_cast<long long>(affix.size());
+                        if (e < s)
+                            continue;
+                        auto const at = aStart ? s : e;
+                        if (bytes.substr(static_cast<std::size_t>(at), affix.size()) == affix)
+                            return make_bool(true);
+                    }
+                    return make_bool(false);
+                }
                 std::u32string storage;
                 auto const& text = points_of(aSelf, storage);
                 for (auto c : candidates)
@@ -889,17 +944,10 @@ namespace neos::python_runtime
                     {
                         std::u32string text, sub;
                         long long start = 0, end = 0;
-                        if (!search_arguments(s, a, k, "str.count", text, sub, start, end))
+                        std::optional<ascii_search> ascii;
+                        if (!search_arguments(s, a, k, "str.count", text, sub, start, end, &ascii))
                             return nullptr;
-                        if (start > static_cast<long long>(text.size()) || end < start)
-                            return make_int(0);
-                        if (sub.empty())
-                            return make_int(end - start + 1);
-                        long long n = 0;
-                        std::u32string_view const range{ text.data() + start, static_cast<std::size_t>(end - start) };
-                        for (auto i = range.find(sub); i != std::u32string_view::npos; i = range.find(sub, i + sub.size()))
-                            ++n;
-                        return make_int(n);
+                        return make_int(ascii ? count_in(ascii->text, ascii->sub, start, end) : count_in(std::u32string_view{ text }, std::u32string_view{ sub }, start, end));
                     } },
                 { "find", [](object* s, std::vector<object*> const& a, object* k) { return find_method(s, a, k, "str.find", false, false); } },
                 { "rfind", [](object* s, std::vector<object*> const& a, object* k) { return find_method(s, a, k, "str.rfind", true, false); } },

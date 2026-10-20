@@ -84,6 +84,20 @@ namespace neos::compilers::python
             return aText;
         }
 
+        // (an int loop's names (see statements.cpp's int loops): "_<aPrefix>N_..." (aWhole: nothing follows the second underscore) is 
+        // the int loop N's: the name of the variable where it stops (_kN_))
+        std::optional<std::string> int_loop_name(std::string_view aName, char aPrefix, bool aWhole)
+        {
+            if (aName.size() < 4u || aName[0] != '_' || aName[1] != aPrefix)
+                return {};
+            std::size_t i = 2u;
+            while (i < aName.size() && std::isdigit(static_cast<unsigned char>(aName[i])))
+                ++i;
+            if (i == 2u || i >= aName.size() || aName[i] != '_' || (aWhole && i + 1u != aName.size()))
+                return {};
+            return std::string{ "_k" } + std::string{ aName.substr(2u, i - 2u) } + "_";
+        }
+
         bool name_character(char aCharacter)
         {
             return std::isalnum(static_cast<unsigned char>(aCharacter)) || aCharacter == '_';
@@ -1867,6 +1881,24 @@ namespace neos::compilers::python
             text = rewrite_classes(text, classesChanged);
             changed = changed || classesChanged;
         }
+        // loops over lists and tuples of ints (see statements.cpp: lines are added)
+        if (!py_exec_mode() && !std::getenv("NEOS_PY_NO_INT_LOOPS"))
+        {
+            bool intLoopsChanged = false;
+            track_lines();
+            std::vector<std::size_t> intLoopLines;
+            text = rewrite_int_loops(text, intLoopsChanged, intLoopLines);
+            if (intLoopsChanged)
+            {
+                std::vector<std::uint32_t> rewritten;
+                for (auto const l : intLoopLines)
+                    rewritten.push_back(l < lines.size() ? lines[l] : 0u);
+                lines = std::move(rewritten);
+                if (std::getenv("NEOS_PY_INT_LOOPS_DEBUG"))
+                    std::fprintf(stderr, "%s\n", text.c_str());
+            }
+            changed = changed || intLoopsChanged;
+        }
         // comprehensions' variables (see statements.cpp)
         {
             bool comprehensionsChanged = false;
@@ -2522,7 +2554,13 @@ namespace neos::compilers::python
                     function.freeObjects.push_back(*holder);
                     auto const operands = comparison->second;
                     function.pyComparisons.erase(comparison);
-                    aValue = py_runtime_call("python::compare_truth", { type::I32, type::Object, type::Object }, type::Boolean, { operands[0], operands[1], operands[2] });
+                    if (operands[2].valueType == type::String)
+                        aValue = py_runtime_call("python::compare_text_truth", { type::I32, type::Object, type::String }, type::Boolean, { operands[0], operands[1], operands[2] });
+                    else if (operands[1].valueType == type::Integer || operands[2].valueType == type::Integer)
+                        aValue = py_runtime_call(operands[1].valueType == type::Integer ? "python::compare_io_truth" : "python::compare_oi_truth", 
+                            { type::I32, operands[1].valueType, operands[2].valueType }, type::Boolean, { operands[0], operands[1], operands[2] });
+                    else
+                        aValue = py_runtime_call("python::compare_truth", { type::I32, type::Object, type::Object }, type::Boolean, { operands[0], operands[1], operands[2] });
                 }
                 else
                     aValue = py_runtime_call("python::truth", { type::Object }, type::Boolean, { aValue });
@@ -4353,18 +4391,73 @@ namespace neos::compilers::python
         auto const object_binary = [&](std::int32_t aOperator)
         {
             fragment op;
+            auto l = materialize(*lhs);
+            auto r = materialize(rhs);
+            // (an int (type::Integer, e.g. an int loop's variable) and an object: python::binary_io and python::binary_oi (no object is 
+            // made for the int if the object is a small int too))
+            if ((l.valueType == type::Integer && r.valueType == type::Object) || (l.valueType == type::Object && r.valueType == type::Integer))
+            {
+                bool const left = l.valueType == type::Integer;
+                put_i32(op, aOperator | (aInplace ? 0x100 : 0));
+                op.valueType = type::I32;
+                value(py_owned(py_runtime_call(left ? "python::binary_io" : "python::binary_oi", { type::I32, l.valueType, r.valueType }, type::Object,
+                    { op, l, r })));
+                return;
+            }
             put_i32(op, aOperator);
             op.valueType = type::I32;
+            if (l.valueType != type::Object)
+                coerce(l, type::Object);
+            if (r.valueType != type::Object)
+                coerce(r, type::Object);
             value(py_owned(py_runtime_call(aInplace ? "python::inplace" : "python::binary", { type::I32, type::Object, type::Object }, type::Object,
-                { op, py_object(*lhs), py_object(rhs) })));
+                { op, l, r })));
         };
         auto const object_compare = [&](std::int32_t aOperator)
         {
             fragment op;
+            auto l = materialize(*lhs);
+            auto r = materialize(rhs);
+            // (a variable that is a str as text (not an object, e.g. one bound to a literal) compared for equality with an object: as text
+            // (python::compare_text: no str is made for it each time))
+            auto const text = [](fragment const& aValue)
+            {
+                auto const& code = aValue.fragmentCode.as_std_vector();
+                if (aValue.valueType != type::String || !aValue.fragmentRelocations.empty() || code.size() < 2u || code.size() > 6u || 
+                    code[0] != static_cast<std::uint8_t>(opcode::LocalGet))
+                    return false;
+                std::size_t i = 1u;
+                while (i < code.size() && (code[i] & 0x80u) != 0u)
+                    ++i;
+                return i + 1u == code.size();
+            };
+            if ((aOperator == PyEqual || aOperator == PyNotEqual) && ((text(l) && r.valueType == type::Object) || (text(r) && l.valueType == type::Object)))
+            {
+                bool const left = text(l);
+                put_i32(op, aOperator | (left ? 0x100 : 0));
+                op.valueType = type::I32;
+                auto& object = left ? r : l;
+                auto& string = left ? l : r;
+                auto result = py_owned(py_runtime_call("python::compare_text", { type::I32, type::Object, type::String }, type::Object, { op, object, string }));
+                py_function().pyComparisons[result.fragmentCode.as_std_vector()] = { op, object, string };
+                value(result);
+                return;
+            }
             put_i32(op, aOperator);
             op.valueType = type::I32;
-            auto l = py_object(*lhs);
-            auto r = py_object(rhs);
+            // (an int and an object: python::compare_io and python::compare_oi (as binary_io's))
+            if ((l.valueType == type::Integer && r.valueType == type::Object) || (l.valueType == type::Object && r.valueType == type::Integer))
+            {
+                auto result = py_owned(py_runtime_call(l.valueType == type::Integer ? "python::compare_io" : "python::compare_oi", { type::I32, l.valueType, r.valueType }, 
+                    type::Object, { op, l, r }));
+                py_function().pyComparisons[result.fragmentCode.as_std_vector()] = { op, l, r };
+                value(result);
+                return;
+            }
+            if (l.valueType != type::Object)
+                coerce(l, type::Object);
+            if (r.valueType != type::Object)
+                coerce(r, type::Object);
             auto result = py_owned(py_runtime_call("python::compare", { type::I32, type::Object, type::Object }, type::Object, { op, l, r }));
             // (its truth, if that is all that is used of it: see py_coerce)
             py_function().pyComparisons[result.fragmentCode.as_std_vector()] = { op, l, r };
@@ -5576,6 +5669,96 @@ namespace neos::compilers::python
             dummy.valueType = type::Boolean;
             push_operand(operand_type{ dummy });
         }
+        else if (auto const stopsAt = targets.size() == 1u && targets[0].kind == py_target::kind_t::Name && !targets[0].starred ?
+            int_loop_name(targets[0].name, 'i', false) : std::nullopt)
+        {
+            // an int loop (statements.cpp's int loops: "for _iN_x in s:"): its variable is an int (type::Integer) that is each item of a list 
+            // or tuple (none if s is not one) while they are small ints; where it stops (its _kN_): -1 if it ends (all of them are, or a 
+            // break), else the position of the item that is not (or 0 if s is not a list or tuple): the loop that resumes it starts there
+            ensure_function();
+            auto const holder = temporary(type::Object);
+            py_function().objectVariables.push_back(holder);
+            auto const position = temporary(type::I64);
+            auto const item = temporary(type::I64);
+            auto const source = temporary(type::I32);
+            auto const stop = [&](fragment& aCode, std::optional<std::uint32_t> aAt, std::int64_t aValue)
+            {
+                fragment value;
+                if (aAt)
+                {
+                    put_local(value, opcode::LocalGet, *aAt);
+                    put_i64(value, 1);
+                    put(value, opcode::I64Shl);
+                }
+                else
+                    put_i64(value, aValue * 2);
+                value.valueType = type::Integer;
+                py_bind_name(*stopsAt, operand_type{ value }, aCode);
+            };
+            auto prelude = make_fragment(fragment_kind::Statement, type::Void, aSource);
+            append(prelude, py_object(iterable));
+            put_local(prelude, opcode::LocalSet, source);
+            put_i64(prelude, 0);
+            put_local(prelude, opcode::LocalSet, position);
+            put_i32(prelude, 0);
+            put_local(prelude, opcode::LocalSet, holder);
+            append(prelude, py_runtime_call("python::sequence_length", { type::Object }, type::I64, { local_value(source, type::Object) }));
+            put_i64(prelude, 0);
+            put(prelude, opcode::I64GeS);
+            put_block(prelude, opcode::If, {});
+            put_local(prelude, opcode::LocalGet, source);
+            emit_call_to(prelude, runtime_function("neos::object_retain", { type::Object }, type::Void));
+            put_local(prelude, opcode::LocalGet, source);
+            put_local(prelude, opcode::LocalSet, holder);
+            stop(prelude, {}, -1);
+            put(prelude, opcode::Else);
+            stop(prelude, {}, 0);
+            put(prelude, opcode::End);
+            append(prelude, py_flush());
+            push_operand(operand_type{ prelude });
+            // (the item: a small int (shifted, as type::Integer's), or 1 (none: the end) or 3 (not a small int: it stops there))
+            auto condition = make_fragment(fragment_kind::Value, type::Boolean, neolib::string_view{});
+            put_local(condition, opcode::LocalGet, holder);
+            put_block(condition, opcode::If, type::Boolean);
+            append(condition, py_runtime_call("python::sequence_int", { type::Object, type::I64 }, type::I64, 
+                { local_value(holder, type::Object), local_value(position, type::I64) }));
+            put_local(condition, opcode::LocalTee, item);
+            put_i64(condition, 1);
+            put(condition, opcode::I64And);
+            put(condition, opcode::I64Eqz);
+            put_block(condition, opcode::If, type::Boolean);
+            {
+                auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+                py_bind(targets[0], operand_type{ local_value(item, type::Integer) }, assignment);
+                append(condition, assignment);
+                put_local(condition, opcode::LocalGet, position);
+                put_i64(condition, 1);
+                put(condition, opcode::I64Add);
+                put_local(condition, opcode::LocalSet, position);
+                put_i32(condition, 1);
+            }
+            put(condition, opcode::Else);
+            put_local(condition, opcode::LocalGet, item);
+            put_i64(condition, 3);
+            put(condition, opcode::I64Eq);
+            put_block(condition, opcode::If, {});
+            stop(condition, position, 0);
+            put(condition, opcode::End);
+            put_i32(condition, 0);
+            put(condition, opcode::End);
+            put(condition, opcode::Else);
+            put_i32(condition, 0);
+            put(condition, opcode::End);
+            append(condition, py_flush());
+            condition.valueType = type::Boolean;
+            push_operand(operand_type{ condition });
+            // (the list or tuple is released when the loop ends)
+            epilogue = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+            put_local(*epilogue, opcode::LocalGet, holder);
+            emit_call_to(*epilogue, runtime_function("neos::object_release", { type::Object }, type::Void));
+            put_i32(*epilogue, 0);
+            put_local(*epilogue, opcode::LocalSet, holder);
+        }
         else
         {
             ensure_function();
@@ -5588,10 +5771,55 @@ namespace neos::compilers::python
             std::uint32_t counter = 0u;
             std::uint32_t start = 0u;
             std::uint32_t step = 0u;
-            // it = iter(iterable) (a range: its length (else -1), start and step)
+            // it = iter(iterable) (a range: its length (else -1), start and step; a list or tuple: indexed (holder: a reference to it, 
+            // while the loop runs), not iterated)
             auto const iterator = temporary(type::Object);
             py_function().objectVariables.push_back(iterator);
+            auto const holder = temporary(type::Object);
+            py_function().objectVariables.push_back(holder);
+            auto const position = temporary(type::I64);
             auto prelude = make_fragment(fragment_kind::Statement, type::Void, aSource);
+            // (the loop that resumes an int loop ("for x in _sN_:": see above): it starts where that stopped (none if it ended))
+            std::optional<std::string> resumes;
+            if (auto const in = text.find(" in "); in != std::string_view::npos)
+                if (auto const colon = text.find(':', in); colon != std::string_view::npos)
+                    resumes = int_loop_name(trimmed(text.substr(in + 4u, colon - in - 4u)), 's', true);
+            auto const iterate = [&](fragment& aCode, std::uint32_t aSource)
+            {
+                put_i64(aCode, 0);
+                put_local(aCode, opcode::LocalSet, position);
+                append(aCode, py_runtime_call("python::sequence_length", { type::Object }, type::I64, { local_value(aSource, type::Object) }));
+                put_i64(aCode, 0);
+                put(aCode, opcode::I64GeS);
+                put_block(aCode, opcode::If, {});
+                put_local(aCode, opcode::LocalGet, aSource);
+                emit_call_to(aCode, runtime_function("neos::object_retain", { type::Object }, type::Void));
+                put_local(aCode, opcode::LocalGet, aSource);
+                put_local(aCode, opcode::LocalSet, holder);
+                put_i32(aCode, 0);
+                put_local(aCode, opcode::LocalSet, iterator);
+                if (resumes)
+                {
+                    auto& stopped = py_variable(*resumes, type::Integer);
+                    fragment at;
+                    put_local(at, is_global(stopped) ? opcode::GlobalGet : opcode::LocalGet, stopped.index());
+                    at.valueType = stopped.type();
+                    append(aCode, materialize(operand_type{ at }, type::I64));
+                    put_local(aCode, opcode::LocalTee, position);
+                    put_i64(aCode, 0);
+                    put(aCode, opcode::I64LtS);
+                    put_block(aCode, opcode::If, {});
+                    put_i64(aCode, std::numeric_limits<std::int64_t>::max());
+                    put_local(aCode, opcode::LocalSet, position);
+                    put(aCode, opcode::End);
+                }
+                put(aCode, opcode::Else);
+                append(aCode, py_runtime_call("python::iter", { type::Object }, type::Object, { local_value(aSource, type::Object) }));
+                put_local(aCode, opcode::LocalSet, iterator);
+                put_i32(aCode, 0);
+                put_local(aCode, opcode::LocalSet, holder);
+                put(aCode, opcode::End);
+            };
             if (speculative)
             {
                 length = temporary(type::I64);
@@ -5604,8 +5832,7 @@ namespace neos::compilers::python
                 put_i64(prelude, 0);
                 put(prelude, opcode::I64LtS);
                 put_block(prelude, opcode::If, {});
-                append(prelude, py_runtime_call("python::iter", { type::Object }, type::Object, { local_value(source, type::Object) }));
-                put_local(prelude, opcode::LocalSet, iterator);
+                iterate(prelude, source);
                 put(prelude, opcode::Else);
                 if (bound)
                 {
@@ -5618,18 +5845,36 @@ namespace neos::compilers::python
                 }
                 put_i64(prelude, 0);
                 put_local(prelude, opcode::LocalSet, counter);
+                put_i32(prelude, 0);
+                put_local(prelude, opcode::LocalSet, holder);
                 put(prelude, opcode::End);
             }
             else
             {
-                append(prelude, py_runtime_call("python::iter", { type::Object }, type::Object, { py_object(iterable) }));
-                put_local(prelude, opcode::LocalSet, iterator);
+                auto const source = temporary(type::I32);
+                append(prelude, py_object(iterable));
+                put_local(prelude, opcode::LocalSet, source);
+                iterate(prelude, source);
             }
             append(prelude, py_flush());
             push_operand(operand_type{ prelude });
             // (item = next(it)) != NULL (and the targets are assigned)
             auto condition = make_fragment(fragment_kind::Value, type::Boolean, neolib::string_view{});
-            auto const item = py_owned(py_runtime_call("python::next", { type::Object }, type::Object, { local_value(iterator, type::Object) }));
+            // (a list's or tuple's item at the position (then the next), else the iterator's next item)
+            fragment next;
+            put_local(next, opcode::LocalGet, holder);
+            put_block(next, opcode::If, type::Object);
+            append(next, py_runtime_call("python::sequence_item", { type::Object, type::I64 }, type::Object, { local_value(holder, type::Object), local_value(position, type::I64) }));
+            put_local(next, opcode::LocalGet, position);
+            put_i64(next, 1);
+            put(next, opcode::I64Add);
+            put_local(next, opcode::LocalSet, position);
+            put(next, opcode::Else);
+            append(next, py_runtime_call("python::next", { type::Object }, type::Object, { local_value(iterator, type::Object) }));
+            put(next, opcode::End);
+            next.valueType = type::Object;
+            next.fragmentKind = fragment_kind::Value;
+            auto const item = py_owned(next);
             auto const itemTemporary = py_function().pendingObjects.back();
             auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
             if (single)
@@ -5727,6 +5972,10 @@ namespace neos::compilers::python
             emit_call_to(*epilogue, runtime_function("neos::object_release", { type::Object }, type::Void));
             put_i32(*epilogue, 0);
             put_local(*epilogue, opcode::LocalSet, iterator);
+            put_local(*epilogue, opcode::LocalGet, holder);
+            emit_call_to(*epilogue, runtime_function("neos::object_release", { type::Object }, type::Void));
+            put_i32(*epilogue, 0);
+            put_local(*epilogue, opcode::LocalSet, holder);
         }
         for (auto const& statement : inlineBody)
             push_operand(operand_type{ statement });
@@ -5900,6 +6149,7 @@ namespace neos::compilers::python
                 auto const counter = temporary(type::I64);
                 auto const start = temporary(type::I64);
                 auto const step = temporary(type::I64);
+                auto const holder = temporary(type::I32);
                 auto iterable = clause.value;
                 if (iterable.valueType != type::Object)
                     coerce(iterable, type::Object);
@@ -5910,8 +6160,27 @@ namespace neos::compilers::python
                 put_i64(code, 0);
                 put(code, opcode::I64LtS);
                 put_block(code, opcode::If, {});
-                append(code, py_runtime_call("python::iter", { type::Object }, type::Object, { local_value(source, type::Object) }));
-                put_local(code, opcode::LocalSet, iterator);
+                {
+                    // (not a range: a list or tuple is indexed (holder: a reference to it, while the loop runs); else its iterator's)
+                    put_i64(code, 0);
+                    put_local(code, opcode::LocalSet, counter);
+                    append(code, py_runtime_call("python::sequence_length", { type::Object }, type::I64, { local_value(source, type::Object) }));
+                    put_i64(code, 0);
+                    put(code, opcode::I64GeS);
+                    put_block(code, opcode::If, {});
+                    put_local(code, opcode::LocalGet, source);
+                    emit_call_to(code, runtime_function("neos::object_retain", { type::Object }, type::Void));
+                    put_local(code, opcode::LocalGet, source);
+                    put_local(code, opcode::LocalSet, holder);
+                    put_i32(code, 0);
+                    put_local(code, opcode::LocalSet, iterator);
+                    put(code, opcode::Else);
+                    append(code, py_runtime_call("python::iter", { type::Object }, type::Object, { local_value(source, type::Object) }));
+                    put_local(code, opcode::LocalSet, iterator);
+                    put_i32(code, 0);
+                    put_local(code, opcode::LocalSet, holder);
+                    put(code, opcode::End);
+                }
                 put(code, opcode::Else);
                 if (bound)
                 {
@@ -5924,6 +6193,8 @@ namespace neos::compilers::python
                 put_local(code, opcode::LocalSet, counter);
                 put_i32(code, 0);
                 put_local(code, opcode::LocalSet, iterator);
+                put_i32(code, 0);
+                put_local(code, opcode::LocalSet, holder);
                 put(code, opcode::End);
                 put_block(code, opcode::Block, {});
                 put_block(code, opcode::Loop, {});
@@ -5934,12 +6205,26 @@ namespace neos::compilers::python
                 put(code, opcode::I64LtS);
                 put_block(code, opcode::If, {});
                 {
-                    // (not a range: the iterator's next item)
+                    // (not a range: the list's or tuple's item, else the iterator's next item)
+                    put_local(code, opcode::LocalGet, holder);
+                    put_block(code, opcode::If, {});
+                    append(code, py_runtime_call("python::sequence_item", { type::Object, type::I64 }, type::Object, 
+                        { local_value(holder, type::Object), local_value(counter, type::I64) }));
+                    put_local(code, opcode::LocalTee, item);
+                    put(code, opcode::I32Eqz);
+                    put(code, opcode::BrIf);
+                    put_u32(code.fragmentCode.as_std_vector(), 3u);
+                    put_local(code, opcode::LocalGet, counter);
+                    put_i64(code, 1);
+                    put(code, opcode::I64Add);
+                    put_local(code, opcode::LocalSet, counter);
+                    put(code, opcode::Else);
                     append(code, py_runtime_call("python::next", { type::Object }, type::Object, { local_value(iterator, type::Object) }));
                     put_local(code, opcode::LocalTee, item);
                     put(code, opcode::I32Eqz);
                     put(code, opcode::BrIf);
-                    put_u32(code.fragmentCode.as_std_vector(), 2u);
+                    put_u32(code.fragmentCode.as_std_vector(), 3u);
+                    put(code, opcode::End);
                     auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
                     py_bind(clause.targets[0], operand_type{ local_value(item, type::Object) }, assignment);
                     append(code, assignment);
@@ -5992,6 +6277,8 @@ namespace neos::compilers::python
                 put(code, opcode::End);
                 put(code, opcode::End);
                 put_local(code, opcode::LocalGet, iterator);
+                emit_call_to(code, release);
+                put_local(code, opcode::LocalGet, holder);
                 emit_call_to(code, release);
                 return code;
             }
@@ -7196,6 +7483,12 @@ namespace neos::compilers::python
                 for (auto const& target : state().pyTargets)
                     if (target.position >= text.data() && target.position < text.data() + text.size())
                         targets.push_back(target);
+                // (an int loop's variable (see py_for_in): an int)
+                if (targets.size() == 1u && targets[0].kind == fragment_state::py_target::kind_t::Name && int_loop_name(targets[0].name, 'i', false))
+                {
+                    py_variable(targets[0].name, type::Integer);
+                    break;
+                }
                 py_declare_targets(targets);
             }
             break;

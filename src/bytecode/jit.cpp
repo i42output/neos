@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <neos/bytecode/vm/jit.hpp>
+#include <neos/bytecode/bytecode.hpp>
 #define NEOS_RUNTIME_PLUGIN_HOST
 #include <neos/runtime/plugin.h>
 
@@ -452,6 +453,7 @@ namespace neos
                         void lea(int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x8D }, true, aDst, aBase, aDisp); }
                         void movsxd(int aDst, int aSrc) { op_rr({ 0x63 }, true, aDst, aSrc); }
                         void movzx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xB6 }, false, aDst, aSrc, -1, true); }
+                        void movzx8_load(int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x0F, 0xB6 }, false, aDst, aBase, aDisp); }
                         void movsx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xBE }, false, aDst, aSrc, -1, true); }
                         void movsx16(int aDst, int aSrc) { op_rr({ 0x0F, 0xBF }, false, aDst, aSrc); }
                         // arithmetic (aOp: add 0, or 1, and 4, sub 5, xor 6, cmp 7)
@@ -909,6 +911,9 @@ namespace neos
                                 case NEOS_RT_OBJECT:
                                     v = static_cast<value>(reinterpret_cast<std::uintptr_t>(host.objectPointer(host.host, static_cast<std::uint32_t>(v))));
                                     break;
+                                case NEOS_RT_STRING:
+                                    v = static_cast<value>(reinterpret_cast<std::uintptr_t>(host.stringPointer(host.host, static_cast<std::uint32_t>(v))));
+                                    break;
                                 case NEOS_RT_INTEGER:
                                     // (an object: its handle (shifted) becomes its address, with the low bit set)
                                     if ((v & 1u) != 0u)
@@ -945,6 +950,9 @@ namespace neos
                                 break;
                             case NEOS_RT_OBJECT:
                                 v = static_cast<value>(host.objectHandle(host.host, reinterpret_cast<void*>(static_cast<std::uintptr_t>(v))));
+                                break;
+                            case NEOS_RT_STRING:
+                                v = static_cast<value>(host.stringAddress(host.host, reinterpret_cast<char const*>(static_cast<std::uintptr_t>(v))));
                                 break;
                             case NEOS_RT_INTEGER:
                                 // (an object: a handle for the new reference (shifted), with the low bit set)
@@ -984,13 +992,21 @@ namespace neos
                         });
                     }
 
-                    // (the object of a slot that generated code freed (in aBuffer[0]): its reference released)
-                    std::uint32_t object_freed(context* aContext, std::uint32_t, value* aBuffer, char const*) noexcept
+                    // (a string argument (aValue: its address) that generated code did not find in memory: the host's (which traps))
+                    std::uint32_t host_string_argument(context* aContext, std::uint32_t, value* aValue, char const*) noexcept
                     {
-                        return guarded(aContext, [&](module_description const&)
+                        return guarded(aContext, [&](module_description const& aModule)
                         {
-                            auto* const object = reinterpret_cast<neos_rt_object*>(static_cast<std::uintptr_t>(aBuffer[0]));
-                            object->type->release(object);
+                            *aValue = static_cast<value>(reinterpret_cast<std::uintptr_t>(aModule.host.stringPointer(aModule.host.host, static_cast<std::uint32_t>(*aValue))));
+                        });
+                    }
+
+                    // (a string result (in aBuffer[0]): copied into memory (its address))
+                    std::uint32_t host_string_result(context* aContext, std::uint32_t, value* aBuffer, char const*) noexcept
+                    {
+                        return guarded(aContext, [&](module_description const& aModule)
+                        {
+                            aBuffer[0] = static_cast<value>(aModule.host.stringAddress(aModule.host.host, reinterpret_cast<char const*>(static_cast<std::uintptr_t>(aBuffer[0]))));
                         });
                     }
 
@@ -3044,16 +3060,10 @@ namespace neos
                             if (aCallee.call != import_call::Plugin || !aCallee.plugin || aCallee.plugin->function == nullptr)
                                 return false;
                             auto const& f = *aCallee.plugin;
-                            if (f.result == NEOS_RT_STRING)
-                                return false;
                             std::size_t integers = 0u;
                             std::size_t floats = 0u;
                             for (auto const p : f.parameters)
-                            {
-                                if (p == NEOS_RT_STRING)
-                                    return false;
                                 ++(p == NEOS_RT_F32 || p == NEOS_RT_F64 ? floats : integers);
-                            }
                             return Windows ? integers + floats <= 4u : integers <= std::size(NativeIntegerArguments) && floats <= 8u;
                         }
                         // the call of an import called directly: its arguments are in the outgoing area (its first result is put 
@@ -3072,7 +3082,7 @@ namespace neos
                             auto const& f = *aCallee.plugin;
                             auto const converted = [](std::uint8_t aType)
                             {
-                                return aType == NEOS_RT_BOOL || aType == NEOS_RT_CHAR || aType == NEOS_RT_OBJECT || aType == NEOS_RT_INTEGER;
+                                return aType == NEOS_RT_BOOL || aType == NEOS_RT_CHAR || aType == NEOS_RT_OBJECT || aType == NEOS_RT_INTEGER || aType == NEOS_RT_STRING;
                             };
                             auto const handle = [](std::uint8_t aType) { return aType == NEOS_RT_OBJECT || aType == NEOS_RT_INTEGER; };
                             // (the arguments are converted here if the table is available (objects' handles become their addresses))
@@ -3083,6 +3093,8 @@ namespace neos
                                     auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(i);
                                     if (handle(f.parameters[i]))
                                         object_argument(aFunction, disp, f.parameters[i] == NEOS_RT_INTEGER);
+                                    else if (f.parameters[i] == NEOS_RT_STRING)
+                                        string_argument(aFunction, disp);
                                     else if (converted(f.parameters[i]))
                                         byte_value(disp, f.parameters[i] == NEOS_RT_BOOL, true);
                                 }
@@ -3097,7 +3109,9 @@ namespace neos
                                 a.movf_store(f.result == NEOS_RT_F64, RSP, ShadowSpace, 0);
                             else if (f.result != NEOS_RT_VOID)
                                 a.store(true, RSP, ShadowSpace, RAX);
-                            if (f.error != nullptr)
+                            // (its plugin's error function: called if its error pending flag (if it has one) is set)
+                            bool const pending = table && f.error != nullptr && f.errorPending != nullptr;
+                            if (f.error != nullptr && !pending)
                                 native_call(reinterpret_cast<void const*>(f.error), {}, false); // (rax: its error)
                             if (table && (f.error != nullptr || converted(f.result)))
                             {
@@ -3108,15 +3122,36 @@ namespace neos
                                 {
                                     if (handle(f.result))
                                         object_result(aFunction, f.result == NEOS_RT_INTEGER, resume);
+                                    else if (f.result == NEOS_RT_STRING)
+                                        direct_helper(&host_string_result, aFunction, false);
                                     else if (converted(f.result))
                                         byte_value(ShadowSpace, f.result == NEOS_RT_BOOL, false);
                                 };
                                 if (f.error != nullptr)
                                 {
                                     auto const error = a.new_label();
-                                    a.test_rr(true, RAX, RAX);
-                                    a.jcc(NE, error);
-                                    result();
+                                    if (pending)
+                                    {
+                                        auto const check = a.new_label();
+                                        auto const none = a.new_label();
+                                        a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(f.errorPending), true);
+                                        a.alu_mi(7, sizeof(long) == 8u, RAX, 0, 0);
+                                        a.jcc(NE, check);
+                                        a.bind(none);
+                                        result();
+                                        slow_path(check, none, [&]()
+                                        {
+                                            native_call(reinterpret_cast<void const*>(f.error), {}, false);
+                                            a.test_rr(true, RAX, RAX);
+                                            a.jcc(NE, error);
+                                        });
+                                    }
+                                    else
+                                    {
+                                        a.test_rr(true, RAX, RAX);
+                                        a.jcc(NE, error);
+                                        result();
+                                    }
                                     slow_path(error, resume, [&]() { direct_helper(&plugin_result, aFunction, true); });
                                 }
                                 else
@@ -3210,6 +3245,34 @@ namespace neos
                             slow_path(slow, resume, [&]() { direct_helper(&host_object_argument, aFunction, false, aDisp, aInteger ? 1u : 0u); });
                             a.bind(resume);
                         }
+                        // (a string argument at aDisp (its address): the address of its text, in place (it is NUL terminated: see the 
+                        // VM's string_pointer); else the host's (which traps))
+                        void string_argument(std::uint32_t aFunction, std::int32_t aDisp)
+                        {
+                            auto const resume = a.new_label();
+                            auto const slow = a.new_label();
+                            a.load(false, RAX, RSP, aDisp);                 // (its address)
+                            a.load(true, RCX, R15, ContextMemory);
+                            a.load(true, R8, RCX, MemorySize);
+                            a.load(true, RCX, RCX, MemoryBase);
+                            a.mov_rr(true, RDX, RAX);
+                            a.alu_ri(0, true, RDX, static_cast<std::int32_t>(bytecode::StringHeaderSize));
+                            a.alu_rr(7, true, RDX, R8);
+                            a.jcc(A, slow);                                 // (its header is not in memory)
+                            a.alu_rr(0, true, RAX, RCX);                    // (its header)
+                            a.load(false, R9, RAX, static_cast<std::int32_t>(offsetof(bytecode::string_header, bytes)));
+                            a.alu_rr(0, true, RDX, R9);                     // (the offset of its end)
+                            a.alu_rr(7, true, RDX, R8);
+                            a.jcc(AE, slow);
+                            a.alu_rr(0, true, RDX, RCX);
+                            a.movzx8_load(R9, RDX, 0);
+                            a.test_rr(false, R9, R9);
+                            a.jcc(NE, slow);                                // (not NUL terminated)
+                            a.alu_ri(0, true, RAX, static_cast<std::int32_t>(bytecode::StringHeaderSize));
+                            a.store(true, RSP, aDisp, RAX);
+                            slow_path(slow, resume, [&]() { direct_helper(&host_string_argument, aFunction, false, aDisp); });
+                            a.bind(resume);
+                        }
                         // (a bool (aBool) or char at aDisp, as a C function takes it (aArgument) or as a value (see plugin_arguments
                         // and plugin_result))
                         void byte_value(std::int32_t aDisp, bool aBool, bool aArgument)
@@ -3295,8 +3358,15 @@ namespace neos
                                     a.store_imm(false, RDX, SlotCount, 0);
                                     a.store(false, RDX, SlotNext, R9);
                                     a.store(false, RCX, TableFree, RAX);
-                                    a.store(true, RSP, ShadowSpace, R8);
-                                    direct_helper(&object_freed, aFunction, false);
+                                    // (its object's type's release, called directly (as a runtime plugin's function is))
+                                    save_pinned_xmms();
+                                    save_pinned_gprs();
+                                    a.mov_rr(true, NativeIntegerArguments[0], R8);
+                                    a.load(true, RAX, R8, 0);
+                                    a.load(true, RAX, RAX, static_cast<std::int32_t>(offsetof(neos_rt_object_type, release)));
+                                    a.call_r(RAX);
+                                    restore_pinned_xmms();
+                                    restore_pinned_gprs();
                                 });
                             }
                             slow_path(slow, resume, [&]() { direct_helper(aRetain ? &object_retain : &object_release, aFunction, false); });

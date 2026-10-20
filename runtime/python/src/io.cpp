@@ -148,10 +148,13 @@ namespace neos::python_runtime
                 int regular = -1;               ///< (a regular file (1), or not (0); -1: not known)
                 object* newline = nullptr;      ///< (None: universal newlines; '' or a line ending)
                 bool translated = true;         ///< (writes translate "\n" to the platform's line ending (Windows: "\r\n"))
+                char* lines = nullptr;          ///< (the buffer that getdelim reads lines into (see read_line_delimited))
+                std::size_t linesCapacity = 0u;
                 ~file_object()
                 {
                     if (!closed && !standard && file != nullptr)
                         std::fclose(file);
+                    std::free(lines);
                     release(name);
                     release(newline);
                 }
@@ -165,7 +168,20 @@ namespace neos::python_runtime
 
             file_object& as_file(object* aObject) { return *reinterpret_cast<file_object*>(aObject); }
 
-            std::string newline_value(file_object const& f)
+            // (the thread's buffer for reading lines a character at a time: found by a call (a plugin's thread-locals are dynamic: the 
+            // compiler finds one again each time it needs its address, unless it is a function's result))
+#if defined(_MSC_VER)
+            __declspec(noinline)
+#else
+            __attribute__((noinline))
+#endif
+            std::string& line_buffer()
+            {
+                thread_local std::string tLine;
+                return tLine;
+            }
+
+            std::string_view newline_value(file_object const& f)
             {
                 if (f.newline == nullptr || kind_of(f.newline) != NEOS_PY_STR)
                     return {};
@@ -214,7 +230,7 @@ namespace neos::python_runtime
 #if !defined(_WIN32)
             // (a line read from the file's buffer by getdelim (memchr) (false: it cannot be (a limit; a \r that may end a line of a file that is
             // not a regular file (it would be read past)))
-            bool read_line_delimited(file_object& f, std::string const& aEnding, std::string& aLine)
+            bool read_line_delimited(file_object& f, std::string_view aEnding, std::string& aLine)
             {
                 bool const universalText = f.text && universal(f);
                 bool const untranslated = f.text && !universal(f) && aEnding.empty();
@@ -231,19 +247,12 @@ namespace neos::python_runtime
                     if (f.regular == 0)
                         return false;
                 }
-                struct delimited_buffer
-                {
-                    char* data = nullptr;
-                    std::size_t capacity = 0u;
-                    ~delimited_buffer() { std::free(data); }
-                };
-                thread_local delimited_buffer tBuffer;
                 for (;;)
                 {
-                    auto const n = ::getdelim(&tBuffer.data, &tBuffer.capacity, crEnds ? '\r' : '\n', f.file);
+                    auto const n = ::getdelim(&f.lines, &f.linesCapacity, crEnds ? '\r' : '\n', f.file);
                     if (n <= 0)
                         break;
-                    std::string_view part{ tBuffer.data, static_cast<std::size_t>(n) };
+                    std::string_view part{ f.lines, static_cast<std::size_t>(n) };
                     if (loneCrEnds)
                     {
                         // (a \r that is not followed by \n ends the line: what was read after it is unread)
@@ -277,14 +286,18 @@ namespace neos::python_runtime
             // bytes (-1: none))
             std::string read_line_bytes(file_object& f, long long aLimit)
             {
-                // (the line is built in the thread's string (cleared: its capacity is kept, so appending to it does not reallocate it), then copied)
-                thread_local std::string tLine;
-                auto& line = tLine;
-                line.clear();
                 auto const ending = newline_value(f);
 #if !defined(_WIN32)
-                if (aLimit < 0 && read_line_delimited(f, ending, line))
-                    return line;
+                std::string delimited;
+                if (aLimit < 0 && read_line_delimited(f, ending, delimited))
+                    return delimited;
+#endif
+                // (else the line is built in the thread's string (cleared: its capacity is kept, so appending to it does not reallocate it), 
+                // then copied)
+                auto& line = line_buffer();
+                line.clear();
+#if !defined(_WIN32)
+                line = delimited;
 #endif
                 // (the line endings: the file's (as of this line))
                 bool const universalText = f.text && universal(f);
@@ -378,7 +391,7 @@ namespace neos::python_runtime
                 if (!f.text)
                     return make_bytes(std::move(aData));
                 // (ASCII is its UTF-8)
-                if (f.encoding == "utf-8" && std::all_of(aData.begin(), aData.end(), [](char c) { return (static_cast<unsigned char>(c) & 0x80u) == 0u; }))
+                if (std::string_view{ f.encoding } == "utf-8" && neos::runtime::string_detail::is_ascii(aData))
                 {
                     auto const n = aData.size();
                     return make_str(std::move(aData), n);   // (known: ASCII)
@@ -483,7 +496,7 @@ namespace neos::python_runtime
 #else
                     std::string const platform = "\n";
 #endif
-                    std::string const lineEnding = universal(f) ? platform : ending.empty() ? std::string{ "\n" } : ending;
+                    std::string const lineEnding = universal(f) ? platform : ending.empty() ? std::string{ "\n" } : std::string{ ending };
                     if (lineEnding != "\n" && !f.standard)
                     {
                         for (auto c : text)

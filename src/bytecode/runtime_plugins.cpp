@@ -88,6 +88,7 @@ namespace neos
                     std::string name;
                     neos_rt_function const* description = nullptr;
                     neos_rt_plugin_error error = nullptr;   ///< (the plugin's, if it can raise errors)
+                    long const* errorPending = nullptr;     ///< (the plugin's, if it says when error can return one)
 #if defined(NEOS_HAVE_LIBFFI)
                     std::vector<ffi_type*> parameterTypes;
                     ffi_cif cif = {};
@@ -389,6 +390,8 @@ namespace neos
                                 if (auto const setHost = reinterpret_cast<neos_rt_plugin_set_host>(lib->symbol(NEOS_RUNTIME_PLUGIN_SET_HOST_NAME)))
                                     setHost(static_cast<neos_rt_host const*>(host()));
                                 auto const error = reinterpret_cast<neos_rt_plugin_error>(lib->symbol(NEOS_RUNTIME_PLUGIN_ERROR_NAME));
+                                auto const errorPending = reinterpret_cast<neos_rt_plugin_error_pending>(lib->symbol(NEOS_RUNTIME_PLUGIN_ERROR_PENDING_NAME));
+                                long const* const pending = error != nullptr && errorPending != nullptr ? errorPending() : nullptr;
                                 p.end = reinterpret_cast<neos_rt_plugin_end>(lib->symbol(NEOS_RUNTIME_PLUGIN_END_NAME));
                                 for (unsigned i = 0u; i < description->functionCount; ++i)
                                 {
@@ -399,6 +402,7 @@ namespace neos
                                     f.name = aNamespace + "::" + d.name;
                                     f.description = &d;
                                     f.error = error;
+                                    f.errorPending = pending;
                                     for (unsigned a = 0u; a < d.parameterCount; ++a)
                                     {
                                         if (d.parameters[a] == NEOS_RT_VOID)
@@ -479,6 +483,11 @@ namespace neos
                     aResult = static_cast<std::uint8_t>(d.result);
                     aError = aFunction.error;
                     return reinterpret_cast<void const*>(d.function);
+                }
+
+                long const* error_pending(function const& aFunction)
+                {
+                    return aFunction.errorPending;
                 }
 
                 void call(function const& aFunction, value* aBuffer, marshaller const& aMarshaller)
