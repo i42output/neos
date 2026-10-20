@@ -165,7 +165,7 @@ namespace neos::compilers::python
                 "fnmatch", "atexit", "gc", "weakref", "traceback", "inspect", "pprint", "reprlib", "array", "calendar", "zlib", "secrets", 
                 "uuid", "locale", "codecs", "unicodedata", "signal", "argparse", "csv", "logging", "timeit", "_collections_abc", "posixpath", 
                 "ntpath", "genericpath", "stat", "__future__", "builtins", "posix", "nt", "copyreg", "_string", "copy", "_codecs", "encodings", "_csv", 
-                "linecache", "_colorize", "_suggestions", "select", "selectors" };
+                "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket" };
             return sStandard;
         }
 

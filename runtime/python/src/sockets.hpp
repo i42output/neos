@@ -84,7 +84,7 @@ namespace neos::python_runtime
             // (a Windows error code as an errno value (PC/errmap.h's winerror_to_errno: Winsock's codes are errno values))
             inline int winerror_to_errno(int aWinError)
             {
-                if ((aWinError & 0xFFFF0000) == static_cast<int>(0x80070000))
+                if ((static_cast<unsigned int>(aWinError) & 0xFFFF0000u) == 0x80070000u)
                     aWinError &= 0x0000FFFF;
                 if (aWinError >= 10000 && aWinError < 12000)
                 {

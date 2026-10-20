@@ -69,6 +69,14 @@ names the CPython sources it is derived from.
   services.cpp         Lib/platform.py, Lib/keyword.py, Lib/copyreg.py,
                        Lib/secrets.py and Lib/timeit.py
   set.cpp              Objects/setobject.c
+  socket.cpp           Modules/socketmodule.c, Python/fileutils.c
+                       (set_inheritable) and Lib/encodings/idna.py (its
+                       ASCII path)
+  socket_constants.hpp Modules/socketmodule.c (the module's constants,
+                       generated)
+  socket_docs.hpp      Modules/socketmodule.c and Lib/socket.py (their
+                       docstrings, generated)
+  socketpy.cpp         Lib/socket.py
   sockets.hpp          Python/errors.c, PC/errmap.h and Objects/exceptions.c
                        (Windows errors)
   statistics.cpp       Lib/statistics.py and Modules/_statisticsmodule.c
