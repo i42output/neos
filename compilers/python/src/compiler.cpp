@@ -1870,7 +1870,7 @@ namespace neos::compilers::python
         // comprehensions' variables (see statements.cpp)
         {
             bool comprehensionsChanged = false;
-            text = rewrite_comprehensions(text, comprehensionsChanged);
+            text = rewrite_comprehensions(text, comprehensionsChanged, !py_exec_mode());
             changed = changed || comprehensionsChanged;
         }
         // nested functions (closures) and decorated functions (see closures.cpp)
@@ -5830,6 +5830,110 @@ namespace neos::compilers::python
             }
             auto const iterator = temporary(type::I32);
             auto const item = temporary(type::I32);
+            if (clause.targets.size() == 1u && clause.targets[0].kind == fragment_state::py_target::kind_t::Name && !clause.targets[0].starred)
+            {
+                // (for target in iterable (as py_for_in's): a range's loop (if it is a range at run time) is a counted loop that 
+                // calls nothing for its items; its target is not bound if nothing else can see it)
+                bool const bound = !in_function() || implicit_entry() || py_observed(clause.targets[0].name);
+                auto const source = temporary(type::I32);
+                auto const length = temporary(type::I64);
+                auto const counter = temporary(type::I64);
+                auto const start = temporary(type::I64);
+                auto const step = temporary(type::I64);
+                auto iterable = clause.value;
+                if (iterable.valueType != type::Object)
+                    coerce(iterable, type::Object);
+                append(code, iterable);
+                put_local(code, opcode::LocalSet, source);
+                append(code, py_runtime_call("python::range_length", { type::Object }, type::I64, { local_value(source, type::Object) }));
+                put_local(code, opcode::LocalTee, length);
+                put_i64(code, 0);
+                put(code, opcode::I64LtS);
+                put_block(code, opcode::If, {});
+                append(code, py_runtime_call("python::iter", { type::Object }, type::Object, { local_value(source, type::Object) }));
+                put_local(code, opcode::LocalSet, iterator);
+                put(code, opcode::Else);
+                if (bound)
+                {
+                    append(code, py_runtime_call("python::range_start", { type::Object }, type::I64, { local_value(source, type::Object) }));
+                    put_local(code, opcode::LocalSet, start);
+                    append(code, py_runtime_call("python::range_step", { type::Object }, type::I64, { local_value(source, type::Object) }));
+                    put_local(code, opcode::LocalSet, step);
+                }
+                put_i64(code, 0);
+                put_local(code, opcode::LocalSet, counter);
+                put_i32(code, 0);
+                put_local(code, opcode::LocalSet, iterator);
+                put(code, opcode::End);
+                put_block(code, opcode::Block, {});
+                put_block(code, opcode::Loop, {});
+                append(code, flush);
+                put_local(code, opcode::LocalGet, length);
+                put_i64(code, 0);
+                put(code, opcode::I64LtS);
+                put_block(code, opcode::If, {});
+                {
+                    // (not a range: the iterator's next item)
+                    append(code, py_runtime_call("python::next", { type::Object }, type::Object, { local_value(iterator, type::Object) }));
+                    put_local(code, opcode::LocalTee, item);
+                    put(code, opcode::I32Eqz);
+                    put(code, opcode::BrIf);
+                    put_u32(code.fragmentCode.as_std_vector(), 2u);
+                    auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+                    py_bind(clause.targets[0], operand_type{ local_value(item, type::Object) }, assignment);
+                    append(code, assignment);
+                    put_local(code, opcode::LocalGet, item);
+                    emit_call_to(code, release);
+                }
+                put(code, opcode::Else);
+                {
+                    // (a range: counter < length (and the target is its value: start + counter * step))
+                    put_local(code, opcode::LocalGet, counter);
+                    put_local(code, opcode::LocalGet, length);
+                    put(code, opcode::I64GeS);
+                    put(code, opcode::BrIf);
+                    put_u32(code.fragmentCode.as_std_vector(), 2u);
+                    if (bound)
+                    {
+                        fragment value;
+                        put_local(value, opcode::LocalGet, start);
+                        put_local(value, opcode::LocalGet, counter);
+                        put_local(value, opcode::LocalGet, step);
+                        put(value, opcode::I64Mul);
+                        put(value, opcode::I64Add);
+                        value.valueType = type::I64;
+                        auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
+                        auto const before = py_function().pendingObjects.size();
+                        py_bind(clause.targets[0], operand_type{ value }, assignment);
+                        // (the objects that it made are released here (and are zero when the statement's temporaries are))
+                        auto const& made = py_function().pendingObjects;
+                        for (auto t = before; t < made.size(); ++t)
+                        {
+                            put_local(assignment, opcode::LocalGet, made[t]);
+                            put_block(assignment, opcode::If, {});
+                            put_local(assignment, opcode::LocalGet, made[t]);
+                            emit_call_to(assignment, release);
+                            put_i32(assignment, 0);
+                            put_local(assignment, opcode::LocalSet, made[t]);
+                            put(assignment, opcode::End);
+                        }
+                        append(code, assignment);
+                    }
+                    put_local(code, opcode::LocalGet, counter);
+                    put_i64(code, 1);
+                    put(code, opcode::I64Add);
+                    put_local(code, opcode::LocalSet, counter);
+                }
+                put(code, opcode::End);
+                append(code, generate(aClause + 1u));
+                put(code, opcode::Br);
+                put_u32(code.fragmentCode.as_std_vector(), 0u);
+                put(code, opcode::End);
+                put(code, opcode::End);
+                put_local(code, opcode::LocalGet, iterator);
+                emit_call_to(code, release);
+                return code;
+            }
             append(code, py_runtime_call("python::iter", { type::Object }, type::Object, { clause.value }));
             put_local(code, opcode::LocalSet, iterator);
             put_block(code, opcode::Block, {});
@@ -7815,6 +7919,7 @@ namespace neos::compilers::python
     {
         // an object that does not change (aMake makes it (a new reference)): made the first time it is used (the global aName 
         // holds it); a borrowed reference
+        ensure_function();
         auto const& name = aName;
         generator().function_global(neolib::string{ name });
         std::uint32_t global;

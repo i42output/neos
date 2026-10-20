@@ -63,6 +63,7 @@
 // private names (__x) are mangled (_C__x).
 
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -1482,7 +1483,8 @@ namespace neos::compilers::python
         class comprehension_rewriter
         {
         public:
-            comprehension_rewriter(std::string const& aText, std::size_t& aNumber) : iText{ aText }, iLines{ tokenize(aText) }, iNumber{ aNumber }
+            comprehension_rewriter(std::string const& aText, std::size_t& aNumber, bool aBuiltins) : 
+                iText{ aText }, iLines{ tokenize(aText) }, iNumber{ aNumber }, iBuiltins{ aBuiltins }
             {
             }
         public:
@@ -1558,6 +1560,51 @@ namespace neos::compilers::python
             static bool opening(std::string_view aOp) { return aOp == "(" || aOp == "[" || aOp == "{"; }
             static bool closing(std::string_view aOp) { return aOp == ")" || aOp == "]" || aOp == "}"; }
             bool is_class_body_header(std::size_t) const { return false; }
+            // (a generator expression (its parenthesis at aOpen) that is the argument of a builtin that collects all its items 
+            // before it uses them (sum(x for x in xs); a str literal's join): the builtin's name; none if it is not one, or the 
+            // module can bind the name (anything but calls of it: e.g. "sum = f", "def f(sum):", "import *"), or builtins are not 
+            // known (exec: its namespaces can bind them))
+            std::optional<std::string_view> consuming_builtin(std::size_t aLine, std::size_t aOpen) const
+            {
+                static std::set<std::string_view> const sConsumers = { "sum", "min", "max", "list", "tuple", "set", "frozenset", "sorted", "dict" };
+                auto const l = aLine;
+                if (!iBuiltins || aOpen == 0u || tok(l, aOpen - 1u).kind != token::Name)
+                    return std::nullopt;
+                auto const name = text(l, aOpen - 1u);
+                if (name == "join")
+                {
+                    if (aOpen >= 3u && is_op(l, aOpen - 2u, ".") && tok(l, aOpen - 3u).kind == token::String && 
+                        (aOpen == 3u || !is_op(l, aOpen - 4u, ".")))
+                    {
+                        // (a str literal (not a bytes literal, nor an f-string): its quote after any prefix of r, u)
+                        auto const literal = text(l, aOpen - 3u);
+                        auto const quote = literal.find_first_of("'\"");
+                        if (quote != std::string_view::npos && literal.substr(0u, quote).find_first_not_of("rRuU") == std::string_view::npos)
+                            return name;
+                    }
+                    return std::nullopt;
+                }
+                if (!sConsumers.contains(name) || (aOpen >= 2u && is_op(l, aOpen - 2u, ".")))
+                    return std::nullopt;
+                if (!iUnbound.contains(std::string{ name }))
+                {
+                    bool unbound = true;
+                    for (std::size_t m = 0u; m < iLines.size() && unbound; ++m)
+                        for (std::size_t t = 0u; t < count(m) && unbound; ++t)
+                        {
+                            if (is_op(m, t, "*") && t > 0u && is_name(m, t - 1u, "import"))
+                                unbound = false;
+                            else if (is_name(m, t, name) && !(t > 0u && is_op(m, t - 1u, ".")) && !is_op(m, t + 1u, "("))
+                                unbound = false;
+                            else if (is_name(m, t, name) && t > 0u && (is_name(m, t - 1u, "def") || is_name(m, t - 1u, "class")))
+                                unbound = false;
+                        }
+                    iUnbound[std::string{ name }] = unbound;
+                }
+                if (!iUnbound.at(std::string{ name }))
+                    return std::nullopt;
+                return name;
+            }
             std::size_t matching(std::size_t aLine, std::size_t aToken) const
             {
                 int depth = 0;
@@ -1673,9 +1720,13 @@ namespace neos::compilers::python
                     if (target.starts_with("_q") && target.size() > 2u && std::isdigit(static_cast<unsigned char>(target[2])))
                         renamed = true;
                 auto const prefix = "_q" + std::to_string(++iNumber) + "_";
-                bool const generator = is_op(l, aOpen, "(");
+                // (a generator expression whose items a builtin collects first anyway (see consuming_builtin): a list comprehension 
+                // (list(...): just that; set(...): a set comprehension), not a generator)
+                auto const consumer = is_op(l, aOpen, "(") ? consuming_builtin(l, aOpen) : std::nullopt;
+                bool const generator = is_op(l, aOpen, "(") && !consumer;
                 bool const wrapped = aClassBody || generator;   // (its first iterable is an argument: _qit)
-                std::string result = iText.substr(0u, tok(l, aOpen).begin);
+                bool const bare = consumer && (*consumer == "list" || *consumer == "set");
+                std::string result = iText.substr(0u, tok(l, bare ? aOpen - 1u : aOpen).begin);
                 std::string comprehension;
                 std::size_t clausesAt = 0u;
                 auto position = tok(l, aOpen).begin;
@@ -1700,6 +1751,13 @@ namespace neos::compilers::python
                     comprehension += rename ? prefix + n : n;
                 }
                 auto const iterable = iText.substr(tok(l, firstIterable->first).begin, tok(l, firstIterable->second - 1u).end - tok(l, firstIterable->first).begin);
+                if (consumer)
+                {
+                    comprehension.front() = *consumer == "set" ? '{' : '[';
+                    comprehension.back() = *consumer == "set" ? '}' : ']';
+                    if (!bare)
+                        result += "(";
+                }
                 if (generator)
                 {
                     // (a generator expression: a generator whose body is a lambda's comprehension (a dict of one item) that yields its 
@@ -1714,6 +1772,8 @@ namespace neos::compilers::python
                     result += "(lambda _qit: " + comprehension + ")(" + iterable + ")";
                 else
                     result += comprehension;
+                if (consumer && !bare)
+                    result += ")";
                 result += iText.substr(tok(l, aClose).end);
                 aResult = std::move(result);
                 return true;
@@ -1722,10 +1782,12 @@ namespace neos::compilers::python
             std::string const& iText;
             std::vector<logical_line> iLines;
             std::size_t& iNumber;
+            bool const iBuiltins;
+            mutable std::map<std::string, bool> iUnbound;  ///< (consuming_builtin's: the names that the module only calls)
         };
     }
 
-    std::string rewrite_comprehensions(std::string const& aText, bool& aChanged)
+    std::string rewrite_comprehensions(std::string const& aText, bool& aChanged, bool aBuiltins)
     {
         // (one comprehension at a time, innermost first)
         std::string text = aText;
@@ -1733,7 +1795,7 @@ namespace neos::compilers::python
         for (;;)
         {
             std::string result;
-            comprehension_rewriter r{ text, number };
+            comprehension_rewriter r{ text, number, aBuiltins };
             if (!r.rewrite(result))
                 break;
             text = std::move(result);

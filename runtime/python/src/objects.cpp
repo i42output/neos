@@ -7542,6 +7542,22 @@ namespace neos::python_runtime
                 start = aArgs[1];
             if (start != nullptr && kind_of(start) == NEOS_PY_STR)
                 return error("TypeError", "sum() can't sum strings [use ''.join(seq) instead]");
+            // (a list's or tuple's small integers (e.g. sum([...]) of a generator expression's items: see the compiler's 
+            // rewrite_comprehensions): summed in place (no code of the program runs, so nothing can change the list))
+            if (auto const k = kind_of(aArgs[0]); (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE) && (start == nullptr || (kind_of(start) == NEOS_PY_INT && !is_big(start))))
+            {
+                auto const& sequence = k == NEOS_PY_LIST ? as<list_object>(aArgs[0])->items : as<tuple_object>(aArgs[0])->items;
+                long long integer = start != nullptr ? int_value(start) : 0;
+                bool small = true;
+                for (auto const item : sequence)
+                    if (kind_of(item) != NEOS_PY_INT || is_big(item) || add_overflow(integer, int_value(item), &integer))
+                    {
+                        small = false;
+                        break;
+                    }
+                if (small)
+                    return make_int(integer);
+            }
             std::vector<ref> items;
             if (!items_of(aArgs[0], items))
                 return nullptr;

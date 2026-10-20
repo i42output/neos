@@ -214,8 +214,12 @@ namespace neos::python_runtime
         inline singleton sFalse{ &sBoolType.base };
 
         inline int kind_of_other(object* aObject);
-        // (the commonest kinds here (inline); the rest: kind_of_other)
-        inline int kind_of(object* aObject)
+        // (the commonest kinds here (inline: always); the rest: kind_of_other)
+#if defined(_MSC_VER)
+        __forceinline int kind_of(object* aObject)
+#else
+        inline __attribute__((always_inline)) int kind_of(object* aObject)
+#endif
         {
             if (aObject == nullptr)
                 return NEOS_PY_OTHER;

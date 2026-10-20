@@ -38,6 +38,7 @@
   print writes to the standard output stream and input reads from the standard input stream.
 */
 
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -63,6 +64,17 @@ namespace neos::python_runtime
         // (a trap requested: the plugin's error when the function returns (tTrapped: if one is; a flag that is cheap to test))
         thread_local std::optional<std::string> tTrap;
         thread_local bool tTrapped = false;
+        // (the threads that have an error to report (tFailed or tTrapped): when there are none, NEOS_RUNTIME_PLUGIN_ERROR's test needs 
+        // no thread-local (finding one is not free in a plugin: its thread-locals are dynamic))
+        std::atomic<long> sPendingThreads{ 0 };
+        void set_flags(bool aFailed, bool aTrapped)
+        {
+            bool const before = tFailed || tTrapped;
+            tFailed = aFailed;
+            tTrapped = aTrapped;
+            if (bool const after = aFailed || aTrapped; after != before)
+                sPendingThreads.fetch_add(after ? 1 : -1, std::memory_order_relaxed);
+        }
     }
 
     void trap(std::string const& aMessage)
@@ -71,7 +83,7 @@ namespace neos::python_runtime
             h->trap(aMessage.c_str());
         if (!tTrap)
             tTrap = aMessage;
-        tTrapped = true;
+        set_flags(tFailed, true);
     }
 
     char const* result(std::string aValue)
@@ -86,7 +98,7 @@ namespace neos::python_runtime
         if (tFailed)
             return;
         tError = aMessage.empty() ? aType : aType + ": " + aMessage;
-        tFailed = true;
+        set_flags(true, tTrapped);
     }
 
     bool failed()
@@ -101,7 +113,7 @@ namespace neos::python_runtime
 
     void clear_error()
     {
-        tFailed = false;
+        set_flags(false, tTrapped);
         tError.clear();
     }
 
@@ -294,15 +306,14 @@ namespace neos::python_runtime
         {
             if (tTrapped)
             {
-                tTrapped = false;
-                tFailed = false;
+                set_flags(false, false);
                 tReportedError = std::move(*tTrap);
                 tTrap.reset();
                 return tReportedError.c_str();
             }
             if (!tFailed)
                 return nullptr;
-            tFailed = false;
+            set_flags(false, false);
             // (the frames that it is raised in)
             neos::python_runtime::detail::frames_reported(tError);
             tReportedError = std::move(tError);
@@ -315,7 +326,7 @@ NEOS_RUNTIME_PLUGIN_ERROR
 {
     using namespace neos::python_runtime;
     // (tested after every call of the plugin's functions: no error is the common case)
-    if (!tFailed && !tTrapped)
+    if (sPendingThreads.load(std::memory_order_relaxed) == 0 || (!tFailed && !tTrapped))
         return nullptr;
     return reported_error();
 }
