@@ -47,6 +47,7 @@
 */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cerrno>
@@ -105,7 +106,118 @@ namespace neos::python_runtime
 
         bool is_big(object* aObject)
         {
-            return aObject != nullptr && aObject->type == &sIntType.base && as<int_object>(aObject)->big != nullptr;
+            return aObject != nullptr && aObject->type == &sIntType.base && (as<int_object>(aObject)->big != nullptr || as<int_object>(aObject)->wide);
+        }
+
+        // --- integers of 128 bits (an int beyond 64 bits that fits: its value is its object's (wide), not a big integer's, so that 
+        // arithmetic on it is native; a big integer is made from it when one is needed (see big_of))
+        struct int128
+        {
+            std::uint64_t lo = 0u;
+            std::int64_t hi = 0;
+        };
+
+        int128 int128_of(long long aValue)
+        {
+            return { static_cast<std::uint64_t>(aValue), aValue < 0 ? -1 : 0 };
+        }
+
+        // (an int or bool that is a 128-bit integer)
+        bool int128_value(object* aObject, int128& aResult)
+        {
+            if (aObject == nullptr)
+                return false;
+            if (aObject->type == &sIntType.base)
+            {
+                auto const& i = *as<int_object>(aObject);
+                if (i.wide)
+                    aResult = { static_cast<std::uint64_t>(i.value), i.high };
+                else if (i.big == nullptr)
+                    aResult = int128_of(i.value);
+                else
+                    return false;
+                return true;
+            }
+            if (aObject == &sTrue.base || aObject == &sFalse.base)
+            {
+                aResult = int128_of(aObject == &sTrue.base ? 1 : 0);
+                return true;
+            }
+            return false;
+        }
+
+        object* make_int128(int128 aValue)
+        {
+            if (aValue.hi == (static_cast<std::int64_t>(aValue.lo) < 0 ? -1 : 0))
+                return make_int(static_cast<long long>(aValue.lo));
+            auto* const result = new int_object{ { { &sIntType.base } }, static_cast<long long>(aValue.lo) };
+            result->high = aValue.hi;
+            result->wide = true;
+            return &result->h.base;
+        }
+
+        // (sums and differences: false if they overflow; products of 64-bit integers (exact))
+        bool add128(int128 a, int128 b, int128& r)
+        {
+            r.lo = a.lo + b.lo;
+            std::uint64_t const carry = r.lo < a.lo ? 1u : 0u;
+            r.hi = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.hi) + static_cast<std::uint64_t>(b.hi) + carry);
+            return ((a.hi ^ r.hi) & (b.hi ^ r.hi)) >= 0;
+        }
+
+        bool subtract128(int128 a, int128 b, int128& r)
+        {
+            r.lo = a.lo - b.lo;
+            std::uint64_t const borrow = a.lo < b.lo ? 1u : 0u;
+            r.hi = static_cast<std::int64_t>(static_cast<std::uint64_t>(a.hi) - static_cast<std::uint64_t>(b.hi) - borrow);
+            return ((a.hi ^ b.hi) & (a.hi ^ r.hi)) >= 0;
+        }
+
+        int128 multiply64(long long a, long long b)
+        {
+#if defined(__SIZEOF_INT128__)
+            auto const p = static_cast<__int128>(a) * static_cast<__int128>(b);
+            return { static_cast<std::uint64_t>(p), static_cast<std::int64_t>(p >> 64) };
+#else
+            // (the magnitudes' product (of 32-bit halves), negated if the signs differ)
+            auto const ua = a < 0 ? 0u - static_cast<std::uint64_t>(a) : static_cast<std::uint64_t>(a);
+            auto const ub = b < 0 ? 0u - static_cast<std::uint64_t>(b) : static_cast<std::uint64_t>(b);
+            std::uint64_t const a0 = ua & 0xFFFFFFFFu, a1 = ua >> 32u, b0 = ub & 0xFFFFFFFFu, b1 = ub >> 32u;
+            std::uint64_t const p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+            std::uint64_t const middle = (p00 >> 32u) + (p01 & 0xFFFFFFFFu) + (p10 & 0xFFFFFFFFu);
+            std::uint64_t lo = (p00 & 0xFFFFFFFFu) | (middle << 32u);
+            std::uint64_t hi = p11 + (p01 >> 32u) + (p10 >> 32u) + (middle >> 32u);
+            if ((a < 0) != (b < 0))
+            {
+                lo = ~lo + 1u;
+                hi = ~hi + (lo == 0u ? 1u : 0u);
+            }
+            return { lo, static_cast<std::int64_t>(hi) };
+#endif
+        }
+
+        int compare128(int128 a, int128 b)
+        {
+            if (a.hi != b.hi)
+                return a.hi < b.hi ? -1 : 1;
+            return a.lo < b.lo ? -1 : a.lo > b.lo ? 1 : 0;
+        }
+
+        // (+, - and * of ints that are 128-bit integers (and whose result is): null if not)
+        object* int128_binary(int aOperation, object* aLhs, object* aRhs)
+        {
+            int128 a, b, r;
+            if ((aOperation != NEOS_PY_ADD && aOperation != NEOS_PY_SUBTRACT && aOperation != NEOS_PY_MULTIPLY) || !int128_value(aLhs, a) || !int128_value(aRhs, b))
+                return nullptr;
+            if (aOperation == NEOS_PY_ADD)
+                return add128(a, b, r) ? make_int128(r) : nullptr;
+            if (aOperation == NEOS_PY_SUBTRACT)
+                return subtract128(a, b, r) ? make_int128(r) : nullptr;
+            // (a product: if its factors are 64-bit integers)
+            auto const fits = [](int128 const& v) { return v.hi == (static_cast<std::int64_t>(v.lo) < 0 ? -1 : 0); };
+            if (!fits(a) || !fits(b))
+                return nullptr;
+            return make_int128(multiply64(static_cast<long long>(a.lo), static_cast<long long>(b.lo)));
         }
 
         namespace
@@ -218,14 +330,24 @@ namespace neos::python_runtime
 
         big_integer const& big_of(object* aObject)
         {
-            return *as<int_object>(aObject)->big;
+            auto& i = *as<int_object>(aObject);
+            // (a 128-bit integer's: made from it the first time it is needed)
+            if (i.big == nullptr && i.wide)
+            {
+                std::array<std::uint64_t, 2u> const words{ static_cast<std::uint64_t>(i.value), static_cast<std::uint64_t>(i.high) };
+                i.big = std::make_unique<big_integer>(words);
+            }
+            return *i.big;
         }
 
-        // (a 64-bit integer if it fits)
+        // (a 64-bit integer if it fits, else a 128-bit integer if it fits)
         object* make_int(big_integer aValue)
         {
-            if (big_detail::magnitude(aValue) == 1u)
+            auto const magnitude = big_detail::magnitude(aValue);
+            if (magnitude == 1u)
                 return make_int(static_cast<long long>(big_detail::cword(aValue, 0u)));
+            if (magnitude == 2u)
+                return make_int128({ static_cast<std::uint64_t>(big_detail::cword(aValue, 0u)), static_cast<std::int64_t>(big_detail::cword(aValue, 1u)) });
             auto* const result = new int_object{ { { &sIntType.base } }, 0 };
             result->big = std::make_unique<big_integer>(std::move(aValue));
             return &result->h.base;
@@ -406,6 +528,22 @@ namespace neos::python_runtime
         {
             return is_big(aObject) ? big_of(aObject) : big_integer{ kind_of(aObject) == NEOS_PY_BOOL ? (aObject == &sTrue.base ? 1ll : 0ll) : as<int_object>(aObject)->value };
         }
+
+        // (any int as a big integer, without a copy of an int's big integer)
+        struct big_operand
+        {
+            std::optional<big_integer> made;
+            big_integer const* value = nullptr;
+            explicit big_operand(object* aObject)
+            {
+                if (is_big(aObject))
+                    value = &big_of(aObject);
+                else
+                    value = &made.emplace(kind_of(aObject) == NEOS_PY_BOOL ? (aObject == &sTrue.base ? 1ll : 0ll) : as<int_object>(aObject)->value);
+            }
+            big_operand(big_operand const&) = delete;
+            big_integer const& operator*() const { return *value; }
+        };
 
         bool to_index(object* aObject, long long& aResult)
         {
@@ -736,13 +874,24 @@ namespace neos::python_runtime
             switch (aOperation)
             {
             case NEOS_PY_ADD:
-                if (add_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                if (add_overflow(a, b, &r))
+                {
+                    // (a 128-bit integer)
+                    int128 sum;
+                    add128(int128_of(a), int128_of(b), sum);
+                    return make_int128(sum);
+                }
                 return make_int(r);
             case NEOS_PY_SUBTRACT:
-                if (subtract_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                if (subtract_overflow(a, b, &r))
+                {
+                    int128 difference;
+                    subtract128(int128_of(a), int128_of(b), difference);
+                    return make_int128(difference);
+                }
                 return make_int(r);
             case NEOS_PY_MULTIPLY:
-                if (multiply_overflow(a, b, &r)) return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                if (multiply_overflow(a, b, &r)) return make_int128(multiply64(a, b));
                 return make_int(r);
             case NEOS_PY_TRUE_DIVIDE:
                 if (b == 0) return error("ZeroDivisionError", "division by zero");
@@ -1126,7 +1275,11 @@ namespace neos::python_runtime
                     return make_bool(aOperation == NEOS_PY_AND ? a && b : aOperation == NEOS_PY_OR ? a || b : a != b);
                 }
                 if (is_big(aLhs) || is_big(aRhs))
-                    return big_binary(aOperation, big_value(aLhs), big_value(aRhs));
+                {
+                    if (auto const result = int128_binary(aOperation, aLhs, aRhs))
+                        return result;
+                    return big_binary(aOperation, *big_operand{ aLhs }, *big_operand{ aRhs });
+                }
                 return int_binary(aOperation, int_value(aLhs), int_value(aRhs));
             }
             if (aOperation == NEOS_PY_REMAINDER && lk == NEOS_PY_STR)
@@ -1185,6 +1338,15 @@ namespace neos::python_runtime
 
         object* binary(int aOperation, object* aLhs, object* aRhs, bool aInplace)
         {
+            // (ints that are 128-bit integers: native (no dispatch))
+            if (aLhs != nullptr && aRhs != nullptr && aLhs->type == &sIntType.base && aRhs->type == &sIntType.base)
+            {
+                if (auto const result = int128_binary(aOperation, aLhs, aRhs))
+                    return result;
+                // (an int beyond 64 bits: its big integer's (as core_binary's))
+                if (is_big(aLhs) || is_big(aRhs))
+                    return big_binary(aOperation, *big_operand{ aLhs }, *big_operand{ aRhs });
+            }
             auto const lt = python_type(aLhs);
             auto const rt = python_type(aRhs);
             if (aInplace && lt != nullptr && lt->binary != nullptr && kind_of(aLhs) == NEOS_PY_OTHER)
@@ -1359,8 +1521,11 @@ namespace neos::python_runtime
                 {
                     if (is_big(aLhs) || is_big(aRhs))
                     {
-                        auto const a = big_value(aLhs), b = big_value(aRhs);
-                        return a < b ? -1 : b < a ? 1 : 0;
+                        int128 a128, b128;
+                        if (int128_value(aLhs, a128) && int128_value(aRhs, b128))
+                            return compare128(a128, b128);
+                        big_operand const a{ aLhs }, b{ aRhs };
+                        return *a < *b ? -1 : *b < *a ? 1 : 0;
                     }
                     auto const a = int_value(aLhs), b = int_value(aRhs);
                     return a < b ? -1 : a > b ? 1 : 0;
@@ -7864,7 +8029,8 @@ namespace neos::python_runtime
                 std::size_t i = 0u;
                 // integers first (exactly), then floats (Neumaier)
                 long long integer = 0;
-                std::optional<big_integer> big; // (the integers' sum beyond 64 bits)
+                std::optional<int128> wide;     // (the integers' sum beyond 64 bits, while it is a 128-bit integer)
+                std::optional<big_integer> big; // (beyond 128 bits)
                 bool isFloat = kind_of(total.get()) == NEOS_PY_FLOAT;
                 if (!isFloat)
                 {
@@ -7875,17 +8041,35 @@ namespace neos::python_runtime
                     for (; i < items.size() && kind_of(items[i].get()) != NEOS_PY_FLOAT; ++i)
                     {
                         auto const item = items[i].get();
-                        if (!big && (is_big(item) || add_overflow(integer, int_value(item), &integer)))
-                            big = big_integer{ integer } + big_value(item);
-                        else if (big)
-                            *big = *big + big_value(item);
+                        if (!big && !wide && !is_big(item) && !add_overflow(integer, int_value(item), &integer))
+                            continue;
+                        if (!big)
+                        {
+                            int128 value, sum;
+                            if (!wide)
+                                wide = int128_of(integer);
+                            if (int128_value(item, value) && add128(*wide, value, sum))
+                            {
+                                wide = sum;
+                                continue;
+                            }
+                            ref const partial{ make_int128(*wide) };
+                            big = big_value(partial.get());
+                        }
+                        *big = *big + *big_operand{ item };
                     }
                     if (i == items.size())
-                        return big ? make_int(*big) : make_int(integer);
+                        return big ? make_int(*big) : wide ? make_int128(*wide) : make_int(integer);
                 }
                 double sum = isFloat ? as<float_object>(total.get())->value : static_cast<double>(integer);
                 if (big && !big_to_double(*big, sum))
                     return error("OverflowError", "int too large to convert to float");
+                if (wide && !big)
+                {
+                    ref const partial{ make_int128(*wide) };
+                    if (!to_double(partial.get(), sum))
+                        return nullptr;
+                }
                 double c = 0.0;
                 for (; i < items.size(); ++i)
                 {
@@ -11928,7 +12112,7 @@ namespace neos::python_runtime
                         return false;
                     }
                     // (a 64-bit result is the hash (as CPython's Py_ssize_t); a larger one's hash is the hash)
-                    if (kind_of(result.get()) == NEOS_PY_INT && !as<int_object>(result.get())->big)
+                    if (is_small_int(result.get()))
                     {
                         aResult = as<int_object>(result.get())->value == -1 ? -2 : as<int_object>(result.get())->value;
                         return true;

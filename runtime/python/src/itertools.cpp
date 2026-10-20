@@ -166,7 +166,7 @@ namespace neos::python_runtime
                     std::string c, s;
                     if (!repr_of(current.get(), c))
                         return nullptr;
-                    bool const unitStep = kind_of(step.get()) == NEOS_PY_INT && as<int_object>(step.get())->value == 1 && !as<int_object>(step.get())->big;
+                    bool const unitStep = kind_of(step.get()) == NEOS_PY_INT && as<int_object>(step.get())->value == 1 && is_small_int(step.get());
                     if (unitStep)
                         return make_str("count(" + c + ")");
                     if (!repr_of(step.get(), s))

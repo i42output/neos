@@ -152,7 +152,9 @@ namespace neos::python_runtime
         { 
             header h; 
             long long value; 
-            std::unique_ptr<big_integer> big; ///< (the value if it is not a 64-bit integer)
+            std::unique_ptr<big_integer> big; ///< (the value if it is not a 64-bit integer (a 128-bit integer's, if needed, made from it))
+            long long high = 0;                 ///< (a 128-bit integer (wide): its high 64 bits; value is its low 64 bits (unsigned))
+            bool wide = false;
             // (ints are made and released at a high rate (e.g. by iteration over a range): their storage is a pool's (see objects.cpp))
             static void* operator new(std::size_t aSize);
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
@@ -273,7 +275,7 @@ namespace neos::python_runtime
 
         template <typename T> T* as(object* aObject) { return reinterpret_cast<T*>(aObject); }
         // (an int of 64 bits (not a bool, nor an instance of a subclass))
-        inline bool is_small_int(object* aObject) { return aObject != nullptr && aObject->type == &sIntType.base && as<int_object>(aObject)->big == nullptr; }
+        inline bool is_small_int(object* aObject) { return aObject != nullptr && aObject->type == &sIntType.base && as<int_object>(aObject)->big == nullptr && !as<int_object>(aObject)->wide; }
 
         inline object* none() { return &sNone.base; }
         inline object* not_implemented() { return &sNotImplemented.base; }
