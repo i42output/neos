@@ -3727,6 +3727,21 @@ namespace neos::compilers::python
             return dummy;
         }
         auto* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ aName } });
+        // (a comprehension's variable that a previous pass found (see py_function_start), used before the function's body starts (a 
+        // def's body on the def's own line, e.g. "def f(): return [x for x in xs]"): declared now)
+        if (symbol == nullptr && in_function() && !implicit_entry() && aName.size() > 3u && aName.starts_with("_q") && std::isdigit(static_cast<unsigned char>(aName[2])))
+            if (auto const locals = iInference.pyLocals.find(current_function_name()); locals != iInference.pyLocals.end())
+                if (auto const local = locals->second.find(aName); local != locals->second.end())
+                {
+                    auto& variable = py_variable(aName, local->second);
+                    fragment value;
+                    put_local(value, opcode::LocalGet, variable.index());
+                    value.valueType = variable.type();
+                    value.fragmentKind = fragment_kind::Value;
+                    if (auto const* checked = variable_value(value, neolib::string_view{ neolib::string{ aName } }, variable))
+                        return fragment{ *checked };
+                    return value;
+                }
         // (the module's name and file)
         if (symbol == nullptr && (aName == "__name__" || aName == "__file__") && !py_exec_mode())
         {
@@ -5785,7 +5800,26 @@ namespace neos::compilers::python
             push_operand(operand_type{ dummy });
             return;
         }
-        auto value = py_object(element);
+        // (__any_items([...]) and __all_items([...]) (any and all of a generator expression: see rewrite_comprehensions): the loops stop 
+        // at the item that decides; the list is of the result)
+        int deciding = 0;   // (1: any, 2: all)
+        if (!aDict && !aSet)
+        {
+            auto const whole = generator().current_fragment().source().to_std_string_view();
+            if (text.data() >= whole.data() && text.data() <= whole.data() + whole.size())
+            {
+                auto const before = whole.substr(0u, static_cast<std::size_t>(text.data() - whole.data()));
+                deciding = before.ends_with("__any_items(") ? 1 : before.ends_with("__all_items(") ? 2 : 0;
+            }
+        }
+        std::optional<fragment> test;
+        if (deciding != 0)
+        {
+            test = materialize(element);
+            if (test->valueType != type::Boolean)
+                coerce(*test, type::Boolean);
+        }
+        auto value = deciding != 0 ? fragment{} : py_object(element);
         std::optional<fragment> keyValue;
         if (key)
             keyValue = py_object(*key);
@@ -5807,13 +5841,39 @@ namespace neos::compilers::python
         fragment result;
         append(result, list);
         put(result, opcode::Drop);
+        // (any, all: the item that decides stops the loops (each tests stop when it starts an iteration))
+        auto const stop = deciding != 0 ? std::optional<std::uint32_t>{ temporary(type::I32) } : std::nullopt;
+        if (stop)
+        {
+            put_i32(result, 0);
+            put_local(result, opcode::LocalSet, *stop);
+        }
+        auto const stopping = [&](fragment& aCode)
+        {
+            if (!stop)
+                return;
+            put_local(aCode, opcode::LocalGet, *stop);
+            put(aCode, opcode::BrIf);
+            put_u32(aCode.fragmentCode.as_std_vector(), 1u);
+        };
         // (the loops, innermost last)
         std::function<fragment(std::size_t)> generate = [&](std::size_t aClause) -> fragment
         {
             fragment code;
             if (aClause == clauses.size())
             {
-                if (keyValue)
+                if (stop)
+                {
+                    // (any: an item that is true decides; all: one that is false)
+                    append(code, *test);
+                    if (deciding == 2)
+                        put(code, opcode::I32Eqz);
+                    put_block(code, opcode::If, {});
+                    put_i32(code, 1);
+                    put_local(code, opcode::LocalSet, *stop);
+                    put(code, opcode::End);
+                }
+                else if (keyValue)
                     append(code, py_runtime_call("python::dict_set", { type::Object, type::Object, type::Object }, type::Void, { local_value(listTemporary, type::Object), *keyValue, value }));
                 else
                     append(code, py_runtime_call(aSet ? "python::set_add" : "python::list_append", { type::Object, type::Object }, type::Void, { local_value(listTemporary, type::Object), value }));
@@ -5868,6 +5928,7 @@ namespace neos::compilers::python
                 put_block(code, opcode::Block, {});
                 put_block(code, opcode::Loop, {});
                 append(code, flush);
+                stopping(code);
                 put_local(code, opcode::LocalGet, length);
                 put_i64(code, 0);
                 put(code, opcode::I64LtS);
@@ -5939,6 +6000,7 @@ namespace neos::compilers::python
             put_block(code, opcode::Block, {});
             put_block(code, opcode::Loop, {});
             append(code, flush);
+            stopping(code);
             append(code, py_runtime_call("python::next", { type::Object }, type::Object, { local_value(iterator, type::Object) }));
             put_local(code, opcode::LocalTee, item);
             put(code, opcode::I32Eqz);
@@ -5983,6 +6045,17 @@ namespace neos::compilers::python
             return code;
         };
         append(result, generate(0u));
+        if (stop)
+        {
+            // (any: whether an item stopped it; all: whether none did)
+            fragment decided;
+            put_local(decided, opcode::LocalGet, *stop);
+            if (deciding == 2)
+                put(decided, opcode::I32Eqz);
+            decided.valueType = type::Boolean;
+            append(result, py_runtime_call("python::list_append", { type::Object, type::Object }, type::Void, { local_value(listTemporary, type::Object), 
+                py_owned(py_runtime_call("python::from_bool", { type::Boolean }, type::Object, { decided })) }));
+        }
         put_local(result, opcode::LocalGet, listTemporary);
         result.valueType = type::Object;
         result.fragmentSource = aSource;
@@ -7511,10 +7584,15 @@ namespace neos::compilers::python
                         if (target.kind == fragment_state::py_target::kind_t::Name)
                         {
                             neolib::string const name{ target.name };
+                            // (another pass if this one did not know of it)
                             if (find_symbol(current_scope(), neolib::string_view{ name }) == nullptr)
                             {
-                                iInference.pyLocals[current_function_name()][target.name] = type::Object;
-                                { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
+                                auto& locals = iInference.pyLocals[current_function_name()];
+                                if (!locals.contains(target.name))
+                                {
+                                    locals[target.name] = type::Object;
+                                    { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
+                                }
                             }
                             if (py_variable(target.name, type::Object).type() != type::Object)
                                 py_kind_change(target.name);

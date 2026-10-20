@@ -1266,7 +1266,8 @@ namespace neos::compilers::python
             {
                 static std::set<std::string_view> const sNames = { "__class", "__closure", "__cell", "__generator", "__yield", "__yield_from", 
                     "__bytes", "__with_items", "__build_class", "__fstring", "__match", "__await", "__async_iter", "__async_with",
-                    "__coroutine", "__async_generator", "__type_alias", "__type_param", "__generic_base", "__generic_function", "__annotate", "__exception_group", "__ns_bind" };
+                    "__coroutine", "__async_generator", "__type_alias", "__type_param", "__generic_base", "__generic_function", "__annotate", "__exception_group", "__ns_bind",
+                    "__any_items", "__all_items" };
                 return sNames.contains(aName) || aName.starts_with("__neos");
             }
             void classes()
@@ -1561,12 +1562,12 @@ namespace neos::compilers::python
             static bool closing(std::string_view aOp) { return aOp == ")" || aOp == "]" || aOp == "}"; }
             bool is_class_body_header(std::size_t) const { return false; }
             // (a generator expression (its parenthesis at aOpen) that is the argument of a builtin that collects all its items 
-            // before it uses them (sum(x for x in xs); a str literal's join): the builtin's name; none if it is not one, or the 
+            // before it uses them (sum(x for x in xs); a str literal's join), or of any or all: the builtin's name; none if it is not one, or the 
             // module can bind the name (anything but calls of it: e.g. "sum = f", "def f(sum):", "import *"), or builtins are not 
             // known (exec: its namespaces can bind them))
             std::optional<std::string_view> consuming_builtin(std::size_t aLine, std::size_t aOpen) const
             {
-                static std::set<std::string_view> const sConsumers = { "sum", "min", "max", "list", "tuple", "set", "frozenset", "sorted", "dict" };
+                static std::set<std::string_view> const sConsumers = { "sum", "min", "max", "list", "tuple", "set", "frozenset", "sorted", "dict", "any", "all" };
                 auto const l = aLine;
                 if (!iBuiltins || aOpen == 0u || tok(l, aOpen - 1u).kind != token::Name)
                     return std::nullopt;
@@ -1722,11 +1723,18 @@ namespace neos::compilers::python
                 auto const prefix = "_q" + std::to_string(++iNumber) + "_";
                 // (a generator expression whose items a builtin collects first anyway (see consuming_builtin): a list comprehension 
                 // (list(...): just that; set(...): a set comprehension), not a generator)
-                auto const consumer = is_op(l, aOpen, "(") ? consuming_builtin(l, aOpen) : std::nullopt;
+                // (any(...) and all(...): __any_items([...]) and __all_items([...]), which the compiler compiles as loops that stop at the 
+                // item that decides (see py_comprehension); not in a class's body (its comprehensions are lambdas'))
+                auto consumer = is_op(l, aOpen, "(") ? consuming_builtin(l, aOpen) : std::nullopt;
+                if (consumer && aClassBody && (*consumer == "any" || *consumer == "all"))
+                    consumer.reset();
                 bool const generator = is_op(l, aOpen, "(") && !consumer;
                 bool const wrapped = aClassBody || generator;   // (its first iterable is an argument: _qit)
                 bool const bare = consumer && (*consumer == "list" || *consumer == "set");
-                std::string result = iText.substr(0u, tok(l, bare ? aOpen - 1u : aOpen).begin);
+                bool const deciding = consumer && (*consumer == "any" || *consumer == "all");
+                std::string result = iText.substr(0u, tok(l, bare || deciding ? aOpen - 1u : aOpen).begin);
+                if (deciding)
+                    result += "__" + std::string{ *consumer } + "_items";
                 std::string comprehension;
                 std::size_t clausesAt = 0u;
                 auto position = tok(l, aOpen).begin;

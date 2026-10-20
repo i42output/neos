@@ -112,19 +112,24 @@ namespace neos::python_runtime
             // (a thread's free list of int objects' storage: its head and length; the list's owner frees it when the thread ends (the
             // storage of an int released after that is not reused))
             constexpr std::size_t MaxFreeInts = 1024u;
-            thread_local void* tFreeInts = nullptr;
-            thread_local std::size_t tFreeIntCount = 0u;
+            // (one thread-local (finding one is not free in a plugin): its head and length)
+            struct free_int_list
+            {
+                void* head = nullptr;
+                std::size_t count = 0u;
+            };
+            thread_local free_int_list tFreeInts;
             struct free_ints_owner
             {
                 ~free_ints_owner()
                 {
-                    while (tFreeInts != nullptr)
+                    while (tFreeInts.head != nullptr)
                     {
-                        auto const next = *static_cast<void**>(tFreeInts);
-                        ::operator delete(tFreeInts);
-                        tFreeInts = next;
+                        auto const next = *static_cast<void**>(tFreeInts.head);
+                        ::operator delete(tFreeInts.head);
+                        tFreeInts.head = next;
                     }
-                    tFreeIntCount = MaxFreeInts;
+                    tFreeInts.count = MaxFreeInts;
                 }
             };
             thread_local free_ints_owner tFreeIntsOwner;
@@ -132,11 +137,12 @@ namespace neos::python_runtime
 
         void* int_object::operator new(std::size_t aSize)
         {
-            if (aSize == sizeof(int_object) && tFreeInts != nullptr)
+            auto& list = tFreeInts;
+            if (aSize == sizeof(int_object) && list.head != nullptr)
             {
-                auto const result = tFreeInts;
-                tFreeInts = *static_cast<void**>(result);
-                --tFreeIntCount;
+                auto const result = list.head;
+                list.head = *static_cast<void**>(result);
+                --list.count;
                 return result;
             }
             return ::operator new(aSize);
@@ -144,12 +150,14 @@ namespace neos::python_runtime
 
         void int_object::operator delete(void* aObject, std::size_t aSize) noexcept
         {
-            if (aSize == sizeof(int_object) && tFreeIntCount < MaxFreeInts)
+            auto& list = tFreeInts;
+            if (aSize == sizeof(int_object) && list.count < MaxFreeInts)
             {
-                (void)&tFreeIntsOwner; // (the owner is constructed (its destructor runs when the thread ends))
-                *static_cast<void**>(aObject) = tFreeInts;
-                tFreeInts = aObject;
-                ++tFreeIntCount;
+                if (list.count == 0u)
+                    (void)&tFreeIntsOwner; // (the owner is constructed (its destructor runs when the thread ends))
+                *static_cast<void**>(aObject) = list.head;
+                list.head = aObject;
+                ++list.count;
                 return;
             }
             ::operator delete(aObject);
@@ -1395,6 +1403,22 @@ namespace neos::python_runtime
 
         object* compare(int aOperation, object* aLhs, object* aRhs)
         {
+            // (two ints of 64 bits: their values')
+            if (is_small_int(aLhs) && is_small_int(aRhs))
+            {
+                auto const a = as<int_object>(aLhs)->value;
+                auto const b = as<int_object>(aRhs)->value;
+                switch (aOperation)
+                {
+                case NEOS_PY_EQ: return make_bool(a == b);
+                case NEOS_PY_NE: return make_bool(a != b);
+                case NEOS_PY_LT: return make_bool(a < b);
+                case NEOS_PY_LE: return make_bool(a <= b);
+                case NEOS_PY_GT: return make_bool(a > b);
+                case NEOS_PY_GE: return make_bool(a >= b);
+                default: break;
+                }
+            }
             // (two strs: their texts' (UTF-8's byte order is its code points'))
             if (kind_of(aLhs) == NEOS_PY_STR && kind_of(aRhs) == NEOS_PY_STR)
             {
@@ -4810,8 +4834,24 @@ namespace neos::python_runtime
         }
         // (an int literal beyond 64 bits)
         object* fn_int_from_string(char const* aText) { return make_int(big_integer::from_string(std::string{ aText })); }
-        object* fn_binary(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(binary(aOperation, aLhs, aRhs, false)); }
-        object* fn_inplace(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(binary(aOperation, aLhs, aRhs, true)); }
+        // (two ints of 64 bits and an arithmetic operator: int_binary's, without binary's dispatch)
+        bool small_arithmetic(std::int32_t aOperation, object* aLhs, object* aRhs)
+        {
+            return is_small_int(aLhs) && is_small_int(aRhs) && (aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT || 
+                aOperation == NEOS_PY_MULTIPLY || aOperation == NEOS_PY_TRUE_DIVIDE || aOperation == NEOS_PY_FLOOR_DIVIDE || aOperation == NEOS_PY_REMAINDER);
+        }
+        object* fn_binary(std::int32_t aOperation, object* aLhs, object* aRhs) 
+        { 
+            if (small_arithmetic(aOperation, aLhs, aRhs))
+                return checked(int_binary(aOperation, as<int_object>(aLhs)->value, as<int_object>(aRhs)->value));
+            return checked(binary(aOperation, aLhs, aRhs, false)); 
+        }
+        object* fn_inplace(std::int32_t aOperation, object* aLhs, object* aRhs) 
+        { 
+            if (small_arithmetic(aOperation, aLhs, aRhs))
+                return checked(int_binary(aOperation, as<int_object>(aLhs)->value, as<int_object>(aRhs)->value));
+            return checked(binary(aOperation, aLhs, aRhs, true)); 
+        }
         object* fn_unary(std::int32_t aOperation, object* aObject) { return checked(unary(aOperation, aObject)); }
         object* fn_compare(std::int32_t aOperation, object* aLhs, object* aRhs) { return checked(compare(aOperation, aLhs, aRhs)); }
         // (a comparison's truth (e.g. if a == b:): its result is not kept)
@@ -7625,22 +7665,28 @@ namespace neos::python_runtime
         {
             if (!no_keywords(aKwargs, aAll ? "all" : "any") || !arity(aArgs, 1u, 1u, aAll ? "all" : "any"))
                 return nullptr;
-            std::vector<ref> items;
-            if (!items_of(aArgs[0], items))
+            // (the items until one decides it (as CPython's: the rest are not got))
+            ref const it{ iter(aArgs[0]) };
+            if (!it)
                 return nullptr;
-            for (auto const& item : items)
+            for (;;)
             {
+                ref const item{ next(it.get()) };
+                if (!item)
+                    return failed() ? nullptr : make_bool(aAll);
                 auto const t = truth(item.get());
                 if (t < 0)
                     return nullptr;
                 if ((t == 1) != aAll)
                     return make_bool(!aAll);
             }
-            return make_bool(aAll);
         }
 
         object* b_any(std::vector<object*> const& aArgs, object* aKwargs) { return any_all(aArgs, aKwargs, false); }
         object* b_all(std::vector<object*> const& aArgs, object* aKwargs) { return any_all(aArgs, aKwargs, true); }
+        // (any and all of a generator expression (python::__any_items, python::__all_items: see the compiler's rewrite_comprehensions))
+        object* fn_any_items(object* aIterable) { return checked(any_all({ aIterable }, nullptr, false)); }
+        object* fn_all_items(object* aIterable) { return checked(any_all({ aIterable }, nullptr, true)); }
 
         object* b_sorted(std::vector<object*> const& aArgs, object* aKwargs)
         {
@@ -14246,6 +14292,8 @@ namespace neos::python_runtime
             { "delattr", NEOS_RT_FUNCTION(fn_delattr), VOID, 2u, { OBJ, STR }, 0u },
             { "len", NEOS_RT_FUNCTION(fn_len), I64, 1u, { OBJ }, 0u },
             { "__yield(object)", NEOS_RT_FUNCTION(fn_yield), OBJ, 1u, { OBJ }, 0u },
+            { "__any_items(object)", NEOS_RT_FUNCTION(fn_any_items), OBJ, 1u, { OBJ }, 0u },
+            { "__all_items(object)", NEOS_RT_FUNCTION(fn_all_items), OBJ, 1u, { OBJ }, 0u },
             { "iter", NEOS_RT_FUNCTION(fn_iter), OBJ, 1u, { OBJ }, 0u },
             { "next", NEOS_RT_FUNCTION(fn_next), OBJ, 1u, { OBJ }, 0u },
             { "range_length", NEOS_RT_FUNCTION(fn_range_length), NEOS_RT_I64, 1u, { OBJ }, 0u },

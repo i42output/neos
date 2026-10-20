@@ -228,6 +228,7 @@ namespace neos::python_runtime
             if (type == &sIntType.base) return NEOS_PY_INT;
             if (type == &sListType.base) return NEOS_PY_LIST;
             if (type == &sTupleType.base) return NEOS_PY_TUPLE;
+            if (type == &sDictType.base) return NEOS_PY_DICT;
             return kind_of_other(aObject);
         }
         inline int kind_of_other(object* aObject)
@@ -239,7 +240,6 @@ namespace neos::python_runtime
             if (type == &sNotImplementedType.base) return NEOS_PY_NOT_IMPLEMENTED;
             if (type == &sEllipsisType.base) return NEOS_PY_ELLIPSIS;
             if (type == &sComplexType.base) return NEOS_PY_COMPLEX;
-            if (type == &sDictType.base) return NEOS_PY_DICT;
             if (type == &sSliceType.base) return NEOS_PY_SLICE;
             if (type == &sRangeType.base) return NEOS_PY_RANGE;
             if (type == &sIteratorType.base) return NEOS_PY_ITERATOR;
@@ -248,6 +248,8 @@ namespace neos::python_runtime
         }
 
         template <typename T> T* as(object* aObject) { return reinterpret_cast<T*>(aObject); }
+        // (an int of 64 bits (not a bool, nor an instance of a subclass))
+        inline bool is_small_int(object* aObject) { return aObject != nullptr && aObject->type == &sIntType.base && as<int_object>(aObject)->big == nullptr; }
 
         inline object* none() { return &sNone.base; }
         inline object* not_implemented() { return &sNotImplemented.base; }
