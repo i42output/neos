@@ -256,6 +256,7 @@ namespace neos::compilers::python
         fragment py_object(operand_type const& aOperand);
         fragment py_unpack_call(fragment const& aValue, std::vector<fragment_state::py_target> const& aTargets);
         fragment py_owned(fragment aValue);
+        bool py_pure(fragment const& aValue);
         fragment py_flush();
         fragment py_release_temporaries(fragment const& aCode, std::optional<std::uint32_t> aExcept = {});
         fragment py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept = {});

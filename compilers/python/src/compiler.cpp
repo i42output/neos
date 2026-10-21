@@ -2340,6 +2340,93 @@ namespace neos::compilers::python
         return aValue;
     }
 
+    // (a value whose code has no effect that could be seen, and cannot raise (its locals' values, constants, objects made of them): one 
+    // that can be computed before what precedes it)
+    bool compiler::py_pure(fragment const& aValue)
+    {
+        // (python::unbound: a variable that is read before it is bound raises (UnboundLocalError, NameError) before the method is found, 
+        // which is only seen if finding it also raises, or has an effect; a global variable's value is read before the method is found, 
+        // which is only seen if finding it binds the variable)
+        static std::set<std::string> const sPure = { "python::from_int", "python::from_integer", "python::from_float", "python::from_bool", 
+            "python::from_str", "python::none", "python::unbound" };
+        auto const& code = aValue.fragmentCode.as_std_vector();
+        auto const relocated = [&](std::size_t aPosition) -> std::optional<std::uint32_t>
+        {
+            for (auto const& r : aValue.fragmentRelocations)
+                if (r.first() == aPosition)
+                    return r.second();
+            return {};
+        };
+        std::size_t p = 0u;
+        auto const leb = [&]() -> std::uint64_t
+        {
+            std::uint64_t value = 0u;
+            unsigned shift = 0u;
+            std::uint8_t b = 0u;
+            do
+            {
+                if (p >= code.size())
+                    return ~std::uint64_t{ 0u };
+                b = code[p++];
+                if (shift < 64u)
+                    value |= static_cast<std::uint64_t>(b & 0x7Fu) << shift;
+                shift += 7u;
+            } while ((b & 0x80u) != 0u);
+            return value;
+        };
+        while (p < code.size())
+        {
+            auto const op = code[p++];
+            switch (op)
+            {
+            case 0x02u: case 0x03u: case 0x04u:
+                // (a block: of no value or of one value)
+                if (p >= code.size() || (code[p] != 0x40u && code[p] != 0x7Fu && code[p] != 0x7Eu && code[p] != 0x7Du && code[p] != 0x7Cu))
+                    return false;
+                ++p;
+                break;
+            case 0x05u: case 0x0Bu: case 0x1Au: case 0x1Bu:
+                break;
+            case 0x10u:
+                {
+                    auto const target = relocated(p);
+                    if (!target || (*target & (DeferredCall | BranchTarget | IndirectSignature)) != 0u || *target >= generator().function_count())
+                        return false;
+                    auto name = generator().function_name(*target).to_std_string();
+                    if (generator().function_stub(*target))
+                        name = name.substr(0u, name.find('('));
+                    if (!sPure.contains(name))
+                        return false;
+                    p += 5u;
+                }
+                break;
+            case 0x20u: case 0x23u:
+                leb();
+                break;
+            case 0x22u:
+                // (a temporary's value, or a variable's that is checked (see variable_value: a temporary is tested for null))
+                if (auto const local = static_cast<std::uint32_t>(leb()); !py_function().objectTemporaries.contains(local) && 
+                    !(p + 2u < code.size() && code[p] == static_cast<std::uint8_t>(opcode::I32Eqz) && code[p + 1u] == 0x04u && code[p + 2u] == 0x40u) &&
+                    std::none_of(py_function().pyScratch.begin(), py_function().pyScratch.end(), [&](auto const& aScratch) { return aScratch.second == local; }) &&
+                    std::find(py_function().pendingIntegers.begin(), py_function().pendingIntegers.end(), local) == py_function().pendingIntegers.end())
+                    return false;
+                break;
+            case 0x41u: case 0x42u:
+                leb();
+                break;
+            case 0x44u:
+                p += 8u;
+                break;
+            default:
+                // (arithmetic that cannot trap (no division, no conversion of a float to an integer))
+                if (op >= 0x45u && op <= 0xC4u && !(op >= 0x6Du && op <= 0x70u) && !(op >= 0x7Fu && op <= 0x82u) && !(op >= 0xA8u && op <= 0xB1u))
+                    break;
+                return false;
+            }
+        }
+        return p == code.size();
+    }
+
     // --- integers of any size (Python's int): type::Integer, a small integer shifted left one bit or an integer object's handle
     // shifted left one bit with the low bit set (see NEOS_RT_INTEGER); an integer value is borrowed: an integer that is a new 
     // reference (a call's result) has its object's reference held by a temporary (released at the end of the statement), a
@@ -4978,6 +5065,87 @@ namespace neos::compilers::python
                 if (text.ends_with(access->second.attribute) && trimmed(text.substr(0u, text.size() - access->second.attribute.size())).ends_with("."))
                     method = access->second;
             }
+        // (receiver.name(a0, a1), of arguments whose values can be computed before the method is found (see py_pure): python::call_method, 
+        // which calls the method, or finds a function of the program that is it, which is called with call_indirect (the receiver first))
+        std::optional<std::vector<fragment>> values;
+        if (method && !anyStar && !anyKeyword && arguments.size() <= 2u)
+        {
+            values.emplace();
+            for (auto const& argument : arguments)
+                values->push_back(py_object(operand_type{ argument }));
+            if (std::all_of(values->begin(), values->end(), [&](fragment const& aValue) { return py_pure(aValue); }))
+            {
+                auto const receiver = temporary(type::I32);
+                append(statement, py_object(operand_type{ method->receiver }));
+                put_local(statement, opcode::LocalSet, receiver);
+                std::vector<std::uint32_t> held;
+                std::vector<fragment> passed;
+                for (auto const& value : *values)
+                {
+                    held.push_back(temporary(type::I32));
+                    append(statement, value);
+                    put_local(statement, opcode::LocalSet, held.back());
+                    passed.push_back(local_value(held.back(), type::Object));
+                }
+                while (passed.size() < 2u)
+                {
+                    fragment absent;
+                    put_i32(absent, 0);
+                    absent.valueType = type::Object;
+                    passed.push_back(absent);
+                }
+                auto const outcome = temporary(type::I64);
+                auto const direct = temporary(type::I32);
+                fragment choice = py_runtime_call("python::call_method", { type::Object, type::String, type::Object, type::Object }, type::Integer, 
+                    { local_value(receiver, type::Object), py_string(method->attribute), passed[0], passed[1] });
+                put_local(choice, opcode::LocalTee, outcome);
+                put_i64(choice, 1);
+                put(choice, opcode::I64And);
+                put(choice, opcode::I32ConvertI64);
+                put_block(choice, opcode::If, type::Object);
+                // (the call's result: an object (its handle shifted left one bit with the low bit set))
+                put_local(choice, opcode::LocalGet, outcome);
+                put_i64(choice, 1);
+                put(choice, opcode::I64ShrU);
+                put(choice, opcode::I32ConvertI64);
+                put(choice, opcode::Else);
+                // (a function of the program to call: ((its index << 1) | 1 if it returns nothing) + 1, shifted left one bit)
+                put_local(choice, opcode::LocalGet, outcome);
+                put_i64(choice, 1);
+                put(choice, opcode::I64ShrU);
+                put_i64(choice, 1);
+                put(choice, opcode::I64Sub);
+                put(choice, opcode::I32ConvertI64);
+                put_local(choice, opcode::LocalSet, direct);
+                std::vector<type> const parameters(held.size() + 1u, type::Object);
+                auto const indirect_call = [&](type aResult)
+                {
+                    put_local(choice, opcode::LocalGet, receiver);
+                    for (auto const h : held)
+                        put_local(choice, opcode::LocalGet, h);
+                    put_local(choice, opcode::LocalGet, direct);
+                    put_i32(choice, 1);
+                    put(choice, opcode::I32ShrU);
+                    emit_call_indirect(choice, indirect_signature(parameters, aResult));
+                };
+                put_local(choice, opcode::LocalGet, direct);
+                put_i32(choice, 1);
+                put(choice, opcode::I32And);
+                put_block(choice, opcode::If, type::Object);
+                indirect_call(type::Void);
+                append(choice, py_runtime_call("python::none", {}, type::Object, {}));
+                put(choice, opcode::Else);
+                indirect_call(type::Object);
+                put(choice, opcode::End);
+                put(choice, opcode::End);
+                choice.valueType = type::Object;
+                choice.fragmentKind = fragment_kind::Value;
+                append(statement, py_owned(choice));
+                statement.valueType = type::Object;
+                push_operand(operand_type{ statement });
+                return;
+            }
+        }
         if (execBuiltin)
             append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
         else if (method)
@@ -4997,20 +5165,24 @@ namespace neos::compilers::python
         // (up to three positional arguments: passed as they are (no tuple is made for them if a function of the program is called))
         if (!anyStar && !anyKeyword && arguments.size() <= 3u)
         {
-            std::vector<fragment> values;
-            for (auto const& argument : arguments)
-                values.push_back(py_object(operand_type{ argument }));
-            while (values.size() < 3u)
+            if (!values)
+            {
+                values.emplace();
+                for (auto const& argument : arguments)
+                    values->push_back(py_object(operand_type{ argument }));
+            }
+            auto& passed = *values;
+            while (passed.size() < 3u)
             {
                 fragment absent;
                 put_i32(absent, 0);
                 absent.valueType = type::Object;
-                values.push_back(absent);
+                passed.push_back(absent);
             }
             if (execBuiltin)
             {
                 auto call = py_owned(py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
-                    { local_value(callable, type::Object), values[0], values[1], values[2] }));
+                    { local_value(callable, type::Object), passed[0], passed[1], passed[2] }));
                 append(statement, call);
                 statement.valueType = type::Object;
                 push_operand(operand_type{ statement });
@@ -5022,7 +5194,7 @@ namespace neos::compilers::python
             for (std::size_t i = 0u; i < arguments.size(); ++i)
             {
                 held.push_back(temporary(type::I32));
-                append(statement, values[i]);
+                append(statement, passed[i]);
                 put_local(statement, opcode::LocalSet, held.back());
             }
             bool const methodCall = receiverTemporary.has_value();
@@ -5058,9 +5230,9 @@ namespace neos::compilers::python
             put(choice, opcode::End);
             put(choice, opcode::Else);
             for (std::size_t i = 0u; i < held.size(); ++i)
-                values[i] = local_value(held[i], type::Object);
+                passed[i] = local_value(held[i], type::Object);
             append(choice, py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
-                { local_value(callable, type::Object), values[0], values[1], values[2] }));
+                { local_value(callable, type::Object), passed[0], passed[1], passed[2] }));
             put(choice, opcode::End);
             choice.valueType = type::Object;
             choice.fragmentKind = fragment_kind::Value;

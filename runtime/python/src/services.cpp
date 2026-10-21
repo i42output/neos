@@ -1661,9 +1661,20 @@ namespace neos::python_runtime
         }
 
         // (the signals that have arrived: their Python handlers are called (false: a handler raised an exception))
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        bool signals_handle();
         bool signals_check()
         {
-            if (!sAnyPending.load(std::memory_order_relaxed) || std::this_thread::get_id() != sMainThread)
+            return !sAnyPending.load(std::memory_order_relaxed) || signals_handle();
+        }
+        // (signals_check's: out of line, so that its check is cheap)
+        bool signals_handle()
+        {
+            if (std::this_thread::get_id() != sMainThread)
                 return true;
             sAnyPending.store(false);
             for (int i = 1; i < kSignalCount; ++i)

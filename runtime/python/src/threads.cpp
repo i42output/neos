@@ -94,9 +94,15 @@ namespace neos::python_runtime
             sGilCondition.notify_all();
         }
 
-        void gil_check()
+        // (another thread waits for it (gil_check's: out of line, so that its check is cheap))
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        void gil_yield()
         {
-            if (!sDropRequest.load(std::memory_order_relaxed) || !tHolding)
+            if (!tHolding)
                 return;
             // (another thread has waited for it: it runs (this one waits until it has taken it))
             {
@@ -108,6 +114,17 @@ namespace neos::python_runtime
                 sGilCondition.wait_for(lock, kSwitchInterval * 4, [&]() { return sSwitches != switches; });
             }
             gil_acquire();
+        }
+
+        bool threads_started()
+        {
+            return sGilActive.load(std::memory_order_relaxed);
+        }
+
+        void gil_check()
+        {
+            if (sDropRequest.load(std::memory_order_relaxed))
+                gil_yield();
         }
 
         namespace

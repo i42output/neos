@@ -3503,10 +3503,19 @@ namespace neos::python_runtime
 
         std::vector<object*> const& tuple_items(object* aTuple) { return as<tuple_object>(aTuple)->items; }
 
-        bool arity(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName)
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        __attribute__((noinline))
+#endif
+        bool arity_error(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName);
+        inline bool arity(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName)
         {
-            if (aArgs.size() >= aMin && aArgs.size() <= aMax)
-                return true;
+            return (aArgs.size() >= aMin && aArgs.size() <= aMax) || arity_error(aArgs, aMin, aMax, aName);
+        }
+        // (arity's: out of line, so that its check is cheap)
+        bool arity_error(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName)
+        {
             if (aMin == aMax)
                 error("TypeError", std::string{ aName } + "() takes exactly " + std::to_string(aMin) + " argument" + (aMin == 1u ? "" : "s") + " (" + std::to_string(aArgs.size()) + " given)");
             else
@@ -10062,8 +10071,29 @@ namespace neos::python_runtime
 
         // (getattr of an instance, or of an exception of a user exception class: its class's __getattribute__ (and then its 
         // __getattr__), if it has one)
-        // (instances' attributes read and set (by getattr and setattr) by name (its text's address) and class: where each is in its 
-        // instance's attributes, while no class changes, so that it is not looked up again (CPython's inline caches))
+        // (a name that a cache's entry is for: its text's address (a call's) and its text (as it was then: an address can be another 
+        // text's later))
+        struct name_text
+        {
+            char const* name = nullptr;
+            std::uint8_t length = 0u;
+            char text[23] = {};
+            bool matches(char const* aName) const { return name == aName && std::strcmp(text, aName) == 0; }
+            std::string_view view() const { return std::string_view{ text, length }; }
+            bool set(char const* aName)
+            {
+                auto const size = std::strlen(aName);
+                if (size >= sizeof(text))
+                    return false;
+                std::memcpy(text, aName, size + 1u);
+                length = static_cast<std::uint8_t>(size);
+                name = aName;
+                return true;
+            }
+        };
+
+        // (instances' attributes read and set (by getattr and setattr) by name and class: where each is in its instance's attributes, 
+        // while no class changes, so that it is not looked up again (CPython's inline caches))
         struct attribute_cache_entry
         {
             object const* cls = nullptr;
@@ -10071,6 +10101,20 @@ namespace neos::python_runtime
             std::uint64_t generation = 0u;
             std::size_t position = 0u;
         };
+
+        // (an attribute's key is a name's (a NUL terminated text's): with no length found for the text)
+        inline bool key_named(object* aKey, char const* aName)
+        {
+            if (aKey->type != &sStrType.base)
+                return false;
+            auto const& key = as<str_object>(aKey)->value;
+            auto const* const text = key.data();
+            auto const length = key.size();
+            for (std::size_t i = 0u; i < length; ++i)
+                if (text[i] != aName[i] || aName[i] == '\0')
+                    return false;
+            return aName[length] == '\0';
+        }
         constexpr std::size_t AttributeCacheSize = 512u;
         attribute_cache_entry sReadCache[AttributeCacheSize];
         attribute_cache_entry sWriteCache[AttributeCacheSize];
@@ -10087,7 +10131,7 @@ namespace neos::python_runtime
             if (aEntry.cls != aInstance.cls || aEntry.name != aName || aEntry.generation != sClassGeneration || aInstance.attributes.dict == nullptr)
                 return nullptr;
             auto& items = as<dict_object>(aInstance.attributes.dict)->items;
-            if (aEntry.position >= items.size() || !attribute_name(items[aEntry.position].first, aName))
+            if (aEntry.position >= items.size() || !key_named(items[aEntry.position].first, aName))
                 return nullptr;
             return &items[aEntry.position];
         }
@@ -10097,8 +10141,9 @@ namespace neos::python_runtime
             if (aInstance.attributes.dict == nullptr)
                 return;
             auto const& items = as<dict_object>(aInstance.attributes.dict)->items;
+            std::string_view const name{ aName };
             for (std::size_t i = 0u; i < items.size(); ++i)
-                if (attribute_name(items[i].first, aName))
+                if (attribute_name(items[i].first, name))
                 {
                     attribute_cache(aCache, aInstance.cls, aName) = { aInstance.cls, aName, sClassGeneration, i };
                     return;
@@ -10339,25 +10384,42 @@ namespace neos::python_runtime
             auto const k = kind_of(aObject);
             if (k != NEOS_PY_OTHER && !(k == NEOS_PY_ITERATOR && aName[0] == '_' && aName[1] == '_'))
             {
+                // (a builtin type's method found before for the name (the methods do not change))
+                struct builtin_cache_entry
+                {
+                    int kind = NEOS_PY_OTHER;
+                    name_text name;
+                    method_target target;
+                };
+                static builtin_cache_entry sBuiltinCache[128];
+                auto& cached = sBuiltinCache[((reinterpret_cast<std::uintptr_t>(aName) * 0x9E3779B97F4A7C15ull ^ static_cast<std::uintptr_t>(k) * 0xC2B2AE3D27D4EB4Full) >> 40u) % 128u];
+                if (cached.kind == k && cached.name.matches(aName))
+                {
+                    aTarget = cached.target;
+                    return true;
+                }
+                auto const found = [&](method_target const& aFound)
+                {
+                    aTarget = aFound;
+                    if (cached.name.set(aName))
+                    {
+                        cached.kind = k;
+                        cached.target = aFound;
+                    }
+                    else
+                        cached.kind = NEOS_PY_OTHER;
+                    return true;
+                };
                 // (as getattr finds them: sMethods, then str's and the containers' methods)
                 for (auto const& method : sMethods)
                     if (method.kind == k && std::strcmp(method.name, aName) == 0)
-                    {
-                        aTarget = { method.data.function, method.data.function == str_format || method.data.function == int_to_bytes, nullptr };
-                        return true;
-                    }
+                        return found({ method.data.function, method.data.function == str_format || method.data.function == int_to_bytes, nullptr });
                 if (k == NEOS_PY_STR)
                     if (auto const f = str_method_function(aName))
-                    {
-                        aTarget = { f, true, nullptr };
-                        return true;
-                    }
+                        return found({ f, true, nullptr });
                 if (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || k == NEOS_PY_DICT)
                     if (auto const f = container_method_function(k, aName))
-                    {
-                        aTarget = { f, true, nullptr };
-                        return true;
-                    }
+                        return found({ f, true, nullptr });
                 return false;
             }
             if (is_instance(aObject))
@@ -10366,16 +10428,16 @@ namespace neos::python_runtime
                 struct method_cache_entry
                 {
                     object const* cls = nullptr;
-                    char const* name = nullptr;
+                    name_text name;
                     std::uint64_t generation = 0u;
                     object* function = nullptr;
                 };
                 static method_cache_entry sMethodCache[256];
                 auto const cls = user_class_of(aObject);
                 auto& cached = sMethodCache[(((reinterpret_cast<std::uintptr_t>(cls) >> 4u) * 0x9E3779B97F4A7C15ull ^ reinterpret_cast<std::uintptr_t>(aName) * 0xC2B2AE3D27D4EB4Full) >> 40u) % 256u];
-                if (cached.cls == cls && cached.name == aName && cached.generation == sClassGeneration)
+                if (cached.cls == cls && cached.generation == sClassGeneration && cached.name.matches(aName))
                 {
-                    if (as<instance_object>(aObject)->attributes.find(aName) != nullptr)
+                    if (as<instance_object>(aObject)->attributes.find(cached.name.view()) != nullptr)
                         return false;
                     aTarget = { nullptr, true, cached.function };
                     return true;
@@ -10389,7 +10451,14 @@ namespace neos::python_runtime
                             as<function_object>(attribute)->binds)) && as<instance_object>(aObject)->attributes.find(aName) == nullptr)
                     {
                         // (the class's attribute is borrowed: it is its class's while no class changes)
-                        cached = { cls, aName, sClassGeneration, attribute };
+                        if (cached.name.set(aName))
+                        {
+                            cached.cls = cls;
+                            cached.generation = sClassGeneration;
+                            cached.function = attribute;
+                        }
+                        else
+                            cached.cls = nullptr;
                         aTarget = { nullptr, true, attribute };
                         return true;
                     }
@@ -10456,6 +10525,34 @@ namespace neos::python_runtime
             return ref{ make_tuple(std::move(items)) };
         }
 
+        // (a call's arguments as a native method takes them (a vector): while no thread has been started, one of the vectors kept for 
+        // calls (a call that is made while one is made has the next), so that a call allocates none)
+        struct pooled_arguments
+        {
+            static constexpr std::size_t PoolSize = 32u;
+            static inline std::vector<object*> sPool[PoolSize];
+            static inline std::size_t sDepth = 0u;
+            std::optional<std::vector<object*>> own;
+            std::vector<object*>& items;
+            explicit pooled_arguments(std::span<object* const> aItems) : 
+                items{ sDepth < PoolSize && !threads_started() ? sPool[sDepth] : own.emplace() }
+            {
+                if (!own)
+                    ++sDepth;
+                items.assign(aItems.begin(), aItems.end());
+            }
+            ~pooled_arguments()
+            {
+                if (!own)
+                {
+                    items.clear();
+                    --sDepth;
+                }
+            }
+            pooled_arguments(pooled_arguments const&) = delete;
+            pooled_arguments& operator=(pooled_arguments const&) = delete;
+        };
+
         // (a call of load_method's method: its arguments aItems (aArgs: them as a tuple, if the call has one))
         object* pending_method_call(object* aPending, std::span<object* const> aItems, object* aArgs, object* aKwargs)
         {
@@ -10472,8 +10569,8 @@ namespace neos::python_runtime
                     return error("TypeError", std::string{ m.name } + "() takes no keyword arguments");
                 if (aArgs != nullptr)
                     return target.function(m.self, tuple_items(aArgs), anyKeyword ? aKwargs : nullptr);
-                std::vector<object*> const items{ aItems.begin(), aItems.end() };
-                return target.function(m.self, items, anyKeyword ? aKwargs : nullptr);
+                pooled_arguments const items{ aItems };
+                return target.function(m.self, items.items, anyKeyword ? aKwargs : nullptr);
             }
             std::vector<object*> items;
             items.reserve(aItems.size() + 1u);
@@ -10501,13 +10598,23 @@ namespace neos::python_runtime
             return call(aCallable, args.get(), aKwargs);
         }
 
+        // (the number of arguments that the program calls a function of the program with itself (see python::direct_function): -1 if it 
+        // does not)
+        std::int32_t direct_parameters(script_function_object const& f)
+        {
+            if (f.directParameters == -2)
+                f.directParameters = f.program != nullptr || f.flavour != 0 || !f.cells.empty() || (f.result != 'O' && f.result != 'V') ||
+                    !std::all_of(f.parameters.begin(), f.parameters.end(), [](script_parameter const& aParameter) { return aParameter.kind == script_parameter::Positional && aParameter.type == 'O'; }) ?
+                        -1 : static_cast<std::int32_t>(f.parameters.size());
+            return f.directParameters;
+        }
+
         // (a call (of aCount positional arguments; 0x100: a method call's (load_method's method, its instance first)) that the program can make 
         // itself (call_indirect): the function of the program it calls, (its index << 1) | 1 if it returns nothing; -1: python::call_arguments's 
         // call (the callable is not one, its arguments are not as it is called with them as they are, or a signal or another thread waits))
         std::int32_t fn_direct_function(object* aCallable, std::int64_t aCount)
         {
-            gil_check();
-            if (aCallable == nullptr || signals_pending() || current_program() != nullptr)
+            if (aCallable == nullptr)
                 return -1;
             bool const methodCall = (aCount & 0x100) != 0;
             auto const count = static_cast<std::size_t>(aCount & 0xFF) + (methodCall ? 1u : 0u);
@@ -10522,13 +10629,69 @@ namespace neos::python_runtime
             if (function == nullptr || function->type != &sScriptFunctionType.base)
                 return -1;
             auto const& f = *as<script_function_object>(function);
-            if (f.directParameters == -2)
-                f.directParameters = f.program != nullptr || f.flavour != 0 || !f.cells.empty() || (f.result != 'O' && f.result != 'V') ||
-                    !std::all_of(f.parameters.begin(), f.parameters.end(), [](script_parameter const& aParameter) { return aParameter.kind == script_parameter::Positional && aParameter.type == 'O'; }) ?
-                        -1 : static_cast<std::int32_t>(f.parameters.size());
-            if (f.directParameters != static_cast<std::int32_t>(count))
+            if (direct_parameters(f) != static_cast<std::int32_t>(count) || current_program() != nullptr)
+                return -1;
+            // (as python::call_arguments: another thread can run; a signal's handler is called by it)
+            gil_check();
+            if (signals_pending())
                 return -1;
             return static_cast<std::int32_t>((f.index << 1u) | (f.result == 'V' ? 1u : 0u));
+        }
+
+        // (receiver.name(a0, a1) (the arguments that are not null): load_method's call and python::call_arguments' made at once, with no 
+        // method object made for it; a function of the program that is the method (of the receiver's class) that the program can call 
+        // itself (see python::direct_function) is not called: ((((its index << 1) | 1 if it returns nothing) + 1) << 1 is (an integer 
+        // that is not an object's) for the program to call it with the receiver first; otherwise the call's result (NEOS_RT_INTEGER: an 
+        // object's address with its low bit set), or 0 if it raised)
+        std::int64_t fn_call_method(object* aReceiver, char const* aName, object* a0, object* a1)
+        {
+            gil_check();
+            if (!signals_check())
+                return 0;
+            object* const items[] = { a0, a1 };
+            std::span<object* const> const arguments{ items, a0 == nullptr ? 0u : a1 == nullptr ? 1u : 2u };
+            object* result = nullptr;
+            if (method_target target; find_method(aReceiver, aName, target))
+            {
+                if (target.function != nullptr)
+                {
+                    pooled_arguments const native{ arguments };
+                    result = target.function(aReceiver, native.items, nullptr);
+                }
+                else if (target.classFunction->type == &sScriptFunctionType.base)
+                {
+                    auto const& f = *as<script_function_object>(target.classFunction);
+                    if (direct_parameters(f) == static_cast<std::int32_t>(arguments.size() + 1u) && current_program() == nullptr && !signals_pending())
+                        return static_cast<std::int64_t>(((((static_cast<std::uint64_t>(f.index) << 1u) | (f.result == 'V' ? 1u : 0u)) + 1u) << 1u));
+                    ref const function = ref::borrowed(target.classFunction);
+                    result = script_function_invoke(target.classFunction, aReceiver, arguments, nullptr);
+                }
+                else
+                {
+                    // (a builtin function that binds (its instance first))
+                    ref const function = ref::borrowed(target.classFunction);
+                    std::vector<object*> bound;
+                    bound.reserve(arguments.size() + 1u);
+                    bound.push_back((retain(aReceiver), aReceiver));
+                    for (auto a : arguments)
+                        bound.push_back((retain(a), a));
+                    ref const args{ make_tuple(std::move(bound)) };
+                    result = call(target.classFunction, args.get(), nullptr);
+                }
+            }
+            else
+            {
+                ref const attribute{ getattr(aReceiver, aName) };
+                if (!attribute)
+                {
+                    note_attribute_error(aReceiver);
+                    return 0;
+                }
+                result = arguments_call(attribute.get(), arguments, nullptr, nullptr);
+            }
+            if (checked(result) == nullptr)
+                return 0;
+            return static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(result) | 1u);
         }
 
         int instance_setattr(neos_py_context*, object* aSelf, char const* aName, object* aValue)
@@ -16706,6 +16869,7 @@ namespace neos::python_runtime
             { "load_method", NEOS_RT_FUNCTION(fn_load_method), OBJ, 2u, { OBJ, STR }, 0u },
             { "call_arguments", NEOS_RT_FUNCTION(fn_call_arguments), OBJ, 4u, { OBJ, OBJ, OBJ, OBJ }, 0u },
             { "direct_function", NEOS_RT_FUNCTION(fn_direct_function), I32, 2u, { OBJ, I64 }, 0u },
+            { "call_method", NEOS_RT_FUNCTION(fn_call_method), INT, 4u, { OBJ, STR, OBJ, OBJ }, 0u },
             { "function", NEOS_RT_FUNCTION(fn_function), OBJ, 4u, { STR, I32, STR, OBJ }, 0u },
             { "getitem", NEOS_RT_FUNCTION(fn_getitem), OBJ, 2u, { OBJ, OBJ }, 0u },
             { "getitem_integer", NEOS_RT_FUNCTION(fn_getitem_integer), OBJ, 2u, { OBJ, INT }, 0u },

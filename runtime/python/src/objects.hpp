@@ -767,6 +767,7 @@ namespace neos::python_runtime
         void gil_acquire();
         void gil_release();
         void gil_check();
+        bool threads_started();                         // (a thread has been started (the GIL is used))
         void threads_end();
 
         // --- generators (generators.cpp)
