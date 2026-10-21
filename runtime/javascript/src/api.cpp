@@ -141,6 +141,22 @@ namespace neos::javascript_runtime
         return sHost;
     }
 
+    void write_standard(int aStream, std::string_view aText)
+    {
+        if (sHost != nullptr && sHost->version >= 9u && sHost->std_write != nullptr)
+            sHost->std_write(aStream, aText.data(), aText.size());
+        else
+            std::fwrite(aText.data(), 1u, aText.size(), aStream == 2 ? stderr : stdout);
+    }
+
+    void flush_standard(int aStream)
+    {
+        if (sHost != nullptr && sHost->version >= 9u && sHost->std_flush != nullptr)
+            sHost->std_flush(aStream);
+        else
+            std::fflush(aStream == 2 ? stderr : stdout);
+    }
+
     std::unordered_map<value, global_binding>& global_lexicals()
     {
         return the_realm().lexicals;

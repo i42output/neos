@@ -933,8 +933,7 @@ namespace neos::python_runtime
                 std::string const text = error_text();
                 clear_error();
                 auto const name = attribute_text(aThread, "name");
-                std::fprintf(stderr, "Exception in thread %s:\nTraceback (most recent call last):\n%s\n", name.c_str(), text.c_str());
-                std::fflush(stderr);
+                write_standard(2, "Exception in thread " + name + ":\nTraceback (most recent call last):\n" + text + "\n");
             }
 
             void run_thread(object* aThread, thread_state* aState)

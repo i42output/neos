@@ -179,16 +179,7 @@ namespace
     char const* input()
     {
         std::string line;
-        char buffer[256];
-        bool read = false;
-        while (std::fgets(buffer, sizeof(buffer), stdin) != nullptr)
-        {
-            read = true;
-            line += buffer;
-            if (!line.empty() && line.back() == '\n')
-                break;
-        }
-        if (!read)
+        if (!detail::read_standard_line(line))
         {
             raise("EOFError", "EOF when reading a line");
             return "";

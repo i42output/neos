@@ -634,6 +634,16 @@ namespace neos::python_runtime
         object* call_method_named(object* aObject, char const* aName, std::vector<object*> aArgs);  // (steals the arguments)
         object* fn_import(char const* aName);
         bool write_out(std::string const& aText);      // (false: an exception (e.g. BrokenPipeError) has been raised)
+        // the standard streams (aStream: 0 (input), 1 (output) or 2 (error)): the running program's, as its host gives them (they may be 
+        // redirected, e.g. to a window: see neos_rt_host::std_write), else the process's (stdin, stdout and stderr)
+        bool write_standard(int aStream, std::string_view aText);   // (written and flushed (false: it failed))
+        int flush_standard(int aStream);                // (as fflush)
+        std::size_t read_standard(char* aBuffer, std::size_t aCount);  // (the input's: as fread)
+        int getc_standard();                            // (the input's: as fgetc)
+        int ungetc_standard(int aCharacter);            // (the input's: as ungetc)
+        bool read_standard_line(std::string& aLine);    // (the input's next line (with its line ending); false: the end of input)
+        std::size_t read_standard_some(char* aBuffer, std::size_t aCount);  // (the input's, as a terminal's read: at most aCount bytes, 
+                                                        // up to the end of a line (0: the end of input))
 
         object* imported_modules();                     // (sys.modules: a new reference)
         bool modules_imported(char const* aName);

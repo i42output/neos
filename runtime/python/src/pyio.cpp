@@ -633,6 +633,14 @@ namespace neos::python_runtime::detail
         long long fd_read(int aFd, void* aBuffer, std::size_t aCount)
         {
             aCount = std::min(aCount, kReadMax);
+            // (the standard input: the running program's (see read_standard_some))
+            if (aFd == 0)
+            {
+                gil_release();
+                auto const n = read_standard_some(static_cast<char*>(aBuffer), aCount);
+                gil_acquire();
+                return static_cast<long long>(n);
+            }
             long long n = 0;
             int error = 0;
             for (;;)
@@ -673,6 +681,20 @@ namespace neos::python_runtime::detail
         // (_Py_write: as fd_read)
         long long fd_write(int aFd, void const* aBuffer, std::size_t aCount)
         {
+            // (the standard output and error: the running program's (see write_standard))
+            if (aFd == 1 || aFd == 2)
+            {
+                gil_release();
+                bool const written = write_standard(aFd, std::string_view{ static_cast<char const*>(aBuffer), aCount });
+                gil_acquire();
+                if (!written)
+                {
+                    raise_os_error(EIO);
+                    errno = EIO;
+                    return -1;
+                }
+                return static_cast<long long>(aCount);
+            }
 #if defined(_WIN32)
             // (the Windows console returns an error (12: not enough space) on writing into stdout if stdout mode is binary and the length is
             // greater than 66,000 bytes (or less, depending on heap usage))

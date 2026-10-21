@@ -34,6 +34,7 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <iostream>
 #include <neolib/core/map.hpp>
 #include <neolib/core/string_view.hpp>
 #include <neolib/core/reference_counted.hpp>
@@ -58,7 +59,11 @@ namespace neos
         struct no_text : warning { no_text() : warning("no text") {} };
         struct compiler_error : error { compiler_error(std::string const& aReason) : error(aReason) {} };
     public:
+        // the context's standard streams: those of the programs that it runs (see neos_rt_host::std_write) and of its compiler's
+        // reports; a host (e.g. an IDE) redirects them (e.g. to a window) by giving the context its own (see context's constructors)
+        virtual std::istream& cin() = 0;
         virtual std::ostream& cout() = 0;
+        virtual std::ostream& cerr() = 0;
     public:
         virtual const concept_libraries_t& concept_libraries() const = 0;
         virtual void find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const = 0;

@@ -576,11 +576,9 @@ namespace neos::javascript_runtime
 
         void write(int aStream, std::string const& aText)
         {
-            auto* const stream = aStream == 2 ? stderr : stdout;
-            std::fwrite(aText.data(), 1u, aText.size(), stream);
-            std::fputc('\n', stream);
+            write_standard(aStream, aText + "\n");
             if (aStream == 2)
-                std::fflush(stream);
+                flush_standard(aStream);
         }
 
         std::string format_arguments(arguments aArguments, int aStream)
@@ -666,7 +664,7 @@ namespace neos::javascript_runtime
 
     void report_uncaught(value aException, bool aInPromise)
     {
-        std::fflush(stdout);
+        flush_standard(1);
         std::string text;
         try
         {

@@ -811,6 +811,10 @@ namespace neos::javascript_runtime
 
     neos_rt_host const* host();
     void* current_program();
+    // the standard streams (aStream: 1 (output) or 2 (error)): the running program's, as its host gives them (they may be redirected, 
+    // e.g. to a window: see neos_rt_host::std_write), else the process's (stdout and stderr)
+    void write_standard(int aStream, std::string_view aText);
+    void flush_standard(int aStream);
 
     // --- abstract operations (operations.cpp)
 

@@ -206,26 +206,47 @@ namespace neos::python_runtime
                 return false;
             }
 
-            // (the file's characters from its buffer, without locking it for each (it is locked for the line))
+            // (the file's characters from its buffer, without locking it for each (it is locked for the line); the standard input's: the 
+            // running program's (see getc_standard))
             struct locked_file
             {
                 std::FILE* file;
+                bool const standard;
 #if defined(_WIN32)
-                explicit locked_file(std::FILE* aFile) : file{ aFile } { ::_lock_file(file); }
-                ~locked_file() { ::_unlock_file(file); }
-                int get() const { return _getc_nolock(file); }     // (MinGW's is a macro)
+                explicit locked_file(file_object const& f) : file{ f.file }, standard{ f.stream == 0 } { if (!standard) ::_lock_file(file); }
+                ~locked_file() { if (!standard) ::_unlock_file(file); }
+                int get() const { return standard ? getc_standard() : _getc_nolock(file); }     // (MinGW's is a macro)
 #if defined(_MSC_VER)
-                void unget(int aCharacter) const { ::_ungetc_nolock(aCharacter, file); }
+                void unget(int aCharacter) const { if (standard) ungetc_standard(aCharacter); else ::_ungetc_nolock(aCharacter, file); }
 #else
-                void unget(int aCharacter) const { std::ungetc(aCharacter, file); }   // (its lock is recursive)
+                void unget(int aCharacter) const { if (standard) ungetc_standard(aCharacter); else std::ungetc(aCharacter, file); }   // (its lock is recursive)
 #endif
 #else
-                explicit locked_file(std::FILE* aFile) : file{ aFile } { ::flockfile(file); }
-                ~locked_file() { ::funlockfile(file); }
-                int get() const { return getc_unlocked(file); }
-                void unget(int aCharacter) const { std::ungetc(aCharacter, file); }
+                explicit locked_file(file_object const& f) : file{ f.file }, standard{ f.stream == 0 } { if (!standard) ::flockfile(file); }
+                ~locked_file() { if (!standard) ::funlockfile(file); }
+                int get() const { return standard ? getc_standard() : getc_unlocked(file); }
+                void unget(int aCharacter) const { if (standard) ungetc_standard(aCharacter); else std::ungetc(aCharacter, file); }
 #endif
             };
+
+            // (the file's bytes (as fread, fgetc and ungetc): the standard input's, the running program's (see read_standard))
+            std::size_t file_fread(void* aBuffer, std::size_t aCount, file_object& f)
+            {
+                return f.stream == 0 ? read_standard(static_cast<char*>(aBuffer), aCount) : std::fread(aBuffer, 1u, aCount, f.file);
+            }
+
+            int file_fgetc(file_object& f)
+            {
+                return f.stream == 0 ? getc_standard() : std::fgetc(f.file);
+            }
+
+            void file_ungetc(int aCharacter, file_object& f)
+            {
+                if (f.stream == 0)
+                    ungetc_standard(aCharacter);
+                else
+                    std::ungetc(aCharacter, f.file);
+            }
 
 #if !defined(_WIN32)
             // (a line read from the file's buffer by getdelim (memchr) (false: it cannot be (a limit; a \r that may end a line of a file that is
@@ -237,6 +258,9 @@ namespace neos::python_runtime
                 bool const crEnds = f.text && aEnding == "\r";
                 bool const crlfEnds = f.text && aEnding == "\r\n";
                 bool const loneCrEnds = universalText || untranslated;
+                // (the standard input: the running program's (see getc_standard), not the file's buffer)
+                if (f.stream == 0)
+                    return false;
                 if (loneCrEnds)
                 {
                     if (f.regular < 0)
@@ -307,7 +331,7 @@ namespace neos::python_runtime
                 bool const untranslated = f.text && !universal(f) && ending.empty();   // (newline='': \r, \r\n and \n end lines, untranslated)
                 bool const utf8Text = f.text && f.encoding == "utf-8";
                 long long count = 0;
-                locked_file const file{ f.file };
+                locked_file const file{ f };
                 for (;;)
                 {
                     if (aLimit >= 0 && count >= aLimit)
@@ -361,7 +385,7 @@ namespace neos::python_runtime
                 char buffer[65536];
                 for (;;)
                 {
-                    auto const n = std::fread(buffer, 1u, sizeof(buffer), f.file);
+                    auto const n = file_fread(buffer, sizeof(buffer), f);
                     data.append(buffer, n);
                     if (n < sizeof(buffer))
                         break;
@@ -426,7 +450,7 @@ namespace neos::python_runtime
                 if (!f.text)
                 {
                     std::string data(static_cast<std::size_t>(aSize), '\0');
-                    auto const n = std::fread(data.data(), 1u, data.size(), f.file);
+                    auto const n = file_fread(data.data(), data.size(), f);
                     data.resize(n);
                     return make_bytes(std::move(data));
                 }
@@ -435,14 +459,14 @@ namespace neos::python_runtime
                 std::size_t characters = 0u;
                 while (characters < static_cast<std::size_t>(aSize))
                 {
-                    int const c = std::fgetc(f.file);
+                    int const c = file_fgetc(f);
                     if (c == EOF)
                         break;
                     if (universal(f) && c == '\r')
                     {
-                        int const next = std::fgetc(f.file);
+                        int const next = file_fgetc(f);
                         if (next != '\n' && next != EOF)
-                            std::ungetc(next, f.file);
+                            file_ungetc(next, f);
                         data += '\n';
                     }
                     else
@@ -453,7 +477,7 @@ namespace neos::python_runtime
                         std::size_t const more = lead < 0x80u ? 0u : lead < 0xE0u ? 1u : lead < 0xF0u ? 2u : 3u;
                         for (std::size_t k = 0u; k < more && f.encoding == "utf-8"; ++k)
                         {
-                            int const b = std::fgetc(f.file);
+                            int const b = file_fgetc(f);
                             if (b == EOF)
                                 break;
                             data += static_cast<char>(b);
@@ -523,14 +547,17 @@ namespace neos::python_runtime
                     if (!write_out(data))
                         return nullptr;
                 }
+                else if (f.stream == 2)
+                {
+                    if (!write_standard(2, data))
+                        return raise_os_error(errno);
+                }
                 else
                 {
                     if (f.appending)
                         std::fseek(f.file, 0, SEEK_END);
                     if (std::fwrite(data.data(), 1u, data.size(), f.file) != data.size())
                         return raise_os_error(errno);
-                    if (f.stream == 2)
-                        std::fflush(f.file);
                 }
                 return make_int(count);
             }
@@ -541,6 +568,8 @@ namespace neos::python_runtime
                     return none();
                 if (!f.standard && f.file != nullptr)
                     std::fclose(f.file);
+                else if (f.standard)
+                    flush_standard(f.stream);
                 else if (f.file != nullptr)
                     std::fflush(f.file);
                 f.closed = !f.standard;
@@ -639,7 +668,9 @@ namespace neos::python_runtime
                     {
                         if (!check_open(f))
                             return nullptr;
-                        if (f.file != nullptr)
+                        if (f.standard)
+                            flush_standard(f.stream);
+                        else if (f.file != nullptr)
                             std::fflush(f.file);
                         return none();
                     } },

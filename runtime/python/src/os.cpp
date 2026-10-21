@@ -2017,7 +2017,7 @@ namespace neos::python_runtime
                         std::string command;
                         if (!str_of(a[0], command))
                             return nullptr;
-                        std::fflush(stdout);
+                        flush_standard(1);
                         gil_release();
                         auto const status = std::system(command.c_str());
                         gil_acquire();
@@ -2161,10 +2161,11 @@ namespace neos::python_runtime
                             return error("ValueError", "negative buffersize in read");
                         std::string data(static_cast<std::size_t>(n), '\0');
                         gil_release();
+                        // (the standard input: the running program's (see read_standard_some))
 #if defined(_WIN32)
-                        auto const r = ::_read(static_cast<int>(fd), data.data(), static_cast<unsigned>(n));
+                        auto const r = fd == 0 ? static_cast<long long>(read_standard_some(data.data(), data.size())) : ::_read(static_cast<int>(fd), data.data(), static_cast<unsigned>(n));
 #else
-                        auto const r = ::read(static_cast<int>(fd), data.data(), static_cast<std::size_t>(n));
+                        auto const r = fd == 0 ? static_cast<long long>(read_standard_some(data.data(), data.size())) : ::read(static_cast<int>(fd), data.data(), static_cast<std::size_t>(n));
 #endif
                         auto const e = errno;
                         gil_acquire();
@@ -2184,10 +2185,13 @@ namespace neos::python_runtime
                             return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(a[1]) + "'");
                         std::string const copy{ data };
                         gil_release();
+                        // (the standard output and error: the running program's (see write_standard))
 #if defined(_WIN32)
-                        auto const r = ::_write(static_cast<int>(fd), copy.data(), static_cast<unsigned>(copy.size()));
+                        auto const r = fd == 1 || fd == 2 ? (write_standard(static_cast<int>(fd), copy) ? static_cast<long long>(copy.size()) : (errno = EIO, -1)) : 
+                            ::_write(static_cast<int>(fd), copy.data(), static_cast<unsigned>(copy.size()));
 #else
-                        auto const r = ::write(static_cast<int>(fd), copy.data(), copy.size());
+                        auto const r = fd == 1 || fd == 2 ? (write_standard(static_cast<int>(fd), copy) ? static_cast<long long>(copy.size()) : (errno = EIO, -1)) : 
+                            ::write(static_cast<int>(fd), copy.data(), copy.size());
 #endif
                         auto const e = errno;
                         gil_acquire();

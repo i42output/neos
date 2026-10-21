@@ -57,21 +57,20 @@ namespace neos
             // aSourceName) in the language aLanguage with the language's options aOptions (none: aError, the error))
             using compile_service = std::function<std::optional<text>(std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
                 std::string const& aOptions, std::string& aError)>;
+            // (the calling thread's: a thread (below) takes those of the thread that constructs it, so that programs that run at the 
+            // same time (e.g. in different contexts) each have their own)
             void set_compile_service(compile_service aService);
-            // (the program's command line arguments (see neos_rt_host::arguments))
+            // (the program's command line arguments (see neos_rt_host::arguments); the calling thread's, as set_compile_service's)
             void set_program_arguments(std::vector<std::string> aArguments);
 
             class thread : public std::thread
             {
             public:
+                // (the program's standard streams: aInput, aOutput and aError (see neos_rt_host::std_write))
+                thread(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aError, bool aRestricted = false);
                 thread(text const& aText, std::ostream& aOutput, std::istream& aInput, bool aRestricted = false) :
-                    iText{ aText },
-                    iOutput{ aOutput },
-                    iInput{ aInput },
-                    iRestricted{ aRestricted }
+                    thread{ aText, aOutput, aInput, std::cerr, aRestricted }
                 {
-                    // start executing only once all members have been constructed
-                    static_cast<std::thread&>(*this) = std::thread{ [this]() { execute(); } };
                 }
             public:
                 void execute();
@@ -94,6 +93,9 @@ namespace neos
                 text const iText;
                 std::ostream& iOutput;
                 std::istream& iInput;
+                std::ostream& iErrorOutput;
+                compile_service const iCompileService;
+                std::vector<std::string> const iArguments;
                 bool const iRestricted; ///< restricted mode: runtime plugin functions that can change the host environment cannot be called
                 language::data_type iResult;
                 std::optional<std::string> iError;

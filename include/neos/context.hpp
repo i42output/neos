@@ -36,6 +36,7 @@
 #include <neos/neos.hpp>
 #include <map>
 #include <string>
+#include <iostream>
 #include <optional>
 #include <vector>
 #include <memory>
@@ -55,12 +56,21 @@ namespace neos
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
     public:
-        context(std::ostream& aCout);
-        context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider);
-        context(std::ostream& aCout, neolib::i_application& aApplication);
+        context(std::ostream& aCout) : 
+            context{ std::cin, aCout, std::cerr } {}
+        context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) : 
+            context{ std::cin, aCout, std::cerr, aServiceProvider } {}
+        context(std::ostream& aCout, neolib::i_application& aApplication) : 
+            context{ std::cin, aCout, std::cerr, aApplication } {}
+        // (the standard streams: aCin, aCout and aCerr (see i_context::cin))
+        context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr);
+        context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr, neolib::i_service_provider& aServiceProvider);
+        context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr, neolib::i_application& aApplication);
         ~context();
     public:
+        std::istream& cin() final;
         std::ostream& cout() final;
+        std::ostream& cerr() final;
     public:
         const concept_libraries_t& concept_libraries() const final;
         void find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const final;
@@ -99,7 +109,9 @@ namespace neos
         void load_fragment(language::i_source_fragment& aFragment) final;
         void load_fragment(language::i_source_fragment& aFragment, std::istream& aStream);
     private:
+        std::istream& iCin;
         std::ostream& iCout;
+        std::ostream& iCerr;
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;
         concept_libraries_t iConceptLibraries;
@@ -109,6 +121,7 @@ namespace neos
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;
         std::vector<neolib::ref_ptr<neolib::i_plugin>> iAddedPlugins;
         std::map<std::string, std::string> iPackages;
+        std::vector<std::string> iArguments;
         bool iRestricted = false;
     };
 }

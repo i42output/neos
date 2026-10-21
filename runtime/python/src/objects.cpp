@@ -8595,7 +8595,7 @@ namespace neos::python_runtime
                 ref const r{ call_method_named(out.get(), "flush", {}) };
                 clear_error();
             }
-            std::fflush(stdout);
+            flush_standard(1);
             std::string const text = aText != nullptr ? aText : "";
             clear_error();
             ref const e{ fn_caught(text.c_str()) };
@@ -8618,8 +8618,7 @@ namespace neos::python_runtime
                 std::string message;
                 if (args.size() == 1u ? !str_of(args[0], message) : !exception_text(e.get(), message))
                     clear_error();
-                std::fprintf(stderr, "%s\n", message.c_str());
-                std::fflush(stderr);
+                write_standard(2, message + "\n");
                 return 1;
             }
             // (sys.excepthook, if the program has replaced it)
@@ -8642,21 +8641,20 @@ namespace neos::python_runtime
                         clear_error();
                         std::set<object*> hookSeen;
                         std::set<object*> seen;
-                        std::fputs(("Error in sys.excepthook:\n" + exception_report(hookError.get(), hookSeen) + "\nOriginal exception was:\n" + 
-                            exception_report(e.get(), seen)).c_str(), stderr);
+                        write_standard(2, "Error in sys.excepthook:\n" + exception_report(hookError.get(), hookSeen) + "\nOriginal exception was:\n" + 
+                            exception_report(e.get(), seen));
                     }
                     if (ref const err{ module_attribute("sys", "stderr") })
                     {
                         ref const f{ call_method_named(err.get(), "flush", {}) };
                     }
                     clear_error();
-                    std::fflush(stderr);
+                    flush_standard(2);
                     return 1;
                 }
             }
             std::set<object*> seen;
-            std::fputs(exception_report(e.get(), seen, traceback_colorize()).c_str(), stderr);
-            std::fflush(stderr);
+            write_standard(2, exception_report(e.get(), seen, traceback_colorize()));
             return 1;
         }
 
@@ -8714,6 +8712,75 @@ namespace neos::python_runtime
             return false;
         }
 
+        namespace
+        {
+            neos_rt_host const* standard_host()
+            {
+                auto const* h = python_runtime::host();
+                return h != nullptr && h->version >= 9u && h->std_write != nullptr ? h : nullptr;
+            }
+        }
+
+        bool write_standard(int aStream, std::string_view aText)
+        {
+            if (auto const* h = standard_host())
+                return h->std_write(aStream, aText.data(), aText.size()) == aText.size() && h->std_flush(aStream) == 0;
+            auto* const stream = aStream == 2 ? stderr : stdout;
+            return std::fwrite(aText.data(), 1u, aText.size(), stream) == aText.size() && std::fflush(stream) == 0;
+        }
+
+        int flush_standard(int aStream)
+        {
+            if (auto const* h = standard_host())
+                return h->std_flush(aStream);
+            return std::fflush(aStream == 0 ? stdin : aStream == 1 ? stdout : stderr);
+        }
+
+        std::size_t read_standard(char* aBuffer, std::size_t aCount)
+        {
+            if (auto const* h = standard_host())
+                return h->std_read(0, aBuffer, aCount);
+            return std::fread(aBuffer, 1u, aCount, stdin);
+        }
+
+        int getc_standard()
+        {
+            if (auto const* h = standard_host())
+                return h->std_getc(0);
+            return std::fgetc(stdin);
+        }
+
+        int ungetc_standard(int aCharacter)
+        {
+            if (auto const* h = standard_host())
+                return h->std_ungetc(aCharacter, 0);
+            return std::ungetc(aCharacter, stdin);
+        }
+
+        std::size_t read_standard_some(char* aBuffer, std::size_t aCount)
+        {
+            std::size_t n = 0u;
+            for (int c = n < aCount ? getc_standard() : EOF; c != EOF; c = n < aCount ? getc_standard() : EOF)
+            {
+                aBuffer[n++] = static_cast<char>(c);
+                if (c == '\n')
+                    break;
+            }
+            return n;
+        }
+
+        bool read_standard_line(std::string& aLine)
+        {
+            aLine.clear();
+            for (int c = getc_standard(); c != EOF; c = getc_standard())
+            {
+                aLine += static_cast<char>(c);
+                if (c == '\n')
+                    return true;
+            }
+            return !aLine.empty();
+        }
+
         bool write_out(std::string const& aText)
         {
             // (sys.stdout, if the program has replaced it (e.g. contextlib.redirect_stdout))
@@ -8725,7 +8792,7 @@ namespace neos::python_runtime
                 return static_cast<bool>(r);
             }
             // (an error writing (e.g. EPIPE: the reader has gone, SIGPIPE being ignored) is OSError, as CPython's)
-            if (std::fwrite(aText.data(), 1u, aText.size(), stdout) != aText.size() || std::fflush(stdout) != 0)
+            if (!write_standard(1, aText))
             {
                 int const e = errno;
                 std::clearerr(stdout);
@@ -10807,15 +10874,14 @@ namespace neos::python_runtime
                 ref const flushed{ call_method_named(out.get(), "flush", {}) };
                 clear_error();
             }
-            std::fflush(stdout);
+            flush_standard(1);
             ref const e{ take_exception() };
             std::string name;
             if (aObject != nullptr && !repr_of(aObject, name))
                 clear_error();
             std::set<object*> seen;
             std::string const report = e ? exception_report(e.get(), seen) : std::string{};
-            std::fprintf(stderr, "Exception ignored in: %s\n%s", name.c_str(), report.c_str());
-            std::fflush(stderr);
+            write_standard(2, "Exception ignored in: " + name + "\n" + report);
         }
 
         // (an instance is destroyed: its class's __del__ is called (once: it can resurrect it); its weak references are cleared)
@@ -13026,16 +13092,7 @@ namespace neos::python_runtime
                     return nullptr;
             }
             std::string line;
-            char buffer[256];
-            bool read = false;
-            while (std::fgets(buffer, sizeof(buffer), stdin) != nullptr)
-            {
-                read = true;
-                line += buffer;
-                if (!line.empty() && line.back() == '\n')
-                    break;
-            }
-            if (!read)
+            if (!read_standard_line(line))
                 return error("EOFError", "EOF when reading a line");
             while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
                 line.pop_back();

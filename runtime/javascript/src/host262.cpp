@@ -59,8 +59,8 @@ namespace neos::javascript_runtime
                 line += is_string(aArguments[i]) ? utf8(aArguments[i]) : inspect(aArguments[i], false);
             }
             line += "\n";
-            std::fwrite(line.data(), 1u, line.size(), stdout);
-            std::fflush(stdout);
+            write_standard(1, line);
+            flush_standard(1);
             return Undefined;
         }
 
@@ -141,7 +141,7 @@ namespace neos::javascript_runtime
             catch (js_exception const& e)
             {
                 std::string const line = "Uncaught (agent) " + inspect(e.thrown, false) + "\n";
-                std::fwrite(line.data(), 1u, line.size(), stdout);
+                write_standard(1, line);
             }
             for (;;)
             {
@@ -156,7 +156,7 @@ namespace neos::javascript_runtime
                     catch (js_exception const& e)
                     {
                         std::string const line = "Uncaught (agent) " + inspect(e.thrown, false) + "\n";
-                        std::fwrite(line.data(), 1u, line.size(), stdout);
+                        write_standard(1, line);
                     }
                 }
                 else if (a.message && a.callback != Undefined)
@@ -171,7 +171,7 @@ namespace neos::javascript_runtime
                     catch (js_exception const& e)
                     {
                         std::string const line = "Uncaught (agent) " + inspect(e.thrown, false) + "\n";
-                        std::fwrite(line.data(), 1u, line.size(), stdout);
+                        write_standard(1, line);
                     }
                 }
                 else

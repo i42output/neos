@@ -41,6 +41,7 @@
 #include <boost/program_options.hpp>
 #include <neos/context.hpp>
 #include <neos/image.hpp>
+#include <neos/console.hpp>
 
 using namespace std::literals::string_literals;
 
@@ -54,43 +55,6 @@ namespace
             return false;
         else
             throw std::runtime_error("invalid command argument(s)");
-    }
-
-    // the path of an image of the program: aPath, else (in the current directory) the program's file name's stem with 
-    // ".exe" on Windows and "a.out" elsewhere; it must not be one of the program's source files
-    std::string image_path(neos::context const& aContext, std::string const& aPath)
-    {
-        std::string result = aPath;
-        if (result.empty())
-        {
-#if defined(_WIN32)
-            std::string stem = "a";
-            if (!aContext.program().translationUnits.empty() && !aContext.program().translationUnits.front().fragments.empty())
-                if (auto const& path = aContext.program().translationUnits.front().fragments.front().source_file_path())
-                    stem = std::filesystem::path{ path->to_std_string() }.stem().string();
-            result = stem + ".exe";
-#else
-            result = "a.out";
-#endif
-        }
-        for (auto const& unit : aContext.program().translationUnits)
-            for (auto const& fragment : unit.fragments)
-                if (auto const& source = fragment.source_file_path())
-                {
-                    std::error_code ec;
-                    if (std::filesystem::equivalent(result, source->to_std_string(), ec))
-                        throw std::runtime_error("the image would replace the source file '" + source->to_std_string() + "'");
-                }
-        return result;
-    }
-
-    // (an image of the program: with the compiler stub of its language (its compiler built in) if the program compiles source while it 
-    // runs (e.g. Python's exec))
-    std::string write_image(neos::context& aContext, std::string const& aPath)
-    {
-        auto const& language = aContext.schema().meta().language;
-        auto const stub = aContext.compiler().compiles_at_run_time(language) ? neos::image::compiler_stub_path(language) : neos::image::stub_path();
-        return neos::image::write(image_path(aContext, aPath), aContext.text(), aContext.restricted(), stub);
     }
 
     // --img: its path is only ever given as --img=<path> (an argument that follows it is not its path but e.g. the
@@ -109,226 +73,6 @@ namespace
         }
         return {};
     }
-}
-
-bool process_command(neos::context& aContext, bool& aInteractive, const std::string& aConsoleInput)
-{
-    auto output_parse_time = [](std::chrono::steady_clock::duration aParseTime)
-    {
-        std::cout << "Parse time: " << std::chrono::duration_cast<std::chrono::microseconds>(aParseTime).count() / 1000.0 << "ms" << std::endl;
-    };
-    auto output_compilation_time = [&aContext, &output_parse_time]()
-    {
-        if (aContext.compiler().preparse())
-            std::cout << "Pre-parse time: " << std::chrono::duration_cast<std::chrono::microseconds>(aContext.compiler().preparse_time()).count() / 1000.0 << "ms" << std::endl;
-        output_parse_time(aContext.compiler().parse_time());
-        std::cout << "Compilation time: " <<
-            std::chrono::duration_cast<std::chrono::microseconds>(aContext.compiler().end_time() - aContext.compiler().start_time()).count() / 1000.0 << "ms" << std::endl;
-    };
-    auto output_schema = [&aContext, &output_parse_time]()
-    {
-        output_parse_time(aContext.schema().parse_time());
-        std::cout << "Language: " << aContext.schema().meta().description + "\nVersion: " + aContext.schema().meta().version << std::endl;
-        if (!aContext.schema().meta().copyright.empty())
-            std::cout << aContext.schema().meta().copyright << std::endl;
-    };
-    std::vector<std::pair<std::string::const_iterator, std::string::const_iterator>> words;
-    const std::string delimeters{ " " };
-    neolib::tokens(aConsoleInput.cbegin(), aConsoleInput.cend(), delimeters.cbegin(), delimeters.cend(), words);
-    if (words.empty())
-        return true;
-    const std::string command{ words[0].first, words[0].second };
-    if (command.empty())
-        return true;
-    std::string parameters{ words.size() > 1 ? words[1].first : aConsoleInput.cend(), aConsoleInput.cend() };
-    try
-    {
-        if (aInteractive)
-            aContext.evaluate(aConsoleInput);
-        else if (command == "?" || command == "h" || command == "help")
-        {
-            std::cout << "h(elp)\n"
-                << "s(chema) <path to language schema>       Load language schema\n"
-                << "l(oad) <path to program>                 Load program\n"
-                << "list                                     List program\n"
-                << "c(ompile)                                Compile program\n"
-                << "r(un)                                    Run program\n"
-                << "img [<path>]                             Make an image of the (compiled) program: an executable that\n"
-                << "                                         runs it (by default <program>.exe on Windows, else a.out)\n"
-                << "![<expression>]                          Evaluate expression (enter interactive mode if expression omitted)\n"
-                << ":<input>                                 Input (as stdin)\n"
-                << "q(uit)                                   Quit neos\n"
-                << "lc                                       List loaded concept libraries\n"
-                << "t(race) <0|1|2|3|4|5> [<filter>]         Compiler trace\n"
-                << "parsetimes [on|off]                      Output the time of each parse (off: only the total)\n"
-                << "preparse [on|off]                        A language's own pass over a source before it is parsed (on by\n"
-                << "                                         default)\n"
-                << "trap_on_overflow [on|off]                Integer arithmetic whose result overflows its (fixed size) type\n"
-                << "                                         traps (off by default: it wraps)\n"
-                << "bigint_promotion [on|off|schema]         Integers of any size: a result that overflows is promoted to an\n"
-                << "                                         arbitrary precision integer (e.g. Python's int); by default the\n"
-                << "                                         language's schema says (bigint.promotion)\n"
-                << "m(etrics)                                Display metrics for running programs\n"
-                << "restricted [on|off]                      Restricted mode: programs cannot call runtime plugin functions\n"
-                << "                                         that can change the host environment (off by default)\n"
-                << std::flush;
-        }
-        else if (command == "s" || command == "schema")
-        {
-            std::cout << "Loading schema '" << (parameters.empty() && aContext.schema_loaded() ? aContext.schema().path() : parameters) << "'..." << std::endl;
-            aContext.load_schema(parameters);
-            output_schema();
-        }
-        else if (command == "l" || command == "load")
-        {
-            bool const schemaWasLoaded = aContext.schema_loaded();
-            aContext.load_program(parameters);
-            if (!schemaWasLoaded && aContext.schema_loaded()) // (the schema for the program's file type)
-            {
-                std::cout << "Loading schema '" << aContext.schema().path() << "'..." << std::endl;
-                output_schema();
-            }
-            std::cout << "Program: " << parameters << std::endl;
-        }
-        else if (command == "c" || command == "compile")
-        {
-            aContext.compile_program();
-            output_compilation_time();
-        }
-        else if (command == "list")
-        {
-            for (auto const& tu : aContext.program().translationUnits)
-                for (auto const& f : tu.fragments)
-                {
-                    if (f.source_file_path() != std::nullopt)
-                        std::cout << "File '" << *f.source_file_path() << "':" << std::endl;
-                    // (the source's last line is terminated when it is loaded (terminate_last_line): a newline only if it is not)
-                    std::cout << f.source();
-                    if (f.source().empty() || f.source().back() != '\n')
-                        std::cout << '\n';
-                    std::cout << std::flush;
-                }
-        }
-        else if (command == "r" || command == "run")
-            aContext.run();
-        else if (command == "img")
-        {
-            if (aContext.text().empty())
-                throw neos::context::no_text();
-            auto const path = write_image(aContext, parameters);
-            std::cout << "Image: " << path << std::endl;
-        }
-        else if (command[0] == '!')
-        {
-            if (!aContext.schema_loaded())
-                throw std::runtime_error("no schema loaded");
-            std::string expression(std::next(words[0].first), aConsoleInput.cend());
-            if (!expression.empty())
-            {
-                aContext.evaluate(expression);
-                output_compilation_time();
-            }
-            else
-                aInteractive = true;
-        }
-        else if (command == "lc")
-        {
-            auto print_concept_library = [](auto const& self, const neos::language::i_concept_library& aConceptLibrary, uint32_t aDepth = 0) -> void
-            {
-                std::cout << std::string(aDepth * 2, ' ') << "[" << aConceptLibrary.name() << "]";
-                if (aDepth == 0)
-                    std::cout << " (" << aConceptLibrary.uri() << ")";
-                std::cout << std::endl;
-                for (auto const& conceptLibrary : aConceptLibrary.sublibraries())
-                    self(self, *conceptLibrary.second(), aDepth + 1);
-            };
-            for (auto const& conceptLibrary : aContext.concept_libraries())
-                if (conceptLibrary.second()->depth() == 0)
-                    print_concept_library(print_concept_library, *conceptLibrary.second());
-        }
-        else if (command == "restricted")
-        {
-            if (parameters == "on")
-                aContext.set_restricted(true);
-            else if (parameters == "off")
-                aContext.set_restricted(false);
-            else if (!parameters.empty())
-                throw std::runtime_error("restricted: expected 'on' or 'off'");
-            std::cout << "Restricted mode: " << (aContext.restricted() ? "on" : "off") << std::endl;
-        }
-        else if (command == "parsetimes")
-        {
-            if (parameters == "on")
-                aContext.compiler().set_show_parse_times(true);
-            else if (parameters == "off")
-                aContext.compiler().set_show_parse_times(false);
-            else if (!parameters.empty())
-                throw std::runtime_error("parsetimes: expected 'on' or 'off'");
-            std::cout << "Parse times: " << (aContext.compiler().show_parse_times() ? "on" : "off") << std::endl;
-        }
-        else if (command == "trap_on_overflow")
-        {
-            if (parameters == "on")
-                aContext.compiler().set_trap_on_overflow(true);
-            else if (parameters == "off")
-                aContext.compiler().set_trap_on_overflow(false);
-            else if (!parameters.empty())
-                throw std::runtime_error("trap_on_overflow: expected 'on' or 'off'");
-            std::cout << "Trap on overflow: " << (aContext.compiler().trap_on_overflow() ? "on" : "off") << std::endl;
-        }
-        else if (command == "bigint_promotion")
-        {
-            if (parameters == "on")
-                aContext.compiler().set_bigint_promotion_override(true);
-            else if (parameters == "off")
-                aContext.compiler().set_bigint_promotion_override(false);
-            else if (parameters == "schema")
-                aContext.compiler().set_bigint_promotion_override({});
-            else if (!parameters.empty())
-                throw std::runtime_error("bigint_promotion: expected 'on', 'off' or 'schema'");
-            auto const setting = aContext.compiler().bigint_promotion_override();
-            std::cout << "Bigint promotion: " << (setting ? (*setting ? "on" : "off") : "the schema's") << std::endl;
-        }
-        else if (command == "preparse")
-        {
-            if (parameters == "on")
-                aContext.compiler().set_preparse(true);
-            else if (parameters == "off")
-                aContext.compiler().set_preparse(false);
-            else if (!parameters.empty())
-                throw std::runtime_error("preparse: expected 'on' or 'off'");
-            std::cout << "Preparse: " << (aContext.compiler().preparse() ? "on" : "off") << std::endl;
-        }
-        else if (command == "t" || command == "trace")
-        {
-            if (words.size() >= 2)
-                aContext.compiler().set_trace(
-                    boost::lexical_cast<uint32_t>(std::string{ words[1].first, words[1].second }), 
-                    words.size() > 2 ? std::string{ words[2].first, words[2].second } : std::optional<std::string>{});
-            else
-                throw std::runtime_error("invalid command argument(s)");
-        }
-        else if (command == "m" || command == "metrics")
-            std::cout << aContext.metrics();
-        else if (command == "q" || command == "quit")
-            return false;
-        else
-            throw std::runtime_error("unknown command '" + command + "'");
-    }
-    catch (const neos::context::warning& e)
-    {
-        output_compilation_time();
-        std::cerr << (std::string_view{ e.what() }.find("warning:") == std::string_view::npos ? "Warning: " : "") << e.what() << std::endl;
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << (std::string_view{ e.what() }.find("error:") == std::string_view::npos ? "Error: " : "") << e.what() << std::endl;
-    }
-    catch (...)
-    {
-        std::cerr << "Unknown error" << std::endl;
-    }
-    return true;
 }
 
 void main_loop(boost::program_options::variables_map& aOptions)
@@ -374,7 +118,7 @@ void main_loop(boost::program_options::variables_map& aOptions)
             }
         }
         std::string line;
-        std::cout << (context.schema_loaded() ? context.running() || interactive ? context.schema().meta().language + "> " : context.schema().meta().language + "] " : "] ");
+        std::cout << neos::console_prompt(context, interactive);
         if (!std::getline(std::cin, line)) // (end of input: quit)
         {
             std::cout << std::endl;

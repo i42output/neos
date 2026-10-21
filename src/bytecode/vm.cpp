@@ -40,6 +40,7 @@
 #include <cmath>
 #include <limits>
 #include <unordered_map>
+#include <set>
 #include <charconv>
 #include <cstdlib>
 #include <iostream>
@@ -387,8 +388,10 @@ namespace neos
                 public:
                     static constexpr std::size_t MaxCallDepth = 100000u;
                 public:
-                    machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::uint64_t& aInstructions, bool aRestricted) :
-                        iSerial{ ++sSerial }, iOutput{ aOutput }, iInput{ aInput }, iInstructions{ aInstructions }, iRestricted{ aRestricted }
+                    machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aErrorOutput, std::uint64_t& aInstructions, bool aRestricted,
+                        compile_service const& aCompileService, std::vector<std::string> const& aArguments) :
+                        iSerial{ ++sSerial }, iOutput{ aOutput }, iInput{ aInput }, iErrorOutput{ aErrorOutput }, iInstructions{ aInstructions }, iRestricted{ aRestricted },
+                        iCompileService{ aCompileService }, iArguments{ aArguments }
                     {
                         for (auto b : aText)
                             iModule.push_back(static_cast<std::uint8_t>(b));
@@ -1829,14 +1832,20 @@ namespace neos
                 public:
                     std::ostream& output() const { return iOutput; }
                     std::istream& input() const { return iInput; }
+                    std::ostream& error_output() const { return iErrorOutput; }
                     bool restricted() const { return iRestricted; }
+                    compile_service const& source_compiler() const { return iCompileService; }    ///< (see neos_rt_host::load)
+                    std::vector<std::string> const& arguments() const { return iArguments; }    ///< (see neos_rt_host::arguments)
                 private:
                     static inline std::atomic<std::uint64_t> sSerial{ 0u };
                     std::uint64_t const iSerial;    ///< (identifies the program (see walk): a program loaded at the address of one that has ended is another)
                     std::ostream& iOutput;
                     std::istream& iInput;
+                    std::ostream& iErrorOutput;
                     std::uint64_t& iInstructions;
                     bool const iRestricted; ///< runtime plugin functions that can change the host environment cannot be called
+                    compile_service const iCompileService;
+                    std::vector<std::string> const iArguments;
                     std::vector<std::uint8_t> iModule;
                     std::vector<std::uint64_t> iTokens;   ///< decoded function bodies
                     std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end
@@ -2162,10 +2171,11 @@ namespace neos
 
                 // --- programs compiled while a program runs (they stay until the process ends: their functions may be called)
 
+                // (the calling thread's (see set_compile_service): a thread takes it when it is constructed)
                 compile_service& the_compile_service()
                 {
-                    static compile_service sService;
-                    return sService;
+                    thread_local compile_service tService;
+                    return tService;
                 }
 
                 struct loaded_program
@@ -2199,10 +2209,10 @@ namespace neos
                             *aError = tError.c_str();
                         return nullptr;
                     };
-                    if (!the_compile_service())
-                        return fail("no compiler");
                     if (tRunning.program == nullptr)
                         return fail("no program is running");
+                    if (!tRunning.program->source_compiler())
+                        return fail("no compiler");
                     // (a program running in restricted mode: source that it compiles could change the host environment)
                     if (tRunning.program->restricted())
                         return fail("restricted");
@@ -2214,7 +2224,7 @@ namespace neos
                         auto const running = tRunning;
                         try
                         {
-                            compiled = the_compile_service()(aLanguage, std::string{ aSource, aSourceLength }, aSourceName != nullptr ? aSourceName : "",
+                            compiled = tRunning.program->source_compiler()(aLanguage, std::string{ aSource, aSourceLength }, aSourceName != nullptr ? aSourceName : "",
                                 aOptions != nullptr ? aOptions : "", error);
                         }
                         catch (std::exception const& e)
@@ -2229,8 +2239,8 @@ namespace neos
                     {
                         std::lock_guard<std::mutex> lock{ loaded_mutex() };
                         auto& p = loaded_programs().emplace_back();
-                        p.program = std::make_unique<machine>(*compiled, tRunning.program->output(), tRunning.program->input(), p.instructions,
-                            tRunning.program->restricted());
+                        p.program = std::make_unique<machine>(*compiled, tRunning.program->output(), tRunning.program->input(), tRunning.program->error_output(),
+                            p.instructions, tRunning.program->restricted(), tRunning.program->source_compiler(), tRunning.program->arguments());
                         p.entry = p.program->export_function("main");
                         if (tRunning.native != nullptr)
                             p.native = p.program->compile();
@@ -2397,23 +2407,101 @@ namespace neos
                     }
                 }
 
+                // (the calling thread's (see set_program_arguments): a thread takes them when it is constructed)
                 std::vector<std::string>& program_arguments()
                 {
-                    static std::vector<std::string> sArguments;
-                    return sArguments;
+                    thread_local std::vector<std::string> tArguments;
+                    return tArguments;
                 }
 
                 unsigned host_arguments(char const** aArguments, unsigned aCount)
                 {
-                    auto const& arguments = program_arguments();
+                    // (the running program's (with none running, the calling thread's), as strings that are valid until the process ends)
+                    auto const& arguments = tRunning.program != nullptr ? tRunning.program->arguments() : program_arguments();
+                    static std::mutex sMutex;
+                    static std::set<std::string> sStrings;
+                    std::lock_guard<std::mutex> lock{ sMutex };
                     for (unsigned i = 0u; i < aCount && i < arguments.size(); ++i)
-                        aArguments[i] = arguments[i].c_str();
+                        aArguments[i] = sStrings.insert(arguments[i]).first->c_str();
                     return static_cast<unsigned>(arguments.size());
+                }
+
+                // --- standard streams (the running program's: see neos_rt_host::std_write)
+
+                std::ostream* output_stream(int aStream)
+                {
+                    if (aStream == 1)
+                        return tRunning.program != nullptr ? &tRunning.program->output() : &std::cout;
+                    if (aStream == 2)
+                        return tRunning.program != nullptr ? &tRunning.program->error_output() : &std::cerr;
+                    return nullptr;
+                }
+
+                std::istream* input_stream(int aStream)
+                {
+                    if (aStream == 0)
+                        return tRunning.program != nullptr ? &tRunning.program->input() : &std::cin;
+                    return nullptr;
+                }
+
+                size_t host_std_write(int aStream, char const* aData, size_t aCount)
+                {
+                    auto* const stream = output_stream(aStream);
+                    if (stream == nullptr || (aData == nullptr && aCount != 0u) || !stream->write(aData, static_cast<std::streamsize>(aCount)))
+                        return 0u;
+                    return aCount;
+                }
+
+                // (the end of input is not kept: a stream that has more input later (e.g. a terminal's) can be read again)
+                size_t host_std_read(int aStream, char* aBuffer, size_t aCount)
+                {
+                    auto* const stream = input_stream(aStream);
+                    if (stream == nullptr || aBuffer == nullptr)
+                        return 0u;
+                    stream->read(aBuffer, static_cast<std::streamsize>(aCount));
+                    auto const result = static_cast<size_t>(stream->gcount());
+                    stream->clear();
+                    return result;
+                }
+
+                int host_std_getc(int aStream)
+                {
+                    auto* const stream = input_stream(aStream);
+                    if (stream == nullptr)
+                        return -1;
+                    auto const c = stream->get();
+                    if (c == std::istream::traits_type::eof())
+                    {
+                        stream->clear();
+                        return -1;
+                    }
+                    return static_cast<unsigned char>(std::istream::traits_type::to_char_type(c));
+                }
+
+                int host_std_ungetc(int aCharacter, int aStream)
+                {
+                    auto* const stream = input_stream(aStream);
+                    if (stream == nullptr || aCharacter < 0 || !stream->putback(static_cast<char>(aCharacter)))
+                    {
+                        if (stream != nullptr)
+                            stream->clear();
+                        return -1;
+                    }
+                    return aCharacter;
+                }
+
+                int host_std_flush(int aStream)
+                {
+                    if (aStream == 0)
+                        return 0;
+                    auto* const stream = output_stream(aStream);
+                    return stream != nullptr && stream->flush() ? 0 : -1;
                 }
 
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
-                    host_function_frame, host_arguments, host_values, host_load_n };
+                    host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
+                    host_std_flush };
             }
 
             void const* runtime::host()
@@ -2431,6 +2519,19 @@ namespace neos
                 the_compile_service() = std::move(aService);
             }
 
+            thread::thread(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aError, bool aRestricted) :
+                iText{ aText },
+                iOutput{ aOutput },
+                iInput{ aInput },
+                iErrorOutput{ aError },
+                iCompileService{ the_compile_service() },
+                iArguments{ program_arguments() },
+                iRestricted{ aRestricted }
+            {
+                // start executing only once all members have been constructed
+                static_cast<std::thread&>(*this) = std::thread{ [this]() { execute(); } };
+            }
+
             void thread::execute()
             {
                 auto const start = std::chrono::steady_clock::now();
@@ -2438,7 +2539,7 @@ namespace neos
                 {
                     if (iText.empty())
                         throw exceptions::no_text();
-                    machine m{ iText, iOutput, iInput, iInstructions, iRestricted };
+                    machine m{ iText, iOutput, iInput, iErrorOutput, iInstructions, iRestricted, iCompileService, iArguments };
                     auto const entry = m.export_function("main");
                     if (!entry)
                         throw std::runtime_error("no entry point (main)");
@@ -2481,7 +2582,7 @@ namespace neos
                     // (an error: reported on the standard error stream (the program's output is flushed first))
                     iError = e.what();
                     iOutput.flush();
-                    std::cerr << "Runtime error: " << e.what() << std::endl;
+                    iErrorOutput << "Runtime error: " << e.what() << std::endl;
                 }
                 iExecutionTime = std::chrono::steady_clock::now() - start;
             }

@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 8
+#define NEOS_RUNTIME_PLUGIN_VERSION 9
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -257,6 +257,18 @@ typedef struct neos_rt_host
     /* (version 8) load, with the source's length (aSourceLength bytes: the source may contain NUL characters) */
     void* (*load_n)(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
         char const** aError);
+    /* (version 9) the standard streams of the running program (as the calling thread runs it; aStream: 0 (input), 1 (output) or 
+       2 (error)): its host's (e.g. a window that a session of an IDE redirects them to), which a plugin uses rather than the 
+       process's (stdin, stdout and stderr) so that programs that run at the same time each have their own. With no program 
+       running, the process's. As the C library's: std_write writes aCount bytes of aData (returns the number written: fewer if 
+       the stream failed); std_read reads at most aCount bytes into aBuffer, as fread does (returns the number read: fewer at 
+       the end of input); std_getc reads a character, as fgetc does (EOF at the end of input); std_ungetc puts one back, as 
+       ungetc does; std_flush flushes, as fflush does (0, else EOF) */
+    size_t (*std_write)(int aStream, char const* aData, size_t aCount);
+    size_t (*std_read)(int aStream, char* aBuffer, size_t aCount);
+    int (*std_getc)(int aStream);
+    int (*std_ungetc)(int aCharacter, int aStream);
+    int (*std_flush)(int aStream);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

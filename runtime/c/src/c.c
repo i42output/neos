@@ -83,23 +83,52 @@ static char const* c_getenv(char const* name)
     return value != NULL ? value : "";
 }
 
+/* the standard output: the running program's, as its host gives it (it may be redirected, e.g. to a window: see 
+   neos_rt_host::std_write), else the process's */
+
+static neos_rt_host const* sHost = NULL;
+
+NEOS_RUNTIME_PLUGIN_SET_HOST
+{
+    sHost = aHost;
+}
+
+static bool c_hosted(void)
+{
+    return sHost != NULL && sHost->version >= 9u && sHost->std_write != NULL;
+}
+
 static int c_flush(void)
 {
-    return fflush(stdout);
+    return c_hosted() ? sHost->std_flush(1) : fflush(stdout);
 }
 
 /* (output is flushed so that it interleaves with the host's output: the plugin may have its own C runtime) */
 static int c_puts(char const* s)
 {
-    int const result = puts(s);
-    fflush(stdout);
+    int result;
+    if (c_hosted())
+    {
+        size_t const length = strlen(s);
+        result = sHost->std_write(1, s, length) == length && sHost->std_write(1, "\n", 1u) == 1u ? 0 : EOF;
+    }
+    else
+        result = puts(s);
+    c_flush();
     return result;
 }
 
 static int c_putchar(int c)
 {
-    int const result = putchar(c);
-    fflush(stdout);
+    int result;
+    if (c_hosted())
+    {
+        char const character = (char)c;
+        result = sHost->std_write(1, &character, 1u) == 1u ? (unsigned char)character : EOF;
+    }
+    else
+        result = putchar(c);
+    c_flush();
     return result;
 }
 
@@ -257,7 +286,7 @@ static int32_t c_setenv(char const* name, char const* value)
 
 static int32_t c_system(char const* command)
 {
-    fflush(stdout);
+    c_flush();
     return system(command);
 }
 

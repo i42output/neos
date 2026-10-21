@@ -46,8 +46,10 @@
 
 namespace neos
 {
-    context::context(std::ostream& aCout) :
+    context::context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr) :
+        iCin{ aCin },
         iCout{ aCout },
+        iCerr{ aCerr },
         iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
@@ -55,8 +57,10 @@ namespace neos
         init();
     }
 
-    context::context(std::ostream& aCout, neolib::i_service_provider& aServiceProvider) :
+    context::context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr, neolib::i_service_provider& aServiceProvider) :
+        iCin{ aCin },
         iCout{ aCout },
+        iCerr{ aCerr },
         iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }, aServiceProvider) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
@@ -64,8 +68,10 @@ namespace neos
         init();
     }
 
-    context::context(std::ostream& aCout, neolib::i_application& aApplication) :
+    context::context(std::istream& aCin, std::ostream& aCout, std::ostream& aCerr, neolib::i_application& aApplication) :
+        iCin{ aCin },
         iCout{ aCout },
+        iCerr{ aCerr },
         iApplication{ aApplication },
         iCompiler{ *this }
     {
@@ -81,9 +87,19 @@ namespace neos
                 t->join();
     }
 
+    std::istream& context::cin()
+    {
+        return iCin;
+    }
+
     std::ostream& context::cout()
     {
         return iCout;
+    }
+
+    std::ostream& context::cerr()
+    {
+        return iCerr;
     }
 
     const context::concept_libraries_t& context::concept_libraries() const
@@ -225,7 +241,7 @@ namespace neos
 
     void context::set_arguments(std::vector<std::string> const& aArguments)
     {
-        bytecode::vm::set_program_arguments(aArguments);
+        iArguments = aArguments;
     }
 
     void context::run()
@@ -278,8 +294,11 @@ namespace neos
                 }
                 return compiled.text;
             });
-        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), std::cin, iRestricted));
-        iThreads.back()->join(); // run to completion: the program reads std::cin, so the console must not read it concurrently
+        // (the program's arguments and the compile service above: the VM thread takes them from this thread (so that contexts that 
+        // run programs at the same time each have their own))
+        bytecode::vm::set_program_arguments(iArguments);
+        iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), cin(), cerr(), iRestricted));
+        iThreads.back()->join(); // run to completion: the program reads cin(), so the console must not read it concurrently
     }
 
     int context::exit_status() const

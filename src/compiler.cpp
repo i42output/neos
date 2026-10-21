@@ -443,7 +443,7 @@ namespace neos::language
                 throw error;
             }
             if (!iQuiet)
-                std::cerr << parserOutput.str();
+                iContext.cerr() << parserOutput.str();
             if (last)
             {
                 auto& unitRoot = *aUnit.ast.root();
