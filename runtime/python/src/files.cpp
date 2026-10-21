@@ -753,8 +753,13 @@ namespace neos::python_runtime
                         }
                         if (bytes)
                         {
+                            // (bytes: each code point is a byte)
                             auto const points = to_code_points(drive + escaped);
-                            return make_bytes(std::string{ points.begin(), points.end() });
+                            std::string data;
+                            data.reserve(points.size());
+                            for (auto const point : points)
+                                data.push_back(static_cast<char>(point));
+                            return make_bytes(std::move(data));
                         }
                         return make_str(drive + escaped);
                     } },
