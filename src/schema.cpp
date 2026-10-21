@@ -131,6 +131,11 @@ namespace neos::language::schema_parser
     auto const SC_Rule = repeat(symbol::SemanticConcept);
     auto const SC = repeat((symbol::SemanticConcept | symbol::SemanticConceptRef));
     auto const WS = symbol::Whitespace;
+    // (characters matched in place (not as symbols, which make a node for each))
+    auto const Alpha = (range('A', 'Z') | range('a', 'z'));
+    auto const AlphaNumeric = (range('A', 'Z') | range('a', 'z') | range('0', '9'));
+    auto const HexDigit = (range('A', 'F') | range('a', 'f') | range('0', '9'));
+    auto const Character = (range('\x20', '\x21') | range('\x23', '\x26') | range('\x28', '\x5B') | range('\x5D', '\xFF'));
         
     neolib::parser_rule<symbol> parserRules[] =
     {
@@ -138,7 +143,7 @@ namespace neos::language::schema_parser
         ( symbol::Rule >> WS , symbol::RuleName , SC_Rule , WS , "::=" , WS ,
             symbol::RuleExpression <=> "rule_expression"_concept , SC , WS , optional(("::="_ , WS , symbol::RuleExpression <=> "rule_constraint"_concept , SC)) , WS , ";" ),
         ( symbol::RuleName >> ((symbol::Identifier , repeat((" "_ , symbol::Identifier))) <=> "rule_name"_concept) ),
-        ( symbol::Identifier >> (symbol::Alpha , repeat(symbol::AlphaNumeric)) ),
+        ( symbol::Identifier >> (Alpha , repeat(AlphaNumeric)) ),
         ( symbol::SemanticConcept >> (WS , symbol::SemanticConceptTag , WS , symbol::SemanticConceptName <=> "semantic_concept"_concept , WS) ),
         ( symbol::SemanticConceptRef >> (WS , symbol::SemanticConceptTagRef , WS , symbol::SemanticConceptName <=> "semantic_concept_ref"_concept , WS)),
         ( symbol::RuleExpression >> (symbol::Grouping | symbol::Repetition | symbol::Optional |
@@ -167,13 +172,13 @@ namespace neos::language::schema_parser
 
         ( symbol::SemanticConceptTag >> "$"_ ),
         ( symbol::SemanticConceptTagRef >> "$:"_),
-        ( symbol::SemanticConceptName >> (symbol::Alpha , repeat(symbol::AlphaNumeric | ("."_ , symbol::AlphaNumeric))) ),
+        ( symbol::SemanticConceptName >> (Alpha , repeat(AlphaNumeric | ("."_ , AlphaNumeric))) ),
 
         ( symbol::SpecialSequence >> ("?"_ , WS , repeat(symbol::Terminal) <=> "special"_concept , WS , "?"_) ),
 
         ( symbol::CharacterLiteral >> ("'"_ , (symbol::Character | symbol::EscapedCharacter) <=> "character"_concept , "'"_)),
-        ( symbol::CharacterLiteral >> ("U+"_ , +repeat(symbol::HexDigit) <=> "codepoint"_concept) ),
-        ( symbol::StringLiteral >> ("\""_ , repeat(symbol::Character | symbol::EscapedCharacter) <=> "string"_concept , "\""_) ),
+        ( symbol::CharacterLiteral >> ("U+"_ , +repeat(HexDigit) <=> "codepoint"_concept) ),
+        ( symbol::StringLiteral >> ("\""_ , repeat(Character | symbol::EscapedCharacter) <=> "string"_concept , "\""_) ),
         ( symbol::Alpha >> (range('A', 'Z') | range('a', 'z')) ),
         ( symbol::AlphaNumeric >> (range('A', 'Z') | range('a', 'z') | range('0', '9' )) ),
         ( symbol::HexDigit >> (range('A', 'F') | range('a', 'f' ) | range('0', '9')) ),

@@ -6383,7 +6383,22 @@ namespace neos::compilers::javascript
             if (unit)
             {
                 iUnitCounters.insert(b);
-                if (up != down)
+                // (a counter that steps one way is clamped where it is read rather than checked where it steps (see counter_value):
+                // unless it is read (other than compared, which is free) more often than it steps)
+                std::size_t reads = 0u;
+                for (auto* site : u.sites)
+                {
+                    auto const* parent = site->parent;
+                    while (parent != nullptr && parent->is(construct::Parenthesized))
+                        parent = parent->parent;
+                    bool const step = parent != nullptr && (std::find(u.updates.begin(), u.updates.end(), parent) != u.updates.end() ||
+                        (std::find(u.assignments.begin(), u.assignments.end(), parent) != u.assignments.end() && parent->child(0u) == site));
+                    bool const compared = parent != nullptr && (parent->is(construct::LessThan) || parent->is(construct::LessEqual) ||
+                        parent->is(construct::GreaterThan) || parent->is(construct::GreaterEqual));
+                    if (!step && !compared && site != u.declarator->child(0u))
+                        ++reads;
+                }
+                if (up != down && reads <= u.assignments.size() + u.updates.size())
                     iMonotoneCounters[b] = up ? 1 : -1;
             }
         }
@@ -7014,9 +7029,16 @@ namespace neos::compilers::javascript
     void function_generator::counter_guard(std::uint32_t aSlot, std::int64_t aStep, binding const* aBinding)
     {
         // (an i64 counter beyond 2^53: as a double would be (its old value (its value less the step) plus the step, rounded); a counter whose
-        // only changes are steps of one from a safe integer is never beyond 2^53 (2^53 plus one rounds to 2^53): only 2^53 + 1 is)
+        // only changes are steps of one from a safe integer is never beyond 2^53 (2^53 plus one rounds to 2^53): only 2^53 + 1 is. The
+        // fix-up is cold (block { block { br_if 0 (to the fix-up); br 1 (past it) } fix-up }): the check is a branch not taken)
         if (aBinding != nullptr && (aStep == 1 || aStep == -1) && monotone(aBinding) == aStep)
             return;     // (a monotone counter: its value is clamped when it is read (see counter_value))
+        op(opcode::Block);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
+        op(opcode::Block);
+        iCode.push_back(0x40u);
+        iControls.push_back(control{ control_kind::Block });
         get(aSlot);
         if (aBinding != nullptr && (aStep == 1 || aStep == -1) && iUnitCounters.contains(aBinding))
         {
@@ -7025,14 +7047,16 @@ namespace neos::compilers::javascript
         }
         else
         {
-        i64(9007199254740992ll);
-        op(opcode::I64Add);
-        i64(2 * 9007199254740992ll);
-        op(opcode::I64GtU);
+            i64(9007199254740992ll);
+            op(opcode::I64Add);
+            i64(2 * 9007199254740992ll);
+            op(opcode::I64GtU);
         }
-        op(opcode::If);
-        iCode.push_back(0x40u);
-        iControls.push_back(control{ control_kind::Block });
+        op(opcode::BrIf);
+        u32(0u);
+        op(opcode::Br);
+        u32(1u);
+        end_control();
         get(aSlot);
         i64(aStep);
         op(opcode::I64Sub);

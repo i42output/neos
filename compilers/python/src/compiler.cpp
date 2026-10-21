@@ -4969,6 +4969,7 @@ namespace neos::compilers::python
         auto const callable = temporary(type::I32);
         // (receiver.name(args): a method call (python::call_method: no bound method is made for it))
         std::optional<fragment_state::py_access> method;
+        std::optional<std::uint32_t> receiverTemporary;
         if (!execBuiltin && !anyStar && callee.holds_alternative<i_fragment>())
             if (auto const access = state().pyAccesses.find(callee.get<i_fragment>().source().to_std_string_view().data());
                 access != state().pyAccesses.end() && !access->second.key && !access->second.attribute.empty())
@@ -4980,7 +4981,16 @@ namespace neos::compilers::python
         if (execBuiltin)
             append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
         else if (method)
-            append(statement, py_owned(py_runtime_call("python::load_method", { type::Object, type::String }, type::Object, { method->receiver, py_string(method->attribute) })));
+        {
+            // (its receiver: a function of the program that is the method is called with it first (see below))
+            fragment receiver = method->receiver;
+            if (!anyStar && !anyKeyword && arguments.size() <= 3u)
+            {
+                receiverTemporary = temporary(type::I32);
+                put_local(receiver, opcode::LocalTee, *receiverTemporary);
+            }
+            append(statement, py_owned(py_runtime_call("python::load_method", { type::Object, type::String }, type::Object, { receiver, py_string(method->attribute) })));
+        }
         else
             append(statement, py_object(callee));
         put_local(statement, opcode::LocalSet, callable);
@@ -4997,9 +5007,64 @@ namespace neos::compilers::python
                 absent.valueType = type::Object;
                 values.push_back(absent);
             }
-            auto call = py_owned(py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
+            if (execBuiltin)
+            {
+                auto call = py_owned(py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
+                    { local_value(callable, type::Object), values[0], values[1], values[2] }));
+                append(statement, call);
+                statement.valueType = type::Object;
+                push_operand(operand_type{ statement });
+                return;
+            }
+            // (a function of the program (that python::direct_function finds) is called by the program itself (call_indirect), with its 
+            // arguments as they are (a method's receiver first); otherwise python::call_arguments calls it)
+            std::vector<std::uint32_t> held;
+            for (std::size_t i = 0u; i < arguments.size(); ++i)
+            {
+                held.push_back(temporary(type::I32));
+                append(statement, values[i]);
+                put_local(statement, opcode::LocalSet, held.back());
+            }
+            bool const methodCall = receiverTemporary.has_value();
+            fragment count;
+            put_i64(count, static_cast<std::int64_t>(arguments.size()) | (methodCall ? 0x100 : 0));
+            count.valueType = type::I64;
+            auto const direct = temporary(type::I32);
+            fragment choice = py_runtime_call("python::direct_function", { type::Object, type::I64 }, type::I32, { local_value(callable, type::Object), count });
+            put_local(choice, opcode::LocalTee, direct);
+            put_i32(choice, 0);
+            put(choice, opcode::I32GeS);
+            put_block(choice, opcode::If, type::Object);
+            std::vector<type> parameters(arguments.size() + (methodCall ? 1u : 0u), type::Object);
+            auto const indirect_call = [&](type aResult)
+            {
+                if (methodCall)
+                    put_local(choice, opcode::LocalGet, *receiverTemporary);
+                for (auto const h : held)
+                    put_local(choice, opcode::LocalGet, h);
+                put_local(choice, opcode::LocalGet, direct);
+                put_i32(choice, 1);
+                put(choice, opcode::I32ShrU);
+                emit_call_indirect(choice, indirect_signature(parameters, aResult));
+            };
+            put_local(choice, opcode::LocalGet, direct);
+            put_i32(choice, 1);
+            put(choice, opcode::I32And);
+            put_block(choice, opcode::If, type::Object);
+            indirect_call(type::Void);
+            append(choice, py_runtime_call("python::none", {}, type::Object, {}));
+            put(choice, opcode::Else);
+            indirect_call(type::Object);
+            put(choice, opcode::End);
+            put(choice, opcode::Else);
+            for (std::size_t i = 0u; i < held.size(); ++i)
+                values[i] = local_value(held[i], type::Object);
+            append(choice, py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
                 { local_value(callable, type::Object), values[0], values[1], values[2] }));
-            append(statement, call);
+            put(choice, opcode::End);
+            choice.valueType = type::Object;
+            choice.fragmentKind = fragment_kind::Value;
+            append(statement, py_owned(choice));
             statement.valueType = type::Object;
             push_operand(operand_type{ statement });
             return;
@@ -8228,7 +8293,12 @@ namespace neos::compilers::python
                         leb();
                     break;
                 case 0x11u:
-                    leb(); leb();
+                    // (call_indirect: its type's index is a relocation too)
+                    if (relocated(start + 1u))
+                        p = start + 6u;
+                    else
+                        leb();
+                    leb();
                     break;
                 case 0x20u: case 0x21u: case 0x22u:
                     result.insert(static_cast<std::uint32_t>(leb()));
@@ -8868,8 +8938,21 @@ namespace neos::compilers::python
                     }
                     continue;
                 case 0x11u:
-                    leb(); leb();
-                    break;
+                    {
+                        // (call_indirect: its type's index is a relocation (5 bytes) until the module is emitted; a function of the 
+                        // program, which can raise)
+                        if (relocationAt(start + 1u, start + 2u))
+                            p = start + 6u;
+                        else
+                            leb();
+                        leb();
+                        auto const target = relocationAt(start, p);
+                        result.insert(result.end(), code.begin() + static_cast<std::ptrdiff_t>(start), code.begin() + static_cast<std::ptrdiff_t>(p));
+                        if (target)
+                            relocations.emplace_back(static_cast<std::uint32_t>(result.size() - (p - start - 1u)), *target);
+                        put_check();
+                    }
+                    continue;
                 case 0x20u: case 0x21u: case 0x22u: case 0x23u: case 0x24u:
                     leb();
                     break;

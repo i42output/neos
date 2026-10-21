@@ -164,6 +164,7 @@ namespace neos::language
     constexpr std::uint32_t BranchTarget = 0x40000000u;     ///< break (or continue) out of the enclosing loop (its depth)
     constexpr std::uint32_t ContinueTarget = 0x20000000u;
     constexpr std::uint32_t DeferredCall = 0x80000000u;     ///< a call of a function defined later (resolved when the module is emitted)
+    constexpr std::uint32_t IndirectSignature = 0x10000000u;    ///< a call_indirect's type: an indirect signature's (see i_code_generator::indirect_signature)
 
     // A fragment of emitted WASM code; produced by the compiler's emit_xxx operations
     struct i_fragment

@@ -100,6 +100,7 @@ namespace neos
                     std::vector<std::uint8_t> const* parameters = nullptr; ///< value types
                     std::vector<std::uint8_t> const* results = nullptr;    ///< value types
                     std::vector<std::uint8_t> const* locals = nullptr;     ///< value types of locals declared by the body
+                    std::uint32_t type = 0u;                               ///< (its type's index: call_indirect's)
                     bool imported = false;
                     std::optional<std::uint8_t> checked;                   ///< (an import that is checked integer arithmetic)
                     import_call call = import_call::Host;                  ///< (an import)
@@ -153,6 +154,7 @@ namespace neos
                 struct module_description
                 {
                     std::vector<function_description> functions;
+                    std::vector<std::pair<std::vector<std::uint8_t> const*, std::vector<std::uint8_t> const*>> types; ///< (parameters and results: call_indirect's)
                     std::vector<std::uint64_t> const* tokens = nullptr; ///< decoded code: an opcode token followed by its immediates
                     std::vector<value>* globals = nullptr;
                     std::vector<std::uint8_t> const* globalTypes = nullptr;

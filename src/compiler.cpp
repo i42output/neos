@@ -3305,6 +3305,24 @@ namespace neos::language
             if (existing == types.end())
                 types.push_back(functionType);
         }
+        // (call_indirect's types: of the indirect signatures (a function's type is the same if its signature is))
+        std::vector<std::uint32_t> indirectTypeOf;
+        for (auto const& signature : iModule.indirectSignatures)
+        {
+            bytes functionType;
+            functionType.push_back(0x60u);
+            put_u32(functionType, signature.first.size());
+            for (auto const& p : signature.first)
+                functionType.push_back(*wasm_type(p));
+            auto const r = wasm_type(signature.second);
+            put_u32(functionType, r ? 1u : 0u);
+            if (r)
+                functionType.push_back(*r);
+            auto existing = std::find(types.begin(), types.end(), functionType);
+            indirectTypeOf.push_back(static_cast<std::uint32_t>(existing - types.begin()));
+            if (existing == types.end())
+                types.push_back(functionType);
+        }
         // entry point
         std::optional<std::uint32_t> entry;
         for (auto id : order)
@@ -3440,6 +3458,11 @@ namespace neos::language
                 for (auto const& r : function.relocations)
                 {
                     std::uint32_t target = r.second;
+                    if ((target & IndirectSignature) != 0u && (target & (DeferredCall | BranchTarget)) == 0u)
+                    {
+                        put_u32_padded(code, r.first, indirectTypeOf[target & ~IndirectSignature]);
+                        continue;
+                    }
                     if (target & DeferredCall)
                     {
                         auto const& deferred = iModule.deferredCalls[target & ~DeferredCall];

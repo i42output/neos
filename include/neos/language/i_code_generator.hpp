@@ -71,6 +71,8 @@ namespace neos::language
         virtual std::uint32_t temporary(type aType) = 0;
         virtual std::uint32_t string_literal(neolib::i_string const& aValue) = 0;
         virtual std::uint32_t runtime_function(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters, type aReturnType) = 0;
+        virtual std::uint32_t indirect_signature(neolib::i_vector<type> const& aParameters, type aReturnType) = 0; ///< (the signature of the functions that a 
+                                                                ///< call_indirect calls: its relocation (IndirectSignature) is that signature's type)
         virtual bool runtime_plugin_available(neolib::i_string const& aNamespace) const = 0; ///< (a runtime plugin provides the namespace's functions)
         // source fragments
     public:

@@ -737,6 +737,7 @@ namespace neos::python_runtime
             return value && to_index(value.get(), aResult);
         }
         void run_exit_functions();                      // (atexit's: the program ends (services.cpp))
+        bool signals_pending();                         // (signals have arrived whose Python handlers signals_check would call)
         bool signals_check();                           // (the Python handlers of signals that have arrived are called: false if one raised)
         void signals_start();                           // (the signals ignored from the start (SIGPIPE: BrokenPipeError instead))
         void fn_finish();

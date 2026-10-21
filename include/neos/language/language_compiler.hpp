@@ -170,6 +170,19 @@ namespace neos::language
             aTarget.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), aFunction });
             code.resize(code.size() + 5u);
         }
+        std::uint32_t indirect_signature(std::vector<type> const& aParameters, type aReturnType)
+        {
+            return iGenerator->indirect_signature(neolib::vector<type>{ aParameters.begin(), aParameters.end() }, aReturnType);
+        }
+        // (a call_indirect of a function of the signature (see indirect_signature): its arguments, then its index (an i32), are the operands)
+        void emit_call_indirect(fragment& aTarget, std::uint32_t aSignature)
+        {
+            auto& code = aTarget.fragmentCode.as_std_vector();
+            emitter::put_op(code, bytecode::opcode::CallIndirect);
+            aTarget.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), IndirectSignature | aSignature });
+            code.resize(code.size() + 5u);
+            code.push_back(0x00u);   // (the table: the functions)
+        }
         // functions
         bool in_function() const { return iGenerator->in_function(); }
         std::uint32_t current_function() const { return iGenerator->current_function_index(); }

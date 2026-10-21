@@ -287,6 +287,7 @@ namespace neos::language
             std::vector<std::uint8_t> data;
             std::map<std::string, std::uint32_t> strings;
             std::vector<std::pair<std::string, std::vector<type>>> deferredCalls; ///< calls to functions defined later (resolved at emission)
+            std::vector<std::pair<std::vector<type>, type>> indirectSignatures;  ///< the signatures of call_indirect's functions (their types: at emission)
         };
         struct interval
         {
@@ -399,6 +400,7 @@ namespace neos::language
         std::uint32_t temporary(type aType) final;
         std::uint32_t string_literal(neolib::i_string const& aValue) final;
         std::uint32_t runtime_function(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters, type aReturnType) final;
+        std::uint32_t indirect_signature(neolib::i_vector<type> const& aParameters, type aReturnType) final;
         bool runtime_plugin_available(neolib::i_string const& aNamespace) const final;
         void import_fragment(neolib::i_string const& aSourceFilePath, neolib::i_string const& aSource) final;
         bool in_function() const final;

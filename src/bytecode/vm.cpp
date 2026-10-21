@@ -424,6 +424,7 @@ namespace neos
                             jit::function_description d;
                             d.parameters = &iTypes.at(f.type).parameters;
                             d.results = &iTypes.at(f.type).results;
+                            d.type = f.type;
                             d.locals = &f.locals;
                             d.imported = f.import.has_value();
                             if (d.imported)
@@ -442,6 +443,8 @@ namespace neos
                             d.codeEnd = f.codeEnd;
                             module.functions.push_back(d);
                         }
+                        for (auto const& t : iTypes)
+                            module.types.emplace_back(&t.parameters, &t.results);
                         module.tokens = &iTokens;
                         module.globals = &iGlobals;
                         module.globalTypes = &iGlobalTypes;
@@ -741,6 +744,25 @@ namespace neos
                                         current.pc = code.position();
                                         enter(callee, std::move(arguments)); // note: invalidates 'current'
                                     }
+                                }
+                                break;
+                            case 0x11:
+                                {
+                                    // (call_indirect: of a function of the program (the table is its functions) whose type is the 
+                                    // instruction's; its index is the last operand)
+                                    current.callSite = opPosition;
+                                    auto const typeIndex = static_cast<std::uint32_t>(code.u());
+                                    code.u();
+                                    auto const callee = as_u32(pop());
+                                    if (callee >= iFunctions.size() || iFunctions[callee].import || iFunctions[callee].type != typeIndex)
+                                        throw trap{ "indirect call type mismatch" };
+                                    auto const parameterCount = type_of(callee).parameters.size();
+                                    if (stack.size() < current.base + parameterCount)
+                                        throw trap{ "stack underflow" };
+                                    std::vector<value> arguments{ stack.end() - static_cast<std::ptrdiff_t>(parameterCount), stack.end() };
+                                    stack.resize(stack.size() - parameterCount);
+                                    current.pc = code.position();
+                                    enter(callee, std::move(arguments)); // note: invalidates 'current'
                                 }
                                 break;
                             case 0x1A: pop(); break;

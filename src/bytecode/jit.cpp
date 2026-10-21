@@ -105,6 +105,7 @@ namespace neos
                         TrapStackExhausted = 5,
                         TrapHostException = 6,
                         TrapOutOfBounds = 7,
+                        TrapIndirectCall = 8,
                         TrapCount
                     };
 
@@ -118,12 +119,14 @@ namespace neos
                         case TrapInvalidConversion: return "invalid conversion to integer";
                         case TrapStackExhausted: return "call stack exhausted";
                         case TrapOutOfBounds: return "out of bounds memory access";
+                        case TrapIndirectCall: return "indirect call type mismatch";
                         default: return "trap";
                         }
                     }
 
                     constexpr std::size_t MaxResults = 64u;
                     constexpr std::size_t FunctionAlignment = 32u;
+                    constexpr std::size_t LoopAlignment = 32u;
 
                     struct context
                     {
@@ -185,6 +188,14 @@ namespace neos
                     std::size_t codeSize = 0u;
                     std::uint32_t(*trampoline)(context*, void const*) = nullptr;
                     std::vector<std::size_t> functionOffsets;
+                    // (call_indirect's table: each function's address and type (an import's: none))
+                    struct indirect_entry
+                    {
+                        std::uint64_t target = 0u;
+                        std::uint32_t type = ~std::uint32_t{ 0u };
+                        std::uint32_t reserved = 0u;
+                    };
+                    std::vector<indirect_entry> indirect;
                     std::exception_ptr exception;
                     // (the frames of generated code: the offset that each call of a function returns to and the token of the call 
                     // (sorted), and the offset that the trampoline's call returns to)
@@ -280,6 +291,31 @@ namespace neos
                         {
                             while (code.size() % aAlignment != 0u)
                                 emit8(0xCCu);
+                        }
+                        // (padding to a multiple of aAlignment where execution reaches it (e.g. before a loop's body, where a branch back
+                        // goes: a short loop that is within one 32 byte block runs as much as twice as fast as one that crosses a block's
+                        // boundary): nops; code before it does not then move (see within_boundary))
+                        void align_executable(std::size_t aAlignment)
+                        {
+                            if (iInCold)
+                                return;
+                            static constexpr std::uint8_t Nops[9][9] = {
+                                { 0x90 },
+                                { 0x66, 0x90 },
+                                { 0x0F, 0x1F, 0x00 },
+                                { 0x0F, 0x1F, 0x40, 0x00 },
+                                { 0x0F, 0x1F, 0x44, 0x00, 0x00 },
+                                { 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00 },
+                                { 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00 },
+                                { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                                { 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 } };
+                            while (code.size() % aAlignment != 0u)
+                            {
+                                auto const length = std::min<std::size_t>(9u, aAlignment - code.size() % aAlignment);
+                                for (std::size_t i = 0u; i < length; ++i)
+                                    emit8(Nops[length - 1u][i]);
+                            }
+                            barrier();
                         }
                         bool in_cold() const { return iInCold; }
                         void begin_cold() { iInCold = true; }
@@ -1148,6 +1184,7 @@ namespace neos
                     public:
                         void generate(compiled_module& aOutput)
                         {
+                            iIndirect = aOutput.indirect.data();
                             trampoline();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 if (!iModule.functions[f].imported)
@@ -3051,6 +3088,63 @@ namespace neos
                                     push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
                             }
                         }
+                        // call_indirect (of a function of the program (the table is its functions) of a type; its index is the last 
+                        // operand): its index and type checked against the table (see compiled_module::indirect), then called as call calls
+                        void call_indirect(std::uint32_t aType, std::size_t aPosition)
+                        {
+                            materialize_cond();
+                            if (aType >= iModule.types.size())
+                                throw unsupported{ "invalid type index" };
+                            auto const& parameters = *iModule.types[aType].first;
+                            auto const& results = *iModule.types[aType].second;
+                            if (results.size() > MaxResults)
+                                throw unsupported{ "too many results" };
+                            std::size_t const n = parameters.size();
+                            if (iStack.size() < iControl.back().base + n + 1u)
+                                throw unsupported{ "operand stack underflow" };
+                            // (the arguments, then the index after them, in the outgoing area)
+                            for (std::size_t i = 0u; i <= n; ++i)
+                                store_entry(iStack[iStack.size() - n - 1u + i], RSP, 8 * static_cast<std::int32_t>(i));
+                            for (std::size_t i = 0u; i <= n; ++i)
+                                release(pop());
+                            spill_registers();
+                            iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(n + 1u, results.size())));
+                            save_pinned_gprs();
+                            a.load(false, RAX, RSP, 8 * static_cast<std::int32_t>(n));
+                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size()));
+                            a.jcc(AE, iTrapLabels[TrapIndirectCall]);
+                            a.shift_ri(4, true, RAX, 4u);
+                            a.mov_ri(R11, reinterpret_cast<std::uint64_t>(iIndirect), true);
+                            a.alu_rr(0, true, R11, RAX);
+                            a.alu_mi(7, false, R11, 8, static_cast<std::int32_t>(aType));
+                            a.jcc(NE, iTrapLabels[TrapIndirectCall]);
+                            a.load(true, R11, R11, 0);
+                            a.call_r(R11);
+                            // (where it returns to: a frame making this call (see walk))
+                            iCallSites.emplace_back(a.new_label(), aPosition);
+                            a.bind(iCallSites.back().first);
+                            restore_pinned_gprs();
+                            for (std::size_t i = 0u; i < results.size(); ++i)
+                            {
+                                auto const t = results[i];
+                                if (i == 0u)
+                                {
+                                    if (is_float(t))
+                                    {
+                                        owner(true, 0) = Locked;
+                                        a.movq_xg(t == F64, 0, RAX);
+                                        push_reg(t, 0);
+                                    }
+                                    else
+                                    {
+                                        owner(false, RAX) = Locked;
+                                        push_reg(t, RAX);
+                                    }
+                                }
+                                else
+                                    push_loaded(t, R15, ContextResults + 8 * static_cast<std::int32_t>(i));
+                            }
+                        }
                         // (an import that is called directly (see import_call), not through the host: a runtime plugin function whose 
                         // arguments are all in registers and that takes and returns no strings (they are copied by the host))
                         static bool direct(function_description const& aCallee)
@@ -3828,9 +3922,11 @@ namespace neos
                                         c.condition = condition_block(aPosition + 2u);
                                     if (aOp == 0x03)
                                     {
-                                        a.bind(c.label);
                                         if (!c.result)
                                             find_loop_head(c, aPosition);
+                                        if (c.headEnd == 0u)
+                                            a.align_executable(LoopAlignment);   // (its head is where a branch back goes)
+                                        a.bind(c.label);
                                     }
                                     iControl.push_back(c);
                                 }
@@ -3938,6 +4034,7 @@ namespace neos
                                 if (auto& c = iControl.back(); c.kind == control::Loop && c.headEnd == aPosition && !c.bodyLabel)
                                 {
                                     c.bodyLabel = a.new_label();
+                                    a.align_executable(LoopAlignment);   // (a rotated loop's body is where a branch back goes)
                                     a.bind(*c.bodyLabel);
                                 }
                                 break;
@@ -3950,6 +4047,9 @@ namespace neos
                                 break;
                             case 0x10:
                                 call(static_cast<std::uint32_t>(aImmediate(0)), aPosition);
+                                break;
+                            case 0x11:
+                                call_indirect(static_cast<std::uint32_t>(aImmediate(0)), aPosition);
                                 break;
                             case 0x1A:
                                 release(pop());
@@ -4208,6 +4308,7 @@ namespace neos
                         std::vector<std::uint64_t> const& iTokens;
                         bool const iSse41;
                         std::size_t iTrapLabels[TrapCount] = {};
+                        void const* iIndirect = nullptr;    // (call_indirect's table (see compiled_module::indirect))
                         std::size_t iTrapFromContext = 0u;
                         std::size_t iExit = 0u;
                         std::size_t iTrampolineReturn = 0u;
@@ -4392,6 +4493,11 @@ namespace neos
                     result->host = std::move(aHost);
                     try
                     {
+                        // (call_indirect's table: its types now, its addresses once the code is where it runs)
+                        result->indirect.resize(result->description.functions.size());
+                        for (std::size_t f = 0u; f < result->description.functions.size(); ++f)
+                            if (!result->description.functions[f].imported)
+                                result->indirect[f].type = result->description.functions[f].type;
                         code_generator generator{ result->description };
                         generator.generate(*result);
 #if defined(NEOS_JIT_DUMP)
@@ -4406,6 +4512,9 @@ namespace neos
                         if (result->code == nullptr)
                             return {};
                         result->trampoline = reinterpret_cast<std::uint32_t(*)(context*, void const*)>(result->code);
+                        for (std::size_t f = 0u; f < result->indirect.size(); ++f)
+                            if (!result->description.functions[f].imported)
+                                result->indirect[f].target = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(result->code) + result->functionOffsets[f]);
                     }
                     catch (unsupported const&)
                     {

@@ -5148,6 +5148,7 @@ namespace neos::python_runtime
             std::vector<object*> cells;     ///< (a closure's: the values of its function's leading parameters)
             std::vector<std::pair<std::string, object*>> attributes;
             char flavour = 0;               ///< (G: a generator function, C: a coroutine function (async def), A: an async generator function)
+            mutable std::int32_t directParameters = -2; ///< (the program calls it itself (see python::direct_function) with this many arguments (-1: never; -2: not yet known))
             ~script_function_object() 
             { 
                 release(globals);
@@ -10431,6 +10432,36 @@ namespace neos::python_runtime
             }
             auto const args = arguments_tuple(aItems, aArgs);
             return call(aCallable, args.get(), aKwargs);
+        }
+
+        // (a call (of aCount positional arguments; 0x100: a method call's (load_method's method, its instance first)) that the program can make 
+        // itself (call_indirect): the function of the program it calls, (its index << 1) | 1 if it returns nothing; -1: python::call_arguments's 
+        // call (the callable is not one, its arguments are not as it is called with them as they are, or a signal or another thread waits))
+        std::int32_t fn_direct_function(object* aCallable, std::int64_t aCount)
+        {
+            gil_check();
+            if (aCallable == nullptr || signals_pending() || current_program() != nullptr)
+                return -1;
+            bool const methodCall = (aCount & 0x100) != 0;
+            auto const count = static_cast<std::size_t>(aCount & 0xFF) + (methodCall ? 1u : 0u);
+            object* function = nullptr;
+            if (methodCall)
+            {
+                if (aCallable->type == &sPendingMethodType.base)
+                    function = reinterpret_cast<pending_method_object*>(aCallable)->target.classFunction;
+            }
+            else
+                function = aCallable;
+            if (function == nullptr || function->type != &sScriptFunctionType.base)
+                return -1;
+            auto const& f = *as<script_function_object>(function);
+            if (f.directParameters == -2)
+                f.directParameters = f.program != nullptr || f.flavour != 0 || !f.cells.empty() || (f.result != 'O' && f.result != 'V') ||
+                    !std::all_of(f.parameters.begin(), f.parameters.end(), [](script_parameter const& aParameter) { return aParameter.kind == script_parameter::Positional && aParameter.type == 'O'; }) ?
+                        -1 : static_cast<std::int32_t>(f.parameters.size());
+            if (f.directParameters != static_cast<std::int32_t>(count))
+                return -1;
+            return static_cast<std::int32_t>((f.index << 1u) | (f.result == 'V' ? 1u : 0u));
         }
 
         int instance_setattr(neos_py_context*, object* aSelf, char const* aName, object* aValue)
@@ -16617,6 +16648,7 @@ namespace neos::python_runtime
             { "call", NEOS_RT_FUNCTION(fn_call), OBJ, 3u, { OBJ, OBJ, OBJ }, 0u },
             { "load_method", NEOS_RT_FUNCTION(fn_load_method), OBJ, 2u, { OBJ, STR }, 0u },
             { "call_arguments", NEOS_RT_FUNCTION(fn_call_arguments), OBJ, 4u, { OBJ, OBJ, OBJ, OBJ }, 0u },
+            { "direct_function", NEOS_RT_FUNCTION(fn_direct_function), I32, 2u, { OBJ, I64 }, 0u },
             { "function", NEOS_RT_FUNCTION(fn_function), OBJ, 4u, { STR, I32, STR, OBJ }, 0u },
             { "getitem", NEOS_RT_FUNCTION(fn_getitem), OBJ, 2u, { OBJ, OBJ }, 0u },
             { "getitem_integer", NEOS_RT_FUNCTION(fn_getitem_integer), OBJ, 2u, { OBJ, INT }, 0u },

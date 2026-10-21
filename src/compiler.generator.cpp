@@ -161,6 +161,17 @@ namespace neos::language
         return runtime_function(aName.to_std_string(), std::vector<type>{ aParameters.begin(), aParameters.end() }, aReturnType);
     }
 
+    std::uint32_t compiler::indirect_signature(neolib::i_vector<type> const& aParameters, type aReturnType)
+    {
+        std::pair<std::vector<type>, type> const signature{ std::vector<type>{ aParameters.begin(), aParameters.end() }, aReturnType };
+        auto& signatures = iModule.indirectSignatures;
+        auto const existing = std::find(signatures.begin(), signatures.end(), signature);
+        if (existing != signatures.end())
+            return static_cast<std::uint32_t>(existing - signatures.begin());
+        signatures.push_back(signature);
+        return static_cast<std::uint32_t>(signatures.size() - 1u);
+    }
+
     // --- functions
 
     bool compiler::in_function() const
