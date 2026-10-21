@@ -3516,10 +3516,20 @@ namespace neos::python_runtime
         // (arity's: out of line, so that its check is cheap)
         bool arity_error(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName)
         {
-            if (aMin == aMax)
-                error("TypeError", std::string{ aName } + "() takes exactly " + std::to_string(aMin) + " argument" + (aMin == 1u ? "" : "s") + " (" + std::to_string(aArgs.size()) + " given)");
+            // (as CPython's: METH_NOARGS's, METH_O's, then PyArg_ParseTuple's)
+            if (aMin == 0u && aMax == 0u)
+                error("TypeError", std::string{ aName } + "() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+            else if (aMin == 1u && aMax == 1u)
+                error("TypeError", std::string{ aName } + "() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
             else
-                error("TypeError", std::string{ aName } + "() expected at most " + std::to_string(aMax) + " argument" + (aMax == 1u ? "" : "s") + ", got " + std::to_string(aArgs.size()));
+            {
+                // (_PyArg_CheckPositional's: the bare name)
+                std::string const name{ aName };
+                auto const bare = name.substr(name.rfind('.') == std::string::npos ? 0u : name.rfind('.') + 1u);
+                auto const n = aArgs.size() < aMin ? aMin : aMax;
+                error("TypeError", bare + " expected " + (aMin == aMax ? "" : aArgs.size() < aMin ? "at least " : "at most ") + std::to_string(n) + " argument" + 
+                    (n == 1u ? "" : "s") + ", got " + std::to_string(aArgs.size()));
+            }
             return false;
         }
 
@@ -3895,7 +3905,9 @@ namespace neos::python_runtime
             auto const* data = static_cast<method_entry const*>(aData);
             if (args.empty())
                 return error("TypeError", "unbound method");
-            if (auto const k = kind_of(args[0]); k != data->kind && !(data->kind == NEOS_PY_INT && k == NEOS_PY_BOOL))
+            // (an instance of a subclass (e.g. str.upper(self) in a subclass's method): its value)
+            auto const self = kind_of(args[0]) == data->kind ? args[0] : builtin_value(args[0]);
+            if (auto const k = kind_of(self); k != data->kind && !(data->kind == NEOS_PY_INT && k == NEOS_PY_BOOL))
             {
                 auto const type = data->kind == NEOS_PY_LIST ? "list" : data->kind == NEOS_PY_TUPLE ? "tuple" : data->kind == NEOS_PY_DICT ? "dict" : 
                     data->kind == NEOS_PY_STR ? "str" : data->kind == NEOS_PY_FLOAT ? "float" : "int";
@@ -3903,8 +3915,8 @@ namespace neos::python_runtime
             }
             std::vector<object*> rest{ args.begin() + 1, args.end() };
             if (aKwargs != nullptr && as<dict_object>(aKwargs)->items.size() != 0u && data->data.function != str_format && data->data.function != int_to_bytes)
-                return error("TypeError", std::string{ data->name } + "() takes no keyword arguments");
-            return data->data.function(args[0], rest, aKwargs);
+                return error("TypeError", std::string{ type_name(args[0]) } + "." + data->name + "() takes no keyword arguments");
+            return data->data.function(self, rest, aKwargs);
         }
 
         object* class_of(object* aObject);
@@ -5157,7 +5169,7 @@ namespace neos::python_runtime
             std::vector<object*> cells;     ///< (a closure's: the values of its function's leading parameters)
             std::vector<std::pair<std::string, object*>> attributes;
             char flavour = 0;               ///< (G: a generator function, C: a coroutine function (async def), A: an async generator function)
-            mutable std::int32_t directParameters = -2; ///< (the program calls it itself (see python::direct_function) with this many arguments (-1: never; -2: not yet known))
+            mutable std::int32_t directParameters = -2; ///< (the program calls it itself (see direct_code) with this many arguments (-1: never; -2: not yet known))
             ~script_function_object() 
             { 
                 release(globals);
@@ -5476,7 +5488,7 @@ namespace neos::python_runtime
                 else
                 {
                     std::string const takes = required == positional ? std::to_string(positional) : "from " + std::to_string(required) + " to " + std::to_string(positional);
-                    return error("TypeError", f.name + "() takes " + takes + " positional argument" + (positional == 1u && required == positional ? "" : "s") + " but " +
+                    return error("TypeError", (f.qualname.empty() ? f.name : f.qualname) + "() takes " + takes + " positional argument" + (positional == 1u && required == positional ? "" : "s") + " but " +
                         std::to_string(args.size()) + (args.size() == 1u ? " was" : " were") + " given");
                 }
             }
@@ -5492,17 +5504,17 @@ namespace neos::python_runtime
                     if (!slot && !varKeywords)
                         for (auto const& p : parameters)
                             if (p.positionalOnly && p.name == key)
-                                return error("TypeError", f.name + "() got some positional-only arguments passed as keyword arguments: '" + key + "'");
+                                return error("TypeError", (f.qualname.empty() ? f.name : f.qualname) + "() got some positional-only arguments passed as keyword arguments: '" + key + "'");
                     if (slot)
                     {
                         if (bound[*slot] != nullptr)
-                            return error("TypeError", f.name + "() got multiple values for argument '" + key + "'");
+                            return error("TypeError", (f.qualname.empty() ? f.name : f.qualname) + "() got multiple values for argument '" + key + "'");
                         bound[*slot] = item.second;
                     }
                     else if (varKeywords)
                         extraKeywords.push_back(item);
                     else
-                        return error("TypeError", f.name + "() got an unexpected keyword argument '" + key + "'");
+                        return error("TypeError", (f.qualname.empty() ? f.name : f.qualname) + "() got an unexpected keyword argument '" + key + "'");
                 }
             std::vector<std::string> missing;
             bool missingKeywordOnly = false;
@@ -5539,7 +5551,7 @@ namespace neos::python_runtime
                 std::string names;
                 for (std::size_t i = 0u; i < missing.size(); ++i)
                     names += (i == 0u ? "'" : i + 1u == missing.size() ? (missing.size() > 2u ? "', and '" : "' and '") : "', '") + missing[i];
-                return error("TypeError", f.name + "() missing " + std::to_string(missing.size()) + " required " + (missingKeywordOnly ? "keyword-only" : "positional") +
+                return error("TypeError", (f.qualname.empty() ? f.name : f.qualname) + "() missing " + std::to_string(missing.size()) + " required " + (missingKeywordOnly ? "keyword-only" : "positional") +
                     " argument" + (missing.size() == 1u ? "" : "s") + ": " + names + "'");
             }
             // (the arguments as the function's parameter types; a closure's cells first)
@@ -8504,6 +8516,19 @@ namespace neos::python_runtime
         }
         object* fn_with_enter(object* aManager)
         {
+            // (a manager without __enter__ or __exit__: CPython's TypeError (before __enter__ is called))
+            for (auto const name : { "__enter__", "__exit__" })
+            {
+                ref const method{ getattr(aManager, name) };
+                if (!method)
+                {
+                    if (!std::string_view{ error_text() }.starts_with("AttributeError"))
+                        return nullptr;
+                    clear_error();
+                    return error("TypeError", std::string{ "'" } + type_name(aManager) + "' object does not support the context manager protocol" +
+                        (std::string_view{ name } == "__exit__" ? " (missed __exit__ method)" : ""));
+                }
+            }
             return call_method_named(aManager, "__enter__", {});
         }
         void fn_with_exit(object* aManager)
@@ -9579,7 +9604,9 @@ namespace neos::python_runtime
         {
             object* key = nullptr;
             object* reverse = nullptr;
-            if (!keywords(aKwargs, { { "key", &key }, { "reverse", &reverse } }, "sort") || !arity(aArgs, 1u, 1u, "sorted"))
+            if (aArgs.size() != 1u)
+                return error("TypeError", "sorted expected 1 argument, got " + std::to_string(aArgs.size()));
+            if (!keywords(aKwargs, { { "key", &key }, { "reverse", &reverse } }, "sort"))
                 return nullptr;
             std::vector<ref> items;
             if (!items_of(aArgs[0], items))
@@ -10284,7 +10311,13 @@ namespace neos::python_runtime
                 auto const function = aValue != nullptr ? p.setter : p.deleter;
                 if (function == nullptr)
                 {
-                    error("AttributeError", "property '" + std::string{ aName } + "' of '" + as<class_object>(cls)->name + "' object has no " + (aValue != nullptr ? "setter" : "deleter"));
+                    // (as CPython's: the property's name is its getter's __name__)
+                    std::string name;
+                    if (p.function != nullptr)
+                        if (ref const n{ getattr(p.function, "__name__") }; n && kind_of(n.get()) == NEOS_PY_STR)
+                            name = "'" + as<str_object>(n.get())->value + "' ";
+                    clear_error();
+                    error("AttributeError", "property " + name + "of '" + as<class_object>(cls)->name + "' object has no " + (aValue != nullptr ? "setter" : "deleter"));
                     return -1;
                 }
                 retain(aSelf);
@@ -10303,6 +10336,24 @@ namespace neos::python_runtime
                     ref const r{ call(method.get(), args.get(), nullptr) };
                     return r ? 0 : -1;
                 }
+            }
+            // (object.__dict__ = d: its attributes are d's (the same dict))
+            if (std::strcmp(aName, "__dict__") == 0 && (cls == nullptr || !as<class_object>(cls)->slots))
+            {
+                if (aValue == nullptr)
+                {
+                    error("TypeError", "cannot delete __dict__");
+                    return -1;
+                }
+                if (kind_of(aValue) != NEOS_PY_DICT)
+                {
+                    error("TypeError", std::string{ "__dict__ must be set to a dictionary, not a '" } + type_name(aValue) + "'");
+                    return -1;
+                }
+                retain(aValue);
+                release(aAttributes.dict);
+                aAttributes.dict = aValue;
+                return 0;
             }
             // (__slots__: the only attributes it can have)
             if (cls != nullptr && as<class_object>(cls)->slots && aValue != nullptr)
@@ -10381,7 +10432,8 @@ namespace neos::python_runtime
 
         bool find_method(object* aObject, char const* aName, method_target& aTarget)
         {
-            auto const k = kind_of(aObject);
+            // (an instance (the commonest receiver of a method of the program): not a builtin type's object)
+            auto const k = aObject != nullptr && aObject->type == &sInstanceType.base ? NEOS_PY_OTHER : kind_of(aObject);
             if (k != NEOS_PY_OTHER && !(k == NEOS_PY_ITERATOR && aName[0] == '_' && aName[1] == '_'))
             {
                 // (a builtin type's method found before for the name (the methods do not change))
@@ -10566,7 +10618,7 @@ namespace neos::python_runtime
             {
                 bool const anyKeyword = aKwargs != nullptr && as<dict_object>(aKwargs)->items.size() != 0u;
                 if (anyKeyword && !target.keywords)
-                    return error("TypeError", std::string{ m.name } + "() takes no keyword arguments");
+                    return error("TypeError", std::string{ type_name(m.self) } + "." + m.name + "() takes no keyword arguments");
                 if (aArgs != nullptr)
                     return target.function(m.self, tuple_items(aArgs), anyKeyword ? aKwargs : nullptr);
                 pooled_arguments const items{ aItems };
@@ -10598,8 +10650,7 @@ namespace neos::python_runtime
             return call(aCallable, args.get(), aKwargs);
         }
 
-        // (the number of arguments that the program calls a function of the program with itself (see python::direct_function): -1 if it 
-        // does not)
+        // (the number of arguments that the program calls a function of the program with itself (see direct_code): -1 if it does not)
         std::int32_t direct_parameters(script_function_object const& f)
         {
             if (f.directParameters == -2)
@@ -10609,40 +10660,45 @@ namespace neos::python_runtime
             return f.directParameters;
         }
 
-        // (a call (of aCount positional arguments; 0x100: a method call's (load_method's method, its instance first)) that the program can make 
-        // itself (call_indirect): the function of the program it calls, (its index << 1) | 1 if it returns nothing; -1: python::call_arguments's 
-        // call (the callable is not one, its arguments are not as it is called with them as they are, or a signal or another thread waits))
-        std::int32_t fn_direct_function(object* aCallable, std::int64_t aCount)
+        // (a function of the program that the program calls itself (call_indirect), with a method's instance first (aReceiver) or not: 
+        // ((((its index << 2) | 2 if it returns nothing | 1 if aReceiver) + 1) << 1 (an even integer: not an object's (NEOS_RT_INTEGER)))
+        std::int64_t direct_code(script_function_object const& f, bool aReceiver)
         {
-            if (aCallable == nullptr)
-                return -1;
-            bool const methodCall = (aCount & 0x100) != 0;
-            auto const count = static_cast<std::size_t>(aCount & 0xFF) + (methodCall ? 1u : 0u);
-            object* function = nullptr;
-            if (methodCall)
-            {
-                if (aCallable->type == &sPendingMethodType.base)
-                    function = reinterpret_cast<pending_method_object*>(aCallable)->target.classFunction;
-            }
-            else
-                function = aCallable;
-            if (function == nullptr || function->type != &sScriptFunctionType.base)
-                return -1;
-            auto const& f = *as<script_function_object>(function);
-            if (direct_parameters(f) != static_cast<std::int32_t>(count) || current_program() != nullptr)
-                return -1;
-            // (as python::call_arguments: another thread can run; a signal's handler is called by it)
-            gil_check();
-            if (signals_pending())
-                return -1;
-            return static_cast<std::int32_t>((f.index << 1u) | (f.result == 'V' ? 1u : 0u));
+            return static_cast<std::int64_t>((((static_cast<std::uint64_t>(f.index) << 2u) | (f.result == 'V' ? 2u : 0u) | (aReceiver ? 1u : 0u)) + 1u) << 1u);
         }
 
-        // (receiver.name(a0, a1) (the arguments that are not null): load_method's call and python::call_arguments' made at once, with no 
-        // method object made for it; a function of the program that is the method (of the receiver's class) that the program can call 
-        // itself (see python::direct_function) is not called: ((((its index << 1) | 1 if it returns nothing) + 1) << 1 is (an integer 
-        // that is not an object's) for the program to call it with the receiver first; otherwise the call's result (NEOS_RT_INTEGER: an 
-        // object's address with its low bit set), or 0 if it raised)
+        // (a call of up to three positional arguments (those that are not null), as python::call_arguments's, except that a function of 
+        // the program that the program can call itself (see direct_parameters) is not called: its direct_code is, for the program to call 
+        // it (load_method's method: with its instance first); otherwise the call's result (NEOS_RT_INTEGER: an object's address with its 
+        // low bit set), or 0 if it raised)
+        std::int64_t fn_call_direct(object* aCallable, object* a0, object* a1, object* a2)
+        {
+            gil_check();
+            if (!signals_check())
+                return 0;
+            object* const items[] = { a0, a1, a2 };
+            std::span<object* const> const arguments{ items, a0 == nullptr ? 0u : a1 == nullptr ? 1u : a2 == nullptr ? 2u : 3u };
+            if (aCallable != nullptr && current_program() == nullptr)
+            {
+                auto function = aCallable;
+                bool receiver = false;
+                if (aCallable->type == &sPendingMethodType.base)
+                {
+                    function = reinterpret_cast<pending_method_object*>(aCallable)->target.classFunction;
+                    receiver = true;
+                }
+                if (function != nullptr && function->type == &sScriptFunctionType.base &&
+                    direct_parameters(*as<script_function_object>(function)) == static_cast<std::int32_t>(arguments.size() + (receiver ? 1u : 0u)))
+                    return direct_code(*as<script_function_object>(function), receiver);
+            }
+            auto const result = checked(arguments_call(aCallable, arguments, nullptr, nullptr));
+            return result != nullptr ? static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(result) | 1u) : 0;
+        }
+
+        // (receiver.name(a0, a1) (the arguments that are not null): load_method's call and python::call_direct's made at once, with no 
+        // method object made for it: a function of the program that the program can call itself (the method of the receiver's class, 
+        // with the receiver first, or a function that is the receiver's attribute (e.g. a module's)) is not called: its direct_code is; 
+        // otherwise the call's result (NEOS_RT_INTEGER: an object's address with its low bit set), or 0 if it raised)
         std::int64_t fn_call_method(object* aReceiver, char const* aName, object* a0, object* a1)
         {
             gil_check();
@@ -10661,8 +10717,8 @@ namespace neos::python_runtime
                 else if (target.classFunction->type == &sScriptFunctionType.base)
                 {
                     auto const& f = *as<script_function_object>(target.classFunction);
-                    if (direct_parameters(f) == static_cast<std::int32_t>(arguments.size() + 1u) && current_program() == nullptr && !signals_pending())
-                        return static_cast<std::int64_t>(((((static_cast<std::uint64_t>(f.index) << 1u) | (f.result == 'V' ? 1u : 0u)) + 1u) << 1u));
+                    if (direct_parameters(f) == static_cast<std::int32_t>(arguments.size() + 1u) && current_program() == nullptr)
+                        return direct_code(f, true);
                     ref const function = ref::borrowed(target.classFunction);
                     result = script_function_invoke(target.classFunction, aReceiver, arguments, nullptr);
                 }
@@ -10687,6 +10743,9 @@ namespace neos::python_runtime
                     note_attribute_error(aReceiver);
                     return 0;
                 }
+                if (attribute.get()->type == &sScriptFunctionType.base && current_program() == nullptr &&
+                    direct_parameters(*as<script_function_object>(attribute.get())) == static_cast<std::int32_t>(arguments.size()))
+                    return direct_code(*as<script_function_object>(attribute.get()), false);
                 result = arguments_call(attribute.get(), arguments, nullptr, nullptr);
             }
             if (checked(result) == nullptr)
@@ -12864,8 +12923,12 @@ namespace neos::python_runtime
         object* b_round(std::vector<object*> const& aArgs, object* aKwargs)
         {
             object* digits = nullptr;
-            if (!keywords(aKwargs, { { "ndigits", &digits } }, "round") || !arity(aArgs, 1u, 2u, "round"))
+            if (aArgs.size() > 2u)
+                return error("TypeError", "round() takes at most 2 arguments (" + std::to_string(aArgs.size()) + " given)");
+            if (!keywords(aKwargs, { { "ndigits", &digits } }, "round"))
                 return nullptr;
+            if (aArgs.empty())
+                return error("TypeError", "round() missing required argument 'number' (pos 1)");
             if (aArgs.size() > 1u)
                 digits = aArgs[1];
             bool const none = digits == nullptr || kind_of(digits) == NEOS_PY_NONE;
@@ -16413,6 +16476,25 @@ namespace neos::python_runtime
         // python::import(name)
         object* fn_import(char const* aName)
         {
+            // (a submodule (e.g. logging.handlers): its package first (unless it is being made: then it makes the submodule its attribute 
+            // itself), then the submodule is its attribute (as CPython's _find_and_load_unlocked makes it))
+            std::string_view const name{ aName };
+            ref parent;
+            std::string child;
+            if (auto const dot = name.rfind('.'); dot != std::string_view::npos && dot > 0u && 
+                (imported().find(aName) == imported().end() || imported().find(aName)->second == nullptr))
+            {
+                std::string const parentName{ name.substr(0u, dot) };
+                if (auto const p = imported().find(parentName); p == imported().end())
+                {
+                    parent = ref{ fn_import(parentName.c_str()) };
+                    if (!parent)
+                        return nullptr;
+                }
+                else if (p->second != nullptr)
+                    parent = ref::borrowed(p->second);
+                child = name.substr(dot + 1u);
+            }
             auto& m = imported()[aName];
             if (m == nullptr)
             {
@@ -16425,6 +16507,8 @@ namespace neos::python_runtime
                 ref const modules{ imported_modules() };
                 ref const key{ make_str(aName) };
                 dict_set(modules.get(), key.get(), m);
+                if (parent && setattr(parent.get(), child.c_str(), m) != 0)
+                    return nullptr;
             }
             retain(m);
             return m;
@@ -16868,7 +16952,7 @@ namespace neos::python_runtime
             { "call", NEOS_RT_FUNCTION(fn_call), OBJ, 3u, { OBJ, OBJ, OBJ }, 0u },
             { "load_method", NEOS_RT_FUNCTION(fn_load_method), OBJ, 2u, { OBJ, STR }, 0u },
             { "call_arguments", NEOS_RT_FUNCTION(fn_call_arguments), OBJ, 4u, { OBJ, OBJ, OBJ, OBJ }, 0u },
-            { "direct_function", NEOS_RT_FUNCTION(fn_direct_function), I32, 2u, { OBJ, I64 }, 0u },
+            { "call_direct", NEOS_RT_FUNCTION(fn_call_direct), INT, 4u, { OBJ, OBJ, OBJ, OBJ }, 0u },
             { "call_method", NEOS_RT_FUNCTION(fn_call_method), INT, 4u, { OBJ, STR, OBJ, OBJ }, 0u },
             { "function", NEOS_RT_FUNCTION(fn_function), OBJ, 4u, { STR, I32, STR, OBJ }, 0u },
             { "getitem", NEOS_RT_FUNCTION(fn_getitem), OBJ, 2u, { OBJ, OBJ }, 0u },

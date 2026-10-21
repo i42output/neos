@@ -63,6 +63,25 @@ namespace neos
         inline constexpr std::uint64_t LineMarkerMask = 0xFFFFFFFFull << 32u;
         inline constexpr bool is_line_marker(std::uint64_t aValue) { return (aValue & LineMarkerMask) == LineMarker; }
 
+        // a position marker: "i64.const PositionMarker | position; drop", immediately before a call: the span of the source of the 
+        // expression that the call evaluates (see position); it has no effect (the VM removes it when it decodes a function, recording 
+        // the position of the call that follows it)
+        inline constexpr std::uint64_t PositionMarker = 0x5053ull << 48u; // ("PS")
+        inline constexpr std::uint64_t PositionMarkerMask = 0xFFFFull << 48u;
+        inline constexpr bool is_position_marker(std::uint64_t aValue) { return (aValue & PositionMarkerMask) == PositionMarker; }
+        // (a position: its line (1-based: 20 bits), the number of lines after it that it ends on (8 bits) and its columns (0-based, 
+        // in bytes: 10 bits each; its end column is exclusive); none (0) if it does not fit)
+        inline constexpr std::uint64_t position(std::uint32_t aLine, std::uint32_t aEndLine, std::uint32_t aColumn, std::uint32_t aEndColumn)
+        {
+            if (aLine == 0u || aLine >= (1u << 20u) || aEndLine < aLine || aEndLine - aLine >= (1u << 8u) || aColumn >= (1u << 10u) || aEndColumn >= (1u << 10u))
+                return 0u;
+            return (static_cast<std::uint64_t>(aLine) << 28u) | (static_cast<std::uint64_t>(aEndLine - aLine) << 20u) | (static_cast<std::uint64_t>(aColumn) << 10u) | aEndColumn;
+        }
+        inline constexpr std::uint32_t position_line(std::uint64_t aPosition) { return static_cast<std::uint32_t>((aPosition >> 28u) & 0xFFFFFu); }
+        inline constexpr std::uint32_t position_end_line(std::uint64_t aPosition) { return position_line(aPosition) + static_cast<std::uint32_t>((aPosition >> 20u) & 0xFFu); }
+        inline constexpr std::uint32_t position_column(std::uint64_t aPosition) { return static_cast<std::uint32_t>((aPosition >> 10u) & 0x3FFu); }
+        inline constexpr std::uint32_t position_end_column(std::uint64_t aPosition) { return static_cast<std::uint32_t>(aPosition & 0x3FFu); }
+
         // the custom section that names a module's frames (see neos_rt_host::frames): its sources' names (a count, then each); 
         // then, for each function that the module defines (a count, then each, in order): its name (empty: it has no frame), its 
         // source (an index) and its first line

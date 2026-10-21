@@ -37,6 +37,7 @@
 // (i_code_generator) as the language's code generation uses them
 
 #include <neos/neos.hpp>
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +47,7 @@
 #include <neos/language/i_language_compiler.hpp>
 #include <neos/language/i_code_generator.hpp>
 #include <neos/language/emit.hpp>
+#include <neos/bytecode/bytecode.hpp>
 
 namespace neos::language
 {
@@ -182,6 +184,36 @@ namespace neos::language
             aTarget.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), IndirectSignature | aSignature });
             code.resize(code.size() + 5u);
             code.push_back(0x00u);   // (the table: the functions)
+        }
+        // (the position of the call (or call_indirect) that a fragment's code ends with (its last: aAll, all of its calls): a position 
+        // marker before it (see bytecode::PositionMarker))
+        void mark_position(fragment& aCode, std::uint64_t aPosition, bool aAll = false)
+        {
+            if (aPosition == 0u)
+                return;
+            auto& code = aCode.fragmentCode.as_std_vector();
+            std::vector<std::uint32_t> calls;
+            for (auto const& r : aCode.fragmentRelocations)
+                if ((r.second() & BranchTarget) == 0u && r.first() >= 1u && code[r.first() - 1u] == static_cast<std::uint8_t>(
+                    (r.second() & IndirectSignature) != 0u && (r.second() & DeferredCall) == 0u ? bytecode::opcode::CallIndirect : bytecode::opcode::CallFunction))
+                    calls.push_back(r.first() - 1u);
+            if (calls.empty())
+                return;
+            std::sort(calls.begin(), calls.end());
+            if (!aAll)
+                calls.erase(calls.begin(), std::prev(calls.end()));
+            emitter::bytes marker;
+            emitter::put_op(marker, bytecode::opcode::I64Const);
+            emitter::put_s64(marker, static_cast<std::int64_t>(bytecode::PositionMarker | aPosition));
+            emitter::put_op(marker, bytecode::opcode::Drop);
+            // (from the last: the earlier ones do not move)
+            for (auto c = calls.rbegin(); c != calls.rend(); ++c)
+            {
+                code.insert(code.begin() + *c, marker.begin(), marker.end());
+                for (auto& r : aCode.fragmentRelocations)
+                    if (r.first() >= *c)
+                        r.first() = r.first() + static_cast<std::uint32_t>(marker.size());
+            }
         }
         // functions
         bool in_function() const { return iGenerator->in_function(); }

@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 10
+#define NEOS_RUNTIME_PLUGIN_VERSION 11
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -189,7 +189,9 @@ typedef union neos_rt_value
    function's name and its source's name are as the compiler named them (valid while the program is loaded); its line is the 
    line of the source that it is running (the call it is making: 0 if unknown); its first line is its function's; its program 
    is the program it belongs to (as thread_context's); its id identifies the call while it runs (the calls running have 
-   different ids) */
+   different ids); (version 11) its position is the span of the source of the expression that the call evaluates, if the compiler gave one 
+   (endLine: its last line (0: none); column and endColumn: its first column and the column after its last, in bytes, plus one 
+   (0: none)) */
 typedef struct neos_rt_frame
 {
     char const* function;
@@ -198,6 +200,9 @@ typedef struct neos_rt_frame
     unsigned firstLine;
     void* program;
     unsigned long long id;
+    unsigned endLine;
+    unsigned column;
+    unsigned endColumn;
 } neos_rt_frame;
 
 typedef struct neos_rt_host

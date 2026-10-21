@@ -1655,11 +1655,6 @@ namespace neos::python_runtime
 #endif
         }
 
-        bool signals_pending()
-        {
-            return sAnyPending.load(std::memory_order_relaxed) && std::this_thread::get_id() == sMainThread;
-        }
-
         // (the signals that have arrived: their Python handlers are called (false: a handler raised an exception))
 #if defined(_MSC_VER)
         __declspec(noinline)

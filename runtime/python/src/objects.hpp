@@ -436,6 +436,7 @@ namespace neos::python_runtime
         object* call(object* aCallable, object* aArgs, object* aKwargs);
         object* fn_builtin(char const* aName);
         void fn_raise(object* aException);              // (raise exception: an exception or its class)
+        void fn_raise_from(object* aException, object* aCause);  // (raise exception from cause)
         void raise_exception(object* aException);
         void raise_exception(object* aException, bool aContext);    // (aContext: the exception being handled is its context)
         void reraise_exception(object* aException);     // (as a bare raise: an exception that was taken (its context is unchanged))
@@ -632,6 +633,7 @@ namespace neos::python_runtime
         long long recursion_limit();                    // (sys.getrecursionlimit() (sys.cpp))
         void fn_depth_check(std::int32_t aDepth);       // (the depth of calls: RecursionError beyond the limit)
         object* call_method_named(object* aObject, char const* aName, std::vector<object*> aArgs);  // (steals the arguments)
+        object* fn_with_enter(object* aManager);    // (with manager: manager.__enter__() (CPython's TypeError if it has no __enter__ or __exit__))
         object* fn_import(char const* aName);
         bool write_out(std::string const& aText);      // (false: an exception (e.g. BrokenPipeError) has been raised)
         // the standard streams (aStream: 0 (input), 1 (output) or 2 (error)): the running program's, as its host gives them (they may be 
@@ -747,7 +749,6 @@ namespace neos::python_runtime
             return value && to_index(value.get(), aResult);
         }
         void run_exit_functions();                      // (atexit's: the program ends (services.cpp))
-        bool signals_pending();                         // (signals have arrived whose Python handlers signals_check would call)
         bool signals_check();                           // (the Python handlers of signals that have arrived are called: false if one raised)
         void signals_start();                           // (the signals ignored from the start (SIGPIPE: BrokenPipeError instead))
         void fn_finish();

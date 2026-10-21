@@ -684,11 +684,13 @@ namespace neos::python_runtime
                     return entry.function(nullptr, args, kwargs);   // (a class method)
                 if (args.empty())
                     return error("TypeError", std::string{ "unbound method " } + kind_name(entry.kind) + "." + entry.name + "() needs an argument");
-                if (kind_of(args[0]) != entry.kind)
+                // (an instance of a subclass (e.g. dict.get(self, key) in a subclass's get): its value)
+                auto const self = kind_of(args[0]) == entry.kind ? args[0] : builtin_value(args[0]);
+                if (kind_of(self) != entry.kind)
                     return error("TypeError", std::string{ "descriptor '" } + entry.name + "' for '" + kind_name(entry.kind) + "' objects doesn't apply to a '" +
                         type_name(args[0]) + "' object");
                 std::vector<object*> rest{ args.begin() + 1, args.end() };
-                return entry.function(args[0], rest, kwargs);
+                return entry.function(self, rest, kwargs);
             }
         }
 

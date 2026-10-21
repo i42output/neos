@@ -42,6 +42,7 @@
 // is empty)
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -1201,9 +1202,12 @@ namespace neos::python_runtime::detail
             return result;
         }
 
+        std::optional<std::size_t> attribute_call_function_end(std::string const& aSegment, std::string const& aName);
+
         // (_walk_tb_with_full_positions(tb): (frame, (lineno, end_lineno, colno, end_colno)) for each of a traceback's frames (a traceback
-        // whose tb_frame is None (one that has not been caught) has none))
-        py walk_tb_with_full_positions(py aTraceback)
+        // whose tb_frame is None (one that has not been caught) has none); aException: the exception (an AttributeError that a method 
+        // call's lookup of its method raised: the position of its innermost frame is the lookup's (o.name), as CPython's (its LOAD_ATTR's)))
+        py walk_tb_with_full_positions(py aTraceback, py const& aException = {})
         {
             std::vector<py> result;
             while (!aTraceback.is_none())
@@ -1213,10 +1217,29 @@ namespace neos::python_runtime::detail
                     break;
                 py positions = py_tuple({ none(), none(), none(), none() });
                 py const lasti = aTraceback.attr("tb_lasti");
-                if (lasti >= py{ 0 })
+                // (a traceback of the program's: the position of the expression that its frame evaluates (if the compiler gave one))
+                if (auto const* f = traceback_frame(aTraceback.get()); f != nullptr && f->column != 0u)
+                    positions = py_tuple({ py{ static_cast<long long>(f->line) }, py{ static_cast<long long>(f->endLine) }, py{ static_cast<long long>(f->column - 1u) },
+                        py{ static_cast<long long>(f->endColumn - 1u) } });
+                else if (lasti >= py{ 0 })
                 {
                     py const positionsGen = frame.attr("f_code").method("co_positions");
                     positions = builtin("next")(import_attribute("itertools", "islice")(positionsGen, floordiv(lasti, py{ 2 }), none()));
+                }
+                if (!aException.empty() && aTraceback.attr("tb_next").is_none() && !positions[py{ 2 }].is_none() && positions[py{ 0 }] == positions[py{ 1 }] &&
+                    builtin("isinstance")(aException, builtin("AttributeError")).truthy())
+                {
+                    py const name = builtin("getattr")(aException, py{ "name" }, none());
+                    py const line = import_attribute("linecache", "getline")(frame.attr("f_code").attr("co_filename"), positions[py{ 0 }]);
+                    if (kind_of(name.get()) == NEOS_PY_STR && kind_of(line.get()) == NEOS_PY_STR)
+                    {
+                        auto const text = line.str();
+                        auto const column = static_cast<std::size_t>(positions[py{ 2 }].as_index());
+                        auto const endColumn = static_cast<std::size_t>(positions[py{ 3 }].as_index());
+                        if (column < endColumn && endColumn <= text.size())
+                            if (auto const end = attribute_call_function_end(text.substr(column, endColumn - column), name.str()))
+                                positions = py_tuple({ positions[py{ 0 }], positions[py{ 1 }], positions[py{ 2 }], py{ static_cast<long long>(column + *end) } });
+                    }
                 }
                 if (positions[py{ 0 }].is_none())
                     result.push_back(py_tuple({ frame, py_tuple({ aTraceback.attr("tb_lineno") }) + slice(positions, py{ 1 }, none()) }));
@@ -1488,9 +1511,537 @@ namespace neos::python_runtime::detail
                 { return py_guarded([&]() { return frame_summary_line(parse("line", aArgs, aKwargs, { "self" }, 1u)[0]); }); } }
         };
 
-        // (StackSummary._should_show_carets: without the module ast (it cannot be imported), the anchors are none)
+        // --- the anchors of carets (traceback._extract_caret_anchors_from_line_segment and the use of ast by 
+        // StackSummary._should_show_carets): the module ast cannot be imported, so an expression's source is scanned here for 
+        // what they need (its top-level operation: a binary operation, a subscript or a call; where its operands are)
+
+        struct expression_scan
+        {
+            enum kind_t { Other, BinOp, Subscript, Call, Name };
+            kind_t kind = Other;
+            std::size_t start = 0u;
+            std::size_t end = 0u;
+            std::size_t leftEnd = 0u;       ///< (BinOp: its left operand's end; Subscript: its value's; Call: its function's)
+            std::size_t rightStart = 0u;    ///< (BinOp: its right operand's start)
+            kind_t funcKind = Other;        ///< (Call: its function's kind)
+        };
+
+        class expression_scanner
+        {
+        public:
+            struct token
+            {
+                enum kind_t { Name, Number, String, Op, End } kind;
+                std::size_t start;
+                std::size_t end;
+                std::string_view text;
+            };
+        public:
+            explicit expression_scanner(std::string_view aText) : iText{ aText }
+            {
+                tokenize();
+            }
+        public:
+            bool ok() const { return iOk; }
+            std::vector<token> const& tokens() const { return iTokens; }
+            std::size_t position() const { return iNext; }
+            void seek(std::size_t aPosition) { iNext = aPosition; }
+            bool at_end() const { return iTokens[iNext].kind == token::End; }
+            // (an expression (as Python's grammar's "expression" (no tuple, no star)): its scan; none if it is not one)
+            std::optional<expression_scan> expression()
+            {
+                auto const start = iNext;
+                // (lambda, yield and starred: not scanned)
+                if (is_name("lambda") || is_name("yield") || is_op("*") || is_op("**"))
+                    return {};
+                auto result = disjunction();
+                if (!result)
+                    return {};
+                if (is_name("if"))
+                {
+                    ++iNext;
+                    if (!disjunction() || !is_name("else"))
+                        return {};
+                    ++iNext;
+                    auto const orelse = expression();
+                    if (!orelse)
+                        return {};
+                    return expression_scan{ expression_scan::Other, iTokens[start].start, orelse->end };
+                }
+                return result;
+            }
+        private:
+            bool is_name(std::string_view aName) const { return iTokens[iNext].kind == token::Name && iTokens[iNext].text == aName; }
+            bool is_op(std::string_view aOp) const { return iTokens[iNext].kind == token::Op && iTokens[iNext].text == aOp; }
+            std::optional<expression_scan> disjunction()
+            {
+                auto const start = iNext;
+                auto result = conjunction();
+                while (result && is_name("or"))
+                {
+                    ++iNext;
+                    auto const right = conjunction();
+                    if (!right)
+                        return {};
+                    result = expression_scan{ expression_scan::Other, iTokens[start].start, right->end };
+                }
+                return result;
+            }
+            std::optional<expression_scan> conjunction()
+            {
+                auto const start = iNext;
+                auto result = inversion();
+                while (result && is_name("and"))
+                {
+                    ++iNext;
+                    auto const right = inversion();
+                    if (!right)
+                        return {};
+                    result = expression_scan{ expression_scan::Other, iTokens[start].start, right->end };
+                }
+                return result;
+            }
+            std::optional<expression_scan> inversion()
+            {
+                if (is_name("not"))
+                {
+                    auto const start = iTokens[iNext++].start;
+                    auto const operand = inversion();
+                    if (!operand)
+                        return {};
+                    return expression_scan{ expression_scan::Other, start, operand->end };
+                }
+                return comparison();
+            }
+            bool comparison_operator()
+            {
+                static std::string_view const sOps[] = { "==", "!=", "<", ">", "<=", ">=" };
+                for (auto op : sOps)
+                    if (is_op(op))
+                        return ++iNext, true;
+                if (is_name("in"))
+                    return ++iNext, true;
+                if (is_name("not") && iTokens[iNext + 1u].kind == token::Name && iTokens[iNext + 1u].text == "in")
+                    return iNext += 2u, true;
+                if (is_name("is"))
+                {
+                    ++iNext;
+                    if (is_name("not"))
+                        ++iNext;
+                    return true;
+                }
+                return false;
+            }
+            std::optional<expression_scan> comparison()
+            {
+                auto const start = iNext;
+                auto result = binary(0);
+                while (result && comparison_operator())
+                {
+                    auto const right = binary(0);
+                    if (!right)
+                        return {};
+                    result = expression_scan{ expression_scan::Other, iTokens[start].start, right->end };
+                }
+                return result;
+            }
+            // (binary operators: |, ^, &, shifts, + -, * / // % @ (left associative); then unary - + ~; then **, which is right 
+            // associative and binds more tightly than a unary operator on its left)
+            static int precedence(std::string_view aOp)
+            {
+                if (aOp == "|") return 1;
+                if (aOp == "^") return 2;
+                if (aOp == "&") return 3;
+                if (aOp == "<<" || aOp == ">>") return 4;
+                if (aOp == "+" || aOp == "-") return 5;
+                if (aOp == "*" || aOp == "/" || aOp == "//" || aOp == "%" || aOp == "@") return 6;
+                return 0;
+            }
+            std::optional<expression_scan> binary(int aMinimum)
+            {
+                auto result = unary();
+                while (result && iTokens[iNext].kind == token::Op && precedence(iTokens[iNext].text) > aMinimum)
+                {
+                    auto const p = precedence(iTokens[iNext].text);
+                    ++iNext;
+                    // (left associative: the right operand binds more tightly)
+                    auto const right = binary(p);
+                    if (!right)
+                        return {};
+                    result = expression_scan{ expression_scan::BinOp, result->start, right->end, result->end, right->start };
+                }
+                return result;
+            }
+            std::optional<expression_scan> unary()
+            {
+                if (is_op("-") || is_op("+") || is_op("~"))
+                {
+                    auto const start = iTokens[iNext++].start;
+                    auto const operand = unary();
+                    if (!operand)
+                        return {};
+                    return expression_scan{ expression_scan::Other, start, operand->end };
+                }
+                return power();
+            }
+            std::optional<expression_scan> power()
+            {
+                auto result = primary();
+                if (result && is_op("**"))
+                {
+                    ++iNext;
+                    auto const right = unary();
+                    if (!right)
+                        return {};
+                    result = expression_scan{ expression_scan::BinOp, result->start, right->end, result->end, right->start };
+                }
+                return result;
+            }
+            // (the end of a bracketed group that starts at the token (its closing bracket's end); none if it is not closed)
+            std::optional<std::size_t> skip_group()
+            {
+                int depth = 0;
+                while (iTokens[iNext].kind != token::End)
+                {
+                    auto const& t = iTokens[iNext++];
+                    if (t.kind != token::Op)
+                        continue;
+                    if (t.text == "(" || t.text == "[" || t.text == "{")
+                        ++depth;
+                    else if (t.text == ")" || t.text == "]" || t.text == "}")
+                    {
+                        if (--depth == 0)
+                            return t.end;
+                    }
+                }
+                return {};
+            }
+            std::optional<expression_scan> primary()
+            {
+                if (is_name("await"))
+                {
+                    auto const start = iTokens[iNext++].start;
+                    auto const operand = primary();
+                    if (!operand)
+                        return {};
+                    return expression_scan{ expression_scan::Other, start, operand->end };
+                }
+                std::optional<expression_scan> result;
+                auto const& t = iTokens[iNext];
+                if (t.kind == token::Name)
+                {
+                    static std::string_view const sKeywords[] = { "if", "else", "and", "or", "not", "in", "is", "for", "lambda", "yield", "await", "async", 
+                        "def", "class", "return", "import", "from", "as", "with", "while", "pass", "del", "global", "nonlocal", "raise", "try", "except", 
+                        "finally", "assert", "break", "continue", "elif" };
+                    if (std::find(std::begin(sKeywords), std::end(sKeywords), t.text) != std::end(sKeywords))
+                        return {};
+                    ++iNext;
+                    result = expression_scan{ expression_scan::Name, t.start, t.end };
+                }
+                else if (t.kind == token::Number)
+                {
+                    ++iNext;
+                    result = expression_scan{ expression_scan::Other, t.start, t.end };
+                }
+                else if (t.kind == token::String)
+                {
+                    auto const start = t.start;
+                    auto end = t.end;
+                    while (iTokens[++iNext].kind == token::String)
+                        end = iTokens[iNext].end;
+                    result = expression_scan{ expression_scan::Other, start, end };
+                }
+                else if (is_op("(") || is_op("[") || is_op("{"))
+                {
+                    auto const start = t.start;
+                    auto const end = skip_group();
+                    if (!end)
+                        return {};
+                    result = expression_scan{ expression_scan::Other, start, *end };
+                }
+                else if (is_op("..."))
+                {
+                    ++iNext;
+                    result = expression_scan{ expression_scan::Other, t.start, t.end };
+                }
+                else
+                    return {};
+                // (its trailers: attributes, calls and subscripts)
+                for (;;)
+                {
+                    if (is_op(".") && iTokens[iNext + 1u].kind == token::Name)
+                    {
+                        result = expression_scan{ expression_scan::Other, result->start, iTokens[iNext + 1u].end };
+                        iNext += 2u;
+                    }
+                    else if (is_op("("))
+                    {
+                        auto const function = *result;
+                        auto const end = skip_group();
+                        if (!end)
+                            return {};
+                        result = expression_scan{ expression_scan::Call, function.start, *end, function.end, 0u, function.kind };
+                    }
+                    else if (is_op("["))
+                    {
+                        auto const value = *result;
+                        auto const end = skip_group();
+                        if (!end)
+                            return {};
+                        result = expression_scan{ expression_scan::Subscript, value.start, *end, value.end };
+                    }
+                    else
+                        break;
+                }
+                return result;
+            }
+            void tokenize()
+            {
+                static std::string_view const sOps[] = { "**=", "//=", ">>=", "<<=", "...", "->", "**", "//", "<<", ">>", "<=", ">=", "==", "!=", ":=",
+                    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "@=" };
+                auto const name_character = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || static_cast<unsigned char>(c) >= 0x80u; };
+                std::size_t i = 0u;
+                auto const n = iText.size();
+                while (i < n)
+                {
+                    char const c = iText[i];
+                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f')
+                    {
+                        ++i;
+                        continue;
+                    }
+                    if (c == '\\')
+                    {
+                        ++i;
+                        continue;
+                    }
+                    if (c == '#')
+                    {
+                        while (i < n && iText[i] != '\n')
+                            ++i;
+                        continue;
+                    }
+                    auto const start = i;
+                    // (a string (with its prefix))
+                    std::size_t q = i;
+                    while (q < n && q - i < 3u && std::strchr("rRbBuUfF", iText[q]) != nullptr && iText[q] != '\0')
+                        ++q;
+                    if (q < n && (iText[q] == '\'' || iText[q] == '"') && (q == i || !name_character(iText[q - 1u]) || std::strchr("rRbBuUfF", iText[q - 1u]) != nullptr))
+                    {
+                        char const quote = iText[q];
+                        bool const triple = q + 2u < n && iText[q + 1u] == quote && iText[q + 2u] == quote;
+                        std::size_t j = q + (triple ? 3u : 1u);
+                        for (; j < n; ++j)
+                        {
+                            if (iText[j] == '\\')
+                                ++j;
+                            else if (iText[j] == quote && (!triple || (j + 2u < n && iText[j + 1u] == quote && iText[j + 2u] == quote)))
+                                break;
+                        }
+                        if (j >= n)
+                        {
+                            iOk = false;
+                            break;
+                        }
+                        i = j + (triple ? 3u : 1u);
+                        iTokens.push_back(token{ token::String, start, i, iText.substr(start, i - start) });
+                        continue;
+                    }
+                    if (std::isdigit(static_cast<unsigned char>(c)) || (c == '.' && i + 1u < n && std::isdigit(static_cast<unsigned char>(iText[i + 1u]))))
+                    {
+                        while (i < n && (name_character(iText[i]) || iText[i] == '.' || ((iText[i] == '+' || iText[i] == '-') && (iText[i - 1u] == 'e' || iText[i - 1u] == 'E'))))
+                            ++i;
+                        iTokens.push_back(token{ token::Number, start, i, iText.substr(start, i - start) });
+                        continue;
+                    }
+                    if (name_character(c))
+                    {
+                        while (i < n && name_character(iText[i]))
+                            ++i;
+                        iTokens.push_back(token{ token::Name, start, i, iText.substr(start, i - start) });
+                        continue;
+                    }
+                    std::size_t length = 1u;
+                    for (auto op : sOps)
+                        if (iText.substr(i, op.size()) == op)
+                        {
+                            length = op.size();
+                            break;
+                        }
+                    i += length;
+                    iTokens.push_back(token{ token::Op, start, i, iText.substr(start, length) });
+                }
+                iTokens.push_back(token{ token::End, n, n, {} });
+            }
+        private:
+            std::string_view iText;
+            std::vector<token> iTokens;
+            std::size_t iNext = 0u;
+            bool iOk = true;
+        };
+
+        // (_Anchors: (left_end_lineno, left_end_offset, right_start_lineno, right_start_offset), in characters)
+        struct caret_anchors
+        {
+            long long leftLine;
+            long long leftOffset;
+            long long rightLine;
+            long long rightOffset;
+        };
+
+        // (_extract_caret_anchors_from_line_segment)
+        std::optional<caret_anchors> extract_caret_anchors(std::string const& aSegment)
+        {
+            expression_scanner scanner{ aSegment };
+            if (!scanner.ok())
+                return {};
+            auto const e = scanner.expression();
+            if (!e || !scanner.at_end())
+                return {};
+            // (lines: the segment's, by byte offset; positions as (line, character offset))
+            std::vector<std::size_t> starts{ 0u };
+            for (std::size_t i = 0u; i < aSegment.size(); ++i)
+                if (aSegment[i] == '\n')
+                    starts.push_back(i + 1u);
+            auto const line_end = [&](std::size_t aLine) { return aLine + 1u < starts.size() ? starts[aLine + 1u] - 1u : aSegment.size(); };
+            auto const line_of = [&](std::size_t aOffset) { return static_cast<std::size_t>(std::upper_bound(starts.begin(), starts.end(), aOffset) - starts.begin()) - 1u; };
+            auto const characters = [&](std::size_t aLine, std::size_t aOffset)
+            {
+                long long n = 0;
+                for (std::size_t i = starts[aLine]; i < aOffset && i < aSegment.size(); ++i)
+                    if ((static_cast<unsigned char>(aSegment[i]) & 0xC0u) != 0x80u)
+                        ++n;
+                return n;
+            };
+            // (next_valid_char, increment_until: by byte offset)
+            auto const valid = [&](std::size_t aOffset) -> std::optional<std::size_t>
+            {
+                auto line = line_of(std::min(aOffset, aSegment.size()));
+                while (line < starts.size() && aOffset >= line_end(line))
+                {
+                    ++line;
+                    if (line == starts.size())
+                        return {};
+                    aOffset = starts[line];
+                }
+                return aOffset;
+            };
+            auto const increment_until = [&](std::size_t aOffset, auto aStop) -> std::optional<std::size_t>
+            {
+                auto p = valid(aOffset);
+                while (p)
+                {
+                    char const ch = aSegment[*p];
+                    if (ch == '\\' || ch == '#')
+                    {
+                        auto const line = line_of(*p);
+                        if (line + 1u >= starts.size())
+                            return {};
+                        p = valid(starts[line + 1u]);
+                    }
+                    else if (!aStop(ch))
+                        p = valid(*p + 1u);
+                    else
+                        break;
+                }
+                return p;
+            };
+            switch (e->kind)
+            {
+            case expression_scan::BinOp:
+                {
+                    auto const op = increment_until(e->leftEnd, [](char ch) { return !std::isspace(static_cast<unsigned char>(ch)) && ch != ')'; });
+                    if (!op)
+                        return {};
+                    auto const line = line_of(*op);
+                    auto right = *op + 1u;
+                    if (right < line_end(line) && (line_of(e->rightStart) > line || right < e->rightStart) && !std::isspace(static_cast<unsigned char>(aSegment[right])) &&
+                        aSegment[right] != '\\' && aSegment[right] != '#')
+                        ++right;
+                    return caret_anchors{ static_cast<long long>(line), characters(line, *op), static_cast<long long>(line), characters(line, right) };
+                }
+            case expression_scan::Subscript:
+            case expression_scan::Call:
+                {
+                    char const open = e->kind == expression_scan::Call ? '(' : '[';
+                    auto const left = increment_until(e->leftEnd, [open](char ch) { return ch == open; });
+                    if (!left)
+                        return {};
+                    auto const leftLine = line_of(*left);
+                    auto const rightLine = line_of(e->end == 0u ? 0u : e->end - 1u);
+                    return caret_anchors{ static_cast<long long>(leftLine), characters(leftLine, *left), static_cast<long long>(rightLine), characters(rightLine, e->end) };
+                }
+            default:
+                return {};
+            }
+        }
+
+        // (a call of a method (o.name(...)): the end of its function (o.name))
+        std::optional<std::size_t> attribute_call_function_end(std::string const& aSegment, std::string const& aName)
+        {
+            expression_scanner scanner{ aSegment };
+            if (!scanner.ok())
+                return {};
+            auto const e = scanner.expression();
+            if (!e || !scanner.at_end() || e->kind != expression_scan::Call)
+                return {};
+            auto const function = std::string_view{ aSegment }.substr(e->start, e->leftEnd - e->start);
+            if (!function.ends_with(aName) || function.size() <= aName.size())
+                return {};
+            auto before = function.substr(0u, function.size() - aName.size());
+            while (!before.empty() && std::isspace(static_cast<unsigned char>(before.back())))
+                before.remove_suffix(1u);
+            if (before.empty() || before.back() != '.')
+                return {};
+            return e->leftEnd;
+        }
+
+        // (the ast cases of StackSummary._should_show_carets: "return f(...)" and "x = f(...)" (f a name) whose call is all of the lines 
+        // (aStart and aEnd: its character offsets in the first and last lines))
+        bool call_is_whole_statement(std::vector<std::string> const& aLines, long long aStart, long long aEnd)
+        {
+            std::string text;
+            for (std::size_t i = 0u; i < aLines.size(); ++i)
+                text += (i > 0u ? "\n" : "") + aLines[i];
+            expression_scanner scanner{ text };
+            if (!scanner.ok())
+                return false;
+            auto const& tokens = scanner.tokens();
+            std::size_t first = 0u;
+            if (tokens.size() > 1u && tokens[0].kind == expression_scanner::token::Name && tokens[0].text == "return")
+                first = 1u;
+            else if (tokens.size() > 2u && tokens[0].kind == expression_scanner::token::Name && tokens[1].kind == expression_scanner::token::Op && tokens[1].text == "=")
+                first = 2u;
+            else
+                return false;
+            scanner.seek(first);
+            auto const e = scanner.expression();
+            // (return f(...): its function a name; x = ...(...): any call's)
+            if (!e || !scanner.at_end() || e->kind != expression_scan::Call || (first == 1u && e->funcKind != expression_scan::Name))
+                return false;
+            // (its span in characters: on the first line and the last)
+            auto const characters = [&](std::size_t aFrom, std::size_t aTo)
+            {
+                long long n = 0;
+                for (std::size_t i = aFrom; i < aTo; ++i)
+                    if ((static_cast<unsigned char>(text[i]) & 0xC0u) != 0x80u)
+                        ++n;
+                return n;
+            };
+            auto const lastLineStart = text.rfind('\n') == std::string::npos ? 0u : text.rfind('\n') + 1u;
+            return text.find('\n') > e->start && characters(0u, e->start) == aStart && e->end >= lastLineStart && characters(lastLineStart, e->end) == aEnd;
+        }
+
+        // (StackSummary._should_show_carets (its use of ast: see call_is_whole_statement))
         bool should_show_carets(long long aStartOffset, long long aEndOffset, std::vector<py> const& aAllLines, py const& aAnchors)
         {
+            {
+                std::vector<std::string> lines;
+                for (auto const& line : aAllLines)
+                    lines.push_back(line.str());
+                if (!lines.empty() && call_is_whole_statement(lines, aStartOffset, aEndOffset))
+                    return false;
+            }
             if (!aAnchors.empty() && aAnchors.truthy())
                 return true;
             if (slice(aAllLines.front(), none(), py{ aStartOffset }).method("lstrip").truthy() || slice(aAllLines.back(), py{ aEndOffset }, none()).method("rstrip").truthy())
@@ -1532,10 +2083,40 @@ namespace neos::python_runtime::detail
                     endOffset = std::max(0ll, endOffset - dedentCharacters);
                     long long const dpStartOffset = display_width(allLines.front(), py{ startOffset });
                     long long const dpEndOffset = display_width(allLines.back(), py{ endOffset });
-                    // (the anchors: none (the module ast cannot be imported))
-                    bool const showCarets = aSelf.method("_should_show_carets", { py{ startOffset }, py{ endOffset }, py_list(allLines), none() }).truthy();
+                    // (the code's segment (the instruction's): its anchors)
+                    py segment = py{ "\n" }.method("join", { py_list(allLines) });
+                    segment = slice(segment, py{ startOffset }, py{ static_cast<long long>(segment.size()) - (static_cast<long long>(allLines.back().size()) - endOffset) });
+                    std::optional<caret_anchors> anchors;
+                    try
+                    {
+                        anchors = extract_caret_anchors(segment.str());
+                    }
+                    catch (...)
+                    {
+                    }
+                    bool const showCarets = aSelf.method("_should_show_carets", { py{ startOffset }, py{ endOffset }, py_list(allLines), 
+                        anchors ? py{ 1 } : none() }).truthy();
                     std::vector<py> result;
                     std::set<long long> significant{ 0, static_cast<long long>(allLines.size()) - 1 };
+                    long long anchorsLeftEnd = 0;
+                    long long anchorsRightStart = 0;
+                    std::string primary = "^";
+                    std::string secondary = "^";
+                    if (anchors)
+                    {
+                        anchorsLeftEnd = anchors->leftOffset + (anchors->leftLine == 0 ? startOffset : 0);
+                        anchorsRightStart = anchors->rightOffset + (anchors->rightLine == 0 ? startOffset : 0);
+                        if (anchors->leftLine < static_cast<long long>(allLines.size()))
+                            anchorsLeftEnd = display_width(allLines[static_cast<std::size_t>(anchors->leftLine)], py{ anchorsLeftEnd });
+                        if (anchors->rightLine < static_cast<long long>(allLines.size()))
+                            anchorsRightStart = display_width(allLines[static_cast<std::size_t>(anchors->rightLine)], py{ anchorsRightStart });
+                        primary = "~";
+                        secondary = "^";
+                        for (long long l = anchors->leftLine - 1; l <= anchors->leftLine + 1; ++l)
+                            significant.insert(l);
+                        for (long long l = anchors->rightLine - 1; l <= anchors->rightLine + 1; ++l)
+                            significant.insert(l);
+                    }
                     significant.erase(-1);
                     significant.erase(static_cast<long long>(allLines.size()));
                     auto const outputLine = [&](long long aLine)
@@ -1548,7 +2129,15 @@ namespace neos::python_runtime::detail
                         std::vector<std::string> carets;
                         long long const count = aLine == static_cast<long long>(allLines.size()) - 1 ? dpEndOffset : display_width(line);
                         for (long long col = 0; col < count; ++col)
-                            carets.push_back(col < spaces || (aLine == 0 && col < dpStartOffset) ? " " : "^");
+                        {
+                            if (col < spaces || (aLine == 0 && col < dpStartOffset))
+                                carets.push_back(" ");
+                            else if (anchors && (aLine > anchors->leftLine || (aLine == anchors->leftLine && col >= anchorsLeftEnd)) &&
+                                (aLine < anchors->rightLine || (aLine == anchors->rightLine && col < anchorsRightStart)))
+                                carets.push_back(secondary);
+                            else
+                                carets.push_back(primary);
+                        }
                         if (aColorize)
                         {
                             auto const chars = result.back().items();
@@ -1790,7 +2379,7 @@ namespace neos::python_runtime::detail
             seen.method("add", { id_of(excValue) });
             self.set_attr("max_group_width", options.maxGroupWidth);
             self.set_attr("max_group_depth", options.maxGroupDepth);
-            self.set_attr("stack", stack_summary_class().method("_extract_from_extended_frame_gen", { walk_tb_with_full_positions(excTraceback) },
+            self.set_attr("stack", stack_summary_class().method("_extract_from_extended_frame_gen", { walk_tb_with_full_positions(excTraceback, excValue) },
                 { { "limit", options.limit }, { "lookup_lines", options.lookupLines }, { "capture_locals", options.captureLocals } }));
             // (an exception that has a traceback (one that has no frame (it has not been caught) is shown as its header))
             self.set_attr("_has_traceback", boolean(!excTraceback.is_none()));

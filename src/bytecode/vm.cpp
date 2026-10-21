@@ -489,17 +489,19 @@ namespace neos
                     // (the frames of an invocation of its functions, innermost first: aVisit(function, line, id) for each that has a 
                     // frame (see FramesSection), until it returns false (an interpreted frame's id is odd; native code's is its frame's 
                     // address, which is even))
-                    void walk(activation const& aActivation, std::function<bool(std::uint32_t aFunction, std::uint32_t aLine, std::uint64_t aId)> const& aVisit) const
+                    void walk(activation const& aActivation, std::function<bool(std::uint32_t aFunction, std::uint32_t aLine, std::uint64_t aPosition, 
+                        std::uint64_t aId)> const& aVisit) const
                     {
                         auto const visit = [&](std::size_t aToken, std::uint64_t aId) -> bool
                         {
-                            // (the function and line of a call: looked up once (a thread's cache of the calls it walked last))
+                            // (the function, line and position of a call: looked up once (a thread's cache of the calls it walked last))
                             struct call_site
                             {
                                 std::uint64_t program = 0u;
                                 std::size_t token = 0u;
                                 std::optional<std::uint32_t> function;
                                 std::uint32_t line = 0u;
+                                std::uint64_t position = 0u;
                             };
                             thread_local std::array<call_site, 256u> tCallSites;
                             auto& site = tCallSites[(aToken ^ (aToken >> 8u) ^ iSerial) % tCallSites.size()];
@@ -511,10 +513,12 @@ namespace neos
                                 if (site.function && (*site.function >= iFrames.size() || !iFrames[*site.function].frame))
                                     site.function.reset();
                                 site.line = site.function ? line_at(*site.function, aToken) : 0u;
+                                auto const p = std::lower_bound(iPositions.begin(), iPositions.end(), std::make_pair(aToken, std::uint64_t{ 0u }));
+                                site.position = p != iPositions.end() && p->first == aToken ? p->second : 0u;
                             }
                             if (!site.function)
                                 return true;
-                            return aVisit(*site.function, site.line, aId);
+                            return aVisit(*site.function, site.line, site.position, aId);
                         };
                         if (aActivation.frames != nullptr)
                         {
@@ -1234,6 +1238,22 @@ namespace neos
                                 {
                                     auto const v = static_cast<std::uint64_t>(r.s());
                                     // (a line marker (and its drop): removed; the line of the code that follows it)
+                                    // (a position marker (and its drop): removed; the position of the call that follows it)
+                                    if (bytecode::is_position_marker(v) && r.position() < f.codeEnd && iModule[r.position()] == 0x1Au)
+                                    {
+                                        r.byte();
+                                        iTokens.resize(position);
+                                        iEnds.resize(position);
+                                        iElses.resize(position);
+                                        if (auto const p = v & ~bytecode::PositionMarkerMask; p != 0u)
+                                        {
+                                            if (!iPositions.empty() && iPositions.back().first == position)
+                                                iPositions.back().second = p;
+                                            else
+                                                iPositions.emplace_back(position, p);
+                                        }
+                                        break;
+                                    }
                                     if (bytecode::is_line_marker(v) && r.position() < f.codeEnd && iModule[r.position()] == 0x1Au)
                                     {
                                         r.byte();
@@ -1885,6 +1905,7 @@ namespace neos
                     std::vector<std::string> iSources;
                     std::vector<std::uint32_t> iCodeOrder;
                     std::vector<std::pair<std::size_t, std::uint32_t>> iLines;
+                    std::vector<std::pair<std::size_t, std::uint64_t>> iPositions;  ///< (token -> its position (see bytecode::PositionMarker))
                 };
             }
 
@@ -2342,12 +2363,16 @@ namespace neos
                         {
                             if (count == aCount)
                                 return count;
-                            a->program->walk(*a, [&](std::uint32_t aFunction, std::uint32_t aLine, std::uint64_t aId)
+                            a->program->walk(*a, [&](std::uint32_t aFunction, std::uint32_t aLine, std::uint64_t aPosition, std::uint64_t aId)
                             {
                                 auto const& info = a->program->frame_of(aFunction);
                                 if (a->context == nullptr)
                                     a->context = context_of(a->program, a->native);
-                                aFrames[count++] = neos_rt_frame{ info.name.c_str(), a->program->source_name(info.source).c_str(), aLine, info.firstLine, a->context, aId };
+                                // (its position: if it is on its line)
+                                bool const positioned = aPosition != 0u && bytecode::position_line(aPosition) == aLine;
+                                aFrames[count++] = neos_rt_frame{ info.name.c_str(), a->program->source_name(info.source).c_str(), aLine, info.firstLine, a->context, aId,
+                                    positioned ? bytecode::position_end_line(aPosition) : 0u, positioned ? bytecode::position_column(aPosition) + 1u : 0u,
+                                    positioned ? bytecode::position_end_column(aPosition) + 1u : 0u };
                                 return count < aCount;
                             });
                         }

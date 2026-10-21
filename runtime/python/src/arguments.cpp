@@ -61,9 +61,13 @@ namespace neos::python_runtime
         {
             // (aFunction: the qualified name (e.g. "bytes.strip"); some messages have the bare name)
             auto const plural = [](std::size_t n) { return n == 1u ? " argument" : " arguments"; };
-            std::string const qualified{ aFunction };
-            auto const dot = qualified.rfind('.');
-            std::string const bare = dot == std::string::npos ? qualified : qualified.substr(dot + 1u);
+            // (its bare name: for a message (found only for one))
+            auto const bare = [aFunction]()
+            {
+                std::string const qualified{ aFunction };
+                auto const dot = qualified.rfind('.');
+                return dot == std::string::npos ? qualified : qualified.substr(dot + 1u);
+            };
             aResult.assign(aNames.size(), nullptr);
             bool const keywords = aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty();
             if (aPositionalOnly >= aNames.size())
@@ -86,13 +90,13 @@ namespace neos::python_runtime
                 }
                 if (aArgs.size() < aRequired)
                 {
-                    error("TypeError", bare + (aRequired == aNames.size() ? " expected " : " expected at least ") + std::to_string(aRequired) +
+                    error("TypeError", bare() + (aRequired == aNames.size() ? " expected " : " expected at least ") + std::to_string(aRequired) +
                         plural(aRequired) + ", got " + std::to_string(aArgs.size()));
                     return false;
                 }
                 if (aArgs.size() > aNames.size())
                 {
-                    error("TypeError", bare + (aRequired == aNames.size() ? " expected " : " expected at most ") + std::to_string(aNames.size()) +
+                    error("TypeError", bare() + (aRequired == aNames.size() ? " expected " : " expected at most ") + std::to_string(aNames.size()) +
                         plural(aNames.size()) + ", got " + std::to_string(aArgs.size()));
                     return false;
                 }
@@ -100,9 +104,17 @@ namespace neos::python_runtime
                     aResult[i] = aArgs[i];
                 return true;
             }
+            // (fewer than its positional-only parameters that it requires (argument clinic's message))
+            if (aArgs.size() < std::min(aRequired, aPositionalOnly))
+            {
+                auto const n = std::min(aRequired, aPositionalOnly);
+                error("TypeError", bare() + "() takes at least " + std::to_string(n) + " positional argument" + (n == 1u ? "" : "s") + " (" + 
+                    std::to_string(aArgs.size()) + " given)");
+                return false;
+            }
             if (aArgs.size() > aNames.size())
             {
-                error("TypeError", bare + "() takes at most " + std::to_string(aNames.size()) + plural(aNames.size()) + " (" +
+                error("TypeError", bare() + "() takes at most " + std::to_string(aNames.size()) + plural(aNames.size()) + " (" +
                     std::to_string(aArgs.size() + (keywords ? as<dict_object>(aKwargs)->items.size() : 0u)) + " given)");
                 return false;
             }
@@ -117,12 +129,12 @@ namespace neos::python_runtime
                         ++i;
                     if (i == aNames.size())
                     {
-                        error("TypeError", bare + "() got an unexpected keyword argument '" + name + "'");
+                        error("TypeError", bare() + "() got an unexpected keyword argument '" + name + "'");
                         return false;
                     }
                     if (aResult[i] != nullptr)
                     {
-                        error("TypeError", "argument for " + bare + "() given by name ('" + name + "') and position (" + std::to_string(i + 1u) + ")");
+                        error("TypeError", "argument for " + bare() + "() given by name ('" + name + "') and position (" + std::to_string(i + 1u) + ")");
                         return false;
                     }
                     aResult[i] = item.second;
@@ -130,7 +142,7 @@ namespace neos::python_runtime
             for (std::size_t i = 0u; i < aRequired; ++i)
                 if (aResult[i] == nullptr)
                 {
-                    error("TypeError", bare + "() missing required argument '" + aNames[i] + "' (pos " + std::to_string(i + 1u) + ")");
+                    error("TypeError", bare() + "() missing required argument '" + aNames[i] + "' (pos " + std::to_string(i + 1u) + ")");
                     return false;
                 }
             return true;

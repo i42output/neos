@@ -257,6 +257,13 @@ namespace neos::compilers::python
         fragment py_unpack_call(fragment const& aValue, std::vector<fragment_state::py_target> const& aTargets);
         fragment py_owned(fragment aValue);
         bool py_pure(fragment const& aValue);
+        fragment py_none(bool aNewReference);
+        std::uint64_t py_position(neolib::i_string_view const& aSource);
+        int py_operator_precedence(std::string_view aSource);
+        std::optional<std::size_t> py_primary_start(std::string_view aText, std::size_t aBefore);
+        std::optional<std::size_t> py_operand_start(std::string_view aText, std::size_t aBefore, int aPrecedence);
+        std::uint64_t py_position(std::string_view aSource, bool aExtend = true);
+        fragment py_call_outcome(fragment aCall, std::optional<std::uint32_t> aReceiver, std::vector<std::uint32_t> const& aArguments);
         fragment py_flush();
         fragment py_release_temporaries(fragment const& aCode, std::optional<std::uint32_t> aExcept = {});
         fragment py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept = {});
@@ -324,6 +331,8 @@ namespace neos::compilers::python
             std::vector<std::uint32_t> const* lines = nullptr;
             std::vector<std::size_t> starts;
         } iPyLineCache;                                     ///< (source_line's: of the source it was last asked about)
+        std::map<std::string, std::string> iPySourceTexts;  ///< (a source as rewritten -> the source as written)
+        neolib::i_string_view const* iPyOperationSource = nullptr; ///< (the source of the operation being emitted (see py_operation))
         std::set<std::string> iPyPackageFunctions;           ///< (the functions of the language's packages (builtins.py): as values, the builtins)
         std::map<std::string, char> iPyFlavours;             ///< (function -> G: a generator function, C: a coroutine function, A: an async generator function)
         std::map<std::string, std::vector<std::pair<std::string, std::string>>> iPyAnnotations; ///< (a function of a module -> the sources of its annotations)

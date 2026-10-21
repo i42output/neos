@@ -182,6 +182,8 @@ namespace neos::python_runtime
 
             bool no_arguments(char const* aName, std::vector<object*> const& aArgs, object* aKwargs)
             {
+                if (aArgs.empty() && (aKwargs == nullptr || as<dict_object>(aKwargs)->items.empty()))
+                    return true;
                 std::vector<object*> a;
                 return parse_arguments(aName, aArgs, aKwargs, {}, 0u, 0u, a);
             }
@@ -235,6 +237,35 @@ namespace neos::python_runtime
             {
                 if (!no_arguments(aName, aArgs, aKwargs))
                     return nullptr;
+                // (ASCII: its bytes' cases (the same as their code points': each ASCII character's case is one ASCII character))
+                if (auto const& s = *as<str_object>(aSelf); s.is_ascii())
+                {
+                    auto const upper = [](char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; };
+                    auto const lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+                    auto const cased = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+                    std::string ascii = s.value;
+                    bool previous = false;
+                    for (std::size_t i = 0u; i < ascii.size(); ++i)
+                    {
+                        auto& c = ascii[i];
+                        switch (aWhich)
+                        {
+                        case 0: c = upper(c); break;
+                        case 1: case 2: c = lower(c); break;
+                        case 3: c = c >= 'a' && c <= 'z' ? upper(c) : lower(c); break;
+                        case 4:
+                            {
+                                bool const wasCased = cased(c);
+                                c = previous ? lower(c) : upper(c);
+                                previous = wasCased;
+                            }
+                            break;
+                        case 5: c = i == 0u ? upper(c) : lower(c); break;
+                        }
+                    }
+                    auto const length = ascii.size();
+                    return make_str(std::move(ascii), length);
+                }
                 std::u32string storage;
                 auto const& text = points_of(aSelf, storage);
                 std::u32string result;
@@ -995,11 +1026,13 @@ namespace neos::python_runtime
                     return entry.function(nullptr, args, aKwargs);    // (a static method)
                 if (args.empty())
                     return error("TypeError", std::string{ "unbound method str." } + entry.name + "() needs an argument");
-                if (kind_of(args[0]) != NEOS_PY_STR)
+                // (an instance of a subclass (e.g. str.upper(self) in a subclass's method): its value)
+                auto const self = kind_of(args[0]) == NEOS_PY_STR ? args[0] : builtin_value(args[0]);
+                if (kind_of(self) != NEOS_PY_STR)
                     return error("TypeError", std::string{ "descriptor '" } + entry.name + "' for 'str' objects doesn't apply to a '" + type_name(args[0]) + "' object");
                 std::vector<object*> rest{ args.begin() + 1, args.end() };
                 auto const kwargs = aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty() ? aKwargs : nullptr;
-                return entry.function(args[0], rest, kwargs);
+                return entry.function(self, rest, kwargs);
             }
         }
 

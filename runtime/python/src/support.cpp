@@ -135,7 +135,7 @@ namespace neos::python_runtime
                         parameters.push_back((retain(t), t));
                     ref const args{ make_tuple(std::move(parameters)) };
                     ref const manager{ call(items.factories[i], args.get(), nullptr) };
-                    ref value{ manager ? call_method_named(manager.get(), "__enter__", {}) : nullptr };
+                    ref value{ manager ? fn_with_enter(manager.get()) : nullptr };
                     if (!value)
                     {
                         // (the items entered are exited, then the exception propagates)

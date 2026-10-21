@@ -44,6 +44,12 @@ names the CPython sources it is derived from.
   locale.cpp           Lib/locale.py
   locale_tables.hpp    Lib/locale.py: its tables
   logging.cpp          Lib/logging/__init__.py
+  logging_config.cpp   Lib/logging/config.py
+  logging_config_docs.hpp
+                       Lib/logging/config.py (its docstrings, generated)
+  logging_handlers.cpp Lib/logging/handlers.py
+  logging_handlers_docs.hpp
+                       Lib/logging/handlers.py (its docstrings, generated)
   objects.cpp          Objects/floatobject.c, Objects/complexobject.c,
                        Objects/longobject.c, Objects/rangeobject.c,
                        Objects/sliceobject.c, Objects/tupleobject.c,
@@ -137,10 +143,15 @@ https://github.com/mjosaarinen/blake2_mjosref), dedicated to the public domain
 under CC0 1.0 Universal.
 
 
-logging (src/logging.cpp)
--------------------------
+logging (src/logging.cpp, src/logging_config.cpp, src/logging_config_docs.hpp,
+src/logging_handlers.cpp and src/logging_handlers_docs.hpp)
+-------------------------------------------------------------------------------
 
-Copyright 2001-2022 by Vinay Sajip. All Rights Reserved.
+Lib/logging/__init__.py: Copyright 2001-2022 by Vinay Sajip. All Rights Reserved.
+Lib/logging/config.py: Copyright 2001-2023 by Vinay Sajip. All Rights Reserved.
+Lib/logging/handlers.py: Copyright 2001-2021 by Vinay Sajip. All Rights Reserved.
+Each under the following permission notice:
+
 
 Permission to use, copy, modify, and distribute this software and its
 documentation for any purpose and without fee is hereby granted,
