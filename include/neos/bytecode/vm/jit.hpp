@@ -39,6 +39,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace neos
@@ -178,7 +179,7 @@ namespace neos
                 // returns null if the module uses an instruction the JIT does not support (the interpreter is then used)
                 compiled_module_ptr compile(module_description const& aModule, host_function aHost);
                 // traps are thrown as std::runtime_error (exceptions thrown by host functions propagate unchanged)
-                std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::vector<value> const& aArguments, 
+                std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, 
                     invocation* aInvocation = nullptr);
                 // (the frames of an invocation that is calling an import (from within that call), innermost first: aVisit(token, id) 
                 // for each (the token of the call it is making, and an id of the frame while it runs), until aVisit returns false)

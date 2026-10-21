@@ -4274,6 +4274,11 @@ namespace neos
                     }
 
                     thread_local std::uint64_t tCoroutineStack = 0u;
+#if defined(_WIN32)
+                    thread_local std::uint32_t tFiberDepth = 0u;    // (calls running on the fiber that run made: further calls run on it)
+#else
+                    thread_local std::uint64_t tThreadStackLimit = 0u;  // (the thread's (found once: pthread_getattr_np is not cheap))
+#endif
 
                     std::uint64_t stack_limit()
                     {
@@ -4281,6 +4286,10 @@ namespace neos
                         constexpr std::uint64_t Headroom = 256u * 1024u;
                         if (tCoroutineStack != 0u)
                             return tCoroutineStack + Headroom;
+#if !defined(_WIN32)
+                        if (tThreadStackLimit != 0u)
+                            return tThreadStackLimit;
+#endif
 #if defined(_WIN32)
                         ULONG_PTR low = 0u;
                         ULONG_PTR high = 0u;
@@ -4294,7 +4303,8 @@ namespace neos
                             std::size_t size = 0u;
                             ::pthread_attr_getstack(&attributes, &address, &size);
                             ::pthread_attr_destroy(&attributes);
-                            return reinterpret_cast<std::uint64_t>(address) + Headroom;
+                            tThreadStackLimit = reinterpret_cast<std::uint64_t>(address) + Headroom;
+                            return tThreadStackLimit;
                         }
                         char probe = 0;
                         return reinterpret_cast<std::uint64_t>(&probe) - 512u * 1024u;
@@ -4322,7 +4332,13 @@ namespace neos
                     {
 #if defined(_WIN32)
                         // generated code uses the native stack: on Windows (1MB thread stacks by default) it runs on a 
-                        // fiber with a larger stack
+                        // fiber with a larger stack (one: a call that it makes (e.g. a runtime plugin's call of a function of 
+                        // the program) runs on it too)
+                        if (tFiberDepth != 0u)
+                        {
+                            aContext.stackLimit = stack_limit();
+                            return aModule.trampoline(&aContext, aFunction);
+                        }
                         constexpr std::size_t StackReserve = 64u * 1024u * 1024u;
                         struct call
                         {
@@ -4339,7 +4355,9 @@ namespace neos
                             {
                                 auto& c = *static_cast<call*>(aCall);
                                 c.ctx->stackLimit = stack_limit();
+                                ++tFiberDepth;
                                 c.status = c.module->trampoline(c.ctx, c.function);
+                                --tFiberDepth;
                                 ::SwitchToFiber(c.caller);
                             }, &c) : nullptr;
                         if (fiber != nullptr)
@@ -4396,12 +4414,12 @@ namespace neos
                     return result;
                 }
 
-                std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::vector<value> const& aArguments, invocation* aInvocation)
+                std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, invocation* aInvocation)
                 {
                     auto const& function = aModule.description.functions.at(aFunction);
                     if (function.imported)
                     {
-                        std::vector<value> buffer{ aArguments };
+                        std::vector<value> buffer{ aArguments.begin(), aArguments.end() };
                         buffer.resize(std::max(buffer.size(), function.results->size()));
                         aModule.host(aFunction, buffer.data());
                         buffer.resize(function.results->size());
@@ -4497,7 +4515,7 @@ namespace neos
                     return {};
                 }
 
-                std::vector<value> invoke(compiled_module&, std::uint32_t, std::vector<value> const&, invocation*)
+                std::vector<value> invoke(compiled_module&, std::uint32_t, std::span<value const>, invocation*)
                 {
                     throw std::logic_error("neos::jit: not available");
                 }

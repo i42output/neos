@@ -43,6 +43,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 #include "objects.hpp"
 
@@ -1072,6 +1073,21 @@ namespace neos::python_runtime
                 if (std::strcmp(entry.name, aName) == 0)
                     return make_function(entry.name, call_str_method, const_cast<str_method_entry*>(&entry), std::strcmp(aName, "maketrans") == 0 ? nullptr : aSelf);
             return nullptr;
+        }
+
+        native_method str_method_function(char const* aName)
+        {
+            // (by name: made once)
+            static std::unordered_map<std::string_view, native_method> const sFunctions = []()
+            {
+                std::unordered_map<std::string_view, native_method> result;
+                for (auto const& entry : sStrMethods)
+                    if (std::strcmp(entry.name, "maketrans") != 0)
+                        result.emplace(entry.name, entry.function);
+                return result;
+            }();
+            auto const f = sFunctions.find(aName);
+            return f != sFunctions.end() ? f->second : nullptr;
         }
     }
 }

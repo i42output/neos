@@ -37,6 +37,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include "objects.hpp"
 
@@ -694,6 +695,24 @@ namespace neos::python_runtime
                 if (entry.kind == aKind && std::strcmp(entry.name, aName) == 0)
                     return make_function(entry.name, call_container_method, const_cast<container_method_entry*>(&entry),
                         std::strcmp(aName, "fromkeys") == 0 ? nullptr : aSelf);
+            return nullptr;
+        }
+
+        native_method container_method_function(int aKind, char const* aName)
+        {
+            // (by name: made once (the first of a kind's, as container_method finds it))
+            static std::unordered_map<std::string_view, std::vector<container_method_entry const*>> const sFunctions = []()
+            {
+                std::unordered_map<std::string_view, std::vector<container_method_entry const*>> result;
+                for (auto const& entry : sContainerMethods)
+                    if (std::strcmp(entry.name, "fromkeys") != 0)
+                        result[entry.name].push_back(&entry);
+                return result;
+            }();
+            if (auto const f = sFunctions.find(aName); f != sFunctions.end())
+                for (auto const* entry : f->second)
+                    if (entry->kind == aKind)
+                        return entry->function;
             return nullptr;
         }
 

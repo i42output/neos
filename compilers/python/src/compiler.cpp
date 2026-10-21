@@ -4967,8 +4967,28 @@ namespace neos::compilers::python
         // a call of an object: callable(*args, **kwargs)
         auto statement = make_fragment(fragment_kind::Value, type::Object, aSource);
         auto const callable = temporary(type::I32);
+        // (receiver.name(args): a method call (python::call_method: no bound method is made for it))
+        std::optional<fragment_state::py_access> method;
+        if (!execBuiltin && !anyStar && callee.holds_alternative<i_fragment>())
+            if (auto const access = state().pyAccesses.find(callee.get<i_fragment>().source().to_std_string_view().data());
+                access != state().pyAccesses.end() && !access->second.key && !access->second.attribute.empty())
+            {
+                auto const text = trimmed(callee.get<i_fragment>().source().to_std_string_view());
+                if (text.ends_with(access->second.attribute) && trimmed(text.substr(0u, text.size() - access->second.attribute.size())).ends_with("."))
+                    method = access->second;
+            }
+        std::optional<std::uint32_t> receiver;
+        if (method)
+        {
+            receiver = temporary(type::I32);
+            append(statement, method->receiver);
+            put_local(statement, opcode::LocalSet, *receiver);
+        }
         if (execBuiltin)
             append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
+        else if (method)
+            append(statement, py_owned(py_runtime_call("python::load_method", { type::Object, type::String }, type::Object, 
+                { local_value(*receiver, type::Object), py_string(method->attribute) })));
         else
             append(statement, py_object(callee));
         put_local(statement, opcode::LocalSet, callable);
@@ -5031,8 +5051,12 @@ namespace neos::compilers::python
         fragment none;
         put_i32(none, 0);
         none.valueType = type::Object;
-        auto call = py_owned(py_runtime_call("python::call", { type::Object, type::Object, type::Object }, type::Object,
-            { local_value(callable, type::Object), local_value(args, type::Object), kwargs ? local_value(*kwargs, type::Object) : none }));
+        auto call = method ? 
+            py_owned(py_runtime_call("python::call_method", { type::Object, type::Object, type::String, type::Object, type::Object }, type::Object,
+                { local_value(callable, type::Object), local_value(*receiver, type::Object), py_string(method->attribute), local_value(args, type::Object), 
+                    kwargs ? local_value(*kwargs, type::Object) : none })) :
+            py_owned(py_runtime_call("python::call", { type::Object, type::Object, type::Object }, type::Object,
+                { local_value(callable, type::Object), local_value(args, type::Object), kwargs ? local_value(*kwargs, type::Object) : none }));
         append(statement, call);
         statement.valueType = type::Object;
         push_operand(operand_type{ statement });

@@ -43,6 +43,8 @@
 #include <charconv>
 #include <cstdlib>
 #include <iostream>
+#include <span>
+#include <boost/container/small_vector.hpp>
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/bytecode/vm/jit.hpp>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
@@ -465,7 +467,7 @@ namespace neos
                         });
                     }
                     // (a function of the program, run as native code)
-                    std::vector<value> invoke(jit::compiled_module& aNative, std::uint32_t aFunction, std::vector<value> const& aArguments)
+                    std::vector<value> invoke(jit::compiled_module& aNative, std::uint32_t aFunction, std::span<value const> aArguments)
                     {
                         activation_scope activating{ this, &aNative, nullptr };
                         return jit::invoke(aNative, aFunction, aArguments, &activating.a.invocation);
@@ -1410,8 +1412,9 @@ namespace neos
                     {
                         thread_local std::string tMessage;
                         thread_local std::string tString;
-                        std::vector<value> arguments;
-                        std::vector<std::uint32_t> handles;
+                        // (a call's arguments and their handles: on the stack (a call of a few arguments allocates none))
+                        boost::container::small_vector<value, 8u> arguments;
+                        boost::container::small_vector<std::uint32_t, 8u> handles;
                         try
                         {
                             for (unsigned i = 0u; i < aCount; ++i)
@@ -1454,7 +1457,8 @@ namespace neos
                             }
                             if (aFunction >= iFunctions.size() || type_of(aFunction).parameters.size() != arguments.size())
                                 throw trap{ "invalid callback" };
-                            auto const results = aNative != nullptr ? invoke(*aNative, aFunction, arguments) : invoke(aFunction, arguments);
+                            auto const results = aNative != nullptr ? invoke(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }) : 
+                                invoke(aFunction, std::vector<value>{ arguments.begin(), arguments.end() });
                             for (auto const h : handles)
                                 release_object(h);
                             handles.clear();

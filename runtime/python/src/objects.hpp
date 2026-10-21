@@ -514,6 +514,10 @@ namespace neos::python_runtime
         // --- str's methods (str.cpp)
 
         object* str_method(object* aSelf, char const* aName);    // (a bound method (aSelf null: unbound), or null if str has no method aName)
+        using native_method = object* (*)(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs);
+        // (the function of str's method aName (called with its self, as str_method's bound method calls it): null if str has no such method, 
+        // or it is a static method)
+        native_method str_method_function(char const* aName);
         object* str_maketrans(std::vector<object*> const& aArgs, object* aKwargs);
         std::u32string to_code_points(std::string_view aText);
         std::size_t code_point_count(std::string const& aText);
@@ -529,6 +533,7 @@ namespace neos::python_runtime
         // --- list's, tuple's and dict's other methods, and dict's views (containers.cpp)
 
         object* container_method(object* aSelf, int aKind, char const* aName);  // (as str_method)
+        native_method container_method_function(int aKind, char const* aName);    // (as str_method_function)
         // (a special method of a builtin type (e.g. __getitem__): aKind: the kind of aSelf (-1: any, unbound (aSelf null)); null if none)
         object* protocol_method(object* aSelf, int aKind, char const* aName);
         object* builtin_value(object* aObject);     // (an instance of a subclass of a builtin type (e.g. dict): its value (borrowed); else aObject)
