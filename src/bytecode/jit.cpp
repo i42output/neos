@@ -4425,9 +4425,25 @@ namespace neos
                         buffer.resize(function.results->size());
                         return buffer;
                     }
+                    std::vector<value> results(function.results->size());
+                    invoke_into(aModule, aFunction, aArguments, results.data(), aInvocation);
+                    return results;
+                }
+
+                std::size_t invoke_into(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, value* aResults, invocation* aInvocation)
+                {
+                    auto const& function = aModule.description.functions.at(aFunction);
+                    if (function.imported)
+                    {
+                        auto const results = invoke(aModule, aFunction, aArguments, aInvocation);
+                        std::copy(results.begin(), results.end(), aResults);
+                        return results.size();
+                    }
                     if (aArguments.size() != function.parameters->size())
                         throw std::runtime_error("wrong number of arguments");
-                    context c = {};
+                    // (its results are not zeroed: the function writes them before they are read)
+                    context c;
+                    std::memset(&c, 0, offsetof(context, results));
                     c.arguments = aArguments.data();
                     c.argumentCount = static_cast<std::uint32_t>(aArguments.size());
                     c.globals = aModule.description.globals->data();
@@ -4452,14 +4468,13 @@ namespace neos
                         }
                         throw std::runtime_error(trap_message(status));
                     }
-                    std::vector<value> results{ c.results, c.results + function.results->size() };
-                    for (std::size_t i = 0u; i < results.size(); ++i)
+                    auto const count = function.results->size();
+                    for (std::size_t i = 0u; i < count; ++i)
                     {
                         auto const t = (*function.results)[i];
-                        if (t == I32 || t == F32)
-                            results[i] &= 0xFFFFFFFFull;
+                        aResults[i] = (t == I32 || t == F32) ? (c.results[i] & 0xFFFFFFFFull) : c.results[i];
                     }
-                    return results;
+                    return count;
                 }
 
                 void walk(compiled_module const& aModule, invocation const& aInvocation, std::function<bool(std::size_t aToken, std::uint64_t aId)> const& aVisit)
@@ -4516,6 +4531,11 @@ namespace neos
                 }
 
                 std::vector<value> invoke(compiled_module&, std::uint32_t, std::span<value const>, invocation*)
+                {
+                    throw std::logic_error("neos::jit: not available");
+                }
+
+                std::size_t invoke_into(compiled_module&, std::uint32_t, std::span<value const>, value*, invocation*)
                 {
                     throw std::logic_error("neos::jit: not available");
                 }

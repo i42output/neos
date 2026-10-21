@@ -181,6 +181,9 @@ namespace neos
                 // traps are thrown as std::runtime_error (exceptions thrown by host functions propagate unchanged)
                 std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, 
                     invocation* aInvocation = nullptr);
+                // (as invoke: its results in aResults (as many as the function has: their count), with nothing allocated for them)
+                std::size_t invoke_into(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, value* aResults,
+                    invocation* aInvocation = nullptr);
                 // (the frames of an invocation that is calling an import (from within that call), innermost first: aVisit(token, id) 
                 // for each (the token of the call it is making, and an id of the frame while it runs), until aVisit returns false)
                 void walk(compiled_module const& aModule, invocation const& aInvocation, std::function<bool(std::size_t aToken, std::uint64_t aId)> const& aVisit);

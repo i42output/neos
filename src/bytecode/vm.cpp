@@ -475,6 +475,11 @@ namespace neos
                         activation_scope activating{ this, &aNative, nullptr };
                         return jit::invoke(aNative, aFunction, aArguments, &activating.a.invocation);
                     }
+                    std::size_t invoke_into(jit::compiled_module& aNative, std::uint32_t aFunction, std::span<value const> aArguments, value* aResults)
+                    {
+                        activation_scope activating{ this, &aNative, nullptr };
+                        return jit::invoke_into(aNative, aFunction, aArguments, aResults, &activating.a.invocation);
+                    }
                     // (the frames of an invocation of its functions, innermost first: aVisit(function, line, id) for each that has a 
                     // frame (see FramesSection), until it returns false (an interpreted frame's id is odd; native code's is its frame's 
                     // address, which is even))
@@ -1408,10 +1413,14 @@ namespace neos
                     // plugin's error is stored there (as a string) rather than trapping, and the plugin call's result is zero
                     std::optional<std::uint32_t> error_global() const
                     {
-                        auto const existing = iGlobalExports.find("__neos_error");
-                        if (existing == iGlobalExports.end() || existing->second >= iGlobals.size())
-                            return {};
-                        return existing->second;
+                        // (found once (while the exports and globals do not change): a plugin's call of a function of the program reads it)
+                        if (iErrorGlobalFor != std::make_pair(iGlobalExports.size(), iGlobals.size()))
+                        {
+                            auto const existing = iGlobalExports.find("__neos_error");
+                            iErrorGlobal = existing == iGlobalExports.end() || existing->second >= iGlobals.size() ? std::nullopt : std::optional<std::uint32_t>{ existing->second };
+                            iErrorGlobalFor = std::make_pair(iGlobalExports.size(), iGlobals.size());
+                        }
+                        return iErrorGlobal;
                     }
                     // (the error that the program did not handle (see error_global): taken)
                     std::optional<std::string> take_error()
@@ -1475,8 +1484,19 @@ namespace neos
                             }
                             if (aFunction >= iFunctions.size() || type_of(aFunction).parameters.size() != arguments.size())
                                 throw trap{ "invalid callback" };
-                            auto const results = aNative != nullptr ? invoke(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }) : 
-                                invoke(aFunction, std::vector<value>{ arguments.begin(), arguments.end() });
+                            // (native code's results: on the stack)
+                            boost::container::small_vector<value, 4u> results;
+                            if (aNative != nullptr && type_of(aFunction).results.size() <= 4u)
+                            {
+                                results.resize(type_of(aFunction).results.size());
+                                invoke_into(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }, results.data());
+                            }
+                            else
+                            {
+                                auto const r = aNative != nullptr ? invoke(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }) :
+                                    invoke(aFunction, std::vector<value>{ arguments.begin(), arguments.end() });
+                                results.assign(r.begin(), r.end());
+                            }
                             for (auto const h : handles)
                                 release_object(h);
                             handles.clear();
@@ -1820,6 +1840,8 @@ namespace neos
                     jit::object_table iObjectTable = { iObjects.data(), 1u, 0u }; ///< (the slots, as generated code uses them)
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
+                    mutable std::optional<std::uint32_t> iErrorGlobal;    ///< (error_global's)
+                    mutable std::pair<std::size_t, std::size_t> iErrorGlobalFor{ ~std::size_t{ 0u }, 0u };
                     std::optional<std::uint32_t> iHeap;
                     // (frames: the functions' (see FramesSection), the names of their sources, the defined functions in the order of 
                     // their code, and the lines of their code (the token where each line begins))

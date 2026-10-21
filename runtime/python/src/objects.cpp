@@ -63,6 +63,7 @@
 #include <map>
 #include <unordered_map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -3946,8 +3947,16 @@ namespace neos::python_runtime
         object* number_rounding_method(char const* aName, object* aSelf);
         object* class_function(std::string const& aClass, char const* aName);
 
+        bool is_instance(object* aObject);
+        object* instance_attribute_cached(object* aObject, char const* aName);
+        bool instance_set_cached(object* aObject, char const* aName, object* aValue);
+
         object* getattr(object* aObject, char const* aName)
         {
+            // (an instance's own attribute, found before)
+            if (is_instance(aObject))
+                if (auto const result = instance_attribute_cached(aObject, aName))
+                    return result;
             auto const k = kind_of(aObject);
             if (k == NEOS_PY_OTHER)
             {
@@ -4094,14 +4103,23 @@ namespace neos::python_runtime
 
         int setattr(object* aObject, char const* aName, object* aValue)
         {
+            // (an instance's own attribute, set before)
+            if (aValue != nullptr && is_instance(aObject) && instance_set_cached(aObject, aName, aValue))
+                return 0;
             if (auto const type = python_type(aObject); type != nullptr && type->setattr != nullptr && kind_of(aObject) == NEOS_PY_OTHER)
                 return type->setattr(context(), aObject, aName, aValue);
             error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
             return -1;
         }
 
+        bool is_pending_method(object* aObject);
+        object* arguments_call(object* aCallable, std::span<object* const> aItems, object* aArgs, object* aKwargs);
+
         object* call(object* aCallable, object* aArgs, object* aKwargs)
         {
+            // (load_method's method)
+            if (is_pending_method(aCallable))
+                return arguments_call(aCallable, aArgs != nullptr ? std::span<object* const>{ tuple_items(aArgs) } : std::span<object* const>{}, aArgs, aKwargs);
             ref args;
             if (aArgs == nullptr)
                 args = ref{ make_tuple() };
@@ -5379,10 +5397,44 @@ namespace neos::python_runtime
             return 0;
         }
 
+        object* script_function_invoke(object* aFunction, object* aFirst, std::span<object* const> aArgs, object* aKwargs);
+        struct script_function_object;
+        object* script_function_run(script_function_object const& f, std::size_t aCount, neos_rt_type const* aTypes, neos_rt_value const* aValues);
+
         object* script_function_call(neos_py_context*, object* aSelf, object* aArgs, object* aKwargs)
         {
-            auto const& f = *as<script_function_object>(aSelf);
-            auto const& args = tuple_items(aArgs);
+            return script_function_invoke(aSelf, nullptr, tuple_items(aArgs), aKwargs);
+        }
+
+        // (a call of a function of the program: its arguments aFirst (if not null: e.g. a method's instance) then aArgs)
+        object* script_function_invoke(object* aFunction, object* aFirst, std::span<object* const> aArgs, object* aKwargs)
+        {
+            auto const& f = *as<script_function_object>(aFunction);
+            // (the usual call: an object for each of its parameters, which are positional parameters of objects (no keywords, no closure): 
+            // as they are)
+            if (auto const count = aArgs.size() + (aFirst != nullptr ? 1u : 0u); count <= 8u && count == f.parameters.size() && f.cells.empty() &&
+                (aKwargs == nullptr || as<dict_object>(aKwargs)->items.empty()) && 
+                std::all_of(f.parameters.begin(), f.parameters.end(), [](script_parameter const& aParameter) { return aParameter.kind == script_parameter::Positional && aParameter.type == 'O'; }))
+            {
+                neos_rt_type types[8];
+                neos_rt_value values[8] = {};
+                std::size_t i = 0u;
+                if (aFirst != nullptr)
+                {
+                    types[i] = NEOS_RT_OBJECT;
+                    values[i++].object = aFirst;
+                }
+                for (auto a : aArgs)
+                {
+                    types[i] = NEOS_RT_OBJECT;
+                    values[i++].object = a;
+                }
+                return script_function_run(f, count, types, values);
+            }
+            neonumeric::vecarray<object*, 8u> args;
+            if (aFirst != nullptr)
+                args.push_back(aFirst);
+            args.insert(args.end(), aArgs.begin(), aArgs.end());
             auto const& parameters = f.parameters;
             // (a call of a few parameters: on the stack)
             neonumeric::vecarray<object*, 8u> bound(parameters.size(), nullptr);
@@ -5556,6 +5608,12 @@ namespace neos::python_runtime
                 }
                 values.push_back(v);
             }
+            return script_function_run(f, values.size(), types.data(), values.data());
+        }
+
+        // (a function of the program called with its arguments as the host takes them)
+        object* script_function_run(script_function_object const& f, std::size_t aCount, neos_rt_type const* aTypes, neos_rt_value const* aValues)
+        {
             auto const* host = python_runtime::host();
             if (host == nullptr)
                 return error("SystemError", "functions of the program cannot be called");
@@ -5585,7 +5643,7 @@ namespace neos::python_runtime
                         switch_program(previous); 
                 }
             } const switched{ f };
-            if (auto const message = host->call(f.index, static_cast<unsigned>(values.size()), types.data(), values.data(), resultType, &r))
+            if (auto const message = host->call(f.index, static_cast<unsigned>(aCount), aTypes, aValues, resultType, &r))
             {
                 std::string const text = message;
                 auto const colon = text.find(": ");
@@ -6691,12 +6749,16 @@ namespace neos::python_runtime
         void fn_setattr(object* aObject, char const* aName, object* aValue) { setattr(aObject, aName, aValue); }
         object* fn_call(object* aCallable, object* aArgs, object* aKwargs) { gil_check(); return signals_check() ? checked(call(aCallable, aArgs, aKwargs)) : nullptr; }
         object* load_method(object* aObject, char const* aName);
-        object* method_call(object* aCallable, object* aObject, char const* aName, object* aArgs, object* aKwargs);
+        object* arguments_call(object* aCallable, std::span<object* const> aItems, object* aArgs, object* aKwargs);
         object* fn_load_method(object* aObject, char const* aName) { return checked(load_method(aObject, aName)); }
-        object* fn_call_method(object* aCallable, object* aObject, char const* aName, object* aArgs, object* aKwargs) 
-        { 
-            gil_check(); 
-            return signals_check() ? checked(method_call(aCallable, aObject, aName, aArgs, aKwargs)) : nullptr; 
+        // (a call of up to three positional arguments (those that are not null): with no tuple made for them if the callable is 
+        // load_method's method, a function of the program or a method that is one (four parameters: native code calls it directly))
+        object* fn_call_arguments(object* aCallable, object* a0, object* a1, object* a2)
+        {
+            gil_check();
+            object* const items[] = { a0, a1, a2 };
+            auto const count = a0 == nullptr ? 0u : a1 == nullptr ? 1u : a2 == nullptr ? 2u : 3u;
+            return signals_check() ? checked(arguments_call(aCallable, std::span<object* const>{ items, count }, nullptr, nullptr)) : nullptr;
         }
         object* fn_getitem(object* aObject, object* aKey) { return checked(getitem(aObject, aKey)); }
         // (an item whose key is an integer (NEOS_RT_INTEGER): a str's, list's or tuple's item at a small integer without an int 
@@ -9932,6 +9994,70 @@ namespace neos::python_runtime
 
         // (getattr of an instance, or of an exception of a user exception class: its class's __getattribute__ (and then its 
         // __getattr__), if it has one)
+        // (instances' attributes read and set (by getattr and setattr) by name (its text's address) and class: where each is in its 
+        // instance's attributes, while no class changes, so that it is not looked up again (CPython's inline caches))
+        struct attribute_cache_entry
+        {
+            object const* cls = nullptr;
+            char const* name = nullptr;
+            std::uint64_t generation = 0u;
+            std::size_t position = 0u;
+        };
+        constexpr std::size_t AttributeCacheSize = 512u;
+        attribute_cache_entry sReadCache[AttributeCacheSize];
+        attribute_cache_entry sWriteCache[AttributeCacheSize];
+
+        attribute_cache_entry& attribute_cache(attribute_cache_entry* aCache, object const* aClass, char const* aName)
+        {
+            auto const h = ((reinterpret_cast<std::uintptr_t>(aClass) >> 4u) * 0x9E3779B97F4A7C15ull) ^ (reinterpret_cast<std::uintptr_t>(aName) * 0xC2B2AE3D27D4EB4Full);
+            return aCache[(h >> 40u) % AttributeCacheSize];
+        }
+
+        // (the item of an instance's attributes that a cache entry is for: null if it is not for it (or no longer))
+        std::pair<object*, object*>* cached_item(attribute_cache_entry const& aEntry, instance_object& aInstance, char const* aName)
+        {
+            if (aEntry.cls != aInstance.cls || aEntry.name != aName || aEntry.generation != sClassGeneration || aInstance.attributes.dict == nullptr)
+                return nullptr;
+            auto& items = as<dict_object>(aInstance.attributes.dict)->items;
+            if (aEntry.position >= items.size() || !attribute_name(items[aEntry.position].first, aName))
+                return nullptr;
+            return &items[aEntry.position];
+        }
+
+        void remember_item(attribute_cache_entry* aCache, instance_object& aInstance, char const* aName)
+        {
+            if (aInstance.attributes.dict == nullptr)
+                return;
+            auto const& items = as<dict_object>(aInstance.attributes.dict)->items;
+            for (std::size_t i = 0u; i < items.size(); ++i)
+                if (attribute_name(items[i].first, aName))
+                {
+                    attribute_cache(aCache, aInstance.cls, aName) = { aInstance.cls, aName, sClassGeneration, i };
+                    return;
+                }
+        }
+
+        object* instance_attribute_cached(object* aObject, char const* aName)
+        {
+            auto& instance = *as<instance_object>(aObject);
+            if (auto const item = cached_item(attribute_cache(sReadCache, instance.cls, aName), instance, aName))
+                return (retain(item->second), item->second);
+            return nullptr;
+        }
+
+        bool instance_set_cached(object* aObject, char const* aName, object* aValue)
+        {
+            auto& instance = *as<instance_object>(aObject);
+            if (auto const item = cached_item(attribute_cache(sWriteCache, instance.cls, aName), instance, aName))
+            {
+                retain(aValue);
+                release(item->second);
+                item->second = aValue;
+                return true;
+            }
+            return false;
+        }
+
         object* user_getattr(object* aSelf, attribute_dict& aAttributes, char const* aName)
         {
             auto const cls = user_class_of(aSelf);
@@ -9977,7 +10103,12 @@ namespace neos::python_runtime
             if (attribute != nullptr && data_descriptor(attribute))
                 return bind_attribute(attribute, aSelf, cls);
             if (auto const a = aAttributes.find(name))
+            {
+                // (an instance's own attribute (with no __getattribute__): where it is, remembered)
+                if (is_instance(aSelf) && &aAttributes == &as<instance_object>(aSelf)->attributes && class_hook(cls, GetAttributeHook) == nullptr)
+                    remember_item(sReadCache, *as<instance_object>(aSelf), aName);
                 return (retain(a), a);
+            }
             if (attribute != nullptr)
                 return bind_attribute(attribute, aSelf, cls);
             if (auto const value = builtin_value(aSelf); value != aSelf)
@@ -10080,6 +10211,9 @@ namespace neos::python_runtime
                 return -1;
             }
             aAttributes.set(aName, aValue);
+            // (an instance's own attribute (its class has none of the name, and no __setattr__): where it is, remembered)
+            if (is_instance(aSelf) && &aAttributes == &as<instance_object>(aSelf)->attributes && classAttribute == nullptr && class_hook(cls, SetAttrHook) == nullptr)
+                remember_item(sWriteCache, *as<instance_object>(aSelf), aName);
             return 0;
         }
 
@@ -10123,8 +10257,8 @@ namespace neos::python_runtime
         }
 
         // (object.name(args): a method of a builtin type's object, or a function of an instance's class, called without a bound method made 
-        // for it (as CPython's LOAD_ATTR of a method): python::load_method (the method is found: sPendingMethod, which python::call_method 
-        // calls; otherwise the attribute, as getattr's), then python::call_method)
+        // for it (as CPython's LOAD_ATTR of a method): python::load_method (the method is found: a pending_method_object, which call calls; 
+        // otherwise the attribute, as getattr's), then python::call or python::call_arguments)
         struct method_target
         {
             native_method function = nullptr;   ///< (a builtin type's method)
@@ -10158,15 +10292,36 @@ namespace neos::python_runtime
                     }
                 return false;
             }
-            if (is_instance(aObject) && std::strcmp(aName, "__class__") != 0 && std::strcmp(aName, "__dict__") != 0)
+            if (is_instance(aObject))
             {
-                // (a function of its class (not a data descriptor) that its attributes do not hide, and no __getattribute__ (as user_getattr))
+                // (its class's function for the name, found before (while no class changes))
+                struct method_cache_entry
+                {
+                    object const* cls = nullptr;
+                    char const* name = nullptr;
+                    std::uint64_t generation = 0u;
+                    object* function = nullptr;
+                };
+                static method_cache_entry sMethodCache[256];
                 auto const cls = user_class_of(aObject);
+                auto& cached = sMethodCache[(((reinterpret_cast<std::uintptr_t>(cls) >> 4u) * 0x9E3779B97F4A7C15ull ^ reinterpret_cast<std::uintptr_t>(aName) * 0xC2B2AE3D27D4EB4Full) >> 40u) % 256u];
+                if (cached.cls == cls && cached.name == aName && cached.generation == sClassGeneration)
+                {
+                    if (as<instance_object>(aObject)->attributes.find(aName) != nullptr)
+                        return false;
+                    aTarget = { nullptr, true, cached.function };
+                    return true;
+                }
+                if (std::strcmp(aName, "__class__") == 0 || std::strcmp(aName, "__dict__") == 0)
+                    return false;
+                // (a function of its class (not a data descriptor) that its attributes do not hide, and no __getattribute__ (as user_getattr))
                 if (cls != nullptr && class_hook(cls, GetAttributeHook) == nullptr)
                     if (auto const attribute = class_lookup(cls, aName); attribute != nullptr && 
                         (attribute->type == &sScriptFunctionType.base || (kind_of(attribute) == NEOS_PY_FUNCTION && as<function_object>(attribute)->self == nullptr && 
                             as<function_object>(attribute)->binds)) && as<instance_object>(aObject)->attributes.find(aName) == nullptr)
                     {
+                        // (the class's attribute is borrowed: it is its class's while no class changes)
+                        cached = { cls, aName, sClassGeneration, attribute };
                         aTarget = { nullptr, true, attribute };
                         return true;
                     }
@@ -10174,25 +10329,42 @@ namespace neos::python_runtime
             return false;
         }
 
-        neos_py_type sPendingMethodType = make_type("python.pending_method", "pending_method", retain_static, release_static);
-        singleton sPendingMethod{ &sPendingMethodType.base };
-        struct pending_method
+        // (load_method's method (a builtin type's or a class's): called by call (python::call or python::call_arguments) as the method of 
+        // its object (it is not otherwise seen))
+        struct pending_method_object
         {
-            object* self = nullptr;
-            char const* name = nullptr;
-            method_target target;               ///< (its class function: retained (it is not released as the process ends))
-        } sPending;
+            header h;
+            object* self;
+            char const* name;
+            method_target target;
+            ~pending_method_object() { release(self); release(target.classFunction); }
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
+        };
+        namespace
+        {
+            object_pool<sizeof(pending_method_object)> sPendingMethodPool;
+        }
+        void* pending_method_object::operator new(std::size_t aSize)
+        {
+            return aSize == sizeof(pending_method_object) ? sPendingMethodPool.allocate() : ::operator new(aSize);
+        }
+        void pending_method_object::operator delete(void* aObject, std::size_t aSize) noexcept
+        {
+            if (aSize == sizeof(pending_method_object))
+                sPendingMethodPool.deallocate(aObject);
+            else
+                ::operator delete(aObject);
+        }
+        neos_py_type sPendingMethodType = make_type("python.pending_method", "pending_method", retain_object, release_object<pending_method_object>);
 
         object* load_method(object* aObject, char const* aName)
         {
             if (method_target target; find_method(aObject, aName, target))
             {
+                retain(aObject);
                 retain(target.classFunction);
-                release(sPending.target.classFunction);
-                sPending.self = aObject;
-                sPending.name = aName;
-                sPending.target = target;
-                return &sPendingMethod.base;
+                return &(new pending_method_object{ { { &sPendingMethodType.base } }, aObject, aName, target })->h.base;
             }
             auto const result = getattr(aObject, aName);
             if (result == nullptr)
@@ -10200,35 +10372,65 @@ namespace neos::python_runtime
             return result;
         }
 
-        object* method_call(object* aCallable, object* aObject, char const* aName, object* aArgs, object* aKwargs)
+        bool is_pending_method(object* aObject)
         {
-            if (aCallable != &sPendingMethod.base)
-                return call(aCallable, aArgs, aKwargs);
-            // (the method that load_method found (it is found again if another was found since))
-            method_target target;
-            if (sPending.self == aObject && sPending.name == aName)
-                target = sPending.target;
-            else if (!find_method(aObject, aName, target))
-            {
-                ref const callable{ getattr(aObject, aName) };
-                return callable ? call(callable.get(), aArgs, aKwargs) : (note_attribute_error(aObject), nullptr);
-            }
-            ref const keep{ target.classFunction != nullptr ? (retain(target.classFunction), target.classFunction) : nullptr };
-            auto const& args = tuple_items(aArgs);
+            return aObject != nullptr && aObject->type == &sPendingMethodType.base;
+        }
+
+        // (a call's arguments as a tuple (aArgs: the call's, if it has one))
+        ref arguments_tuple(std::span<object* const> aItems, object* aArgs)
+        {
+            if (aArgs != nullptr)
+                return ref::borrowed(aArgs);
+            std::vector<object*> items{ aItems.begin(), aItems.end() };
+            for (auto a : items)
+                retain(a);
+            return ref{ make_tuple(std::move(items)) };
+        }
+
+        // (a call of load_method's method: its arguments aItems (aArgs: them as a tuple, if the call has one))
+        object* pending_method_call(object* aPending, std::span<object* const> aItems, object* aArgs, object* aKwargs)
+        {
+            ref const keep = ref::borrowed(aPending);
+            auto const& m = *reinterpret_cast<pending_method_object*>(aPending);
+            auto const& target = m.target;
+            // (a function of the program: its instance first, with no tuple made for it)
+            if (target.classFunction != nullptr && target.classFunction->type == &sScriptFunctionType.base)
+                return script_function_invoke(target.classFunction, m.self, aItems, aKwargs);
             if (target.function != nullptr)
             {
                 bool const anyKeyword = aKwargs != nullptr && as<dict_object>(aKwargs)->items.size() != 0u;
                 if (anyKeyword && !target.keywords)
-                    return error("TypeError", std::string{ aName } + "() takes no keyword arguments");
-                return target.function(aObject, args, anyKeyword ? aKwargs : nullptr);
+                    return error("TypeError", std::string{ m.name } + "() takes no keyword arguments");
+                if (aArgs != nullptr)
+                    return target.function(m.self, tuple_items(aArgs), anyKeyword ? aKwargs : nullptr);
+                std::vector<object*> const items{ aItems.begin(), aItems.end() };
+                return target.function(m.self, items, anyKeyword ? aKwargs : nullptr);
             }
             std::vector<object*> items;
-            items.reserve(args.size() + 1u);
-            items.push_back((retain(aObject), aObject));
-            for (auto a : args)
+            items.reserve(aItems.size() + 1u);
+            items.push_back((retain(m.self), m.self));
+            for (auto a : aItems)
                 items.push_back((retain(a), a));
             ref const bound{ make_tuple(std::move(items)) };
             return call(target.classFunction, bound.get(), aKwargs);
+        }
+
+        // (a call of an object with its arguments aItems (aArgs: them as a tuple, if the call has one): load_method's method, a function of 
+        // the program, or a bound method of one, is called with no tuple made for them)
+        object* arguments_call(object* aCallable, std::span<object* const> aItems, object* aArgs, object* aKwargs)
+        {
+            if (aCallable != nullptr && aCallable->type == &sPendingMethodType.base)
+                return pending_method_call(aCallable, aItems, aArgs, aKwargs);
+            if (aCallable != nullptr && aCallable->type == &sScriptFunctionType.base)
+                return script_function_invoke(aCallable, nullptr, aItems, aKwargs);
+            if (aCallable != nullptr && aCallable->type == &sBoundMethodType.base && as<bound_method_object>(aCallable)->function->type == &sScriptFunctionType.base)
+            {
+                ref const method = ref::borrowed(aCallable);
+                return script_function_invoke(as<bound_method_object>(aCallable)->function, as<bound_method_object>(aCallable)->self, aItems, aKwargs);
+            }
+            auto const args = arguments_tuple(aItems, aArgs);
+            return call(aCallable, args.get(), aKwargs);
         }
 
         int instance_setattr(neos_py_context*, object* aSelf, char const* aName, object* aValue)
@@ -16414,7 +16616,7 @@ namespace neos::python_runtime
             { "setattr", NEOS_RT_FUNCTION(fn_setattr), VOID, 3u, { OBJ, STR, OBJ }, 0u },
             { "call", NEOS_RT_FUNCTION(fn_call), OBJ, 3u, { OBJ, OBJ, OBJ }, 0u },
             { "load_method", NEOS_RT_FUNCTION(fn_load_method), OBJ, 2u, { OBJ, STR }, 0u },
-            { "call_method", NEOS_RT_FUNCTION(fn_call_method), OBJ, 5u, { OBJ, OBJ, STR, OBJ, OBJ }, 0u },
+            { "call_arguments", NEOS_RT_FUNCTION(fn_call_arguments), OBJ, 4u, { OBJ, OBJ, OBJ, OBJ }, 0u },
             { "function", NEOS_RT_FUNCTION(fn_function), OBJ, 4u, { STR, I32, STR, OBJ }, 0u },
             { "getitem", NEOS_RT_FUNCTION(fn_getitem), OBJ, 2u, { OBJ, OBJ }, 0u },
             { "getitem_integer", NEOS_RT_FUNCTION(fn_getitem_integer), OBJ, 2u, { OBJ, INT }, 0u },

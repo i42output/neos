@@ -4977,21 +4977,33 @@ namespace neos::compilers::python
                 if (text.ends_with(access->second.attribute) && trimmed(text.substr(0u, text.size() - access->second.attribute.size())).ends_with("."))
                     method = access->second;
             }
-        std::optional<std::uint32_t> receiver;
-        if (method)
-        {
-            receiver = temporary(type::I32);
-            append(statement, method->receiver);
-            put_local(statement, opcode::LocalSet, *receiver);
-        }
         if (execBuiltin)
             append(statement, py_owned(py_runtime_call("python::exec_lookup", { type::String }, type::Object, { py_string(*execBuiltin) })));
         else if (method)
-            append(statement, py_owned(py_runtime_call("python::load_method", { type::Object, type::String }, type::Object, 
-                { local_value(*receiver, type::Object), py_string(method->attribute) })));
+            append(statement, py_owned(py_runtime_call("python::load_method", { type::Object, type::String }, type::Object, { method->receiver, py_string(method->attribute) })));
         else
             append(statement, py_object(callee));
         put_local(statement, opcode::LocalSet, callable);
+        // (up to three positional arguments: passed as they are (no tuple is made for them if a function of the program is called))
+        if (!anyStar && !anyKeyword && arguments.size() <= 3u)
+        {
+            std::vector<fragment> values;
+            for (auto const& argument : arguments)
+                values.push_back(py_object(operand_type{ argument }));
+            while (values.size() < 3u)
+            {
+                fragment absent;
+                put_i32(absent, 0);
+                absent.valueType = type::Object;
+                values.push_back(absent);
+            }
+            auto call = py_owned(py_runtime_call("python::call_arguments", { type::Object, type::Object, type::Object, type::Object }, type::Object,
+                { local_value(callable, type::Object), values[0], values[1], values[2] }));
+            append(statement, call);
+            statement.valueType = type::Object;
+            push_operand(operand_type{ statement });
+            return;
+        }
         std::size_t positional = 0u;
         for (std::size_t i = 0u; i < keywords.size(); ++i)
             if (!keywords[i] && stars[i] == 0)
@@ -5051,12 +5063,8 @@ namespace neos::compilers::python
         fragment none;
         put_i32(none, 0);
         none.valueType = type::Object;
-        auto call = method ? 
-            py_owned(py_runtime_call("python::call_method", { type::Object, type::Object, type::String, type::Object, type::Object }, type::Object,
-                { local_value(callable, type::Object), local_value(*receiver, type::Object), py_string(method->attribute), local_value(args, type::Object), 
-                    kwargs ? local_value(*kwargs, type::Object) : none })) :
-            py_owned(py_runtime_call("python::call", { type::Object, type::Object, type::Object }, type::Object,
-                { local_value(callable, type::Object), local_value(args, type::Object), kwargs ? local_value(*kwargs, type::Object) : none }));
+        auto call = py_owned(py_runtime_call("python::call", { type::Object, type::Object, type::Object }, type::Object,
+            { local_value(callable, type::Object), local_value(args, type::Object), kwargs ? local_value(*kwargs, type::Object) : none }));
         append(statement, call);
         statement.valueType = type::Object;
         push_operand(operand_type{ statement });
