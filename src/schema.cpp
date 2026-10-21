@@ -164,8 +164,9 @@ namespace neos::language::schema_parser
             ((symbol::Grouping | symbol::StringLiteral | symbol::CharacterLiteral) <=> "exception"_concept)) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
-        ( symbol::Terminal >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::Exception | symbol::SpecialSequence |
-            symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral) ),
+        // (the first that matches (each is longer than any after it that matches where it does (U+0041 is a character, not the rule U)))
+        ( symbol::Terminal >> (symbol::RangeSubtract / symbol::RangeNot / symbol::Range / symbol::CharacterLiteral / symbol::StringLiteral /
+            symbol::SpecialSequence / symbol::Exception / symbol::RuleName / symbol::Identifier) ),
         ( symbol::Subtract >> "-"_ ),
         ( symbol::AtLeastOne >> "+"_ ) ,
         ( symbol::Not >> "!"_ ) ,

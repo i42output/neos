@@ -702,12 +702,12 @@ namespace neos::python_runtime::detail
 
         bool can_colorize(py aFile)
         {
-            auto const environ = import_attribute("os", "environ");
+            auto const environment = import_attribute("os", "environ"); // (not "environ": a macro of some C libraries)
             auto const getenv = [&](char const* aName) -> py
             {
                 try
                 {
-                    return environ.method("get", { py{ aName }, none() });
+                    return environment.method("get", { py{ aName }, none() });
                 }
                 catch (raised const&)
                 {

@@ -281,9 +281,11 @@ namespace neos::compilers::javascript
             std::string name;
             std::vector<std::uint32_t> withObjects;    ///< (with statements' objects whose bindings are looked up first)
             bool globalLexical = false;                 ///< (a global: a binding of the global lexical environment (let, const, class))
+            bool globalConstant = false;                ///< (a global lexical binding that is const)
         };
         reference resolve(std::string const& aName, node* aSite);
         void load(reference const& aReference, bool aTypeof = false, node* aSite = nullptr);
+        bool initialized_at(binding const* aBinding, node const* aSite) const;
         void store(reference const& aReference, bool aInitialize = false, node* aSite = nullptr);   ///< (the value on the stack: kept)
         void load_binding(binding* aBinding);
         void initialize_binding(binding* aBinding);  ///< (the value on the stack: consumed)
@@ -312,7 +314,8 @@ namespace neos::compilers::javascript
         void member(node* aNode);
         void call_expression(node* aNode);
         void arguments_values(std::vector<node*> const& aArguments, std::optional<std::uint32_t>& aSpread);
-        void call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail = false);
+        void call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail = false,
+            function_info const* aKnown = nullptr);   ///< (aKnown: the function that the callee probably is (it is called directly if it is))
         bool tail_call(node* aCall) const;
         void tail_positions(node* aExpression);
         void check_call();
@@ -350,6 +353,10 @@ namespace neos::compilers::javascript
         bool numeric_condition(node* aNode);        ///< (an i32)
         bool numeric_update(reference const& aReference, bool aIncrement, bool aPostfix);
         bool numeric_assignment(reference const& aReference, node* aValue, std::string const& aOperator);
+        binding* integer_binding(node* aNode);
+        void integer_remainder(binding& aDivisor, std::optional<std::pair<std::uint32_t, std::uint32_t>> const& aShadow = std::nullopt,
+            bool aZero = false);    ///< (the f64 on the stack % the binding (an integer); aZero: whether it is 0 (an i32))
+        bool remainder_condition(node* aRemainder);     ///< (whether a remainder of an integer binding is 0 (an i32); false: not one)
         void f64_remainder(node* aDividend, node* aDivisor);  ///< (the two f64s on the stack: the remainder (as % computes it))
         intrinsic intrinsic_of(node* aNode) const;  ///< (a call that is compiled inline (see iIntrinsics))
         // numeric versions: a function whose parameters are used as numbers is compiled twice: a version (chosen when it is called with
@@ -419,11 +426,17 @@ namespace neos::compilers::javascript
         std::unordered_map<node const*, binding*> iNumericNames;   ///< (the references (identifiers) to bindings that may be numeric)
         std::set<binding const*> iUnitCounters;        ///< (i64 locals whose only changes are steps of one from a safe integer)
         std::map<binding const*, int> iMonotoneCounters;    ///< (unit counters whose steps are all +1 (1) or all -1 (-1): no guards (see counter_value))
+        std::set<binding const*> iPositiveCounters;     ///< (unit counters that start at a positive integer and only step up: never 0 or negative)
+        std::map<binding const*, std::vector<node*>> iCounterSteps;    ///< (unit counters' steps (updates and assignments))
+        std::set<binding const*> iBoundedCounters;      ///< (unit counters within a loop whose test bounds them within the safe integers)
+        binding const* bounded_counter(node* aTest, node* aUpdate);
         int monotone(binding const* aBinding) const;
         void counter_value(binding const* aBinding);
         bool raw_counter(node* aNode, node* aOther);
         std::set<binding const*> iInvariantNumerics;   ///< (f64 locals that are never assigned (e.g. a numeric version's parameters))
         std::map<std::pair<binding const*, int>, std::uint32_t> iBoundShadows;    ///< (a loop's integral bounds of such locals (see bound_shadows))
+        std::map<binding const*, std::pair<std::uint32_t, std::uint32_t>> iIntegralShadows;  ///< (a loop's integer values of such locals (see integral_shadows))
+        void integral_shadows(node* aNode, std::vector<binding const*>& aAdded);
         bool iNumericParameters = false;            ///< (the numeric version is being inferred or generated: its parameters may be numeric)
         std::vector<std::pair<std::uint32_t, binding*>> iNumericArguments;  ///< (the numeric version's numeric parameters (by index))
         std::unordered_map<node const*, intrinsic> iIntrinsics;    ///< (the numeric version's (pure) intrinsic calls: inline (its entry checks them))
@@ -488,6 +501,9 @@ namespace neos::compilers::javascript
         void generate(node* aScript);
         std::uint32_t literal_string(std::string const& aText);     ///< (the global (an i64) that holds the string's value)
         std::uint32_t global_index(std::string const& aName, type aType);
+        std::optional<std::uint32_t> global_mirror(std::string const& aName);   ///< (the global (an i64) that mirrors a global binding's value)
+        function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
+        std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t source_line_of(std::string_view aSource) const;
     public:
         std::string_view fragment_source() const { return iSource; }
@@ -501,6 +517,10 @@ namespace neos::compilers::javascript
         std::vector<std::tuple<node*, scope*, function_info*>> iAnnexBFunctions;
         std::map<std::string, std::uint32_t> iLiterals;     ///< (string literals -> their globals)
         std::vector<std::pair<std::string, std::uint32_t>> iLiteralOrder;
+        std::map<std::string, std::uint32_t> iMirrors;      ///< (global binding names -> the globals that mirror their values)
+        std::vector<std::pair<std::string, std::uint32_t>> iMirrorOrder;
+        std::map<std::string, function_info*> iScriptFunctions;     ///< (the script's function declarations (those that define its functions))
+        std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iErrorGlobal = 0u;

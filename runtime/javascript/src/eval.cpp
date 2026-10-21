@@ -511,7 +511,7 @@ namespace neos::javascript_runtime
                     return get(b.object, name);
                 case binding_reference::GlobalLexical:
                     {
-                        auto const v = global_lexicals()[name].v;
+                        auto const v = global_lexicals()[name].get();
                         if (v == Empty)
                             throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
                         return v;
@@ -568,12 +568,13 @@ namespace neos::javascript_runtime
                         auto& g = global_lexicals()[name];
                         if (!initialize)
                         {
-                            if (g.v == Empty)
+                            if (g.get() == Empty)
                                 throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
                             if (g.constant)
                                 throw_type_error("Assignment to constant variable.");
                         }
-                        g.v = aValue;
+                        g.set(aValue);
+                        global_mirror_update(the_realm(), name);
                         return Undefined;
                     }
                 case binding_reference::Global:
@@ -661,7 +662,7 @@ namespace neos::javascript_runtime
                     return get(the_realm().global, name);
                 if (aBase == True)
                 {
-                    auto const v = global_lexicals()[name].v;
+                    auto const v = global_lexicals()[name].get();
                     if (v == Empty)
                         throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
                     return v;
@@ -711,11 +712,12 @@ namespace neos::javascript_runtime
                 if (aBase == True)
                 {
                     auto& g = global_lexicals()[name];
-                    if (g.v == Empty)
+                    if (g.get() == Empty)
                         throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
                     if (g.constant)
                         throw_type_error("Assignment to constant variable.");
-                    g.v = aValue;
+                    g.set(aValue);
+                    global_mirror_update(the_realm(), name);
                     return Undefined;
                 }
                 if (is_object(aBase))

@@ -371,6 +371,27 @@ namespace neos::compilers::javascript
             analyse(aScript);
             iLiterals.clear();
             iLiteralOrder.clear();
+            iMirrors.clear();
+            iMirrorOrder.clear();
+            iScriptFunctions.clear();
+            iClosures.clear();
+            if (iKind == code_kind::Script && !iModule)
+            {
+                // (a script that is the program: the function declarations that define its global functions (the last of a name does))
+                for (auto& f : iFunctions)
+                    if (f.script && f.top != nullptr && f.top->owner != nullptr)
+                    {
+                        for (auto* s : f.top->owner->children)
+                        {
+                            node* d = s;
+                            while (d->is(construct::Labelled) && d->size() == 2u)
+                                d = d->child(1u);
+                            if ((d->is(construct::Function) || d->is(construct::AsyncFunction)) && d->function != nullptr)
+                                iScriptFunctions[d->function->name] = d->function;
+                        }
+                        break;
+                    }
+            }
             iFrameNames.clear();
             iTemplateSites = 0u;
             // (the functions: their WebAssembly functions)
@@ -502,6 +523,32 @@ namespace neos::compilers::javascript
                 call("javascript::string", { STR }, I64);
                 put_op(code, opcode::GlobalSet);
                 put_u32(code, global);
+            }
+            for (auto const& [name, global] : iMirrorOrder)
+            {
+                // (Empty until the runtime mirrors the binding)
+                put_op(code, opcode::I64Const);
+                put_s64(code, static_cast<std::int64_t>(values::Empty));
+                put_op(code, opcode::GlobalSet);
+                put_u32(code, global);
+                put_op(code, opcode::GlobalGet);
+                put_u32(code, iLiterals.at(utf8_encoding(name)));
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(global));
+                call("javascript::global_mirror", { I64, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
+            for (auto const& [function, global] : iClosures)
+            {
+                // (Empty until the script defines the function; kept (see call_value))
+                put_op(code, opcode::I64Const);
+                put_s64(code, static_cast<std::int64_t>(values::Empty));
+                put_op(code, opcode::GlobalSet);
+                put_u32(code, global);
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(global));
+                call("javascript::global_root", { I32 }, I64);
+                put_op(code, opcode::Drop);
             }
             if (iModule)
             {
@@ -901,7 +948,10 @@ namespace neos::compilers::javascript
                     return result;
                 }
                 else if (b != nullptr && b->lexical())
+                {
                     result.globalLexical = true;
+                    result.globalConstant = b->kind == binding_kind::Const;
+                }
                 break;
             }
             auto* b = s->find(aName);
@@ -935,9 +985,40 @@ namespace neos::compilers::javascript
         return result;
     }
 
+    bool function_generator::initialized_at(binding const* aBinding, node const* aSite) const
+    {
+        // (a lexical binding that a reference finds initialized (it needs no TDZ check): the reference is in the same function, after the
+        // declaration, and within the statement list that has the declaration's statement before the statement that has the reference
+        // (so that the declaration has been evaluated: not a switch's case, which a jump can enter after a declaration))
+        if (aSite == nullptr || aBinding == nullptr || aBinding->declaration == nullptr || !aBinding->lexical())
+            return false;
+        auto const function_of = [](node const* aNode) -> node const*
+        {
+            for (node const* n = aNode->parent; n != nullptr; n = n->parent)
+                if (n->function != nullptr || is_function_node(n))
+                    return n;
+            return static_cast<node const*>(nullptr);
+        };
+        node const* statement = aBinding->declaration;
+        while (statement->parent != nullptr && !statement->parent->is(construct::Block) && !statement->parent->is(construct::Body) &&
+            !statement->parent->is(construct::Script) && !statement->parent->is(construct::For) && !is_function_node(statement->parent) &&
+            statement->parent->function == nullptr && !statement->parent->is(construct::Case) && !statement->parent->is(construct::Default))
+            statement = statement->parent;
+        auto const* list = statement->parent;
+        if (list == nullptr || list->is(construct::Case) || list->is(construct::Default) || is_function_node(list) || list->function != nullptr)
+            return false;
+        if (function_of(aSite) != function_of(statement))
+            return false;
+        if (aSite->source.data() < statement->source.data() + statement->source.size())
+            return false;
+        for (auto* n = aSite->parent; n != nullptr; n = n->parent)
+            if (n == list)
+                return true;
+        return false;
+    }
+
     void function_generator::load(reference const& aReference, bool aTypeof, node* aSite)
     {
-        (void)aSite;
         std::size_t opened = 0u;
         switch (aReference.kind)
         {
@@ -949,7 +1030,7 @@ namespace neos::compilers::javascript
                 box(rep);
                 break;
             }
-            if (aReference.target != nullptr && (aReference.target->tdz || aReference.target->lexical()))
+            if (aReference.target != nullptr && (aReference.target->tdz || aReference.target->lexical()) && !initialized_at(aReference.target, aSite))
             {
                 // (an uninitialized binding: a ReferenceError)
                 tee(iScratch);
@@ -976,7 +1057,7 @@ namespace neos::compilers::javascript
                 runtime("import_get", { I64, I32, I32, I64 }, I64);
                 check();
             }
-            else if (aReference.target->tdz || aReference.target->lexical())
+            else if ((aReference.target->tdz || aReference.target->lexical()) && !(aReference.hops == 0u && initialized_at(aReference.target, aSite)))
             {
                 key(aReference.name);
                 runtime("env_get_checked", { I64, I32, I32, I64 }, I64);
@@ -986,6 +1067,26 @@ namespace neos::compilers::javascript
                 runtime("env_get", { I64, I32, I32 }, I64);
             break;
         case reference::Global:
+            if (auto const mirror = iCompiler.global_mirror(aReference.name))
+            {
+                // (the binding's mirror: its value; Empty: the slow way (uninitialized, an accessor, not found ...))
+                key(aReference.name);
+                drop();     // (the key's literal exists (the entry point creates the literals before it registers the mirrors))
+                op(opcode::GlobalGet);
+                u32(*mirror);
+                tee(iScratch);
+                constant(values::Empty);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x40u);
+                iControls.push_back(control{ control_kind::Block });
+                key(aReference.name);
+                runtime(aTypeof ? "global_get_typeof" : "global_get", { I64 }, I64);
+                check_void();
+                end_control();
+                get(iScratch);
+                break;
+            }
             key(aReference.name);
             runtime(aTypeof ? "global_get_typeof" : "global_get", { I64 }, I64);
             check();
@@ -1050,7 +1151,8 @@ namespace neos::compilers::javascript
             if (!constant_check())
             {
                 auto const rep = rep_of(aReference.target);
-                if (!aInitialize && rep == numeric_rep::None && aReference.target != nullptr && (aReference.target->tdz || aReference.target->lexical()))
+                if (!aInitialize && rep == numeric_rep::None && aReference.target != nullptr && (aReference.target->tdz || aReference.target->lexical()) &&
+                    !initialized_at(aReference.target, aSite))
                 {
                     load(aReference);
                     drop();
@@ -1067,7 +1169,7 @@ namespace neos::compilers::javascript
                 i32(static_cast<std::int32_t>(aReference.hops));
                 i32(static_cast<std::int32_t>(aReference.target->slot));
                 get(value);
-                if (!aInitialize && (aReference.target->tdz || aReference.target->lexical()))
+                if (!aInitialize && (aReference.target->tdz || aReference.target->lexical()) && !(aReference.hops == 0u && initialized_at(aReference.target, aSite)))
                 {
                     key(aReference.name);
                     runtime("env_set_checked", { I64, I32, I32, I64, I64 }, I64);
@@ -1089,6 +1191,30 @@ namespace neos::compilers::javascript
             check_void();
             break;
         case reference::Global:
+            if (aReference.globalLexical && !aReference.globalConstant && !aInitialize)
+                if (auto const mirror = iCompiler.global_mirror(aReference.name))
+                {
+                    // (a global lexical binding that the script declares: its value is its mirror (the runtime keeps it there); while it
+                    // is uninitialized (Empty) the runtime's assignment throws)
+                    op(opcode::GlobalGet);
+                    u32(*mirror);
+                    constant(values::Empty);
+                    op(opcode::I64Eq);
+                    op(opcode::If);
+                    iCode.push_back(0x40u);
+                    iControls.push_back(control{ control_kind::Block });
+                    key(aReference.name);
+                    get(value);
+                    i32(iFunction.strict ? 1 : 0);
+                    runtime("global_set", { I64, I64, I32 }, I64);
+                    check_void();
+                    op(opcode::Else);
+                    get(value);
+                    op(opcode::GlobalSet);
+                    u32(*mirror);
+                    end_control();
+                    break;
+                }
             key(aReference.name);
             get(value);
             if (aInitialize && aReference.globalLexical)
@@ -1671,6 +1797,13 @@ namespace neos::compilers::javascript
                 get(value);
                 runtime("global_define_function", { I64, I64 }, I64);
                 check_void();
+                if (iCompiler.script_function(f->function->name) == f->function)
+                {
+                    // (its function object: the calls that probably call it compare it with their callee)
+                    get(value);
+                    op(opcode::GlobalSet);
+                    u32(iCompiler.function_closure(*f->function));
+                }
                 release(value);
             }
             else
@@ -2254,6 +2387,11 @@ namespace neos::compilers::javascript
         std::vector<std::pair<binding const*, int>> shadows;
         if (test != nullptr && !iInvariantNumerics.empty())
             bound_shadows(test->child(0u), shadows);
+        std::vector<binding const*> integralShadows;
+        if (!iInvariantNumerics.empty())
+            for (auto* n : { test, update, body })
+                integral_shadows(n, integralShadows);
+        auto const* const bounded = test != nullptr ? bounded_counter(test->child(0u), update) : nullptr;
         begin(control_kind::Breakable, {}, aLabels);
         iControls.back().loop = true;
         auto const exit = iControls.size() - 1u;
@@ -2266,6 +2404,8 @@ namespace neos::compilers::javascript
         }
         begin(control_kind::Continuable, {}, aLabels);
         iControls.back().loop = true;
+        if (bounded != nullptr)
+            iBoundedCounters.insert(bounded);
         statement(body);
         end_control();
         copy_environment();
@@ -2275,12 +2415,16 @@ namespace neos::compilers::javascript
             expression(update->child(0u));
             drop();
         }
+        if (bounded != nullptr)
+            iBoundedCounters.erase(bounded);
         op(opcode::Br);
         u32(0u);
         end_control();
         end_control();
         for (auto const& key : shadows)
             iBoundShadows.erase(key);
+        for (auto const* b : integralShadows)
+            iIntegralShadows.erase(b);
     }
 
     void function_generator::for_in_of_statement(node* aNode, std::vector<std::string> const& aLabels)
@@ -3564,7 +3708,8 @@ namespace neos::compilers::javascript
         get(iScratch);
     }
 
-    void function_generator::call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail)
+    void function_generator::call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail,
+        function_info const* aKnown)
     {
         // (the arguments are evaluated (into locals), then the callee is called: the program's own functions through the
         // dispatcher, others through the runtime)
@@ -3642,6 +3787,34 @@ namespace neos::compilers::javascript
                 release(v);
             return;
         }
+        auto const arguments = [&]()
+        {
+            for (std::uint32_t i = 0u; i < RegisterArguments; ++i)
+            {
+                if (i < values.size())
+                    get(values[i]);
+                else
+                    undefined();
+            }
+        };
+        if (aKnown != nullptr)
+        {
+            // (the function that the callee probably is (its function object): called directly)
+            get(aCallee);
+            op(opcode::GlobalGet);
+            u32(iCompiler.function_closure(*aKnown));
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Eu);
+            iControls.push_back(control{ control_kind::Block });
+            get(aCallee);
+            get(aThis);
+            undefined();
+            i32(static_cast<std::int32_t>(argc));
+            arguments();
+            call(aKnown->index);
+            op(opcode::Else);
+        }
         // (the program's function: its number)
         auto const number = temporary(I32);
         get(aCallee);
@@ -3678,6 +3851,8 @@ namespace neos::compilers::javascript
         }
         runtime("call", { I64, I64, I32, I64, I64, I64, I64 }, I64);
         end_control();
+        if (aKnown != nullptr)
+            end_control();
         release(number);
         if (argc > RegisterArguments)
         {
@@ -3698,6 +3873,7 @@ namespace neos::compilers::javascript
     {
         auto* calleeNode = aNode->child(0u);
         std::vector<node*> arguments{ aNode->children.begin() + 1, aNode->children.end() };
+        function_info const* known = nullptr;
         auto const callee = temporary();
         auto const thisValue = temporary();
         // ((a.b)(): a parenthesized reference is the reference (its base is the this))
@@ -3872,8 +4048,13 @@ namespace neos::compilers::javascript
             // the this))
             std::optional<reference> dynamicCallee;
             if (calleeNode->is(construct::Identifier))
-                if (auto const r = resolve(name_of(calleeNode), calleeNode); r.kind == reference::Dynamic && !r.name.starts_with("#"))
+            {
+                auto const r = resolve(name_of(calleeNode), calleeNode);
+                if (r.kind == reference::Dynamic && !r.name.starts_with("#"))
                     dynamicCallee = r;
+                else if (r.kind == reference::Global && !r.globalLexical)
+                    known = iCompiler.script_function(r.name);     // (a global function that the script declares)
+            }
             if (dynamicCallee)
             {
                 auto const base = dynamic_reference(*dynamicCallee);
@@ -3892,7 +4073,7 @@ namespace neos::compilers::javascript
                 set(thisValue);
             }
         }
-        call_value(callee, thisValue, arguments, tail_call(aNode));
+        call_value(callee, thisValue, arguments, tail_call(aNode), known);
         release(thisValue);
         release(callee);
     }
@@ -4299,6 +4480,28 @@ namespace neos::compilers::javascript
             { construct::In, "in" }, { construct::StrictEqual, "strict_equal_value" }, { construct::StrictNotEqual, "strict_not_equal" },
             { construct::Equal, "equal" }, { construct::NotEqual, "not_equal" }, { construct::BitAnd, "bitwise_and" }, { construct::BitXor, "bitwise_xor" },
             { construct::BitOr, "bitwise_or" } };
+        if (aNode->is(construct::Add))
+            for (int side = 0; side < 2; ++side)
+            {
+                // (a string literal + a number (or a number + a string literal): the string made at once)
+                auto* literalNode = aNode->child(side == 0 ? 0u : 1u);
+                while (literalNode->is(construct::Parenthesized) && literalNode->size() == 1u)
+                    literalNode = literalNode->child(0u);
+                auto* const other = aNode->child(side == 0 ? 1u : 0u);
+                if (!literalNode->is(construct::String) || num_type(other) == numeric_rep::None)
+                    continue;
+                numeric(other);
+                box(numeric_rep::F64);
+                auto const number = temporary();
+                set(number);
+                literal(literalNode);
+                get(number);
+                i32(side == 0 ? 0 : 1);
+                runtime("concat_string_number", { I64, I64, I32 }, I64);
+                check();
+                release(number);
+                return;
+            }
         expression(aNode->child(0u));
         auto const lhs = temporary();
         set(lhs);
@@ -6037,6 +6240,9 @@ namespace neos::compilers::javascript
         iInvariantNumerics.clear();
         iUnitCounters.clear();
         iMonotoneCounters.clear();
+        iPositiveCounters.clear();
+        iCounterSteps.clear();
+        iBoundedCounters.clear();
         iIntrinsics.clear();
         iIntrinsicMask = 0u;
         static bool const sDisabled = std::getenv("NEOS_JS_NO_NUMERIC") != nullptr;
@@ -6383,6 +6589,11 @@ namespace neos::compilers::javascript
             if (unit)
             {
                 iUnitCounters.insert(b);
+                auto& steps = iCounterSteps[b];
+                steps.assign(u.updates.begin(), u.updates.end());
+                steps.insert(steps.end(), u.assignments.begin(), u.assignments.end());
+                if (up && !down && initial && *initial >= 1.0)
+                    iPositiveCounters.insert(b);
                 // (a counter that steps one way is clamped where it is read rather than checked where it steps (see counter_value):
                 // unless it is read (other than compared, which is free) more often than it steps)
                 std::size_t reads = 0u;
@@ -6431,6 +6642,98 @@ namespace neos::compilers::javascript
             default: return aKind;
             }
         }
+    }
+
+    binding const* function_generator::bounded_counter(node* aTest, node* aUpdate)
+    {
+        // (a loop whose test is i < C or i <= C (C a constant safe integer) of a counter that steps up only in its update (or i > C, i >= C
+        // of one that steps down): within its body and update the counter is a safe integer (below C, or C), and so is a step of it (no
+        // clamp or guard is needed))
+        auto* n = const_cast<node*>(unparenthesized(aTest));
+        if (n == nullptr || n->size() != 2u || aUpdate == nullptr)
+            return nullptr;
+        for (int side = 0; side < 2; ++side)
+        {
+            auto* const i = const_cast<node*>(unparenthesized(n->child(side == 0 ? 0u : 1u)));
+            auto const c = constant_number(n->child(side == 0 ? 1u : 0u));
+            if (!i->is(construct::Identifier) || !c || !(std::fabs(*c) < SafeInteger))
+                continue;
+            auto const name = iNumericNames.find(i);
+            if (name == iNumericNames.end() || !iUnitCounters.contains(name->second))
+                continue;
+            auto const kind = side == 0 ? n->kind : reversed_comparison(n->kind);
+            auto const* const steps = &iCounterSteps.at(name->second);
+            bool up = false;
+            bool down = false;
+            bool inUpdate = true;
+            for (auto* s : *steps)
+            {
+                bool inside = false;
+                for (auto* p = s; p != nullptr; p = p->parent)
+                    if (p == aUpdate)
+                        inside = true;
+                inUpdate = inUpdate && inside;
+                if (s->is(construct::PreIncrement) || s->is(construct::PostIncrement))
+                    up = true;
+                else if (s->is(construct::PreDecrement) || s->is(construct::PostDecrement))
+                    down = true;
+                else
+                {
+                    auto const oper = assignment_operator(s);
+                    auto const step = constant_number(s->child(1u));
+                    ((*step > 0.0) == (oper == "+=") ? up : down) = true;
+                }
+            }
+            if (!inUpdate || up == down)
+                continue;
+            if (up && (kind == construct::LessThan || kind == construct::LessEqual))
+                return name->second;
+            if (down && (kind == construct::GreaterThan || kind == construct::GreaterEqual))
+                return name->second;
+        }
+        return nullptr;
+    }
+
+    void function_generator::integral_shadows(node* aNode, std::vector<binding const*>& aAdded)
+    {
+        // (before a loop: the integer values of the invariant f64s that it divides (as %) by integers: an i64 and whether it is one (an
+        // integer below 2^53 in magnitude) (computed once, not each iteration))
+        if (aNode == nullptr || aNode->function != nullptr)
+            return;
+        if (aNode->is(construct::Remainder) && aNode->size() == 2u && integer_binding(aNode->child(1u)) != nullptr)
+        {
+            auto const* x = unparenthesized(aNode->child(0u));
+            auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end();
+            if (name != iNumericNames.end() && iInvariantNumerics.contains(name->second) && rep_of(name->second) == numeric_rep::F64 &&
+                !iIntegralShadows.contains(name->second))
+            {
+                auto const value = local(I64);
+                auto const integral = local(I32);
+                get(name->second->slot);
+                op(opcode::F64Abs);
+                f64(SafeInteger);
+                op(opcode::F64Lt);
+                get(name->second->slot);
+                get(name->second->slot);
+                op(opcode::F64Trunc);
+                op(opcode::F64Eq);
+                op(opcode::I32And);
+                tee(integral);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(name->second->slot);
+                op(opcode::I64SConvertF64);
+                op(opcode::Else);
+                i64(0);
+                end_control();
+                set(value);
+                iIntegralShadows[name->second] = std::make_pair(value, integral);
+                aAdded.push_back(name->second);
+            }
+        }
+        for (auto* c : aNode->children)
+            integral_shadows(c, aAdded);
     }
 
     void function_generator::bound_shadows(node* aTest, std::vector<std::pair<binding const*, int>>& aAdded)
@@ -6738,6 +7041,20 @@ namespace neos::compilers::javascript
             numeric(aNode->child(0u));
             return;
         case construct::Remainder:
+            if (auto* const divisor = integer_binding(aNode->child(1u)))
+            {
+                auto const* x = unparenthesized(aNode->child(0u));
+                if (auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end(); name != iNumericNames.end())
+                    if (auto const shadow = iIntegralShadows.find(name->second); shadow != iIntegralShadows.end())
+                    {
+                        numeric(aNode->child(0u));
+                        integer_remainder(*divisor, shadow->second);
+                        return;
+                    }
+                numeric(aNode->child(0u));
+                integer_remainder(*divisor);
+                return;
+            }
             numeric(aNode->child(0u));
             numeric(aNode->child(1u));
             f64_remainder(aNode->child(0u), aNode->child(1u));
@@ -6747,7 +7064,16 @@ namespace neos::compilers::javascript
         case construct::Multiply:
         case construct::Divide:
             numeric(aNode->child(0u));
-            numeric(aNode->child(1u));
+            if (auto* const b = integer_binding(aNode->child(0u)); b != nullptr && b == integer_binding(aNode->child(1u)))
+            {
+                // (x op x: x once)
+                auto const x = temporary(F64);
+                tee(x);
+                get(x);
+                release(x);
+            }
+            else
+                numeric(aNode->child(1u));
             op(aNode->is(construct::Add) ? opcode::F64Add : aNode->is(construct::Subtract) ? opcode::F64Sub : aNode->is(construct::Multiply) ? opcode::F64Mul : opcode::F64Div);
             return;
         case construct::ShiftRightUnsigned:
@@ -6982,7 +7308,7 @@ namespace neos::compilers::javascript
         // reach 2^63 only after centuries); stepping down, max(local, -2^53). Without a branch: limit + ((local - limit) & mask), the mask
         // all ones if the difference is negative (up) or positive (down))
         auto const direction = monotone(aBinding);
-        if (direction == 0)
+        if (direction == 0 || iBoundedCounters.contains(aBinding))
             return;
         auto const limit = direction > 0 ? 9007199254740992ll : -9007199254740992ll;
         auto const difference = temporary(I64);
@@ -7033,6 +7359,8 @@ namespace neos::compilers::javascript
         // fix-up is cold (block { block { br_if 0 (to the fix-up); br 1 (past it) } fix-up }): the check is a branch not taken)
         if (aBinding != nullptr && (aStep == 1 || aStep == -1) && monotone(aBinding) == aStep)
             return;     // (a monotone counter: its value is clamped when it is read (see counter_value))
+        if (aBinding != nullptr && iBoundedCounters.contains(aBinding))
+            return;     // (a counter that its loop's test bounds within the safe integers: a step stays within them (see bounded_counter))
         op(opcode::Block);
         iCode.push_back(0x40u);
         iControls.push_back(control{ control_kind::Block });
@@ -7066,6 +7394,111 @@ namespace neos::compilers::javascript
         op(opcode::I64SConvertF64);
         set(aSlot);
         end_control();
+    }
+
+    binding* function_generator::integer_binding(node* aNode)
+    {
+        // (a reference to an integer binding (an i64 or i32 local))
+        aNode = const_cast<node*>(unparenthesized(aNode));
+        if (!aNode->is(construct::Identifier))
+            return nullptr;
+        auto const existing = iNumericNames.find(aNode);
+        if (existing == iNumericNames.end())
+            return nullptr;
+        auto const rep = rep_of(existing->second);
+        return rep == numeric_rep::I64 || rep == numeric_rep::I32 ? existing->second : nullptr;
+    }
+
+    bool function_generator::remainder_condition(node* aRemainder)
+    {
+        auto* const r = const_cast<node*>(unparenthesized(aRemainder));
+        if (!r->is(construct::Remainder) || r->size() != 2u)
+            return false;
+        auto* const divisor = integer_binding(r->child(1u));
+        if (divisor == nullptr || num_type(r->child(0u)) == numeric_rep::None)
+            return false;
+        std::optional<std::pair<std::uint32_t, std::uint32_t>> shadow;
+        auto const* x = unparenthesized(r->child(0u));
+        if (auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end(); name != iNumericNames.end())
+            if (auto const s = iIntegralShadows.find(name->second); s != iIntegralShadows.end())
+                shadow = s->second;
+        numeric(r->child(0u));
+        integer_remainder(*divisor, shadow, true);
+        return true;
+    }
+
+    void function_generator::integer_remainder(binding& aDivisor, std::optional<std::pair<std::uint32_t, std::uint32_t>> const& aShadow, bool aZero)
+    {
+        // (an f64 (on the stack) % an integer binding: of an integer dividend below 2^53 (in magnitude) and a divisor that is neither 0 nor
+        // -1, the integers' remainder with the dividend's sign (a zero remainder too); else the runtime's)
+        auto const a = temporary(F64);
+        set(a);
+        auto const b = temporary(I64);
+        get(aDivisor.slot);
+        counter_value(&aDivisor);
+        if (rep_of(&aDivisor) == numeric_rep::I32)
+            op(opcode::I64SConvertI32);
+        set(b);
+        if (aShadow)
+            get(aShadow->second);   // (the dividend's integer value is known (see integral_shadows))
+        else
+        {
+            get(a);
+            op(opcode::F64Abs);
+            f64(SafeInteger);
+            op(opcode::F64Lt);
+            get(a);
+            get(a);
+            op(opcode::F64Trunc);
+            op(opcode::F64Eq);
+            op(opcode::I32And);
+        }
+        if (!iPositiveCounters.contains(&aDivisor))
+        {
+            get(b);
+            i64(1);
+            op(opcode::I64Add);
+            i64(1);
+            op(opcode::I64GtU);
+            op(opcode::I32And);
+        }
+        op(opcode::If);
+        iCode.push_back(aZero ? 0x7Fu : 0x7Cu);     // (i32 or f64)
+        iControls.push_back(control{ control_kind::Block });
+        if (aShadow)
+            get(aShadow->first);
+        else
+        {
+            get(a);
+            op(opcode::I64SConvertF64);
+        }
+        get(b);
+        op(opcode::I64RemS);
+        if (aZero)
+            op(opcode::I64Eqz);
+        else
+        {
+            op(opcode::F64SConvertI64);
+            get(a);
+            op(opcode::F64CopySign);
+        }
+        op(opcode::Else);
+        get(a);
+        op(opcode::I64ReinterpretF64);
+        get(b);
+        op(opcode::F64SConvertI64);
+        op(opcode::I64ReinterpretF64);
+        runtime("remainder", { I64, I64 }, I64);
+        check();
+        op(opcode::F64ReinterpretI64);
+        if (aZero)
+        {
+            f64(0.0);
+            op(opcode::F64Eq);
+        }
+        end_control();
+        release(b);
+        release(a);
     }
 
     void function_generator::f64_remainder(node* aDividend, node* aDivisor)
@@ -7342,6 +7775,16 @@ namespace neos::compilers::javascript
             }
             else
             {
+                // (a remainder of an integer compared with 0: the integers' remainder is)
+                if (n->is(construct::StrictEqual) || n->is(construct::StrictNotEqual))
+                    for (int side = 0; side < 2; ++side)
+                        if (auto const zero = constant_number(n->child(side == 0 ? 1u : 0u)); zero && *zero == 0.0 &&
+                            remainder_condition(n->child(side == 0 ? 0u : 1u)))
+                        {
+                            if (n->is(construct::StrictNotEqual))
+                                op(opcode::I32Eqz);
+                            return true;
+                        }
                 numeric(n->child(0u));
                 numeric(n->child(1u));
                 op(opcodes->f64);

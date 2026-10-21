@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 9
+#define NEOS_RUNTIME_PLUGIN_VERSION 10
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -269,6 +269,10 @@ typedef struct neos_rt_host
     int (*std_getc)(int aStream);
     int (*std_ungetc)(int aCharacter, int aStream);
     int (*std_flush)(int aStream);
+    /* (version 10) a global of the running program (as the calling thread runs it): the address of its 64 bit word (the program's
+       code reads it there (interpreted or compiled), so a plugin can keep a value there that the code reads without calling it; valid
+       while the program is loaded); NULL if there is no such global */
+    unsigned long long* (*global)(unsigned aGlobal);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

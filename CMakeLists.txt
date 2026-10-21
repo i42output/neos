@@ -156,6 +156,14 @@ function(add_neos_plugin_objects TARGET)
     set(NEOS_PLUGIN_SOURCES ${own} PARENT_SCOPE)
 endfunction()
 
+# (a plugin's own functions are bound to it when it is linked (ELF): loading it then resolves only the symbols that it imports, not
+# the many thousands that it defines (it has its own copy of neos and neolib), which made each program's start slow)
+function(neos_plugin_link_options TARGET)
+    if(NOT MSVC AND NOT APPLE)
+        target_link_options(${TARGET} PRIVATE "LINKER:-Bsymbolic-functions")
+    endif()
+endfunction()
+
 # concept libraries (plugins with the extension ".ncl")
 function(add_neos_concept_library TARGET)
     add_neos_plugin_objects(${TARGET} ${ARGN})
@@ -165,6 +173,7 @@ function(add_neos_concept_library TARGET)
     set_target_properties(${TARGET} PROPERTIES PREFIX "" SUFFIX ".ncl"
         LIBRARY_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    neos_plugin_link_options(${TARGET})
     install(TARGETS ${TARGET} LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endfunction()
 
@@ -215,6 +224,7 @@ function(add_neos_compiler_plugin TARGET LANGUAGE)
     set_target_properties(${TARGET} PROPERTIES PREFIX "" OUTPUT_NAME "${LANGUAGE}" SUFFIX ".ncp"
         LIBRARY_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    neos_plugin_link_options(${TARGET})
     install(TARGETS ${TARGET} LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endfunction()
 add_neos_compiler_plugin(compiler.javascript javascript
@@ -343,6 +353,7 @@ function(add_neos_runtime_plugin TARGET)
         C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden
         LIBRARY_OUTPUT_DIRECTORY "${NEOS_PLUGIN_OUTPUT_DIRECTORY}"
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    neos_plugin_link_options(${TARGET})
     if(MSVC)
         target_compile_definitions(${TARGET} PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
@@ -424,6 +435,12 @@ target_include_directories(python PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers
 target_link_libraries(python PRIVATE neonumeric::neonumeric) # (ints beyond 64 bits)
 if(WIN32)
     target_link_libraries(python PRIVATE ws2_32) # (Winsock: the modules select and socket)
+endif()
+# (Visual Studio: compiled by clang-cl (the ClangCL toolset: Visual Studio's "C++ Clang tools for Windows" component), as cl.exe 
+# (14.51) crashes compiling some of its modules (e.g. dataclasses.cpp and inspect.cpp); clang-cl takes cl.exe's options, so the 
+# options CMake gives it as MSVC's apply)
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    set_target_properties(python PROPERTIES VS_PLATFORM_TOOLSET ClangCL)
 endif()
 # (its thread-locals (dynamic: it is loaded by dlopen) found through TLS descriptors: cheaper than calls of __tls_get_addr, and 
 # every call of its functions uses some)

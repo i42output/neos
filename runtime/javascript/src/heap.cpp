@@ -344,6 +344,28 @@ namespace neos::javascript_runtime
         return TagString | s.handle;
     }
 
+    value concat_number(value aString, double aNumber, bool aNumberFirst)
+    {
+        // (string + number, or number + string: one string made (not the number's string and then the two concatenated))
+        char16_t digits[32];
+        auto const count = number_characters(aNumber, digits);
+        auto& s = cell_of<string>(aString);
+        auto const length = static_cast<std::uint64_t>(s.length) + count;
+        if (length > 32u)
+        {
+            auto const n = make_string(std::u16string{ digits, count });
+            return aNumberFirst ? concat(n, aString) : concat(aString, n);
+        }
+        std::u16string text;
+        text.reserve(static_cast<std::size_t>(length));
+        if (aNumberFirst)
+            text.append(digits, count);
+        text.append(s.flat());
+        if (!aNumberFirst)
+            text.append(digits, count);
+        return make_string(std::move(text));
+    }
+
     std::u16string const& str(value aString)
     {
         return cell_of<string>(aString).flat();

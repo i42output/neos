@@ -554,8 +554,11 @@ namespace neos::python_runtime
             enum protocol_operation : int
             {
                 GetItem, SetItem, DelItem, Len, Iter, Contains, Repr, Str, Hash, Bool, Index, Int, Float, Lt, Le, Eq, Ne, Gt, Ge, 
-                Neg, Pos, Invert, Abs, Binary, ReflectedBinary = Binary + 16, InplaceBinary = ReflectedBinary + 16, ProtocolEnd = InplaceBinary + 16
+                Neg, Pos, Invert, Abs, FirstBinary
             };
+            // (the binary operators': an operator (neos_py_binary) is added to them, so they are ints (C++26 has no arithmetic between 
+            // the values of different enumerations))
+            constexpr int Binary = FirstBinary, ReflectedBinary = Binary + 16, InplaceBinary = ReflectedBinary + 16, ProtocolEnd = InplaceBinary + 16;
 
             struct protocol_entry { char const* name; int operation; };
 

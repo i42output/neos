@@ -72,8 +72,10 @@ namespace neos::javascript_runtime
                 for (auto const& [name, binding] : r->lexicals)
                 {
                     aTracer.mark(name);
-                    aTracer.mark(binding.v);
+                    aTracer.mark(binding.get());
                 }
+                for (auto const& m : r->mirrors)
+                    aTracer.mark(m.first);
             }
             for (auto const& entry : symbol_registry())
                 aTracer.mark(entry.second);
@@ -91,6 +93,33 @@ namespace neos::javascript_runtime
     realm& the_realm()
     {
         return tCurrent != nullptr ? *tCurrent : *sRealm;
+    }
+
+    void global_mirror_update(realm& aRealm, value aName)
+    {
+        auto const m = aRealm.mirrors.find(aName);
+        if (m == aRealm.mirrors.end())
+            return;
+        // (what reading the name finds without running code: a global lexical binding's value (Empty: uninitialized); else an own data
+        // property's of an ordinary global object; else Empty (the program finds it the slow way))
+        value v = Empty;
+        if (auto const b = aRealm.lexicals.find(aName); b != aRealm.lexicals.end())
+            v = b->second.get();
+        else if (auto& g = obj(aRealm.global); g.cls == object_class::Ordinary)
+            if (auto const* p = g.own(aName); p != nullptr && !p->accessor())
+                v = p->data;
+        for (auto* word : m->second)
+            *word = v;
+    }
+
+    void global_object_changed(object& aObject, value aKey)
+    {
+        for (auto* r : realms())
+            if (r->global != Undefined && &obj(r->global) == &aObject)
+            {
+                global_mirror_update(*r, aKey);
+                return;
+            }
     }
 
     bool realm_initialized()

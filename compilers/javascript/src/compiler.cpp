@@ -1453,6 +1453,37 @@ namespace neos::compilers::javascript
         return g;
     }
 
+    std::optional<std::uint32_t> compiler::global_mirror(std::string const& aName)
+    {
+        // (a script that is the program (it runs once, in one realm): its global references read the bindings' mirrors (see the
+        // runtime's global_mirror); eval code and the other scripts that the runtime loads are cached and may run in other realms)
+        if (iKind != code_kind::Script || iModule)
+            return std::nullopt;
+        auto const existing = iMirrors.find(aName);
+        if (existing != iMirrors.end())
+            return existing->second;
+        auto const g = global_index("%jsg" + std::to_string(iMirrors.size()), type::I64);
+        iMirrors.emplace(aName, g);
+        iMirrorOrder.emplace_back(aName, g);
+        return g;
+    }
+
+    function_info* compiler::script_function(std::string const& aName)
+    {
+        auto const f = iScriptFunctions.find(aName);
+        return f != iScriptFunctions.end() ? f->second : nullptr;
+    }
+
+    std::uint32_t compiler::function_closure(function_info const& aFunction)
+    {
+        auto const existing = iClosures.find(&aFunction);
+        if (existing != iClosures.end())
+            return existing->second;
+        auto const g = global_index("%jsc" + std::to_string(iClosures.size()), type::I64);
+        iClosures.emplace(&aFunction, g);
+        return g;
+    }
+
     std::uint32_t compiler::source_line_of(std::string_view aSource) const
     {
         if (aSource.data() < iSource.data() || aSource.data() > iSource.data() + iSource.size())

@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include "js.hpp"
 #include "api.hpp"
@@ -364,7 +365,11 @@ namespace neos::javascript_runtime
                         throw_syntax_error("Identifier '" + name_text(name) + "' has already been declared");
                     if (auto const existing = g.get_own_property(name); existing && !existing->configurable.value_or(false))
                         throw_syntax_error("Identifier '" + name_text(name) + "' has already been declared");
-                    lexicals.emplace(name, global_binding{ Empty, aKind == 3 });
+                    auto& binding = lexicals.emplace(name, global_binding{ Empty, aKind == 3 }).first->second;
+                    // (a binding that the program reads and writes in place: its value is the program's word (its mirror))
+                    if (auto const m = the_realm().mirrors.find(name); m != the_realm().mirrors.end() && !m->second.empty())
+                        binding.slot = m->second.front();
+                    global_mirror_update(the_realm(), name);
                     return Undefined;
                 }
                 if (lexicals.contains(name))
@@ -407,9 +412,9 @@ namespace neos::javascript_runtime
                 auto& lexicals = global_lexicals();
                 if (auto const b = lexicals.find(name); b != lexicals.end())
                 {
-                    if (b->second.v == Empty)
+                    if (b->second.get() == Empty)
                         throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
-                    return b->second.v;
+                    return b->second.get();
                 }
                 auto const global = the_realm().global;
                 // (an own data property of an ordinary global object: its value (as [[HasProperty]] and [[Get]] would find it))
@@ -452,9 +457,9 @@ namespace neos::javascript_runtime
                 auto& lexicals = global_lexicals();
                 if (auto const b = lexicals.find(name); b != lexicals.end())
                 {
-                    if (b->second.v == Empty)
+                    if (b->second.get() == Empty)
                         throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
-                    return b->second.v;
+                    return b->second.get();
                 }
                 auto const global = the_realm().global;
                 if (!has_property(global, name))
@@ -483,11 +488,12 @@ namespace neos::javascript_runtime
                 auto& lexicals = global_lexicals();
                 if (auto const b = lexicals.find(name); b != lexicals.end())
                 {
-                    if (b->second.v == Empty)
+                    if (b->second.get() == Empty)
                         throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
                     if (b->second.constant)
                         throw_type_error("Assignment to constant variable.");
-                    b->second.v = aValue;
+                    b->second.set(aValue);
+                    global_mirror_update(the_realm(), name);
                     return aValue;
                 }
                 auto const global = the_realm().global;
@@ -501,8 +507,55 @@ namespace neos::javascript_runtime
         value global_init(value aName, value aValue)
         {
             auto const name = intern(aName);
-            global_lexicals()[name].v = aValue;
+            global_lexicals()[name].set(aValue);
+            global_mirror_update(the_realm(), name);
             return aValue;
+        }
+
+        unsigned long long* program_word(std::int32_t aGlobal)
+        {
+            // (a global of the running program (see neos_rt_host::global): the program cannot run without it)
+            auto const* h = host();
+            auto* const word = h != nullptr && h->version >= 10u && h->global != nullptr ? h->global(static_cast<unsigned>(aGlobal)) : nullptr;
+            if (word == nullptr)
+            {
+                std::fprintf(stderr, "javascript: the host does not provide the program's globals\n");
+                std::abort();
+            }
+            return word;
+        }
+
+        // (the program's globals that hold values that it may compare with others (e.g. a function that a call site calls directly):
+        // their values are kept (a value that was collected could be the same as a new one))
+        std::vector<unsigned long long*>& rooted_words()
+        {
+            static std::vector<unsigned long long*> sWords;
+            return sWords;
+        }
+        root_tracer const sWordRoots{ [](tracer& aTracer)
+        {
+            for (auto* word : rooted_words())
+                aTracer.mark(static_cast<value>(*word));
+        } };
+
+        value global_root(std::int32_t aGlobal)
+        {
+            rooted_words().push_back(program_word(aGlobal));
+            return Undefined;
+        }
+
+        value global_mirror(value aName, std::int32_t aGlobal)
+        {
+            // (the program's global aGlobal mirrors the global binding aName (see realm::mirrors): reading it is then a read of the
+            // global (the program reads the binding the slow way while the global is Empty))
+            auto const name = intern(aName);
+            // (the program writes the global lexical bindings that it declares in place: it cannot run without its mirrors)
+            auto* const word = program_word(aGlobal);
+            auto& r = the_realm();
+            obj(r.global).mirrored = true;
+            r.mirrors[name].push_back(word);
+            global_mirror_update(r, name);
+            return Undefined;
         }
 
         value global_delete(value aName)
@@ -824,6 +877,12 @@ namespace neos::javascript_runtime
                     throw_type_error("Cannot read properties of " + std::string{ aObject == Null ? "null" : "undefined" } + " (reading '" + describe_key(aKey) + "')");
                 return get_v(aObject, to_property_key(aKey));
             });
+        }
+
+        value concat_string_number(value aString, value aNumber, std::int32_t aNumberFirst)
+        {
+            // (a string + a number (aNumberFirst: a number + a string))
+            return guard([&]() -> value { return concat_number(aString, as_number(aNumber), aNumberFirst != 0); });
         }
 
         value get_named(value aObject, value aKey)
@@ -1387,6 +1446,9 @@ namespace neos::javascript_runtime
             { "global_resolved", NEOS_RT_FUNCTION(global_resolved), I32, 1u, { I64 }, 0u },
             { "global_set", NEOS_RT_FUNCTION(global_set), I64, 3u, { I64, I64, I32 }, 0u },
             { "global_init", NEOS_RT_FUNCTION(global_init), I64, 2u, { I64, I64 }, 0u },
+            { "global_mirror", NEOS_RT_FUNCTION(global_mirror), I64, 2u, { I64, I32 }, 0u },
+            { "global_root", NEOS_RT_FUNCTION(global_root), I64, 1u, { I32 }, 0u },
+            { "concat_string_number", NEOS_RT_FUNCTION(concat_string_number), I64, 3u, { I64, I64, I32 }, 0u },
             { "global_delete", NEOS_RT_FUNCTION(global_delete), I64, 1u, { I64 }, 0u },
             { "env_new", NEOS_RT_FUNCTION(env_new), I64, 2u, { I64, I32 }, 0u },
             { "env_copy", NEOS_RT_FUNCTION(env_copy), I64, 1u, { I64 }, 0u },

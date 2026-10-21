@@ -117,9 +117,11 @@ namespace neos::javascript_runtime
             existing->data = aValue;
             existing->setter = Undefined;
             existing->attributes = aAttributes;
-            return;
         }
-        properties.add(aKey, aValue, Undefined, aAttributes);
+        else
+            properties.add(aKey, aValue, Undefined, aAttributes);
+        if (mirrored) [[unlikely]]
+            global_object_changed(*this, aKey);
     }
 
     void object::put_accessor(value aKey, value aGetter, value aSetter, std::uint8_t aAttributes)
@@ -130,9 +132,11 @@ namespace neos::javascript_runtime
             existing->data = aGetter;
             existing->setter = aSetter;
             existing->attributes = aAttributes;
-            return;
         }
-        properties.add(aKey, aGetter, aSetter, aAttributes);
+        else
+            properties.add(aKey, aGetter, aSetter, aAttributes);
+        if (mirrored) [[unlikely]]
+            global_object_changed(*this, aKey);
     }
 
     value object::get_prototype_of()
@@ -196,7 +200,24 @@ namespace neos::javascript_runtime
         return validate_and_apply_property_descriptor(nullptr, Undefined, aExtensible, aDescriptor, aCurrent);
     }
 
+    namespace
+    {
+        bool apply_property_descriptor(object* aObject, value aKey, bool aExtensible, property_descriptor const& aDescriptor,
+            std::optional<property_descriptor> const& aCurrent);
+    }
+
     bool validate_and_apply_property_descriptor(object* aObject, value aKey, bool aExtensible, property_descriptor const& aDescriptor,
+        std::optional<property_descriptor> const& aCurrent)
+    {
+        auto const result = apply_property_descriptor(aObject, aKey, aExtensible, aDescriptor, aCurrent);
+        if (aObject != nullptr && aObject->mirrored) [[unlikely]]
+            global_object_changed(*aObject, aKey);
+        return result;
+    }
+
+    namespace
+    {
+    bool apply_property_descriptor(object* aObject, value aKey, bool aExtensible, property_descriptor const& aDescriptor,
         std::optional<property_descriptor> const& aCurrent)
     {
         if (!aCurrent)
@@ -297,6 +318,7 @@ namespace neos::javascript_runtime
             }
         }
         return true;
+    }
     }
 
     bool object::ordinary_define_own_property(value aKey, property_descriptor const& aDescriptor)
@@ -427,6 +449,8 @@ namespace neos::javascript_runtime
                 if (!p->writable())
                     return false;
                 p->data = aValue;
+                if (mirrored) [[unlikely]]
+                    global_object_changed(*this, aKey);
                 return true;
             }
             return set_with_own_descriptor(*this, aKey, aValue, aReceiver, p->descriptor());
@@ -442,6 +466,8 @@ namespace neos::javascript_runtime
         if (desc->configurable.value_or(false))
         {
             properties.remove(aKey);
+            if (mirrored) [[unlikely]]
+                global_object_changed(*this, aKey);
             return true;
         }
         return false;
@@ -455,6 +481,8 @@ namespace neos::javascript_runtime
         if (p->configurable())
         {
             properties.remove(aKey);
+            if (mirrored) [[unlikely]]
+                global_object_changed(*this, aKey);
             return true;
         }
         return false;

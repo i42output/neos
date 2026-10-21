@@ -886,11 +886,9 @@ namespace neos
                     }
                     std::uint64_t trunc_f32_i32(float a, context* c) { return truncate<std::int32_t>(a, c); }
                     std::uint64_t trunc_f32_u32(float a, context* c) { return truncate<std::uint32_t>(a, c); }
-                    std::uint64_t trunc_f64_i32(double a, context* c) { return truncate<std::int32_t>(a, c); }
                     std::uint64_t trunc_f64_u32(double a, context* c) { return truncate<std::uint32_t>(a, c); }
                     std::uint64_t trunc_f32_i64(float a, context* c) { return truncate<std::int64_t>(a, c); }
                     std::uint64_t trunc_f32_u64(float a, context* c) { return truncate<std::uint64_t>(a, c); }
-                    std::uint64_t trunc_f64_i64(double a, context* c) { return truncate<std::int64_t>(a, c); }
                     std::uint64_t trunc_f64_u64(double a, context* c) { return truncate<std::uint64_t>(a, c); }
 
                     std::uint32_t host_thunk(context* aContext, std::uint32_t aFunction, value* aBuffer) noexcept
@@ -1807,10 +1805,25 @@ namespace neos
                             save_pinned_gprs();
                             int intIndex = 0;
                             int floatIndex = 0;
+                            std::int32_t stackIndex = 0;
                             for (std::size_t i = 0u; i < aArguments.size(); ++i)
                             {
                                 auto const disp = ShadowSpace + static_cast<std::int32_t>(i) * 8;
-                                if (aArguments[i].isFloat)
+                                bool const inRegister = Windows ? i < std::size(NativeIntegerArguments) :
+                                    aArguments[i].isFloat ? floatIndex < 8 : intIndex < static_cast<int>(std::size(NativeIntegerArguments));
+                                if (!inRegister)
+                                {
+                                    // (an argument passed on the stack (beyond those in registers): moved down from where it was staged to
+                                    // where the callee finds it (the stack arguments follow the shadow space (Windows) or start at rsp
+                                    // (System V)); the arguments before it have been taken, so the move overwrites none still needed)
+                                    auto const slot = Windows ? disp - 8 * static_cast<std::int32_t>(std::size(NativeIntegerArguments)) : 8 * stackIndex++;
+                                    if (slot != disp)
+                                    {
+                                        a.load(true, RAX, RSP, disp);
+                                        a.store(true, RSP, slot, RAX);
+                                    }
+                                }
+                                else if (aArguments[i].isFloat)
                                 {
                                     int const x = Windows ? static_cast<int>(i) : floatIndex++;
                                     a.movf_load(aArguments[i].isDouble, x, RSP, disp);
@@ -2011,10 +2024,12 @@ namespace neos
                             for (auto t : *f.locals)
                                 iLocals.push_back(local_info{ t });
                             choose_pinned_locals(f.codeBegin, f.codeEnd);
+                            // (a parameter's home is its argument's slot (the caller's outgoing arguments, which are the callee's): it is not
+                            // copied)
                             std::int32_t frameLocals = 0;
-                            for (auto& l : iLocals)
-                                if (!l.pinned)
-                                    l.disp = locals_base() - 8 * (++frameLocals);
+                            for (std::size_t i = 0u; i < iLocals.size(); ++i)
+                                if (!iLocals[i].pinned)
+                                    iLocals[i].disp = i < f.parameters->size() ? 16 + 8 * static_cast<std::int32_t>(i) : locals_base() - 8 * (++frameLocals);
                             iSlotsBase = locals_base() - 8 * frameLocals;
                             // prologue (aligned, so that the speed of its code (e.g. its loops' jumps) does not depend on the code before it)
                             a.align(FunctionAlignment);
@@ -2043,11 +2058,6 @@ namespace neos
                                             a.movf_load(l.type == F64, l.reg, RBP, argument);
                                         else
                                             a.load(is_wide(l.type), l.reg, RBP, argument);
-                                    }
-                                    else
-                                    {
-                                        a.load(true, RAX, RBP, argument);
-                                        a.store(true, RBP, l.disp, RAX);
                                     }
                                 }
                                 else if (!zero[i])
@@ -2819,6 +2829,24 @@ namespace neos
                             owner(false, RDX) = Locked;
                             a.test_rr(aW, divisor, divisor);
                             a.jcc(E, iTrapLabels[TrapDivideByZero]);
+                            std::optional<std::size_t> narrowDone;
+                            if (aW)
+                            {
+                                // (operands below 2^32 (most are): a 32 bit division, which is much quicker (signed or unsigned, they are
+                                // non-negative))
+                                auto const wide = a.new_label();
+                                narrowDone = a.new_label();
+                                auto const t = alloc(false, avoid | (1u << divisor));
+                                a.mov_rr(true, t, RAX);
+                                a.alu_rr(1, true, t, divisor);
+                                a.shift_ri(5, true, t, 32u);
+                                release_reg(false, t);
+                                a.jcc(NE, wide);
+                                a.alu_rr(6, false, RDX, RDX);
+                                a.f7(6, false, divisor);
+                                a.jmp(*narrowDone);
+                                a.bind(wide);
+                            }
                             if (aSigned)
                             {
                                 auto const general = a.new_label();
@@ -2843,6 +2871,8 @@ namespace neos
                                 a.alu_rr(6, false, RDX, RDX);
                                 a.f7(6, aW, divisor);
                             }
+                            if (narrowDone)
+                                a.bind(*narrowDone);
                             if (rhs.k == kind::Reg)
                                 release_reg(false, rhs.reg);
                             int const result = aRemainder ? RDX : RAX;
@@ -2985,6 +3015,38 @@ namespace neos
                                     a.mov_rr(false, RAX, RAX);
                                 push_reg(aResultType, RAX);
                             }
+                        }
+                        void truncate_f64(bool aWide)
+                        {
+                            // (i32/i64.trunc_f64_s: cvttsd2si; its "integer indefinite" result (the minimum) is a trap unless the value is the
+                            // minimum (NaN: an invalid conversion; else an overflow))
+                            materialize_cond();
+                            auto v = pop();
+                            auto const x = to_xmm(v);
+                            auto const r = alloc(false);
+                            // (registers are allocated before the branch: an allocation may spill, which both paths must see)
+                            auto const t = aWide ? alloc(false) : -1;
+                            auto const m = alloc(true);
+                            a.sse_rr(0xF2, 0x2C, aWide, r, x);
+                            auto const done = a.new_label();
+                            if (aWide)
+                            {
+                                a.mov_ri(t, 0x8000000000000000ull, true);
+                                a.alu_rr(7, true, r, t);
+                                release_reg(false, t);
+                            }
+                            else
+                                a.alu_ri(7, false, r, std::numeric_limits<std::int32_t>::min());
+                            a.jcc(NE, done);
+                            a.xorpd(m, m);
+                            a.sse_rr(0xF2, 0x2A, aWide, m, r);
+                            a.ucomis(true, x, m);
+                            a.jcc(P, iTrapLabels[TrapInvalidConversion]);
+                            a.jcc(NE, iTrapLabels[TrapIntegerOverflow]);
+                            release_reg(true, m);
+                            a.bind(done);
+                            release_reg(true, x);
+                            push_reg(aWide ? I64 : I32, r);
                         }
                         void convert_to_float(bool aDouble, bool aWideSource, bool aSigned)
                         {
@@ -3145,20 +3207,16 @@ namespace neos
                                     push_loaded(t, R15, ContextResults + 8 * static_cast<std::int32_t>(i));
                             }
                         }
-                        // (an import that is called directly (see import_call), not through the host: a runtime plugin function whose 
-                        // arguments are all in registers and that takes and returns no strings (they are copied by the host))
+                        // (an import that is called directly (see import_call), not through the host: a runtime plugin function that
+                        // takes and returns no strings (they are copied by the host))
                         static bool direct(function_description const& aCallee)
                         {
                             if (aCallee.call == import_call::ObjectRetain || aCallee.call == import_call::ObjectRelease)
                                 return aCallee.parameters->size() == 1u && aCallee.results->empty();
                             if (aCallee.call != import_call::Plugin || !aCallee.plugin || aCallee.plugin->function == nullptr)
                                 return false;
-                            auto const& f = *aCallee.plugin;
-                            std::size_t integers = 0u;
-                            std::size_t floats = 0u;
-                            for (auto const p : f.parameters)
-                                ++(p == NEOS_RT_F32 || p == NEOS_RT_F64 ? floats : integers);
-                            return Windows ? integers + floats <= 4u : integers <= std::size(NativeIntegerArguments) && floats <= 8u;
+                            // (arguments beyond those in registers are passed on the stack (see native_call))
+                            return aCallee.plugin->parameters.size() <= NEOS_RT_MAX_PARAMETERS;
                         }
                         // the call of an import called directly: its arguments are in the outgoing area (its first result is put 
                         // there too)
@@ -4210,7 +4268,7 @@ namespace neos
                                 break;
                             case 0xA8: helper(reinterpret_cast<void const*>(&trunc_f32_i32), 1u, F32, I32, true); break;
                             case 0xA9: helper(reinterpret_cast<void const*>(&trunc_f32_u32), 1u, F32, I32, true); break;
-                            case 0xAA: helper(reinterpret_cast<void const*>(&trunc_f64_i32), 1u, F64, I32, true); break;
+                            case 0xAA: truncate_f64(false); break;
                             case 0xAB: helper(reinterpret_cast<void const*>(&trunc_f64_u32), 1u, F64, I32, true); break;
                             case 0xAC: // i64.extend_i32_s
                                 {
@@ -4232,7 +4290,7 @@ namespace neos
                                 break;
                             case 0xAE: helper(reinterpret_cast<void const*>(&trunc_f32_i64), 1u, F32, I64, true); break;
                             case 0xAF: helper(reinterpret_cast<void const*>(&trunc_f32_u64), 1u, F32, I64, true); break;
-                            case 0xB0: helper(reinterpret_cast<void const*>(&trunc_f64_i64), 1u, F64, I64, true); break;
+                            case 0xB0: truncate_f64(true); break;
                             case 0xB1: helper(reinterpret_cast<void const*>(&trunc_f64_u64), 1u, F64, I64, true); break;
                             case 0xB2: convert_to_float(false, false, true); break;
                             case 0xB3: convert_to_float(false, false, false); break;

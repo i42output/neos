@@ -1836,6 +1836,11 @@ namespace neos
                     bool restricted() const { return iRestricted; }
                     compile_service const& source_compiler() const { return iCompileService; }    ///< (see neos_rt_host::load)
                     std::vector<std::string> const& arguments() const { return iArguments; }    ///< (see neos_rt_host::arguments)
+                    // (a global's storage (its word): the interpreter and generated code use it (it does not move))
+                    value* global_address(std::uint32_t aIndex)
+                    {
+                        return aIndex < iGlobals.size() ? &iGlobals[aIndex] : nullptr;
+                    }
                 private:
                     static inline std::atomic<std::uint64_t> sSerial{ 0u };
                     std::uint64_t const iSerial;    ///< (identifies the program (see walk): a program loaded at the address of one that has ended is another)
@@ -2370,6 +2375,13 @@ namespace neos
                     }
                 }
 
+                unsigned long long* host_global(unsigned aGlobal)
+                {
+                    if (tRunning.program == nullptr)
+                        return nullptr;
+                    return reinterpret_cast<unsigned long long*>(tRunning.program->global_address(aGlobal));
+                }
+
                 void host_values(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
                 {
                     if (aVisit == nullptr)
@@ -2501,7 +2513,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush };
+                    host_std_flush, host_global };
             }
 
             void const* runtime::host()

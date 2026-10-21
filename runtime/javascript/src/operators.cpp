@@ -152,6 +152,10 @@ namespace neos::javascript_runtime
                     return number(as_number(aLeft) + as_number(aRight));
                 if (is_string(aLeft) && is_string(aRight))
                     return concat(aLeft, aRight);
+                if (is_string(aLeft) && is_number(aRight))
+                    return concat_number(aLeft, as_number(aRight), false);
+                if (is_number(aLeft) && is_string(aRight))
+                    return concat_number(aRight, as_number(aLeft), true);
                 auto const l = to_primitive(aLeft);
                 auto const r = to_primitive(aRight);
                 if (is_string(l) || is_string(r))

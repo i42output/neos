@@ -34,6 +34,7 @@
 // ECMAScript's abstract operations: conversions, comparisons, object operations and iterators
 
 #include <algorithm>
+#include <charconv>
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
 #include "api.hpp"
@@ -168,12 +169,57 @@ namespace neos::javascript_runtime
         return utf16_ascii(es::number_to_string(aValue, aRadix));
     }
 
+    std::size_t number_characters(double aValue, char16_t (&aBuffer)[32])
+    {
+        // (a safe integer's digits directly (the common case); else Number::toString's)
+        if (aValue > -9007199254740992.0 && aValue < 9007199254740992.0)
+        {
+            auto const integer = static_cast<std::int64_t>(aValue);
+            if (static_cast<double>(integer) == aValue)
+            {
+                // (-0 is "0"; two digits at a time)
+                static constexpr char sPairs[] =
+                    "0001020304050607080910111213141516171819202122232425262728293031323334353637383940414243444546474849"
+                    "5051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+                std::uint64_t magnitude = integer < 0 ? static_cast<std::uint64_t>(-integer) : static_cast<std::uint64_t>(integer);
+                char16_t reversed[20];
+                std::size_t count = 0u;
+                while (magnitude >= 100u)
+                {
+                    auto const pair = static_cast<std::size_t>(magnitude % 100u) * 2u;
+                    magnitude /= 100u;
+                    reversed[count++] = static_cast<char16_t>(sPairs[pair + 1u]);
+                    reversed[count++] = static_cast<char16_t>(sPairs[pair]);
+                }
+                if (magnitude >= 10u)
+                {
+                    auto const pair = static_cast<std::size_t>(magnitude) * 2u;
+                    reversed[count++] = static_cast<char16_t>(sPairs[pair + 1u]);
+                    reversed[count++] = static_cast<char16_t>(sPairs[pair]);
+                }
+                else
+                    reversed[count++] = static_cast<char16_t>(u'0' + magnitude);
+                std::size_t length = 0u;
+                if (integer < 0)
+                    aBuffer[length++] = u'-';
+                while (count > 0u)
+                    aBuffer[length++] = reversed[--count];
+                return length;
+            }
+        }
+        auto const text = es::number_to_string(aValue);
+        std::copy(text.begin(), text.end(), aBuffer);
+        return text.size();
+    }
+
     value number_to_string(double aValue)
     {
         // (small integers are common: their strings are interned)
         if (aValue >= 0.0 && aValue < 1024.0 && std::trunc(aValue) == aValue && !(aValue == 0.0 && std::signbit(aValue)))
             return index_key(static_cast<std::uint64_t>(aValue));
-        return make_string(utf16_ascii(es::number_to_string(aValue)));
+        char16_t buffer[32];
+        auto const length = number_characters(aValue, buffer);
+        return make_string(std::u16string{ buffer, length });
     }
 
     value to_string(value aValue)

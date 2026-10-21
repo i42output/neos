@@ -528,6 +528,7 @@ namespace neos::javascript_runtime
         object_class cls;
         value proto;
         bool extensible = true;
+        bool mirrored = false;          ///< (a global object whose properties have mirrors: changes to them call global_object_changed)
         property_table properties;
         value internal = Undefined;     ///< ([[BooleanData]], [[NumberData]], [[StringData]], [[SymbolData]], [[BigIntData]], [[DateValue]],
                                         ///< [[ErrorData]] (its stack) ... as the class has)
@@ -760,13 +761,22 @@ namespace neos::javascript_runtime
         // the global lexical environment's bindings (let, const and class declarations of scripts)
         struct global_binding
         {
-            value v = Empty;
+            value stored = Empty;
             bool constant = false;
+            unsigned long long* slot = nullptr;     ///< (the program's word that holds the value (see global_mirror), else stored)
+
+            value get() const { return slot != nullptr ? static_cast<value>(*slot) : stored; }
+            void set(value aValue) { if (slot != nullptr) *slot = aValue; else stored = aValue; }
         };
         std::unordered_map<value, global_binding> lexicals;
+        // (the program's global value mirrors (see global_mirror): names -> the words (module globals) that hold the value that
+        // reading the name finds (a global lexical binding's value; else an own data property's of the global object), or Empty)
+        std::unordered_map<value, std::vector<unsigned long long*>> mirrors;
     };
 
     realm& the_realm();                     ///< (the current realm: the realm of the function running)
+    void global_mirror_update(realm& aRealm, value aName);  ///< (a global binding changed (its mirrors, if it has any, are updated))
+    void global_object_changed(object& aObject, value aKey);    ///< (a property of a global object with mirrors changed)
     bool is_object_prototype(object const& aObject);    ///< (a realm's %Object.prototype% (an immutable prototype exotic object))
     void initialize_realm();
     bool realm_initialized();
@@ -838,6 +848,8 @@ namespace neos::javascript_runtime
     value canonical_numeric_index_string(value aKey);           ///< (a number or undefined)
     std::u16string number_to_u16string(double aValue, int aRadix = 10);
     value number_to_string(double aValue);
+    std::size_t number_characters(double aValue, char16_t (&aBuffer)[32]);    ///< (ToString of a number, in aBuffer: its length)
+    value concat_number(value aString, double aNumber, bool aNumberFirst);   ///< (a string and ToString of a number, concatenated)
     double string_to_number(std::u16string_view aText);
     std::string type_name(value aValue);                        ///< (for messages)
     std::string describe(value aValue);                         ///< (for messages: a short representation)
