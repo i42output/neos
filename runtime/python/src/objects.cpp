@@ -67,6 +67,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #include <memory>
 #include <neonumeric/integer.hpp>
 #include <neos/runtime/python/object.h>
@@ -106,7 +109,8 @@ namespace neos::python_runtime
 
         bool is_big(object* aObject)
         {
-            return aObject != nullptr && aObject->type == &sIntType.base && (as<int_object>(aObject)->big != nullptr || as<int_object>(aObject)->wide);
+            return aObject != nullptr && aObject->type == &sIntType.base && (as<int_object>(aObject)->big != nullptr || as<int_object>(aObject)->wide || 
+                as<int_object>(aObject)->limbs != nullptr);
         }
 
         // --- integers of 128 bits (an int beyond 64 bits that fits: its value is its object's (wide), not a big integer's, so that 
@@ -132,7 +136,7 @@ namespace neos::python_runtime
                 auto const& i = *as<int_object>(aObject);
                 if (i.wide)
                     aResult = { static_cast<std::uint64_t>(i.value), i.high };
-                else if (i.big == nullptr)
+                else if (i.big == nullptr && i.limbs == nullptr)
                     aResult = int128_of(i.value);
                 else
                     return false;
@@ -220,6 +224,983 @@ namespace neos::python_runtime
             return make_int128(multiply64(static_cast<long long>(a.lo), static_cast<long long>(b.lo)));
         }
 
+        // --- ints beyond 128 bits: their magnitudes' 64-bit words (limbs, least significant first) and their signs (int_object::limbs, 
+        // size and negative): arithmetic (Karatsuba's products, Knuth's divisions), shifts, bitwise operations, comparisons, hashes, 
+        // conversions (to and from text, to bytes and floats) and math's gcd (Lehmer's), isqrt, factorial, comb and perm are native (as 
+        // CPython's longobject.c's); the rest are neonumeric's (a big integer is made from them when one is needed: see big_of)
+        using limb = std::uint64_t;
+
+        // (an int's limbs while it is made (they are its own when it is made: see make_limbs))
+        class limb_array
+        {
+        public:
+            explicit limb_array(std::uint32_t aCount) : iCapacity{ aCount }, iData{ allocate_limbs(iCapacity) } {}
+            limb_array(limb_array&& aOther) noexcept : iCapacity{ aOther.iCapacity }, iData{ aOther.iData } { aOther.iData = nullptr; }
+            limb_array(limb_array const&) = delete;
+            ~limb_array() { if (iData != nullptr) free_limbs(iData, iCapacity); }
+        public:
+            limb* get() const { return iData; }
+            limb& operator[](std::size_t aIndex) const { return iData[aIndex]; }
+            std::uint32_t capacity() const { return iCapacity; }
+            limb* release() { auto const result = iData; iData = nullptr; return result; }
+        private:
+            std::uint32_t iCapacity;
+            limb* iData;
+        };
+
+        // (an int's magnitude and sign: its limbs, or a 64-bit or 128-bit int's (in local))
+        struct limb_view
+        {
+            limb const* data = nullptr;
+            std::uint32_t size = 0u;
+            bool negative = false;
+            limb local[2] = {};
+            limb_view() = default;
+            limb_view(limb_view const&) = delete;
+        };
+
+        void view_of(int128 v, limb_view& aView);
+
+        bool limbs_of(object* aObject, limb_view& aView)
+        {
+            if (aObject == nullptr)
+                return false;
+            int128 v;
+            if (aObject->type == &sIntType.base)
+            {
+                auto const& i = *as<int_object>(aObject);
+                if (i.limbs != nullptr)
+                {
+                    aView.data = i.limbs;
+                    aView.size = i.size;
+                    aView.negative = i.negative;
+                    return true;
+                }
+                if (i.wide)
+                    v = { static_cast<std::uint64_t>(i.value), i.high };
+                else if (i.big == nullptr)
+                    v = int128_of(i.value);
+                else
+                    return false;
+            }
+            else if (aObject == &sTrue.base || aObject == &sFalse.base)
+                v = int128_of(aObject == &sTrue.base ? 1 : 0);
+            else
+                return false;
+            view_of(v, aView);
+            return true;
+        }
+
+        void view_of(int128 v, limb_view& aView)
+        {
+            aView.negative = v.hi < 0;
+            auto lo = v.lo;
+            auto hi = static_cast<limb>(v.hi);
+            if (aView.negative)
+            {
+                lo = ~lo + 1u;
+                hi = ~hi + (lo == 0u ? 1u : 0u);
+            }
+            aView.local[0] = lo;
+            aView.local[1] = hi;
+            aView.size = hi != 0u ? 2u : lo != 0u ? 1u : 0u;
+            aView.data = aView.local;
+        }
+
+        // (a * b + c + d: its low word, and its high word in aHigh (it fits in 128 bits))
+        limb multiply_add(limb a, limb b, limb c, limb d, limb& aHigh)
+        {
+#if defined(__SIZEOF_INT128__)
+            auto const r = static_cast<unsigned __int128>(a) * b + c + d;
+            aHigh = static_cast<limb>(r >> 64);
+            return static_cast<limb>(r);
+#else
+            limb const a0 = a & 0xFFFFFFFFu, a1 = a >> 32u, b0 = b & 0xFFFFFFFFu, b1 = b >> 32u;
+            limb const p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+            limb const middle = (p00 >> 32u) + (p01 & 0xFFFFFFFFu) + (p10 & 0xFFFFFFFFu);
+            limb lo = (p00 & 0xFFFFFFFFu) | (middle << 32u);
+            limb hi = p11 + (p01 >> 32u) + (p10 >> 32u) + (middle >> 32u);
+            lo += c;
+            hi += lo < c ? 1u : 0u;
+            lo += d;
+            hi += lo < d ? 1u : 0u;
+            aHigh = hi;
+            return lo;
+#endif
+        }
+
+        int compare_limbs(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn)
+        {
+            if (an != bn)
+                return an < bn ? -1 : 1;
+            for (auto i = an; i-- > 0u;)
+                if (a[i] != b[i])
+                    return a[i] < b[i] ? -1 : 1;
+            return 0;
+        }
+
+        // (|a| + |b| (an >= bn) in r (an + 1 limbs))
+        std::uint32_t add_limbs(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn, limb* r)
+        {
+            limb carry = 0u;
+            std::uint32_t i = 0u;
+            for (; i < bn; ++i)
+            {
+#if defined(__SIZEOF_INT128__)
+                auto const s = static_cast<unsigned __int128>(a[i]) + b[i] + carry;
+                r[i] = static_cast<limb>(s);
+                carry = static_cast<limb>(s >> 64);
+#else
+                auto const s = a[i] + carry;
+                carry = s < carry ? 1u : 0u;
+                r[i] = s + b[i];
+                carry += r[i] < s ? 1u : 0u;
+#endif
+            }
+            for (; i < an && carry != 0u; ++i)
+            {
+                r[i] = a[i] + carry;
+                carry = r[i] < carry ? 1u : 0u;
+            }
+            std::copy(a + i, a + an, r + i);
+            r[an] = carry;
+            return an + 1u;
+        }
+
+        // (|a| - |b| (|a| >= |b|) in r (an limbs))
+        std::uint32_t subtract_limbs(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn, limb* r)
+        {
+            limb borrow = 0u;
+            std::uint32_t i = 0u;
+            for (; i < bn; ++i)
+            {
+                auto const d = a[i] - b[i];
+                auto const nextBorrow = (a[i] < b[i] ? 1u : 0u) + (d < borrow ? 1u : 0u);
+                r[i] = d - borrow;
+                borrow = nextBorrow;
+            }
+            for (; i < an && borrow != 0u; ++i)
+            {
+                r[i] = a[i] - borrow;
+                borrow = a[i] < borrow ? 1u : 0u;
+            }
+            std::copy(a + i, a + an, r + i);
+            return an;
+        }
+
+        // (an int from a magnitude (its limbs: adopted) and a sign: a 64-bit or 128-bit int if it fits)
+        object* make_limbs(limb_array aLimbs, std::uint32_t aSize, bool aNegative)
+        {
+            while (aSize > 0u && aLimbs[aSize - 1u] == 0u)
+                --aSize;
+            if (aSize == 0u)
+                return make_int(0);
+            if (aSize <= 2u)
+            {
+                auto const lo = aLimbs[0];
+                auto const hi = aSize > 1u ? aLimbs[1] : limb{ 0u };
+                constexpr limb top = limb{ 1u } << 63u;
+                if (hi < top || (aNegative && hi == top && lo == 0u))
+                {
+                    int128 v{ lo, static_cast<std::int64_t>(hi) };
+                    if (aNegative)
+                    {
+                        v.lo = ~lo + 1u;
+                        v.hi = static_cast<std::int64_t>(~hi + (v.lo == 0u ? 1u : 0u));
+                    }
+                    return make_int128(v);
+                }
+            }
+            auto* const result = new int_object{ { { &sIntType.base } }, 0 };
+            result->capacity = aLimbs.capacity();
+            result->limbs = aLimbs.release();
+            result->size = aSize;
+            result->negative = aNegative;
+            return &result->h.base;
+        }
+
+        object* add_views(limb_view const& a, limb_view const& b, bool aSubtract)
+        {
+            bool const bNegative = (b.negative != aSubtract) && b.size != 0u;
+            bool const aNegative = a.negative && a.size != 0u;
+            auto const n = std::max(a.size, b.size) + 1u;
+            limb_array r{ n };
+            if (aNegative == bNegative || a.size == 0u || b.size == 0u)
+            {
+                bool const negative = a.size != 0u ? aNegative : bNegative;
+                auto const size = a.size >= b.size ? add_limbs(a.data, a.size, b.data, b.size, r.get()) : add_limbs(b.data, b.size, a.data, a.size, r.get());
+                return make_limbs(std::move(r), size, negative);
+            }
+            auto const order = compare_limbs(a.data, a.size, b.data, b.size);
+            if (order == 0)
+                return make_int(0);
+            if (order > 0)
+                return make_limbs(std::move(r), subtract_limbs(a.data, a.size, b.data, b.size, r.get()), aNegative);
+            return make_limbs(std::move(r), subtract_limbs(b.data, b.size, a.data, a.size, r.get()), bNegative);
+        }
+
+        // (r += x (r: rn limbs, x: xn <= rn limbs; the sum fits))
+        void add_into(limb* r, std::uint32_t rn, limb const* x, std::uint32_t xn)
+        {
+            limb carry = 0u;
+            std::uint32_t i = 0u;
+            for (; i < xn; ++i)
+            {
+                auto const s = r[i] + carry;
+                carry = s < carry ? 1u : 0u;
+                r[i] = s + x[i];
+                carry += r[i] < s ? 1u : 0u;
+            }
+            for (; carry != 0u && i < rn; ++i)
+                carry = ++r[i] == 0u ? 1u : 0u;
+        }
+
+        // (r -= x (r: rn limbs, x: xn <= rn limbs; r >= x))
+        void subtract_from(limb* r, std::uint32_t rn, limb const* x, std::uint32_t xn)
+        {
+            limb borrow = 0u;
+            std::uint32_t i = 0u;
+            for (; i < xn; ++i)
+            {
+                auto const d = r[i] - x[i];
+                auto const nextBorrow = (r[i] < x[i] ? 1u : 0u) + (d < borrow ? 1u : 0u);
+                r[i] = d - borrow;
+                borrow = nextBorrow;
+            }
+            for (; borrow != 0u && i < rn; ++i)
+                borrow = r[i]-- == 0u ? 1u : 0u;
+        }
+
+        // (a * b in r (an + bn limbs): schoolbook, and Karatsuba's for factors of 40 limbs or more (as CPython's k_mul))
+        void multiply_limbs(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn, limb* r)
+        {
+            constexpr std::uint32_t cutoff = 40u;
+            if (an < bn)
+            {
+                std::swap(a, b);
+                std::swap(an, bn);
+            }
+            std::fill(r, r + an + bn, limb{ 0u });
+            if (bn < cutoff)
+            {
+                for (std::uint32_t i = 0u; i < bn; ++i)
+                {
+                    limb carry = 0u;
+                    auto const bi = b[i];
+                    for (std::uint32_t j = 0u; j < an; ++j)
+                        r[i + j] = multiply_add(bi, a[j], r[i + j], carry, carry);
+                    r[i + an] = carry;
+                }
+                return;
+            }
+            auto const h = (an + 1u) / 2u;
+            if (bn <= h)
+            {
+                // (a much longer factor: in slices of the other's size)
+                std::vector<limb> t(2u * bn);
+                for (std::uint32_t offset = 0u; offset < an; offset += bn)
+                {
+                    auto const length = std::min(bn, an - offset);
+                    multiply_limbs(a + offset, length, b, bn, t.data());
+                    add_into(r + offset, an + bn - offset, t.data(), length + bn);
+                }
+                return;
+            }
+            // (a = a1 B^h + a0, b = b1 B^h + b0: a b = z2 B^2h + ((a0 + a1)(b0 + b1) - z0 - z2) B^h + z0)
+            multiply_limbs(a, h, b, h, r);
+            multiply_limbs(a + h, an - h, b + h, bn - h, r + 2u * h);
+            std::vector<limb> sa(h + 1u, 0u), sb(h + 1u, 0u), z1(2u * h + 2u);
+            std::copy(a, a + h, sa.begin());
+            add_into(sa.data(), h + 1u, a + h, an - h);
+            std::copy(b, b + h, sb.begin());
+            add_into(sb.data(), h + 1u, b + h, bn - h);
+            auto san = h + 1u, sbn = h + 1u;
+            while (san > 0u && sa[san - 1u] == 0u)
+                --san;
+            while (sbn > 0u && sb[sbn - 1u] == 0u)
+                --sbn;
+            std::fill(z1.begin(), z1.end(), limb{ 0u });
+            if (san != 0u && sbn != 0u)
+                multiply_limbs(sa.data(), san, sb.data(), sbn, z1.data());
+            auto const zn = 2u * h + 2u;
+            subtract_from(z1.data(), zn, r, 2u * h);
+            subtract_from(z1.data(), zn, r + 2u * h, an + bn - 2u * h);
+            auto z1n = zn;
+            while (z1n > 0u && z1[z1n - 1u] == 0u)
+                --z1n;
+            add_into(r + h, an + bn - h, z1.data(), z1n);
+        }
+
+        object* multiply_views(limb_view const& a, limb_view const& b)
+        {
+            if (a.size == 0u || b.size == 0u)
+                return make_int(0);
+            auto const n = a.size + b.size;
+            limb_array r{ n };
+            // (by a single limb (e.g. a factorial's): one pass)
+            if (a.size == 1u || b.size == 1u)
+            {
+                auto const& x = a.size == 1u ? b : a;
+                auto const y = a.size == 1u ? a.data[0] : b.data[0];
+                limb carry = 0u;
+                for (std::uint32_t i = 0u; i < x.size; ++i)
+                    r[i] = multiply_add(x.data[i], y, carry, 0u, carry);
+                r[x.size] = carry;
+                return make_limbs(std::move(r), x.size + 1u, a.negative != b.negative);
+            }
+            multiply_limbs(a.data, a.size, b.data, b.size, r.get());
+            return make_limbs(std::move(r), n, a.negative != b.negative);
+        }
+
+        // (a 128-bit dividend's quotient (aHigh < aDivisor: it fits in 64 bits) and remainder)
+        limb divide_128(limb aHigh, limb aLow, limb aDivisor, limb& aRemainder)
+        {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+            // (the instruction itself (unsigned __int128's division is a library call's))
+            limb quotient = 0u, remainder = 0u;
+            __asm__("divq %4" : "=a"(quotient), "=d"(remainder) : "a"(aLow), "d"(aHigh), "rm"(aDivisor) : "cc");
+            aRemainder = remainder;
+            return quotient;
+#elif defined(__SIZEOF_INT128__)
+            auto const dividend = (static_cast<unsigned __int128>(aHigh) << 64) | aLow;
+            aRemainder = static_cast<limb>(dividend % aDivisor);
+            return static_cast<limb>(dividend / aDivisor);
+#elif defined(_MSC_VER) && defined(_M_X64)
+            return _udiv128(aHigh, aLow, aDivisor, &aRemainder);
+#else
+            // (a bit at a time)
+            limb quotient = 0u;
+            limb remainder = aHigh;
+            for (int bit = 63; bit >= 0; --bit)
+            {
+                bool const carry = (remainder >> 63u) != 0u;
+                remainder = (remainder << 1u) | ((aLow >> bit) & 1u);
+                quotient <<= 1u;
+                if (carry || remainder >= aDivisor)
+                {
+                    remainder -= aDivisor;
+                    quotient |= 1u;
+                }
+            }
+            aRemainder = remainder;
+            return quotient;
+#endif
+        }
+
+        // (a magnitude divided by a single limb: its quotient (in q: an limbs) and remainder)
+        limb divide_limbs(limb const* a, std::uint32_t an, limb aDivisor, limb* q)
+        {
+            limb remainder = 0u;
+            for (auto i = an; i-- > 0u;)
+                q[i] = divide_128(remainder, a[i], aDivisor, remainder);
+            return remainder;
+        }
+
+        // (a magnitude (u: n limbs) divided by another (v: m limbs, 2 <= m <= n; its most significant not zero): its quotient (in q: 
+        // n - m + 1 limbs) and remainder (in r: m limbs) (Knuth's algorithm D, as Hacker's Delight's divmnu))
+        void divide_limbs(limb const* u, std::uint32_t n, limb const* v, std::uint32_t m, limb* q, limb* r)
+        {
+            auto const s = static_cast<unsigned>(std::countl_zero(v[m - 1u]));
+            auto const shifted = [s](limb aHigh, limb aLow) { return s == 0u ? aHigh : (aHigh << s) | (aLow >> (64u - s)); };
+            // (scratch kept for reuse (a division is made per step of a pow(base, exponent, modulus)))
+            thread_local std::vector<limb> vn, un;
+            vn.resize(m);
+            un.resize(n + 1u);
+            for (auto i = m - 1u; i > 0u; --i)
+                vn[i] = shifted(v[i], v[i - 1u]);
+            vn[0] = v[0] << s;
+            un[n] = s == 0u ? 0u : u[n - 1u] >> (64u - s);
+            for (auto i = n - 1u; i > 0u; --i)
+                un[i] = shifted(u[i], u[i - 1u]);
+            un[0] = u[0] << s;
+            for (auto j = n - m + 1u; j-- > 0u;)
+            {
+                // (the quotient's digit: estimated from the leading digits, then corrected)
+                limb qhat = 0u, rhat = 0u;
+                bool rhatOverflow = false;
+                if (un[j + m] >= vn[m - 1u])
+                {
+                    qhat = ~limb{ 0u };
+                    rhat = un[j + m - 1u] + vn[m - 1u];
+                    rhatOverflow = rhat < vn[m - 1u];
+                }
+                else
+                    qhat = divide_128(un[j + m], un[j + m - 1u], vn[m - 1u], rhat);
+                while (!rhatOverflow)
+                {
+                    limb high = 0u;
+                    auto const low = multiply_add(qhat, vn[m - 2u], 0u, 0u, high);
+                    if (high < rhat || (high == rhat && low <= un[j + m - 2u]))
+                        break;
+                    --qhat;
+                    rhat += vn[m - 1u];
+                    rhatOverflow = rhat < vn[m - 1u];
+                }
+                // (its multiple of the divisor subtracted)
+                limb carry = 0u, borrow = 0u;
+                for (std::uint32_t i = 0u; i < m; ++i)
+                {
+                    limb high = 0u;
+                    auto const product = multiply_add(qhat, vn[i], carry, 0u, high);
+                    carry = high;
+                    auto const t = un[i + j] - product;
+                    auto const b1 = un[i + j] < product ? 1u : 0u;
+                    auto const t2 = t - borrow;
+                    auto const b2 = t < borrow ? 1u : 0u;
+                    un[i + j] = t2;
+                    borrow = b1 + b2;
+                }
+                auto const t = un[j + m] - carry;
+                auto const b1 = un[j + m] < carry;
+                auto const t2 = t - borrow;
+                auto const b2 = t < borrow;
+                un[j + m] = t2;
+                q[j] = qhat;
+                if (b1 || b2)
+                {
+                    // (one too many: the divisor added back)
+                    --q[j];
+                    limb c = 0u;
+                    for (std::uint32_t i = 0u; i < m; ++i)
+                    {
+                        auto const s1 = un[i + j] + c;
+                        auto const c1 = s1 < c ? 1u : 0u;
+                        auto const s2 = s1 + vn[i];
+                        auto const c2 = s2 < s1 ? 1u : 0u;
+                        un[i + j] = s2;
+                        c = c1 + c2;
+                    }
+                    un[j + m] += c;
+                }
+            }
+            for (std::uint32_t i = 0u; i < m; ++i)
+                r[i] = s == 0u ? un[i] : (un[i] >> s) | (un[i + 1u] << (64u - s));
+        }
+
+        // (a magnitude's quotient and remainder by another (not zero): q (an - bn + 1 limbs, or 1 if an < bn) and r (bn limbs))
+        void divide_magnitudes(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn, limb* q, limb* r)
+        {
+            if (an < bn)
+            {
+                q[0] = 0u;
+                std::copy(a, a + an, r);
+                std::fill(r + an, r + bn, limb{ 0u });
+            }
+            else if (bn == 1u)
+                r[0] = divide_limbs(a, an, b[0], q);
+            else
+                divide_limbs(a, an, b, bn, q, r);
+        }
+
+        // (// and % of ints (as Python's: the quotient is floored, the remainder has the divisor's sign); the divisor is not zero)
+        object* divide_views(limb_view const& a, limb_view const& d, bool aRemainder, object** aRemainderResult = nullptr)
+        {
+            auto const qn = a.size >= d.size ? a.size - d.size + 2u : 2u;
+            limb_array q{ qn };
+            limb_array r{ d.size + 1u };
+            std::fill(q.get(), q.get() + qn, limb{ 0u });
+            r[d.size] = 0u;
+            divide_magnitudes(a.data, a.size, d.data, d.size, q.get(), r.get());
+            bool const aNegative = a.negative && a.size != 0u;
+            bool const differ = aNegative != d.negative;
+            bool remainderZero = true;
+            for (std::uint32_t i = 0u; i < d.size; ++i)
+                if (r[i] != 0u)
+                    remainderZero = false;
+            bool const adjust = differ && !remainderZero;
+            if (aRemainder || aRemainderResult != nullptr)
+            {
+                // (the remainder: |d| - r with the divisor's sign (if it is adjusted), else r with the dividend's)
+                if (adjust)
+                    subtract_limbs(d.data, d.size, r.get(), d.size, r.get());
+                auto const remainder = make_limbs(std::move(r), d.size, adjust ? d.negative : aNegative);
+                if (aRemainderResult == nullptr)
+                    return remainder;
+                // (divmod: both)
+                *aRemainderResult = remainder;
+            }
+            if (adjust)
+            {
+                // (the quotient's magnitude + 1)
+                for (std::uint32_t i = 0u; i < qn; ++i)
+                    if (++q[i] != 0u)
+                        break;
+            }
+            return make_limbs(std::move(q), qn, differ);
+        }
+
+        // (a magnitude (std::vector: its limbs) without its leading zeros)
+        using magnitude = std::vector<limb>;
+
+        void trim(magnitude& aValue)
+        {
+            while (!aValue.empty() && aValue.back() == 0u)
+                aValue.pop_back();
+        }
+
+        magnitude multiply_magnitudes(magnitude const& a, magnitude const& b)
+        {
+            if (a.empty() || b.empty())
+                return {};
+            magnitude r(a.size() + b.size());
+            multiply_limbs(a.data(), static_cast<std::uint32_t>(a.size()), b.data(), static_cast<std::uint32_t>(b.size()), r.data());
+            trim(r);
+            return r;
+        }
+
+        magnitude modulo_magnitude(magnitude const& a, magnitude const& m)
+        {
+            if (compare_limbs(a.data(), static_cast<std::uint32_t>(a.size()), m.data(), static_cast<std::uint32_t>(m.size())) < 0)
+                return a;
+            magnitude q(a.size() - m.size() + 2u, 0u), r(m.size() + 1u, 0u);
+            divide_magnitudes(a.data(), static_cast<std::uint32_t>(a.size()), m.data(), static_cast<std::uint32_t>(m.size()), q.data(), r.data());
+            trim(r);
+            return r;
+        }
+
+        object* magnitude_int(magnitude const& aValue, bool aNegative)
+        {
+            limb_array result{ static_cast<std::uint32_t>(std::max<std::size_t>(aValue.size(), 1u)) };
+            result[0] = 0u;
+            std::copy(aValue.begin(), aValue.end(), result.get());
+            return make_limbs(std::move(result), static_cast<std::uint32_t>(aValue.size()), aNegative);
+        }
+
+        // (** of an int and an exponent of 64 bits (not negative): squares and products)
+        object* power_views(limb_view const& aBase, limb aExponent)
+        {
+            magnitude base{ aBase.data, aBase.data + aBase.size };
+            magnitude result{ 1u };
+            bool const negative = aBase.negative && aBase.size != 0u && (aExponent & 1u) != 0u;
+            for (auto e = aExponent; e != 0u; e >>= 1u)
+            {
+                if ((e & 1u) != 0u)
+                    result = multiply_magnitudes(result, base);
+                if (e > 1u)
+                    base = multiply_magnitudes(base, base);
+            }
+            return magnitude_int(result, negative);
+        }
+
+        // (a * b mod m (a and b less than m, which has mn limbs) in out (mn limbs; it can be a or b): its size (product: an + bn limbs, 
+        // quotient: mn + 2))
+        std::uint32_t multiply_modulo(limb const* a, std::uint32_t an, limb const* b, std::uint32_t bn, limb const* m, std::uint32_t mn, 
+            limb* product, limb* quotient, limb* out)
+        {
+            if (an == 0u || bn == 0u)
+                return 0u;
+            std::fill(product, product + an + bn, limb{ 0u });
+            for (std::uint32_t i = 0u; i < an; ++i)
+            {
+                limb carry = 0u;
+                for (std::uint32_t j = 0u; j < bn; ++j)
+                    product[i + j] = multiply_add(a[i], b[j], product[i + j], carry, carry);
+                product[i + bn] = carry;
+            }
+            auto pn = an + bn;
+            while (pn > 0u && product[pn - 1u] == 0u)
+                --pn;
+            if (compare_limbs(product, pn, m, mn) < 0)
+            {
+                std::copy(product, product + pn, out);
+                return pn;
+            }
+            divide_magnitudes(product, pn, m, mn, quotient, out);
+            auto rn = mn;
+            while (rn > 0u && out[rn - 1u] == 0u)
+                --rn;
+            return rn;
+        }
+
+        // (pow(base, exponent, modulus) of ints (the exponent is not negative, the modulus is not zero): the result has the modulus's sign)
+        object* power_modulo_views(limb_view const& aBase, limb_view const& aExponent, limb_view const& aModulus)
+        {
+            magnitude const m{ aModulus.data, aModulus.data + aModulus.size };
+            magnitude base = modulo_magnitude(magnitude{ aBase.data, aBase.data + aBase.size }, m);
+            if (aBase.negative && !base.empty())
+            {
+                // (the base's floored remainder: |m| - (|base| mod |m|))
+                magnitude difference(m.size(), 0u);
+                subtract_limbs(m.data(), static_cast<std::uint32_t>(m.size()), base.data(), static_cast<std::uint32_t>(base.size()), difference.data());
+                trim(difference);
+                base = std::move(difference);
+            }
+            // (left to right from the exponent's top bit (the result is then the base), with buffers made once)
+            auto const mn = static_cast<std::uint32_t>(m.size());
+            auto const bn = static_cast<std::uint32_t>(base.size());
+            magnitude result(mn + 1u, 0u), product(2u * mn + 1u), quotient(mn + 2u);
+            std::uint32_t rn = mn == 1u && m[0] == 1u ? 0u : 1u;
+            result[0] = rn;
+            bool started = false;
+            for (auto i = aExponent.size; i-- > 0u;)
+                for (int bit = 63; bit >= 0; --bit)
+                {
+                    bool const set = ((aExponent.data[i] >> bit) & 1u) != 0u;
+                    if (!started)
+                    {
+                        if (set)
+                        {
+                            started = true;
+                            std::copy(base.begin(), base.end(), result.begin());
+                            rn = bn;
+                        }
+                        continue;
+                    }
+                    rn = multiply_modulo(result.data(), rn, result.data(), rn, m.data(), mn, product.data(), quotient.data(), result.data());
+                    if (set)
+                        rn = multiply_modulo(result.data(), rn, base.data(), bn, m.data(), mn, product.data(), quotient.data(), result.data());
+                }
+            result.resize(rn);
+            if (aModulus.negative && !result.empty())
+            {
+                magnitude difference(m.size(), 0u);
+                subtract_limbs(m.data(), static_cast<std::uint32_t>(m.size()), result.data(), static_cast<std::uint32_t>(result.size()), difference.data());
+                trim(difference);
+                return magnitude_int(difference, true);
+            }
+            return magnitude_int(result, false);
+        }
+
+        bool round_to_double(std::uint64_t top, bool sticky, std::int64_t e, bool aNegative, double& aResult);
+
+        // (the bits of a magnitude (its top limb not zero))
+        std::uint64_t limbs_bits(limb const* a, std::uint32_t n)
+        {
+            return n == 0u ? 0u : (n - 1u) * std::uint64_t{ 64u } + (64u - static_cast<unsigned>(std::countl_zero(a[n - 1u])));
+        }
+
+        // (a magnitude (its top limb not zero) * 2^aExponent correctly rounded to a double (as big_to_double); false if it overflows)
+        bool limbs_to_double(limb const* a, std::uint32_t n, std::int64_t aExponent, bool aSticky, bool aNegative, double& aResult)
+        {
+            auto const bits = static_cast<std::int64_t>(limbs_bits(a, n));
+            if (bits == 0)
+            {
+                aResult = aNegative ? -0.0 : 0.0;
+                return true;
+            }
+            // (its top 64 bits, and whether a bit below them is set)
+            auto const low = bits - 64;
+            std::uint64_t top = 0u;
+            bool sticky = aSticky;
+            if (low <= 0)
+                top = a[0] << static_cast<unsigned>(-low);
+            else
+            {
+                auto const w = static_cast<std::uint32_t>(low / 64);
+                auto const shift = static_cast<unsigned>(low % 64);
+                top = shift == 0u ? a[w] : (a[w] >> shift) | (a[w + 1u] << (64u - shift));
+                sticky = sticky || (shift != 0u && (a[w] & ((limb{ 1u } << shift) - 1u)) != 0u);
+                for (std::uint32_t i = 0u; i < w && !sticky; ++i)
+                    sticky = a[i] != 0u;
+            }
+            return round_to_double(top, sticky, bits - 1 + aExponent, aNegative, aResult);
+        }
+
+        // (a magnitude << s in out (an + s / 64 + 1 limbs, which it returns))
+        std::uint32_t shift_magnitude(limb const* a, std::uint32_t an, std::uint64_t s, limb* out)
+        {
+            auto const words = static_cast<std::uint32_t>(s / 64u);
+            auto const bits = static_cast<unsigned>(s % 64u);
+            std::fill(out, out + words, limb{ 0u });
+            limb carry = 0u;
+            for (std::uint32_t i = 0u; i < an; ++i)
+            {
+                out[words + i] = bits == 0u ? a[i] : (a[i] << bits) | carry;
+                carry = bits == 0u ? 0u : a[i] >> (64u - bits);
+            }
+            out[words + an] = carry;
+            return an + words + 1u;
+        }
+
+        // (an int << n)
+        object* shift_left_views(limb_view const& a, std::uint64_t n)
+        {
+            if (a.size == 0u)
+                return make_int(0);
+            auto const size = a.size + static_cast<std::uint32_t>(n / 64u) + 1u;
+            limb_array r{ size };
+            shift_magnitude(a.data, a.size, n, r.get());
+            return make_limbs(std::move(r), size, a.negative);
+        }
+
+        // (an int >> n (floored, as Python's))
+        object* shift_right_views(limb_view const& a, std::uint64_t n)
+        {
+            bool const negative = a.negative && a.size != 0u;
+            if (n >= limbs_bits(a.data, a.size))
+                return make_int(negative ? -1 : 0);
+            auto const words = static_cast<std::uint32_t>(n / 64u);
+            auto const bits = static_cast<unsigned>(n % 64u);
+            auto const size = a.size - words;
+            limb_array r{ size + 1u };
+            for (std::uint32_t i = 0u; i < size; ++i)
+                r[i] = bits == 0u ? a.data[words + i] : (a.data[words + i] >> bits) | (words + i + 1u < a.size ? a.data[words + i + 1u] << (64u - bits) : limb{ 0u });
+            r[size] = 0u;
+            // (a negative int's bits shifted out: its magnitude's quotient rounded up)
+            bool lost = false;
+            if (negative)
+            {
+                lost = bits != 0u && (a.data[words] & ((limb{ 1u } << bits) - 1u)) != 0u;
+                for (std::uint32_t i = 0u; i < words && !lost; ++i)
+                    lost = a.data[i] != 0u;
+            }
+            for (std::uint32_t i = 0u; lost && i <= size; ++i)
+                lost = ++r[i] == 0u;
+            return make_limbs(std::move(r), size + 1u, negative);
+        }
+
+        // (&, | and ^ of ints (as two's complement integers, as Python's))
+        object* bitwise_views(int aOperation, limb_view const& a, limb_view const& b)
+        {
+            // (of magnitudes (not negative): their limbs')
+            if (!(a.negative && a.size != 0u) && !(b.negative && b.size != 0u))
+            {
+                auto const size = aOperation == NEOS_PY_AND ? std::min(a.size, b.size) : std::max(a.size, b.size);
+                limb_array r{ std::max(size, 1u) };
+                for (std::uint32_t i = 0u; i < size; ++i)
+                {
+                    auto const x = i < a.size ? a.data[i] : limb{ 0u };
+                    auto const y = i < b.size ? b.data[i] : limb{ 0u };
+                    r[i] = aOperation == NEOS_PY_AND ? x & y : aOperation == NEOS_PY_OR ? x | y : x ^ y;
+                }
+                return make_limbs(std::move(r), size, false);
+            }
+            auto const n = std::max(a.size, b.size) + 1u;
+            limb_array x{ n }, y{ n }, r{ n };
+            auto const negate = [n](limb* v)
+            {
+                limb carry = 1u;
+                for (std::uint32_t i = 0u; i < n; ++i)
+                {
+                    v[i] = ~v[i] + carry;
+                    carry = carry != 0u && v[i] == 0u ? 1u : 0u;
+                }
+            };
+            auto const twos = [&](limb_view const& v, limb* out)
+            {
+                std::copy(v.data, v.data + v.size, out);
+                std::fill(out + v.size, out + n, limb{ 0u });
+                if (v.negative && v.size != 0u)
+                    negate(out);
+            };
+            twos(a, x.get());
+            twos(b, y.get());
+            for (std::uint32_t i = 0u; i < n; ++i)
+                r[i] = aOperation == NEOS_PY_AND ? x[i] & y[i] : aOperation == NEOS_PY_OR ? x[i] | y[i] : x[i] ^ y[i];
+            bool const negative = (r[n - 1u] >> 63u) != 0u;
+            if (negative)
+                negate(r.get());
+            return make_limbs(std::move(r), n, negative);
+        }
+
+        // (an int / an int (not zero), correctly rounded (as big_binary's): null if it is not native (its result is out of range))
+        object* true_divide_views(limb_view const& a, limb_view const& b)
+        {
+            bool const negative = (a.negative && a.size != 0u) != (b.negative && b.size != 0u);
+            if (a.size == 0u)
+                return make_float(negative ? -0.0 : 0.0);
+            auto const shift = static_cast<std::int64_t>(limbs_bits(a.data, a.size)) - static_cast<std::int64_t>(limbs_bits(b.data, b.size)) - 55;
+            if (shift > 1100)
+                return nullptr;
+            if (shift < -1200)
+                return make_float(negative ? -0.0 : 0.0);
+            // (a / b = q * 2^shift (+ the remainder): q has 55 or 56 bits)
+            auto const ns = static_cast<std::uint64_t>(shift < 0 ? -shift : 0);
+            auto const ds = static_cast<std::uint64_t>(shift > 0 ? shift : 0);
+            limb_array n{ a.size + static_cast<std::uint32_t>(ns / 64u) + 1u }, d{ b.size + static_cast<std::uint32_t>(ds / 64u) + 1u };
+            auto nn = shift_magnitude(a.data, a.size, ns, n.get());
+            auto dn = shift_magnitude(b.data, b.size, ds, d.get());
+            while (nn > 0u && n[nn - 1u] == 0u)
+                --nn;
+            while (dn > 0u && d[dn - 1u] == 0u)
+                --dn;
+            auto const qn = nn >= dn ? nn - dn + 2u : 2u;
+            limb_array q{ qn }, r{ dn + 1u };
+            std::fill(q.get(), q.get() + qn, limb{ 0u });
+            std::fill(r.get(), r.get() + dn + 1u, limb{ 0u });
+            divide_magnitudes(n.get(), nn, d.get(), dn, q.get(), r.get());
+            auto qs = qn;
+            while (qs > 0u && q[qs - 1u] == 0u)
+                --qs;
+            bool sticky = false;
+            for (std::uint32_t i = 0u; i < dn && !sticky; ++i)
+                sticky = r[i] != 0u;
+            double result = 0.0;
+            if (!limbs_to_double(q.get(), qs, shift, sticky, negative, result))
+                return nullptr;
+            return make_float(result);
+        }
+
+        // (the greatest common divisor of ints (Lehmer's algorithm, as CPython's _PyLong_GCD (Objects/longobject.c, Python Software 
+        // Foundation License), on 64-bit limbs))
+        object* gcd_views(limb_view const& aA, limb_view const& aB)
+        {
+            magnitude a{ aA.data, aA.data + aA.size }, b{ aB.data, aB.data + aB.size }, c, d;
+            auto const size = [](magnitude const& v) { return static_cast<std::uint32_t>(v.size()); };
+            if (compare_limbs(a.data(), size(a), b.data(), size(b)) < 0)
+                std::swap(a, b);
+            // (P X - Q Y (not negative) in r)
+            auto const combine = [](limb P, magnitude const& X, limb Q, magnitude const& Y, magnitude& r)
+            {
+                auto const n = std::max(X.size(), Y.size());
+                r.resize(n);
+                limb c1 = 0u, c2 = 0u, borrow = 0u;
+                for (std::size_t i = 0u; i < n; ++i)
+                {
+                    auto const p = multiply_add(P, i < X.size() ? X[i] : limb{ 0u }, c1, 0u, c1);
+                    auto const q = multiply_add(Q, i < Y.size() ? Y[i] : limb{ 0u }, c2, 0u, c2);
+                    auto const t = p - q;
+                    auto const b1 = p < q ? 1u : 0u;
+                    r[i] = t - borrow;
+                    borrow = b1 + (t < borrow ? 1u : 0u);
+                }
+                trim(r);
+            };
+            while (a.size() > 1u)
+            {
+                if (b.empty())
+                    return magnitude_int(a, false);
+                // (the top 60 bits of a, and b's bits in the same places)
+                auto const shift = limbs_bits(a.data(), size(a)) - 60u;
+                auto const top = [shift](magnitude const& v) -> std::int64_t
+                {
+                    auto const w = static_cast<std::size_t>(shift / 64u);
+                    auto const bits = static_cast<unsigned>(shift % 64u);
+                    if (w >= v.size())
+                        return 0;
+                    auto r = v[w] >> bits;
+                    if (bits != 0u && w + 1u < v.size())
+                        r |= v[w + 1u] << (64u - bits);
+                    return static_cast<std::int64_t>(r & ((limb{ 1u } << 60u) - 1u));
+                };
+                std::int64_t x = top(a), y = top(b);
+                // (the inner loop of Lehmer's algorithm: A, B, C and D do not exceed 2^30)
+                std::int64_t A = 1, B = 0, C = 0, D = 1;
+                int k = 0;
+                for (;; ++k)
+                {
+                    if (y - C == 0)
+                        break;
+                    auto const q = (x + (A - 1)) / (y - C);
+                    auto const s = B + q * D;
+                    auto t = x - q * y;
+                    if (s > t)
+                        break;
+                    x = y;
+                    y = t;
+                    t = A + q * C;
+                    A = D;
+                    B = C;
+                    C = s;
+                    D = t;
+                }
+                if (k == 0)
+                {
+                    // (no progress: a step of Euclid's (a, b = b, a % b))
+                    magnitude q(a.size() - b.size() + 2u, 0u), r(b.size() + 1u, 0u);
+                    divide_magnitudes(a.data(), size(a), b.data(), size(b), q.data(), r.data());
+                    r.resize(b.size());
+                    trim(r);
+                    a = std::move(b);
+                    b = std::move(r);
+                    continue;
+                }
+                // (a, b = A b - B a, D a - C b if k is odd; A a - B b, D b - C a if k is even)
+                auto const P = static_cast<limb>(A), Q = static_cast<limb>(B), R = static_cast<limb>(C), S = static_cast<limb>(D);
+                if ((k & 1) != 0)
+                {
+                    combine(P, b, Q, a, c);
+                    combine(S, a, R, b, d);
+                }
+                else
+                {
+                    combine(P, a, Q, b, c);
+                    combine(S, b, R, a, d);
+                }
+                a.swap(c);
+                b.swap(d);
+            }
+            // (64-bit integers: Euclid's)
+            limb x = a.empty() ? 0u : a[0], y = b.empty() ? 0u : b[0];
+            while (y != 0u)
+            {
+                auto const t = x % y;
+                x = y;
+                y = t;
+            }
+            return magnitude_int(magnitude{ x }, false);
+        }
+
+        // (an int from its digits (valid, in base 2 to 36) and its sign: a limb's worth of digits at a time)
+        object* digits_int(std::string_view aDigits, unsigned aBase, bool aNegative)
+        {
+            unsigned chunk = 0u;
+            for (limb power = 1u; power <= ~limb{ 0u } / aBase; power *= aBase)
+                ++chunk;
+            limb_array r{ static_cast<std::uint32_t>(aDigits.size() / chunk + 2u) };
+            std::uint32_t size = 0u;
+            for (std::size_t i = 0u; i < aDigits.size();)
+            {
+                auto const n = std::min<std::size_t>(chunk, aDigits.size() - i);
+                limb value = 0u, scale = 1u;
+                for (std::size_t j = 0u; j < n; ++j, ++i)
+                {
+                    auto const c = aDigits[i];
+                    unsigned const d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c - 'A' + 10;
+                    value = value * aBase + d;
+                    scale *= aBase;
+                }
+                limb carry = value;
+                for (std::uint32_t k = 0u; k < size; ++k)
+                    r[k] = multiply_add(r[k], scale, carry, 0u, carry);
+                if (carry != 0u)
+                    r[size++] = carry;
+            }
+            return make_limbs(std::move(r), size, aNegative);
+        }
+
+        // (+, -, *, //, % and ** (an exponent of 64 bits, not negative) of ints, one of them beyond 128 bits: null if not native)
+        object* limbs_binary(int aOperation, object* aLhs, object* aRhs)
+        {
+            if (aOperation != NEOS_PY_ADD && aOperation != NEOS_PY_SUBTRACT && aOperation != NEOS_PY_MULTIPLY && aOperation != NEOS_PY_FLOOR_DIVIDE &&
+                aOperation != NEOS_PY_REMAINDER && aOperation != NEOS_PY_POWER && aOperation != NEOS_PY_TRUE_DIVIDE && aOperation != NEOS_PY_LSHIFT &&
+                aOperation != NEOS_PY_RSHIFT && aOperation != NEOS_PY_AND && aOperation != NEOS_PY_OR && aOperation != NEOS_PY_XOR)
+                return nullptr;
+            limb_view a, b;
+            if (!limbs_of(aLhs, a) || !limbs_of(aRhs, b))
+                return nullptr;
+            switch (aOperation)
+            {
+            case NEOS_PY_ADD: return add_views(a, b, false);
+            case NEOS_PY_SUBTRACT: return add_views(a, b, true);
+            case NEOS_PY_MULTIPLY: return multiply_views(a, b);
+            case NEOS_PY_POWER: return b.negative || b.size > 1u ? nullptr : power_views(a, b.size == 0u ? 0u : b.data[0]);
+            case NEOS_PY_TRUE_DIVIDE: return b.size == 0u ? nullptr : true_divide_views(a, b);
+            // (shifts of up to 2^37 bits (and errors) as big_binary's otherwise)
+            case NEOS_PY_LSHIFT: return (b.negative && b.size != 0u) || b.size > 1u || (b.size == 1u && b.data[0] >= (limb{ 1u } << 37u)) ? nullptr : 
+                shift_left_views(a, b.size == 0u ? 0u : b.data[0]);
+            case NEOS_PY_RSHIFT: return (b.negative && b.size != 0u) || b.size > 1u ? nullptr : shift_right_views(a, b.size == 0u ? 0u : b.data[0]);
+            case NEOS_PY_AND:
+            case NEOS_PY_OR:
+            case NEOS_PY_XOR: return bitwise_views(aOperation, a, b);
+            default: return b.size == 0u ? nullptr : divide_views(a, b, aOperation == NEOS_PY_REMAINDER);
+            }
+        }
+
+        // (the order of ints (-1, 0 or 1), or 2 if they are not both ints without big integers)
+        int limbs_order(object* aLhs, object* aRhs)
+        {
+            limb_view a, b;
+            if (!limbs_of(aLhs, a) || !limbs_of(aRhs, b))
+                return 2;
+            bool const aNegative = a.negative && a.size != 0u;
+            bool const bNegative = b.negative && b.size != 0u;
+            if (aNegative != bNegative)
+                return aNegative ? -1 : 1;
+            auto const order = compare_limbs(a.data, a.size, b.data, b.size);
+            return aNegative ? -order : order;
+        }
+
         namespace
         {
             // (the storage of objects of one size that are made and released at a high rate (ints and floats): cells carved from 
@@ -261,6 +1242,35 @@ namespace neos::python_runtime
             object_pool<sizeof(int_object)> sIntPool;
             object_pool<sizeof(float_object)> sFloatPool;
             object_pool<sizeof(str_object)> sStrPool;
+            object_pool<2u * sizeof(std::uint64_t)> sLimbs2Pool;
+            object_pool<4u * sizeof(std::uint64_t)> sLimbs4Pool;
+            object_pool<8u * sizeof(std::uint64_t)> sLimbs8Pool;
+            object_pool<16u * sizeof(std::uint64_t)> sLimbs16Pool;
+        }
+
+        std::uint64_t* allocate_limbs(std::uint32_t& aCapacity)
+        {
+            if (aCapacity <= 2u)
+                return (aCapacity = 2u, static_cast<std::uint64_t*>(sLimbs2Pool.allocate()));
+            if (aCapacity <= 4u)
+                return (aCapacity = 4u, static_cast<std::uint64_t*>(sLimbs4Pool.allocate()));
+            if (aCapacity <= 8u)
+                return (aCapacity = 8u, static_cast<std::uint64_t*>(sLimbs8Pool.allocate()));
+            if (aCapacity <= 16u)
+                return (aCapacity = 16u, static_cast<std::uint64_t*>(sLimbs16Pool.allocate()));
+            return new std::uint64_t[aCapacity];
+        }
+
+        void free_limbs(std::uint64_t* aLimbs, std::uint32_t aCapacity) noexcept
+        {
+            switch (aCapacity)
+            {
+            case 2u: sLimbs2Pool.deallocate(aLimbs); break;
+            case 4u: sLimbs4Pool.deallocate(aLimbs); break;
+            case 8u: sLimbs8Pool.deallocate(aLimbs); break;
+            case 16u: sLimbs16Pool.deallocate(aLimbs); break;
+            default: delete[] aLimbs; break;
+            }
         }
 
         void* int_object::operator new(std::size_t aSize)
@@ -337,6 +1347,22 @@ namespace neos::python_runtime
                 std::array<std::uint64_t, 2u> const words{ static_cast<std::uint64_t>(i.value), static_cast<std::uint64_t>(i.high) };
                 i.big = std::make_unique<big_integer>(words);
             }
+            // (an int beyond 128 bits: its two's complement words, from its limbs)
+            if (i.big == nullptr && i.limbs != nullptr)
+            {
+                std::vector<big_integer::word_t> words(i.size + 1u, 0u);
+                std::copy(i.limbs, i.limbs + i.size, words.begin());
+                if (i.negative)
+                {
+                    big_integer::word_t carry = 1u;
+                    for (auto& w : words)
+                    {
+                        w = ~w + carry;
+                        carry = (w == 0u && carry != 0u) ? 1u : 0u;
+                    }
+                }
+                i.big = std::make_unique<big_integer>(words.begin(), words.end());
+            }
             return *i.big;
         }
 
@@ -348,9 +1374,27 @@ namespace neos::python_runtime
                 return make_int(static_cast<long long>(big_detail::cword(aValue, 0u)));
             if (magnitude == 2u)
                 return make_int128({ static_cast<std::uint64_t>(big_detail::cword(aValue, 0u)), static_cast<std::int64_t>(big_detail::cword(aValue, 1u)) });
-            auto* const result = new int_object{ { { &sIntType.base } }, 0 };
-            result->big = std::make_unique<big_integer>(std::move(aValue));
-            return &result->h.base;
+            // (beyond 128 bits: its limbs (its magnitude's words: its two's complement words', negated if it is negative); its big integer 
+            // is kept)
+            auto const size = static_cast<std::uint32_t>(magnitude);
+            limb_array limbs{ size };
+            bool const negative = big_negative(aValue);
+            limb carry = 1u;
+            for (std::uint32_t w = 0u; w < size; ++w)
+            {
+                auto const word = static_cast<limb>(big_detail::cword(aValue, w));
+                if (negative)
+                {
+                    limbs[w] = ~word + carry;
+                    carry = (limbs[w] == 0u && carry != 0u) ? 1u : 0u;
+                }
+                else
+                    limbs[w] = word;
+            }
+            auto const result = make_limbs(std::move(limbs), size, negative);
+            if (as<int_object>(result)->limbs != nullptr)
+                as<int_object>(result)->big = std::make_unique<big_integer>(std::move(aValue));
+            return result;
         }
 
         // (integers of any size (NEOS_RT_INTEGER): see the functions scripts call)
@@ -419,6 +1463,13 @@ namespace neos::python_runtime
             bool sticky = aSticky;
             for (std::int64_t position = leading - 64; position >= 0 && !sticky; --position)
                 sticky = big_bit(aMagnitude, static_cast<std::uint64_t>(position));
+            return round_to_double(top, sticky, e, aNegative, aResult);
+        }
+
+        // (a double from the top 64 bits of a magnitude (its leading bit: bit 63), whether a bit below them is set, and the binary 
+        // exponent of its leading bit, correctly rounded (round half to even); false if it overflows)
+        bool round_to_double(std::uint64_t top, bool sticky, std::int64_t e, bool aNegative, double& aResult)
+        {
             double result = 0.0;
             if (e > 1023)
                 return false;
@@ -484,25 +1535,115 @@ namespace neos::python_runtime
         }
 
         // a big integer's digits in a base (2 to 36: lower case), without sign
+        // (a magnitude's digits (lower case) in a base (2 to 36): of a power of two, its bits'; else the remainders of its divisions by the 
+        // largest power of the base that is a limb)
+        std::string magnitude_digits(magnitude aValue, int aBase)
+        {
+            static char const sDigits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+            trim(aValue);
+            if (aValue.empty())
+                return "0";
+            std::string result;
+            auto const base = static_cast<limb>(aBase);
+            if ((base & (base - 1u)) == 0u)
+            {
+                auto const bits = static_cast<std::size_t>(std::countr_zero(base));
+                auto const total = 64u * (aValue.size() - 1u) + static_cast<std::size_t>(std::bit_width(aValue.back()));
+                // (its digits from the most significant: no reversal)
+                auto const count = (total + bits - 1u) / bits;
+                result.resize(count);
+                for (std::size_t k = 0u, bit = 0u; k < count; ++k, bit += bits)
+                {
+                    auto const index = bit / 64u;
+                    auto const offset = bit % 64u;
+                    auto digit = aValue[index] >> offset;
+                    if (offset + bits > 64u && index + 1u < aValue.size())
+                        digit |= aValue[index + 1u] << (64u - offset);
+                    result[count - 1u - k] = sDigits[digit & (base - 1u)];
+                }
+                return result;
+            }
+            else
+            {
+                limb chunk = base;
+                std::size_t chunkDigits = 1u;
+                while (chunk <= ~limb{ 0u } / base)
+                {
+                    chunk *= base;
+                    ++chunkDigits;
+                }
+                magnitude quotient(aValue.size());
+                while (!aValue.empty())
+                {
+                    auto remainder = divide_limbs(aValue.data(), static_cast<std::uint32_t>(aValue.size()), chunk, quotient.data());
+                    std::copy(quotient.begin(), quotient.begin() + static_cast<std::ptrdiff_t>(aValue.size()), aValue.begin());
+                    trim(aValue);
+                    for (std::size_t i = 0u; i < chunkDigits && !(aValue.empty() && remainder == 0u); ++i)
+                    {
+                        result.push_back(sDigits[remainder % base]);
+                        remainder /= base;
+                    }
+                }
+            }
+            std::reverse(result.begin(), result.end());
+            return result;
+        }
+
         std::string big_digits(big_integer const& aValue, int aBase)
         {
-            auto digits = big_abs(aValue).to_string(static_cast<std::uint32_t>(aBase));
-            for (auto& c : digits)
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            return digits;
+            if (aBase < 2 || aBase > 36)
+            {
+                auto digits = big_abs(aValue).to_string(static_cast<std::uint32_t>(aBase));
+                for (auto& c : digits)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return digits;
+            }
+            // (its magnitude: its two's complement words, negated if it is negative)
+            auto const size = static_cast<std::size_t>(big_detail::magnitude(aValue));
+            magnitude value(size);
+            bool const negative = big_negative(aValue);
+            limb carry = 1u;
+            for (std::size_t w = 0u; w < size; ++w)
+            {
+                auto const word = static_cast<limb>(big_detail::cword(aValue, static_cast<big_integer::word_index_t>(w)));
+                if (negative)
+                {
+                    value[w] = ~word + carry;
+                    carry = (value[w] == 0u && carry != 0u) ? 1u : 0u;
+                }
+                else
+                    value[w] = word;
+            }
+            return magnitude_digits(std::move(value), aBase);
+        }
+
+        // (an int's digits in a base of 2 to 36 (of its limbs: see limbs_of), and its sign; false if it has none)
+        bool int_digits(object* aObject, int aBase, std::string& aDigits, bool& aNegative)
+        {
+            limb_view v;
+            if (!limbs_of(aObject, v))
+                return false;
+            aDigits = magnitude_digits(magnitude{ v.data, v.data + v.size }, aBase);
+            aNegative = v.negative && v.size != 0u;
+            return true;
+        }
+
+        // str(int): false (ValueError) beyond the digit limit
+        bool digits_str(std::string const& aDigits, bool aNegative, std::string& aResult)
+        {
+            if (sIntMaxStrDigits > 0 && aDigits.size() > static_cast<std::size_t>(sIntMaxStrDigits))
+            {
+                int_max_str_digits_error(aDigits.size(), false);
+                return false;
+            }
+            aResult = (aNegative ? "-" : "") + aDigits;
+            return true;
         }
 
         // str(big): false (ValueError) beyond the digit limit
         bool big_str(big_integer const& aValue, std::string& aResult)
         {
-            auto digits = big_digits(aValue, 10);
-            if (sIntMaxStrDigits > 0 && digits.size() > static_cast<std::size_t>(sIntMaxStrDigits))
-            {
-                int_max_str_digits_error(digits.size(), false);
-                return false;
-            }
-            aResult = (big_negative(aValue) ? "-" : "") + digits;
-            return true;
+            return digits_str(big_digits(aValue, 10), big_negative(aValue), aResult);
         }
 
         object* big_binary(int aOperation, big_integer const& a, big_integer const& b);
@@ -571,6 +1712,15 @@ namespace neos::python_runtime
             case NEOS_PY_INT:
                 if (is_big(aObject))
                 {
+                    if (limb_view v; limbs_of(aObject, v))
+                    {
+                        if (!limbs_to_double(v.data, v.size, 0, false, v.negative && v.size != 0u, aResult))
+                        {
+                            error("OverflowError", "int too large to convert to float");
+                            return false;
+                        }
+                        return true;
+                    }
                     if (!big_to_double(big_of(aObject), aResult))
                     {
                         error("OverflowError", "int too large to convert to float");
@@ -676,7 +1826,13 @@ namespace neos::python_runtime
             case NEOS_PY_BOOL: aResult = aObject == &sTrue.base ? "True" : "False"; return true;
             case NEOS_PY_INT: 
                 if (is_big(aObject))
+                {
+                    std::string digits;
+                    bool negative = false;
+                    if (int_digits(aObject, 10, digits, negative))
+                        return digits_str(digits, negative, aResult);
                     return big_str(big_of(aObject), aResult);
+                }
                 aResult = std::to_string(as<int_object>(aObject)->value); 
                 return true;
             case NEOS_PY_FLOAT: aResult = python_float(as<float_object>(aObject)->value); return true;
@@ -897,7 +2053,12 @@ namespace neos::python_runtime
                 if (b == 0) return error("ZeroDivisionError", "division by zero");
                 // (exact as doubles: correctly rounded; else as CPython, from the integers)
                 if (a > (1ll << 53) || a < -(1ll << 53) || b > (1ll << 53) || b < -(1ll << 53))
-                    return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                {
+                    limb_view x, y;
+                    view_of(int128_of(a), x);
+                    view_of(int128_of(b), y);
+                    return true_divide_views(x, y);
+                }
                 return make_float(static_cast<double>(a) / static_cast<double>(b));
             case NEOS_PY_FLOOR_DIVIDE:
             case NEOS_PY_REMAINDER:
@@ -925,12 +2086,19 @@ namespace neos::python_runtime
                     }
                     long long result = 1;
                     long long base = a;
+                    // (beyond 64 bits: with limbs)
+                    auto const wider = [&]()
+                    {
+                        limb_view view;
+                        view_of(int128_of(a), view);
+                        return power_views(view, static_cast<limb>(b));
+                    };
                     for (long long e = b; e > 0; e >>= 1)
                     {
                         if ((e & 1) != 0 && multiply_overflow(result, base, &result))
-                            return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                            return wider();
                         if (e > 1 && multiply_overflow(base, base, &base))
-                            return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                            return wider();
                     }
                     return make_int(result);
                 }
@@ -938,7 +2106,13 @@ namespace neos::python_runtime
                 if (b < 0) return error("ValueError", "negative shift count");
                 if (a == 0) return make_int(0);
                 if (b >= 63 || (a > 0 ? a > (std::numeric_limits<long long>::max() >> b) : a < (std::numeric_limits<long long>::min() >> b)))
-                    return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                {
+                    if (b >= (1ll << 37))
+                        return big_binary(aOperation, big_integer{ a }, big_integer{ b });
+                    limb_view view;
+                    view_of(int128_of(a), view);
+                    return shift_left_views(view, static_cast<std::uint64_t>(b));
+                }
                 return make_int(static_cast<long long>(static_cast<unsigned long long>(a) << b));
             case NEOS_PY_RSHIFT:
                 if (b < 0) return error("ValueError", "negative shift count");
@@ -1278,6 +2452,8 @@ namespace neos::python_runtime
                 {
                     if (auto const result = int128_binary(aOperation, aLhs, aRhs))
                         return result;
+                    if (auto const result = limbs_binary(aOperation, aLhs, aRhs))
+                        return result;
                     return big_binary(aOperation, *big_operand{ aLhs }, *big_operand{ aRhs });
                 }
                 return int_binary(aOperation, int_value(aLhs), int_value(aRhs));
@@ -1343,9 +2519,21 @@ namespace neos::python_runtime
             {
                 if (auto const result = int128_binary(aOperation, aLhs, aRhs))
                     return result;
-                // (an int beyond 64 bits: its big integer's (as core_binary's))
+                // (an int beyond 64 bits: native (its limbs), else its big integer's (as core_binary's))
                 if (is_big(aLhs) || is_big(aRhs))
+                {
+                    if (auto const result = limbs_binary(aOperation, aLhs, aRhs))
+                        return result;
                     return big_binary(aOperation, *big_operand{ aLhs }, *big_operand{ aRhs });
+                }
+            }
+            // (floats' +, - and *: native (no dispatch))
+            if (aLhs != nullptr && aRhs != nullptr && aLhs->type == &sFloatType.base && aRhs->type == &sFloatType.base &&
+                (aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT || aOperation == NEOS_PY_MULTIPLY))
+            {
+                auto const a = as<float_object>(aLhs)->value;
+                auto const b = as<float_object>(aRhs)->value;
+                return make_float(aOperation == NEOS_PY_ADD ? a + b : aOperation == NEOS_PY_SUBTRACT ? a - b : a * b);
             }
             auto const lt = python_type(aLhs);
             auto const rt = python_type(aRhs);
@@ -1422,6 +2610,21 @@ namespace neos::python_runtime
             case NEOS_PY_BOOL:
             case NEOS_PY_INT:
                 {
+                    // (an int beyond 64 bits: its limbs, its sign changed (~x: -x - 1))
+                    if (limb_view v; kind_of(aObject) == NEOS_PY_INT && is_big(aObject) && limbs_of(aObject, v))
+                    {
+                        if (aOperation == NEOS_PY_INVERT)
+                        {
+                            limb_view one;
+                            view_of(int128_of(1), one);
+                            v.negative = !v.negative;
+                            return add_views(v, one, true);
+                        }
+                        limb_array limbs{ std::max(v.size, 1u) };
+                        std::copy(v.data, v.data + v.size, limbs.get());
+                        bool const negative = aOperation == NEOS_PY_NEGATIVE ? !v.negative : aOperation == NEOS_PY_ABSOLUTE ? false : v.negative;
+                        return make_limbs(std::move(limbs), v.size, negative);
+                    }
                     if (is_big(aObject))
                     {
                         auto const& v = big_of(aObject);
@@ -1524,6 +2727,8 @@ namespace neos::python_runtime
                         int128 a128, b128;
                         if (int128_value(aLhs, a128) && int128_value(aRhs, b128))
                             return compare128(a128, b128);
+                        if (auto const order = limbs_order(aLhs, aRhs); order != 2)
+                            return order;
                         big_operand const a{ aLhs }, b{ aRhs };
                         return *a < *b ? -1 : *b < *a ? 1 : 0;
                     }
@@ -2432,12 +3637,21 @@ namespace neos::python_runtime
         {
             if (!arity(aArgs, 0u, 0u, "int.bit_length"))
                 return nullptr;
+            if (limb_view v; limbs_of(aSelf, v))
+                return make_int(static_cast<long long>(limbs_bits(v.data, v.size)));
             return make_int(static_cast<long long>(big_bit_length(big_value(aSelf))));
         }
         object* int_bit_count(object* aSelf, std::vector<object*> const& aArgs, object*)
         {
             if (!arity(aArgs, 0u, 0u, "int.bit_count"))
                 return nullptr;
+            if (limb_view v; limbs_of(aSelf, v))
+            {
+                long long count = 0;
+                for (std::uint32_t i = 0u; i < v.size; ++i)
+                    count += std::popcount(v.data[i]);
+                return make_int(count);
+            }
             auto const magnitude = big_abs(big_value(aSelf));
             long long count = 0;
             for (std::uint32_t i = 0u; i < big_detail::magnitude(magnitude); ++i)
@@ -2518,14 +3732,51 @@ namespace neos::python_runtime
                     return error("ValueError", "byteorder must be either 'little' or 'big'");
             }
             bool const isSigned = a[2] != nullptr && truth(a[2]) == 1;
+            // (an int's limbs: as two's complement bytes)
+            if (limb_view v; limbs_of(aSelf, v))
+            {
+                bool const negative = v.negative && v.size != 0u;
+                if (negative && !isSigned)
+                    return error("OverflowError", "can't convert negative int to unsigned");
+                auto const bits = limbs_bits(v.data, v.size);
+                auto const limit = static_cast<std::uint64_t>(8 * length);
+                // (signed: one bit fewer, other than for -2^(8 length - 1))
+                bool fits = bits <= limit;
+                if (isSigned && bits == limit && bits != 0u)
+                {
+                    std::uint64_t ones = 0u;
+                    for (std::uint32_t i = 0u; i < v.size; ++i)
+                        ones += static_cast<std::uint64_t>(std::popcount(v.data[i]));
+                    fits = negative && ones == 1u;
+                }
+                if (!fits)
+                    return error("OverflowError", "int too big to convert");
+                std::string bytes(static_cast<std::size_t>(length), '\0');
+                for (std::size_t w = 0u, i = 0u; w < v.size && i < bytes.size(); ++w)
+                    for (unsigned shift = 0u; shift < 64u && i < bytes.size(); shift += 8u)
+                        bytes[i++] = static_cast<char>((v.data[w] >> shift) & 0xFFu);
+                if (negative)
+                {
+                    unsigned carry = 1u;
+                    for (auto& byte : bytes)
+                    {
+                        auto const sum = (~static_cast<unsigned>(static_cast<unsigned char>(byte)) & 0xFFu) + carry;
+                        byte = static_cast<char>(sum & 0xFFu);
+                        carry = sum >> 8u;
+                    }
+                }
+                if (order == "big")
+                    std::reverse(bytes.begin(), bytes.end());
+                return make_bytes(std::move(bytes));
+            }
             auto value = big_value(aSelf);
             if (big_negative(value))
             {
                 if (!isSigned)
                     return error("OverflowError", "can't convert negative int to unsigned");
-                // (two's complement)
+                // (two's complement (at least -2^(8 length - 1)))
                 value = (big_integer{ 1 } << static_cast<std::int64_t>(8 * length)) + value;
-                if (big_negative(value))
+                if (big_negative(value) || length == 0 || big_bit_length(value) < static_cast<std::uint64_t>(8 * length))
                     return error("OverflowError", "int too big to convert");
             }
             else if (isSigned && length > 0 && big_bit_length(value) >= static_cast<std::uint64_t>(8 * length))
@@ -4995,8 +6246,7 @@ namespace neos::python_runtime
                     auto const converted = std::from_chars(digits.data(), digits.data() + digits.size(), value, static_cast<int>(base));
                     if (converted.ec == std::errc{} && converted.ptr == digits.data() + digits.size() && value <= 9223372036854775807ull)
                         return make_int(negative ? -static_cast<long long>(value) : static_cast<long long>(value));
-                    auto big = big_integer::from_string(digits, static_cast<std::uint32_t>(base));
-                    return make_int(negative ? -big : big);
+                    return digits_int(digits, static_cast<unsigned>(base), negative);
                 }
             case NEOS_PY_BOOL:
                 return make_int(int_value(aObject));
@@ -5149,6 +6399,12 @@ namespace neos::python_runtime
             default: return a >= b;
             }
         }
+        // (ints (or bools) that are not both small compared by their order, with no bool made (2: they are not))
+        int int_compare(std::int32_t aOperation, object* aLhs, object* aRhs)
+        {
+            auto const order = limbs_order(aLhs, aRhs);
+            return order == 2 ? 2 : small_compare(aOperation, order, 0) ? 1 : 0;
+        }
         object* fn_compare_io(std::int32_t aOperation, std::int64_t aInteger, object* aObject)
         {
             if (!integer_is_object(aInteger) && is_small_int(aObject))
@@ -5168,6 +6424,8 @@ namespace neos::python_runtime
             if (!integer_is_object(aInteger) && is_small_int(aObject))
                 return small_compare(aOperation, aInteger >> 1, as<int_object>(aObject)->value);
             ref const lhs{ integer_as_object(aInteger) };
+            if (auto const r = int_compare(aOperation, lhs.get(), aObject); r != 2)
+                return r == 1;
             ref const result{ compare(aOperation, lhs.get(), aObject) };
             if (result.get() == nullptr)
                 return (checked(nullptr), false);
@@ -5178,6 +6436,8 @@ namespace neos::python_runtime
             if (!integer_is_object(aInteger) && is_small_int(aObject))
                 return small_compare(aOperation, as<int_object>(aObject)->value, aInteger >> 1);
             ref const rhs{ integer_as_object(aInteger) };
+            if (auto const r = int_compare(aOperation, aObject, rhs.get()); r != 2)
+                return r == 1;
             ref const result{ compare(aOperation, aObject, rhs.get()) };
             if (result.get() == nullptr)
                 return (checked(nullptr), false);
@@ -5188,6 +6448,8 @@ namespace neos::python_runtime
         // (a comparison's truth (e.g. if a == b:): its result is not kept)
         bool fn_compare_truth(std::int32_t aOperation, object* aLhs, object* aRhs)
         {
+            if (auto const r = int_compare(aOperation, aLhs, aRhs); r != 2)
+                return r == 1;
             ref const result{ compare(aOperation, aLhs, aRhs) };
             if (result.get() == nullptr)
                 return (checked(nullptr), false);
@@ -5253,6 +6515,20 @@ namespace neos::python_runtime
         {
             if (aResult == nullptr)
                 return (checked(nullptr), 0);
+            // (an int (not a subclass's): with no dispatch)
+            if (aResult->type == &sIntType.base)
+            {
+                if (is_small_int(aResult))
+                {
+                    auto const value = as<int_object>(aResult)->value;
+                    if (value >= -sSmallIntegerLimit && value < sSmallIntegerLimit)
+                    {
+                        release(aResult);
+                        return small_integer(value);
+                    }
+                }
+                return static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(aResult) | 1u);
+            }
             if (kind_of(aResult) == NEOS_PY_BOOL)
             {
                 bool const value = aResult == &sTrue.base;
@@ -8030,12 +9306,12 @@ namespace neos::python_runtime
                 // integers first (exactly), then floats (Neumaier)
                 long long integer = 0;
                 std::optional<int128> wide;     // (the integers' sum beyond 64 bits, while it is a 128-bit integer)
-                std::optional<big_integer> big; // (beyond 128 bits)
+                ref big;                        // (beyond 128 bits: an int)
                 bool isFloat = kind_of(total.get()) == NEOS_PY_FLOAT;
                 if (!isFloat)
                 {
                     if (is_big(total.get()))
-                        big = big_of(total.get());
+                        big = total;
                     else
                         integer = int_value(total.get());
                     for (; i < items.size() && kind_of(items[i].get()) != NEOS_PY_FLOAT; ++i)
@@ -8053,17 +9329,18 @@ namespace neos::python_runtime
                                 wide = sum;
                                 continue;
                             }
-                            ref const partial{ make_int128(*wide) };
-                            big = big_value(partial.get());
+                            big = ref{ make_int128(*wide) };
                         }
-                        *big = *big + *big_operand{ item };
+                        big = ref{ binary(NEOS_PY_ADD, big.get(), item, false) };
+                        if (!big)
+                            return nullptr;
                     }
                     if (i == items.size())
-                        return big ? make_int(*big) : wide ? make_int128(*wide) : make_int(integer);
+                        return big ? big.release_ownership() : wide ? make_int128(*wide) : make_int(integer);
                 }
                 double sum = isFloat ? as<float_object>(total.get())->value : static_cast<double>(integer);
-                if (big && !big_to_double(*big, sum))
-                    return error("OverflowError", "int too large to convert to float");
+                if (big && !to_double(big.get(), sum))
+                    return nullptr;
                 if (wide && !big)
                 {
                     ref const partial{ make_int128(*wide) };
@@ -11042,6 +12319,14 @@ namespace neos::python_runtime
         {
             if (!no_keywords(aKwargs, "divmod") || !arity(aArgs, 2u, 2u, "divmod"))
                 return nullptr;
+            // (ints beyond 64 bits: with one division)
+            if (limb_view a, d; (is_big(aArgs[0]) || is_big(aArgs[1])) && limbs_of(aArgs[0], a) && limbs_of(aArgs[1], d) && d.size != 0u)
+            {
+                object* remainder = nullptr;
+                ref q{ divide_views(a, d, false, &remainder) };
+                ref r{ remainder };
+                return make_tuple({ q.release_ownership(), r.release_ownership() });
+            }
             ref q{ binary(NEOS_PY_FLOOR_DIVIDE, aArgs[0], aArgs[1], false) };
             if (!q)
                 return nullptr;
@@ -11062,6 +12347,12 @@ namespace neos::python_runtime
                 return error("TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
             if (is_big(aArgs[0]) || is_big(aArgs[1]) || is_big(aArgs[2]) || int_value(aArgs[1]) < 0)
             {
+                // (an exponent that is not negative: with limbs)
+                {
+                    limb_view bv, ev, mv;
+                    if (limbs_of(aArgs[0], bv) && limbs_of(aArgs[1], ev) && limbs_of(aArgs[2], mv) && (!ev.negative || ev.size == 0u) && mv.size != 0u)
+                        return power_modulo_views(bv, ev, mv);
+                }
                 // (beyond 64 bits, or a negative exponent (the inverse of the base): with big integers)
                 auto const floor_mod = [](big_integer const& a, big_integer const& n) { big_integer q, r; big_divmod(a, n, q, r); return r; };
                 auto B = big_value(aArgs[0]);
@@ -11178,7 +12469,13 @@ namespace neos::python_runtime
                 return nullptr;
             long long v = 0;
             if (is_big(aArgs[0]))
+            {
+                std::string digits;
+                bool negative = false;
+                if (int_digits(aArgs[0], aBase, digits, negative))
+                    return make_str(std::string{ negative ? "-" : "" } + aPrefix + digits);
                 return make_str(std::string{ big_negative(big_of(aArgs[0])) ? "-" : "" } + aPrefix + big_digits(big_of(aArgs[0]), aBase));
+            }
             if (!to_index(aArgs[0], v))
                 return nullptr;
             unsigned long long u = v < 0 ? 0ull - static_cast<unsigned long long>(v) : static_cast<unsigned long long>(v);
@@ -11890,6 +13187,27 @@ namespace neos::python_runtime
             return finished_hash(aValue < 0 ? static_cast<std::uint64_t>(-static_cast<long long>(magnitude)) : magnitude);
         }
 
+        // (an int's magnitude mod 2**61 - 1 from its limbs (most significant first: x * 2**64 + limb, and 2**64 is 2**3 mod 2**61 - 1), with 
+        // its sign)
+        long long limbs_hash(limb_view const& aValue)
+        {
+            std::uint64_t x = 0u;
+            for (auto i = aValue.size; i-- > 0u;)
+            {
+                x <<= 3u;
+                x = (x & kHashModulus) + (x >> kHashBits);
+                if (x >= kHashModulus)
+                    x -= kHashModulus;
+                auto l = (aValue.data[i] & kHashModulus) + (aValue.data[i] >> kHashBits);
+                if (l >= kHashModulus)
+                    l -= kHashModulus;
+                x += l;
+                if (x >= kHashModulus)
+                    x -= kHashModulus;
+            }
+            return finished_hash(aValue.negative ? static_cast<std::uint64_t>(-static_cast<long long>(x)) : x);
+        }
+
         long long big_hash(big_integer const& aValue)
         {
             big_integer q, r;
@@ -12047,7 +13365,13 @@ namespace neos::python_runtime
                 aResult = aObject == &sTrue.base ? 1 : 0;
                 return true;
             case NEOS_PY_INT:
-                aResult = is_big(aObject) ? big_hash(big_of(aObject)) : int_hash(as<int_object>(aObject)->value);
+                if (is_big(aObject))
+                {
+                    limb_view v;
+                    aResult = limbs_of(aObject, v) ? limbs_hash(v) : big_hash(big_of(aObject));
+                }
+                else
+                    aResult = int_hash(as<int_object>(aObject)->value);
                 return true;
             case NEOS_PY_FLOAT:
                 aResult = float_hash(aObject, as<float_object>(aObject)->value);
@@ -13288,28 +14612,36 @@ namespace neos::python_runtime
             object* m_isinf(std::vector<object*> const& a, object*) { return predicate(a, "isinf", [](double x) { return std::isinf(x); }); }
             object* m_isfinite(std::vector<object*> const& a, object*) { return predicate(a, "isfinite", [](double x) { return std::isfinite(x); }); }
 
+            // (an operation on ints (native: see binary); null if it raised)
+            ref int_operation(int aOperation, ref const& a, ref const& b)
+            {
+                if (!a || !b)
+                    return ref{};
+                return ref{ binary(aOperation, a.get(), b.get(), false) };
+            }
+
             // the product of the integers from aFirst to aLast (binary splitting: the factors' sizes balanced)
-            big_integer range_product(long long aFirst, long long aLast)
+            ref range_product(long long aFirst, long long aLast)
             {
                 if (aLast - aFirst < 16)
                 {
-                    big_integer result{ 1 };
+                    ref result{ make_int(1) };
                     long long chunk = 1;
                     for (long long i = aFirst; i <= aLast; ++i)
                     {
                         long long product = 0;
                         if (multiply_overflow(chunk, i, &product))
                         {
-                            result = result * big_integer{ chunk };
+                            result = int_operation(NEOS_PY_MULTIPLY, result, ref{ make_int(chunk) });
                             chunk = i;
                         }
                         else
                             chunk = product;
                     }
-                    return result * big_integer{ chunk };
+                    return int_operation(NEOS_PY_MULTIPLY, result, ref{ make_int(chunk) });
                 }
                 auto const middle = aFirst + (aLast - aFirst) / 2;
-                return range_product(aFirst, middle) * range_product(middle + 1, aLast);
+                return int_operation(NEOS_PY_MULTIPLY, range_product(aFirst, middle), range_product(middle + 1, aLast));
             }
 
             object* m_factorial(std::vector<object*> const& aArgs, object*)
@@ -13325,7 +14657,7 @@ namespace neos::python_runtime
                     return error("ValueError", "factorial() not defined for negative values");
                 if (n < 2)
                     return make_int(1);
-                return make_int(range_product(2, n));
+                return range_product(2, n).release_ownership();
             }
 
             object* m_isqrt(std::vector<object*> const& aArgs, object*)
@@ -13335,6 +14667,31 @@ namespace neos::python_runtime
                 long long n = 0;
                 if (is_big(aArgs[0]))
                 {
+                    if (limb_view view; limbs_of(aArgs[0], view))
+                    {
+                        if (view.negative)
+                            return error("ValueError", "isqrt() argument must be nonnegative");
+                        // (as CPython's (Modules/mathmodule.c, Python Software Foundation License): a = isqrt(n >> 2 (c - d)) to d 
+                        // bits, d doubling)
+                        ref const n = ref::borrowed(aArgs[0]);
+                        auto const c = static_cast<long long>((limbs_bits(view.data, view.size) - 1u) / 2u);
+                        ref a{ make_int(1) };
+                        long long d = 0;
+                        for (auto shift = static_cast<int>(std::bit_width(static_cast<unsigned long long>(c))); shift-- > 0;)
+                        {
+                            auto const e = d;
+                            d = c >> shift;
+                            auto const high = int_operation(NEOS_PY_LSHIFT, a, ref{ make_int(d - e - 1) });
+                            auto const low = int_operation(NEOS_PY_FLOOR_DIVIDE, int_operation(NEOS_PY_RSHIFT, n, ref{ make_int(2 * c - e - d + 1) }), a);
+                            a = int_operation(NEOS_PY_ADD, high, low);
+                        }
+                        auto const square = int_operation(NEOS_PY_MULTIPLY, a, a);
+                        if (!square)
+                            return nullptr;
+                        if (limbs_order(square.get(), n.get()) > 0)
+                            a = int_operation(NEOS_PY_SUBTRACT, a, ref{ make_int(1) });
+                        return a.release_ownership();
+                    }
                     auto const& v = big_of(aArgs[0]);
                     if (big_negative(v))
                         return error("ValueError", "isqrt() argument must be nonnegative");
@@ -13411,32 +14768,51 @@ namespace neos::python_runtime
                 return true;
             }
 
+            // (an int, or an object with __index__, as an int with limbs (see limbs_of))
+            ref index_int(object* aObject)
+            {
+                if (limb_view v; limbs_of(aObject, v))
+                    return ref::borrowed(aObject);
+                return ref{ make_int(index_value(aObject)) };
+            }
+
+            ref int_gcd(ref const& a, ref const& b)
+            {
+                limb_view x, y;
+                if (!limbs_of(a.get(), x) || !limbs_of(b.get(), y))
+                    return ref{ make_int(big_gcd(big_value(a.get()), big_value(b.get()))) };
+                return ref{ gcd_views(x, y) };
+            }
+
             object* m_gcd(std::vector<object*> const& aArgs, object*)
             {
                 if (!int_arguments(aArgs))
                     return nullptr;
-                big_integer r{ 0 };
+                ref r{ make_int(0) };
                 for (auto arg : aArgs)
-                    r = big_gcd(r, index_value(arg));
-                return make_int(std::move(r));
+                    r = int_gcd(r, index_int(arg));
+                return r.release_ownership();
             }
 
             object* m_lcm(std::vector<object*> const& aArgs, object*)
             {
                 if (!int_arguments(aArgs))
                     return nullptr;
-                big_integer r{ 1 };
+                ref r{ make_int(1) };
                 for (auto arg : aArgs)
                 {
-                    auto const v = index_value(arg);
-                    if (big_zero(r) || big_zero(v))
+                    auto const v = index_int(arg);
+                    if (truth(r.get()) == 0 || truth(v.get()) == 0)
                     {
-                        r = big_integer{ 0 };
+                        r = ref{ make_int(0) };
                         continue;
                     }
-                    r = big_abs(r / big_gcd(r, v) * v);
+                    auto const product = int_operation(NEOS_PY_MULTIPLY, int_operation(NEOS_PY_FLOOR_DIVIDE, r, int_gcd(r, v)), v);
+                    if (!product)
+                        return nullptr;
+                    r = ref{ unary(NEOS_PY_ABSOLUTE, product.get()) };
                 }
-                return make_int(std::move(r));
+                return r.release_ownership();
             }
 
             object* combinatorial(std::vector<object*> const& aArgs, char const* aName, bool aComb)
@@ -13460,14 +14836,15 @@ namespace neos::python_runtime
                     return error("OverflowError", std::string{ aComb ? "min(n - k, k)" : "k" } + " must not exceed 9223372036854775807");
                 auto const count = static_cast<long long>(big_detail::cword(k, 0u));
                 // (perm: n (n - 1) ... (n - k + 1); comb: each partial product of i factors is divisible by i!)
-                big_integer r{ 1 };
-                for (long long i = 0; i < count; ++i)
+                ref const nObject{ make_int(n) };
+                ref r{ make_int(1) };
+                for (long long i = 0; i < count && r; ++i)
                 {
-                    r = r * (n - big_integer{ i });
+                    r = int_operation(NEOS_PY_MULTIPLY, r, int_operation(NEOS_PY_SUBTRACT, nObject, ref{ make_int(i) }));
                     if (aComb)
-                        r = r / big_integer{ i + 1 };
+                        r = int_operation(NEOS_PY_FLOOR_DIVIDE, r, ref{ make_int(i + 1) });
                 }
-                return make_int(std::move(r));
+                return r.release_ownership();
             }
 
             object* m_comb(std::vector<object*> const& a, object*) { return combinatorial(a, "comb", true); }
