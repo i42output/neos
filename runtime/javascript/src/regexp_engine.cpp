@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <span>
 #include "unicode.hpp"
 #include "regexp_engine.hpp"

@@ -59,6 +59,7 @@
 #include <memory>
 #include <stdexcept>
 #include <algorithm>
+#include <iterator>
 #include <type_traits>
 #include <compare>
 #include <cstring>
@@ -148,15 +149,26 @@ namespace neos::runtime
             return (aHash ^ static_cast<std::uint64_t>(aCodePoint)) * 0x100000001B3ull;
         }
 
+        // (code points as units of a narrower fixed width: each of them fits in one (the caller has checked))
+        template <typename Unit, typename Iterator>
+        inline std::vector<Unit> narrowed(Iterator aFirst, Iterator aLast)
+        {
+            std::vector<Unit> result;
+            result.reserve(static_cast<std::size_t>(std::distance(aFirst, aLast)));
+            for (; aFirst != aLast; ++aFirst)
+                result.push_back(static_cast<Unit>(*aFirst));
+            return result;
+        }
+
         // (code points in the narrowest fixed width that holds them)
         using fixed_units = std::variant<std::vector<std::uint8_t>, std::vector<char16_t>, std::vector<char32_t>>;
         inline fixed_units narrowest(std::vector<char32_t>&& aCodePoints)
         {
             char32_t const greatest = aCodePoints.empty() ? 0u : *std::max_element(aCodePoints.begin(), aCodePoints.end());
             if (greatest <= 0xFFu)
-                return std::vector<std::uint8_t>(aCodePoints.begin(), aCodePoints.end());
+                return narrowed<std::uint8_t>(aCodePoints.begin(), aCodePoints.end());
             if (greatest <= 0xFFFFu)
-                return std::vector<char16_t>(aCodePoints.begin(), aCodePoints.end());
+                return narrowed<char16_t>(aCodePoints.begin(), aCodePoints.end());
             return std::move(aCodePoints);
         }
     }
@@ -630,8 +642,10 @@ namespace neos::runtime
                     }
                     else
                     {
+                        // (widened above: each code point fits in a unit)
                         auto& units = aRep.edit();
-                        units.insert(units.begin() + static_cast<std::ptrdiff_t>(aIndex), aCodePoints.begin(), aCodePoints.end());
+                        auto const narrowedCodePoints = string_detail::narrowed<typename rep_type::unit_type>(aCodePoints.begin(), aCodePoints.end());
+                        units.insert(units.begin() + static_cast<std::ptrdiff_t>(aIndex), narrowedCodePoints.begin(), narrowedCodePoints.end());
                     }
                 }
             }, iRep);

@@ -33,6 +33,7 @@
 
 // RegExp: the RegExp constructor, RegExp.prototype, the RegExp String Iterator and RegExpCreate (make_regexp)
 
+#include <algorithm>
 #include <unordered_map>
 #include "js.hpp"
 #include "api.hpp"
