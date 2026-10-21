@@ -31,84 +31,205 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+
 #pragma once
 
-// JavaScript's own constructs and operators: the JavaScript concepts (neos.javascript) emit them with
-// i_compiler::emit_language_construct(Language, construct, source); only those concepts and the compiler's JavaScript
-// code generation use them
+// JavaScript's constructs: the JavaScript concepts (neos.javascript) emit them with i_compiler::emit_language_construct(Language,
+// construct, source) (each concept of the JavaScript schema is one); the JavaScript compiler builds its syntax tree from them (a
+// construct's children are the constructs emitted before it whose source is within its source; a postfix construct also takes
+// the construct emitted before those as its first child)
 
 #include <cstdint>
+#include <string_view>
 
 namespace neos::language::javascript
 {
     // (the language as its schema names it)
     inline constexpr char Language[] = "javascript";
 
+#define NEOS_JAVASCRIPT_CONSTRUCTS(X) \
+    X(Script, "javascript.script", false) \
+    X(Identifier, "javascript.identifier", false) \
+    X(Binding, "javascript.binding", false) \
+    X(Label, "javascript.label", false) \
+    X(Name, "javascript.name", false) \
+    X(Private, "javascript.private", false) \
+    X(Null, "javascript.null", false) \
+    X(True, "javascript.true", false) \
+    X(False, "javascript.false", false) \
+    X(This, "javascript.this", false) \
+    X(Number, "javascript.number", false) \
+    X(String, "javascript.string", false) \
+    X(Template, "javascript.template", false) \
+    X(TemplateString, "javascript.template.string", false) \
+    X(RegExp, "javascript.regexp", false) \
+    X(Parenthesized, "javascript.parenthesized", false) \
+    X(Array, "javascript.array", false) \
+    X(Hole, "javascript.hole", false) \
+    X(Spread, "javascript.spread", false) \
+    X(Object, "javascript.object", false) \
+    X(Property, "javascript.property", false) \
+    X(Shorthand, "javascript.shorthand", false) \
+    X(ShorthandDefault, "javascript.shorthand.default", false) \
+    X(Computed, "javascript.computed", false) \
+    X(Method, "javascript.method", false) \
+    X(Getter, "javascript.getter", false) \
+    X(Setter, "javascript.setter", false) \
+    X(GeneratorMethod, "javascript.method.generator", false) \
+    X(AsyncMethod, "javascript.method.async", false) \
+    X(AsyncGeneratorMethod, "javascript.method.async.generator", false) \
+    X(FunctionExpression, "javascript.function.expression", false) \
+    X(AsyncFunctionExpression, "javascript.function.expression.async", false) \
+    X(Parameters, "javascript.parameters", false) \
+    X(Body, "javascript.body", false) \
+    X(Arrow, "javascript.arrow", false) \
+    X(AsyncArrow, "javascript.arrow.async", false) \
+    X(ClassExpression, "javascript.class.expression", false) \
+    X(Extends, "javascript.extends", false) \
+    X(Static, "javascript.static", false) \
+    X(Field, "javascript.field", false) \
+    X(StaticBlock, "javascript.static.block", false) \
+    X(Dot, "javascript.dot", true) \
+    X(DotPrivate, "javascript.dot.private", true) \
+    X(Index, "javascript.index", true) \
+    X(Tagged, "javascript.tagged", true) \
+    X(SuperDot, "javascript.super.dot", false) \
+    X(SuperIndex, "javascript.super.index", false) \
+    X(NewTarget, "javascript.new.target", false) \
+    X(ImportMeta, "javascript.import.meta", false) \
+    X(New, "javascript.new", false) \
+    X(Arguments, "javascript.arguments", false) \
+    X(Call, "javascript.call", true) \
+    X(SuperCall, "javascript.super.call", false) \
+    X(ImportCall, "javascript.import.call", false) \
+    X(Optional, "javascript.optional", false) \
+    X(OptionalCall, "javascript.optional.call", true) \
+    X(OptionalIndex, "javascript.optional.index", true) \
+    X(OptionalDot, "javascript.optional.dot", true) \
+    X(OptionalPrivate, "javascript.optional.private", true) \
+    X(PreIncrement, "javascript.preincrement", false) \
+    X(PreDecrement, "javascript.predecrement", false) \
+    X(PostIncrement, "javascript.postincrement", true) \
+    X(PostDecrement, "javascript.postdecrement", true) \
+    X(Delete, "javascript.delete", false) \
+    X(Void, "javascript.void", false) \
+    X(TypeOf, "javascript.typeof", false) \
+    X(Plus, "javascript.plus", false) \
+    X(Negate, "javascript.negate", false) \
+    X(BitNot, "javascript.bitnot", false) \
+    X(Not, "javascript.not", false) \
+    X(Await, "javascript.await", false) \
+    X(Exponent, "javascript.exponent", true) \
+    X(Multiply, "javascript.multiply", true) \
+    X(Divide, "javascript.divide", true) \
+    X(Remainder, "javascript.remainder", true) \
+    X(Add, "javascript.add", true) \
+    X(Subtract, "javascript.subtract", true) \
+    X(ShiftLeft, "javascript.shiftleft", true) \
+    X(ShiftRight, "javascript.shiftright", true) \
+    X(ShiftRightUnsigned, "javascript.shiftrightunsigned", true) \
+    X(LessThan, "javascript.lessthan", true) \
+    X(GreaterThan, "javascript.greaterthan", true) \
+    X(LessEqual, "javascript.lessequal", true) \
+    X(GreaterEqual, "javascript.greaterequal", true) \
+    X(InstanceOf, "javascript.instanceof", true) \
+    X(In, "javascript.in", true) \
+    X(PrivateIn, "javascript.private.in", false) \
+    X(StrictEqual, "javascript.strictequal", true) \
+    X(StrictNotEqual, "javascript.strictnotequal", true) \
+    X(Equal, "javascript.equal", true) \
+    X(NotEqual, "javascript.notequal", true) \
+    X(BitAnd, "javascript.bitand", true) \
+    X(BitXor, "javascript.bitxor", true) \
+    X(BitOr, "javascript.bitor", true) \
+    X(And, "javascript.and", true) \
+    X(Or, "javascript.or", true) \
+    X(Coalesce, "javascript.coalesce", true) \
+    X(Conditional, "javascript.conditional", true) \
+    X(Assign, "javascript.assign", false) \
+    X(Yield, "javascript.yield", false) \
+    X(Comma, "javascript.comma", true) \
+    X(Initializer, "javascript.initializer", false) \
+    X(ObjectPattern, "javascript.pattern.object", false) \
+    X(PatternProperty, "javascript.pattern.property", false) \
+    X(Rest, "javascript.pattern.rest", false) \
+    X(ArrayPattern, "javascript.pattern.array", false) \
+    X(Block, "javascript.block", false) \
+    X(Empty, "javascript.empty", false) \
+    X(ExpressionStatement, "javascript.expression", false) \
+    X(Debugger, "javascript.debugger", false) \
+    X(Var, "javascript.var", false) \
+    X(Let, "javascript.let", false) \
+    X(Const, "javascript.const", false) \
+    X(Using, "javascript.using", false) \
+    X(AwaitUsing, "javascript.await.using", false) \
+    X(Declarator, "javascript.declarator", false) \
+    X(If, "javascript.if", false) \
+    X(Do, "javascript.do", false) \
+    X(While, "javascript.while", false) \
+    X(For, "javascript.for", false) \
+    X(ForInit, "javascript.for.init", false) \
+    X(ForTest, "javascript.for.test", false) \
+    X(ForUpdate, "javascript.for.update", false) \
+    X(ForIn, "javascript.for.in", false) \
+    X(ForOf, "javascript.for.of", false) \
+    X(ForAwaitOf, "javascript.for.await.of", false) \
+    X(ForVar, "javascript.for.var", false) \
+    X(ForLet, "javascript.for.let", false) \
+    X(ForConst, "javascript.for.const", false) \
+    X(ForUsing, "javascript.for.using", false) \
+    X(ForAwaitUsing, "javascript.for.await.using", false) \
+    X(Continue, "javascript.continue", false) \
+    X(Break, "javascript.break", false) \
+    X(Return, "javascript.return", false) \
+    X(Throw, "javascript.throw", false) \
+    X(With, "javascript.with", false) \
+    X(Switch, "javascript.switch", false) \
+    X(Case, "javascript.case", false) \
+    X(Default, "javascript.default", false) \
+    X(Labelled, "javascript.labelled", false) \
+    X(Try, "javascript.try", false) \
+    X(Catch, "javascript.catch", false) \
+    X(Finally, "javascript.finally", false) \
+    X(Function, "javascript.function", false) \
+    X(AsyncFunction, "javascript.function.async", false) \
+    X(Class, "javascript.class", false) \
+    X(Import, "javascript.import", false) \
+    X(ImportDefault, "javascript.import.default", false) \
+    X(ImportNamespace, "javascript.import.namespace", false) \
+    X(ImportNamed, "javascript.import.named", false) \
+    X(ImportSpecifier, "javascript.import.specifier", false) \
+    X(ImportAttributes, "javascript.import.attributes", false) \
+    X(Export, "javascript.export", false) \
+    X(ExportDefault, "javascript.export.default", false) \
+    X(ExportNamed, "javascript.export.named", false) \
+    X(ExportSpecifier, "javascript.export.specifier", false)
+
     enum class construct : std::uint32_t
     {
-        Module,             ///< the end of the module
-        Function,           ///< 'function': the function being declared has inferred parameter and return types
-        Let,                ///< the kind of declaration that follows
-        Const,
-        Var,
-        GlobalLet,          ///< (a top-level declaration declares global variables)
-        GlobalConst,
-        GlobalVar,
-        Declarator,         ///< name [= value]
-        Statement,          ///< expression statement
-        EmptyStatement,
-        GlobalStatement,    ///< a top-level statement (part of the entry point)
-        If,
-        While,
-        DoWhile,
-        For,
-        ForTest,            ///< a for or while loop's test
-        Return,
-        Break,
-        Continue,
-        Assignment,         ///< name op= value
-        PrefixIncrement,
-        PrefixDecrement,
-        PostfixIncrement,
-        PostfixDecrement,
-        Conditional,        ///< condition ? value : value
-        Call,               ///< name(arguments)
-        Member,             ///< .name or .name(arguments) of the preceding operand
-        Index,              ///< [index] of the preceding operand
-        Variable,
-        TemplateBegin,      ///< the start of a template literal (template text and substitutions are appended)
-        TemplateSubstitution,
-        Switch,
-        Case,               ///< case value: statements
-        DefaultCase,        ///< default: statements
-        // operators: values are numbers (f64), strings or booleans, converted as JavaScript converts them (e.g. a string 
-        // plus a number is a string)
-        Add,
-        Subtract,
-        Multiply,
-        Divide,
-        Remainder,
-        Power,
-        Equal,
-        NotEqual,
-        StrictEqual,
-        StrictNotEqual,
-        LessThan,
-        GreaterThan,
-        LessThanOrEqual,
-        GreaterThanOrEqual,
-        LogicalAnd,
-        LogicalOr,
-        LogicalNot,
-        BitwiseAnd,
-        BitwiseOr,
-        BitwiseXor,
-        BitwiseNot,
-        ShiftLeft,
-        ShiftRight,
-        ShiftRightUnsigned,
-        Negate,
-        Plus,
-        TypeOf
+#define NEOS_JAVASCRIPT_CONSTRUCT_ENUM(aConstruct, aName, aPostfix) aConstruct,
+        NEOS_JAVASCRIPT_CONSTRUCTS(NEOS_JAVASCRIPT_CONSTRUCT_ENUM)
+#undef NEOS_JAVASCRIPT_CONSTRUCT_ENUM
+        COUNT
     };
+
+    struct construct_info
+    {
+        construct id;
+        std::string_view conceptName; ///< (the concept's name)
+        std::string_view name;      ///< (the construct's name)
+        bool postfix;
+    };
+
+    inline constexpr construct_info Constructs[] =
+    {
+#define NEOS_JAVASCRIPT_CONSTRUCT_INFO(aConstruct, aName, aPostfix) { construct::aConstruct, aName, #aConstruct, aPostfix },
+        NEOS_JAVASCRIPT_CONSTRUCTS(NEOS_JAVASCRIPT_CONSTRUCT_INFO)
+#undef NEOS_JAVASCRIPT_CONSTRUCT_INFO
+    };
+
+    inline constexpr construct_info const& info(construct aConstruct)
+    {
+        return Constructs[static_cast<std::uint32_t>(aConstruct)];
+    }
 }

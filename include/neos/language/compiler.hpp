@@ -423,6 +423,9 @@ namespace neos::language
         i_fragment const& function_body(std::uint32_t aFunction) const final;
         void set_function_body(std::uint32_t aFunction, i_fragment const& aBody) final;
         std::uint32_t deferred_call(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters) final;
+        void set_function_locals(std::uint32_t aFunction, neolib::i_vector<type> const& aLocals) final;
+        std::uint32_t define_function(neolib::i_string const& aName, i_function_signature const& aSignature, neolib::i_vector<type> const& aLocals,
+            neolib::i_string const& aFrameName, std::uint32_t aFirstLine) final;
         type inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const final;
         void set_inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex, std::uint32_t aCount, type aType) final;
         void infer(neolib::i_string const& aWhat, type aOld, type aNew) final;
@@ -506,7 +509,7 @@ namespace neos::language
         std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
         inference iInference;
         bool iGlobalsDeclared = false;
-        std::map<void const*, std::pair<bool, std::string>> iParsed; ///< parser -> source of its last successful parse
+        std::map<void const*, std::tuple<bool, std::string, char const*>> iParsed; ///< parser -> source (and its address: the AST refers to it) of its last successful parse
         std::vector<neolib::ref_ptr<i_language_compiler>> iLanguageCompilers;
         fragment iResult;                                       ///< (i_code_generator: the fragment returned)
         struct line_starts

@@ -392,7 +392,8 @@ namespace neos::language
             parser.set_debug_timing(iShowParseTimes);
             // (a source parsed by the previous compilation pass need not be parsed again)
             auto& parsed = iParsed[&parser];
-            if (parsed.first && parsed.second == aFragment.source().to_std_string_view())
+            if (std::get<0>(parsed) && std::get<1>(parsed) == aFragment.source().to_std_string_view() &&
+                std::get<2>(parsed) == aFragment.source().to_std_string_view().data())
                 ok = true;
             else
             {
@@ -405,7 +406,7 @@ namespace neos::language
                 if (ok && last)
                     parser.create_ast();
                 if (ok)
-                    parsed = { true, aFragment.source().to_std_string() };
+                    parsed = { true, aFragment.source().to_std_string(), aFragment.source().to_std_string_view().data() };
             }
             parser.set_debug_output(sQuiet, false, false);
             if (!ok)
@@ -3780,6 +3781,6 @@ namespace neos::language
             message.to_std_string();
         if (!report.empty())
             return compiler_error{ report.to_std_string(), diagnostic };
-        return compiler_error{ (location(*state().unit, fragment, aSourcePos) + ": " + aErrorType + ": " + aError).to_std_string(), diagnostic };
+        return compiler_error{ (location(*state().unit, fragment, aSourcePos) + ": " + type + ": " + message).to_std_string(), diagnostic };
     }
 }

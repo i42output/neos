@@ -31,6 +31,7 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <functional>
 #include <neos/neos.hpp>
 #include <filesystem>
 #include <neolib/core/scoped.hpp>
@@ -61,6 +62,7 @@ namespace neos::language::schema_parser
         Range,
         RangeNot,
         RangeSubtract,
+        Exception,
         Terminal,
         Subtract,
         Optional,
@@ -102,6 +104,7 @@ declare_symbol(neos::language::schema_parser::symbol, Alternation)
 declare_symbol(neos::language::schema_parser::symbol, Range)
 declare_symbol(neos::language::schema_parser::symbol, RangeNot)
 declare_symbol(neos::language::schema_parser::symbol, RangeSubtract)
+declare_symbol(neos::language::schema_parser::symbol, Exception)
 declare_symbol(neos::language::schema_parser::symbol, Terminal)
 declare_symbol(neos::language::schema_parser::symbol, Subtract)
 declare_symbol(neos::language::schema_parser::symbol, Repetition)
@@ -151,9 +154,12 @@ namespace neos::language::schema_parser
         ( symbol::RangeSubtract >> (symbol::Range , WS , (symbol::Subtract <=> "subtract"_infix_concept) , WS , symbol::Argument) ),
         ( symbol::RangeNot >> ((symbol::Not , WS , symbol::Range) <=> "not"_concept) ),
         ( symbol::Range >> ((symbol::CharacterLiteral , WS , ".."_ , WS , symbol::CharacterLiteral) <=> "range"_concept) ),
+        // (an exception (ISO 14977's "factor - exception"): a match of the factor (a rule or a group) that is not one of the exception's strings)
+        ( symbol::Exception >> ((symbol::Grouping | symbol::RuleName) , WS , "-"_ , WS ,
+            ((symbol::Grouping | symbol::StringLiteral | symbol::CharacterLiteral) <=> "exception"_concept)) ),
         ( symbol::Argument >> (symbol::Terminal | symbol::RuleExpression) ),
         ( symbol::Argument2 >> (symbol::Terminal | symbol::RuleExpression2) ),
-        ( symbol::Terminal >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::SpecialSequence |
+        ( symbol::Terminal >> (symbol::RangeSubtract | symbol::RangeNot | symbol::Range | symbol::Exception | symbol::SpecialSequence |
             symbol::RuleName | symbol::Identifier | symbol::CharacterLiteral | symbol::StringLiteral) ),
         ( symbol::Subtract >> "-"_ ),
         ( symbol::AtLeastOne >> "+"_ ) ,
@@ -213,6 +219,45 @@ namespace neos::language
         thread_local std::int32_t depth = 0;
         std::optional<neolib::scoped_counter<std::int32_t>> scopedDepth;
 
+        if (aNode.c == "exception")
+        {
+            // (factor - exception: a match of the factor (the primitive before it) is not a match if the exception matches all of it)
+            primitive* factor = nullptr;
+            if (!codeParser.rules().empty() && !codeParser.rules().back().lhs.empty() && !codeParser.rules().back().rhs.empty() &&
+                currentParent == &codeParser.rules().back().lhs.back())
+                factor = &codeParser.rules().back().rhs.back();
+            else if (currentParent)
+                std::visit([&](auto& aParentPrimitive)
+                {
+                    using type = std::decay_t<decltype(aParentPrimitive)>;
+                    if constexpr (
+                        std::is_same_v<type, parser::concatenation> ||
+                        std::is_same_v<type, parser::alternation> ||
+                        std::is_same_v<type, parser::repetition> ||
+                        std::is_same_v<type, parser::optional>)
+                    {
+                        if (!aParentPrimitive.value.empty())
+                            factor = &aParentPrimitive.value.back();
+                    }
+                }, *currentParent);
+            if (factor == nullptr)
+                throw std::runtime_error("schema: an exception ('-') without a factor");
+            // (an exception has no rules (ISO 14977): its terminals (strings, characters, ranges ...))
+            std::function<void(neolib::parser<schema_parser::symbol>::ast_node const&)> check = [&](auto const& aChild)
+            {
+                if (aChild.c == "rule_name")
+                    throw std::runtime_error("schema: an exception ('-') cannot refer to a rule (" + std::string{ aChild.value } + ")");
+                for (auto const& c : aChild.children)
+                    check(*c);
+            };
+            check(aNode);
+            primitive exception = parser::alternation{};
+            for (auto const& child : aNode.children)
+                walk_ast(aSchemaParser, *child, aStage, &exception);
+            auto& alternatives = std::get<parser::alternation>(exception).value;
+            factor->exception = std::make_shared<primitive const>(alternatives.size() == 1u ? alternatives[0] : exception);
+            return;
+        }
         if (aNode.c == "rule_name")
             value.emplace(lookup_symbol(aStage, aNode.value));
         else if (aNode.c == "rule_constraint")

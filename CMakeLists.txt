@@ -210,7 +210,15 @@ function(add_neos_compiler_plugin TARGET LANGUAGE)
 endfunction()
 add_neos_compiler_plugin(compiler.javascript javascript
     compilers/javascript/src/plugin.cpp
-    compilers/javascript/src/compiler.cpp)
+    compilers/javascript/src/compiler.cpp
+    compilers/javascript/src/codegen.cpp
+    compilers/javascript/src/early_errors.cpp
+    runtime/javascript/src/regexp_engine.cpp
+    runtime/javascript/src/unicode.cpp
+    runtime/javascript/src/unicode_data.cpp)
+# (the compiler checks regular expression literals' patterns with the runtime's regular expression parser (and Unicode data))
+target_include_directories(compiler.javascript.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/javascript/src")
+target_compile_definitions(compiler.javascript.objects PRIVATE NEOS_JAVASCRIPT_COMPILER)
 add_neos_compiler_plugin(compiler.python python
     compilers/python/src/plugin.cpp
     compilers/python/src/compiler.cpp
@@ -332,7 +340,51 @@ endfunction()
 
 add_neos_runtime_plugin(c runtime/c/src/c.c)
 
-add_neos_runtime_plugin(javascript runtime/javascript/src/javascript.cpp)
+add_neos_runtime_plugin(javascript
+    runtime/javascript/src/javascript.cpp
+    runtime/javascript/src/api.cpp
+    runtime/javascript/src/heap.cpp
+    runtime/javascript/src/object.cpp
+    runtime/javascript/src/operations.cpp
+    runtime/javascript/src/operators.cpp
+    runtime/javascript/src/functions.cpp
+    runtime/javascript/src/realm.cpp
+    runtime/javascript/src/console.cpp
+    runtime/javascript/src/builtins_object.cpp
+    runtime/javascript/src/builtins_error.cpp
+    runtime/javascript/src/builtins_basic.cpp
+    runtime/javascript/src/builtins_array.cpp
+    runtime/javascript/src/numbers.cpp
+    runtime/javascript/src/builtins_string.cpp
+    runtime/javascript/src/builtins_regexp.cpp
+    runtime/javascript/src/regexp_engine.cpp
+    runtime/javascript/src/builtins_date.cpp
+    runtime/javascript/src/temporal_abstract.cpp
+    runtime/javascript/src/temporal_parse.cpp
+    runtime/javascript/src/temporal_timezone.cpp
+    runtime/javascript/src/temporal_objects.cpp
+    runtime/javascript/src/temporal_plain.cpp
+    runtime/javascript/src/temporal_zoned.cpp
+    runtime/javascript/src/builtins_json.cpp
+    runtime/javascript/src/builtins_iterator.cpp
+    runtime/javascript/src/builtins_disposable.cpp
+    runtime/javascript/src/unicode.cpp
+    runtime/javascript/src/unicode_data.cpp
+    runtime/javascript/src/host262.cpp
+    runtime/javascript/src/builtins_buffers.cpp
+    runtime/javascript/src/builtins_typed_arrays.cpp
+    runtime/javascript/src/builtins_atomics.cpp
+    runtime/javascript/src/builtins_collections.cpp
+    runtime/javascript/src/builtins_reflect.cpp
+    runtime/javascript/src/proxy.cpp
+    runtime/javascript/src/promise.cpp
+    runtime/javascript/src/generators.cpp
+    runtime/javascript/src/classes.cpp
+    runtime/javascript/src/eval.cpp
+    runtime/javascript/src/modules.cpp
+    runtime/javascript/src/builtins_async.cpp
+    runtime/javascript/src/bigint.cpp
+    runtime/javascript/src/stubs.cpp)
 target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include") # (ECMAScript's conversions)
 
 # zlib (the Python runtime plugin's module zlib): the bundled source (3rdparty/zlib-1.3.1), compiled into the plugin (its names

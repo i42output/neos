@@ -101,6 +101,14 @@ namespace neos::language
         virtual void set_function_body(std::uint32_t aFunction, i_fragment const& aBody) = 0;
         virtual std::uint32_t deferred_call(neolib::i_string const& aName, neolib::i_vector<type> const& aParameters) = 0; ///< (a call of a 
                                                                 ///< function defined later: the relocation (DeferredCall))
+        virtual void set_function_locals(std::uint32_t aFunction, neolib::i_vector<type> const& aLocals) = 0; ///< (the locals of a function that 
+                                                                ///< define_function defined (those that follow its parameters))
+        virtual std::uint32_t define_function(neolib::i_string const& aName, i_function_signature const& aSignature, neolib::i_vector<type> const& aLocals,
+            neolib::i_string const& aFrameName, std::uint32_t aFirstLine) = 0; ///< (a function that a language compiler generates whole (not from 
+                                                                ///< a schema's function constructs): its signature and its locals (those 
+                                                                ///< that follow its parameters); its body is set with set_function_body; its 
+                                                                ///< frame's name (empty: it has no frame) and the line (1-based) of its source 
+                                                                ///< that it begins on)
         virtual type inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const = 0; ///< (UNKNOWN: none)
         virtual void set_inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex, std::uint32_t aCount, type aType) = 0;
         virtual void infer(neolib::i_string const& aWhat, type aOld, type aNew) = 0; ///< (aOld UNKNOWN: none)

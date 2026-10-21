@@ -285,6 +285,26 @@ namespace neos::language
         return relocation;
     }
 
+    void compiler::set_function_locals(std::uint32_t aFunction, neolib::i_vector<type> const& aLocals)
+    {
+        iModule.functions.at(aFunction).locals.assign(aLocals.begin(), aLocals.end());
+    }
+
+    std::uint32_t compiler::define_function(neolib::i_string const& aName, i_function_signature const& aSignature, neolib::i_vector<type> const& aLocals,
+        neolib::i_string const& aFrameName, std::uint32_t aFirstLine)
+    {
+        auto const id = add_function(aName.to_std_string(), false);
+        auto& function = iModule.functions[id];
+        function.signature = function_signature{ aSignature };
+        function.locals.assign(aLocals.begin(), aLocals.end());
+        function.compiled = true;
+        if (!aFrameName.empty())
+            function.frameName = aFrameName.to_std_string();
+        function.frameSource = source_name();
+        function.firstLine = aFirstLine;
+        return id;
+    }
+
     type compiler::inferred_parameter(neolib::i_string_view const& aFunction, std::uint32_t aIndex) const
     {
         auto const facts = iInference.parameters.find(aFunction.to_std_string());

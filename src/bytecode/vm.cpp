@@ -1855,6 +1855,8 @@ namespace neos
                     coroutine* previous = nullptr;  ///< (the coroutine that resumed it (null: the thread))
                     activation* activations = nullptr;  ///< (the invocations within it, while it is suspended)
                     activation* resumerActivations = nullptr; ///< (the invocations of the code that resumed it)
+                    std::optional<running> suspendedRunning;    ///< (the program running within it when it was suspended)
+                    running resumerRunning;                     ///< (the program of the code that resumed it)
 #if defined(_WIN32)
                     void* fiber = nullptr;
                     void* resumer = nullptr;        ///< (the fiber that resumed it)
@@ -2012,6 +2014,10 @@ namespace neos
                     tCoroutine = &c;
                     c.resumerActivations = tActivation;
                     tActivation = c.activations;
+                    // (the program running in it is its own: the resumer's is restored when it suspends (or finishes))
+                    c.resumerRunning = tRunning;
+                    if (c.suspendedRunning)
+                        tRunning = *c.suspendedRunning;
 #if defined(_WIN32)
                     bool const converted = !::IsThreadAFiber();
                     c.resumer = converted ? ::ConvertThreadToFiber(nullptr) : ::GetCurrentFiber();
@@ -2030,6 +2036,8 @@ namespace neos
                     c.activations = tActivation;
                     tActivation = c.resumerActivations;
                     tCoroutine = c.previous;
+                    c.suspendedRunning = tRunning;
+                    tRunning = c.resumerRunning;
                     return c.finished ? 1 : 0;
                 }
 
