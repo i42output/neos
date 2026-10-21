@@ -64,3 +64,8 @@ NEOS_RUNTIME_PLUGIN_SET_HOST
 {
     neos::javascript_runtime::set_host(aHost);
 }
+
+NEOS_RUNTIME_PLUGIN_END
+{
+    neos::javascript_runtime::program_ended();
+}

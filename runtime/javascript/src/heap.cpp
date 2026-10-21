@@ -67,6 +67,11 @@ namespace neos::javascript_runtime
 
     std::u16string const& string::flat()
     {
+        if (smallText)
+        {
+            text.assign(small, length);
+            smallText = false;
+        }
         if (left == 0u)
             return text;
         // (a rope: its leaves in order (iteratively: a rope made by repeated concatenation is deep))
@@ -80,7 +85,7 @@ namespace neos::javascript_runtime
             auto& s = cell_of<string>(pending.back());
             pending.pop_back();
             if (s.left == 0u)
-                result.append(s.text);
+                result.append(s.smallText ? std::u16string_view{ s.small, s.length } : std::u16string_view{ s.text });
             else
             {
                 pending.push_back(s.right);
@@ -97,7 +102,7 @@ namespace neos::javascript_runtime
     {
         if (!hashed)
         {
-            hashValue = std::hash<std::u16string_view>{}(flat());
+            hashValue = std::hash<std::u16string_view>{}(chars());
             hashed = true;
         }
         return hashValue;
@@ -107,7 +112,7 @@ namespace neos::javascript_runtime
     {
         if (arrayIndex != -2)
             return arrayIndex;
-        auto const& t = flat();
+        auto const t = chars();
         arrayIndex = -1;
         if (t.empty() || t.size() > 10u || (t.size() > 1u && t[0] == u'0'))
             return arrayIndex;
@@ -160,7 +165,15 @@ namespace neos::javascript_runtime
 
     value make_string(std::u16string_view aText)
     {
+        if (aText.size() <= string::SmallCapacity)
+            return make_small_string(aText);
         return make_string(std::u16string{ aText });
+    }
+
+    value make_small_string(std::u16string_view aText)
+    {
+        auto& s = the_heap().make<string>(string::small_tag{}, aText);
+        return TagString | s.handle;
     }
 
     value make_string(char16_t aCharacter)
@@ -332,12 +345,20 @@ namespace neos::javascript_runtime
         auto const length = static_cast<std::uint64_t>(l.length) + r.length;
         if (length > MaxStringLength)
             throw_range_error("invalid string length");
+        if (length <= string::SmallCapacity)
+        {
+            char16_t text[string::SmallCapacity];
+            auto const lc = l.chars();
+            auto const rc = r.chars();
+            std::copy(rc.begin(), rc.end(), std::copy(lc.begin(), lc.end(), text));
+            return make_small_string(std::u16string_view{ text, static_cast<std::size_t>(length) });
+        }
         if (length <= 32u)
         {
             std::u16string text;
             text.reserve(static_cast<std::size_t>(length));
-            text.append(l.flat());
-            text.append(r.flat());
+            text.append(l.chars());
+            text.append(r.chars());
             return make_string(std::move(text));
         }
         auto& s = the_heap().make<string>(aLeft, aRight, static_cast<std::uint32_t>(length));
@@ -351,6 +372,18 @@ namespace neos::javascript_runtime
         auto const count = number_characters(aNumber, digits);
         auto& s = cell_of<string>(aString);
         auto const length = static_cast<std::uint64_t>(s.length) + count;
+        if (length <= string::SmallCapacity)
+        {
+            char16_t text[string::SmallCapacity];
+            auto const sc = s.chars();
+            auto* p = text;
+            if (aNumberFirst)
+                p = std::copy(digits, digits + count, p);
+            p = std::copy(sc.begin(), sc.end(), p);
+            if (!aNumberFirst)
+                p = std::copy(digits, digits + count, p);
+            return make_small_string(std::u16string_view{ text, static_cast<std::size_t>(length) });
+        }
         if (length > 32u)
         {
             auto const n = make_string(std::u16string{ digits, count });
@@ -360,7 +393,7 @@ namespace neos::javascript_runtime
         text.reserve(static_cast<std::size_t>(length));
         if (aNumberFirst)
             text.append(digits, count);
-        text.append(s.flat());
+        text.append(s.chars());
         if (!aNumberFirst)
             text.append(digits, count);
         return make_string(std::move(text));

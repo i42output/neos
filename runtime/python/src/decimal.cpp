@@ -1857,7 +1857,6 @@ namespace neos::python_runtime
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
-                    auto const& d = value_of(aSelf);
                     std::string_view const name{ aName };
                     if (name == "real")
                         return borrowed(aSelf);
@@ -2421,19 +2420,6 @@ namespace neos::python_runtime
             int decimal_instancecheck(neos_py_context*, void*, object* aObject) { return is_decimal(aObject) ? 1 : 0; }
 
             // --- Context objects
-
-            std::string signals_text(unsigned aSignals)
-            {
-                std::string text = "[";
-                bool first = true;
-                for (std::size_t i = 0u; i < std::size(sSignalNames); ++i)
-                    if ((aSignals & (1u << i)) != 0u)
-                    {
-                        text += (first ? "" : ", ") + std::string{ sSignalNames[i] };
-                        first = false;
-                    }
-                return text + "]";
-            }
 
             // (a context's repr: libmpdec's order)
             std::string context_signals_text(unsigned aSignals)

@@ -92,7 +92,6 @@ namespace neos::python_runtime::detail
         py _(char const* aText) { return py{ aText }; }
         py ngettext(char const* aSingular, char const* aPlural, py const& aCount) { return py{ aCount == py{ 1 } ? aSingular : aPlural }; }
         bool is_str(py const& aValue) { return isinstance(aValue, builtin("str")); }
-        bool is_suppress(py const& aValue) { return aValue.is(state().SUPPRESS); }
         bool callable(py const& aValue) { return builtin("callable")(aValue).truthy(); }
 
         py attr_or(py const& aObject, char const* aName, py const& aDefault)

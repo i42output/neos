@@ -354,8 +354,7 @@ namespace neos::compilers::javascript
         bool numeric_update(reference const& aReference, bool aIncrement, bool aPostfix);
         bool numeric_assignment(reference const& aReference, node* aValue, std::string const& aOperator);
         binding* integer_binding(node* aNode);
-        void integer_remainder(binding& aDivisor, std::optional<std::pair<std::uint32_t, std::uint32_t>> const& aShadow = std::nullopt,
-            bool aZero = false);    ///< (the f64 on the stack % the binding (an integer); aZero: whether it is 0 (an i32))
+        void integer_remainder(node* aDividend, binding& aDivisor, bool aZero = false);    ///< (a % the binding (an integer); aZero: whether it is 0 (an i32))
         bool remainder_condition(node* aRemainder);     ///< (whether a remainder of an integer binding is 0 (an i32); false: not one)
         void f64_remainder(node* aDividend, node* aDivisor);  ///< (the two f64s on the stack: the remainder (as % computes it))
         intrinsic intrinsic_of(node* aNode) const;  ///< (a call that is compiled inline (see iIntrinsics))

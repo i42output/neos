@@ -145,7 +145,6 @@ namespace neos::python_runtime::detail
             return false;
         }
         py tuple_of(py const& aValue) { return is_tuple(aValue) ? aValue : py_tuple({ aValue }); }
-        std::vector<py> items_of(py const& aValue) { return aValue.items(); }
         py slice(py const& aSequence, std::optional<long long> aStart, std::optional<long long> aStop)
         {
             py const start = aStart ? py{ *aStart } : none();
@@ -845,8 +844,6 @@ namespace neos::python_runtime::detail
         bool is_dunder(std::string const& aAttribute) { return aAttribute.size() >= 4u && aAttribute.starts_with("__") && aAttribute.ends_with("__"); }
 
         // --- the special forms
-
-        py special_form_getitem(py const& self, py const& aParameters);
 
         // (a special form's subscription (its function's): aParameters as given)
         using special_form_function = std::function<py(py const& aSelf, py const& aParameters)>;

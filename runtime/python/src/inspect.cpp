@@ -1555,10 +1555,6 @@ namespace neos::python_runtime::detail
         {
             return aClass.call({ aName, aKind }, { { "default", aDefault }, { "annotation", aAnnotation } });
         }
-        py parameter(py const& aName, int aKind, py const& aDefault, py const& aAnnotation)
-        {
-            return make_parameter(cls("Parameter"), aName, kind(aKind), aDefault, aAnnotation);
-        }
 
         py parameter_init(std::vector<py> const& a)
         {

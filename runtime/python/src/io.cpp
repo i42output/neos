@@ -426,19 +426,6 @@ namespace neos::python_runtime
                 return make_str(std::move(text));
             }
 
-            // (the code points of UTF-8 text: its first aCount (a prefix's length in bytes))
-            std::size_t utf8_prefix(std::string_view aText, std::size_t aCount)
-            {
-                std::size_t i = 0u;
-                while (aCount > 0u && i < aText.size())
-                {
-                    auto const c = static_cast<unsigned char>(aText[i]);
-                    i += c < 0x80u ? 1u : c < 0xE0u ? 2u : c < 0xF0u ? 3u : 4u;
-                    --aCount;
-                }
-                return std::min(i, aText.size());
-            }
-
             object* file_read(file_object& f, long long aSize)
             {
                 if (!check_open(f))

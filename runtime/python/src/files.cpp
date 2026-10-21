@@ -58,9 +58,6 @@ namespace neos::python_runtime
         {
             // --- helpers
 
-            ref own(object* aObject) { return ref{ aObject }; }
-            ref str_ref(std::string aText) { return ref{ make_str(std::move(aText)) }; }
-
             // (a function of os (or of os.path: "path.name"))
             ref os_function(char const* aName)
             {

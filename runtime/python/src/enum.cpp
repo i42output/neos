@@ -178,15 +178,6 @@ namespace neos::python_runtime
                 return true;
             }
 
-            // (formatting with %: e.g. "%r is not a valid %s")
-            std::string format(char const* aFormat, std::vector<object*> aValues)    // (steals the values)
-            {
-                ref const f{ make_str(aFormat) };
-                ref const values{ make_tuple(std::move(aValues)) };
-                ref const r{ binary(NEOS_PY_REMAINDER, f.get(), values.get(), false) };
-                return r ? text_of(r.get()) : (clear_error(), std::string{});
-            }
-
             object* raise(char const* aType, std::string const& aMessage)
             {
                 return error(aType, aMessage);
@@ -1627,7 +1618,7 @@ namespace neos::python_runtime
                 if (!classdict)
                     return nullptr;
                 ref names{ aNames != nullptr ? new_reference(aNames) : new_reference(none()) };
-                if (auto const text = str_of_value(names.get()))
+                if (str_of_value(names.get()))
                 {
                     std::vector<object*> list;
                     if (!names_of(names.get(), list))

@@ -1573,7 +1573,6 @@ namespace neos::python_runtime::detail
                 { return py_guarded([&]() { return type_repr(arguments("_type_repr", aArgs, aKwargs, { "obj" }, 1u)[0]); }); } }
         };
 
-        object* sModuleObject = nullptr;
 
         bool make_abcs()
         {

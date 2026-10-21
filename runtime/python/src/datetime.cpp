@@ -2408,8 +2408,6 @@ namespace neos::python_runtime
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
 
-            object* timezone_class();
-
             neos_py_type make_timezone_type()
             {
                 auto type = make_type("datetime.timezone", "timezone", retain_object, release_object<timezone_object>);

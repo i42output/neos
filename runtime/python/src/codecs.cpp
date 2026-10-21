@@ -2047,18 +2047,6 @@ namespace neos::python_runtime
                 return ok;
             }
 
-            object* engine_decode_pair(codec_descriptor const& aCodec, object* aInput, std::string_view aErrors, bool aFinal)
-            {
-                std::string_view data;
-                if (!data_argument(aInput, data))
-                    return nullptr;
-                std::string result;
-                std::size_t consumed = 0u;
-                if (!engine_decode(aCodec, data, aErrors, aFinal, result, consumed))
-                    return nullptr;
-                return result_pair(make_str(std::move(result)), static_cast<long long>(consumed));
-            }
-
             // --- _codecs's functions (CPython's: builtins)
 
             object* codec_encode_function(char const* aName, codec_id aId, std::vector<object*> const& aArgs, object* aKwargs, bool aByteOrder = false)
@@ -2360,16 +2348,6 @@ namespace neos::python_runtime
                     return error("LookupError", "unknown encoding: " + std::string{ aEncoding });
                 lookup_cache()[normalized] = new_reference(result.get());
                 return new_reference(result.get());
-            }
-
-            // (a codec's function: info.encode or info.decode (CPython's codec_getitem))
-            object* codec_function(object* aEncoding, char const* aWhich)
-            {
-                std::string_view encoding;
-                if (!text_argument(aWhich, aEncoding, 1u, encoding))
-                    return nullptr;
-                ref const info{ registry_lookup(encoding) };
-                return info ? getattr(info.get(), aWhich) : nullptr;
             }
 
             // (codecs.encode and codecs.decode: any codec; the codec's exception has a note)

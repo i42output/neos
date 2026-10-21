@@ -101,7 +101,11 @@ namespace neos::javascript_runtime
         for (auto c : text)
             if (c >= 0x80u)
                 return std::numeric_limits<double>::quiet_NaN();
-        std::string ascii{ text.begin(), text.end() };
+        // (ASCII (above): each code unit a char)
+        std::string ascii;
+        ascii.reserve(text.size());
+        for (auto c : text)
+            ascii += static_cast<char>(c);
         if (ascii.size() > 2u && ascii[0] == '0')
         {
             int radix = 0;
@@ -169,6 +173,62 @@ namespace neos::javascript_runtime
         return utf16_ascii(es::number_to_string(aValue, aRadix));
     }
 
+    namespace
+    {
+        // (integers' digits: two at a time, from a table)
+        constexpr char sDigitPairs[] =
+            "0001020304050607080910111213141516171819202122232425262728293031323334353637383940414243444546474849"
+            "5051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+        inline void digit_pair(char16_t* aOut, std::uint32_t aValue)
+        {
+            aOut[0] = static_cast<char16_t>(sDigitPairs[aValue * 2u]);
+            aOut[1] = static_cast<char16_t>(sDigitPairs[aValue * 2u + 1u]);
+        }
+        // (exactly eight digits (with leading zeros): its halves are independent)
+        inline void eight_digits(char16_t* aOut, std::uint32_t aValue)
+        {
+            auto const high = aValue / 10000u;
+            auto const low = aValue % 10000u;
+            digit_pair(aOut, high / 100u);
+            digit_pair(aOut + 2, high % 100u);
+            digit_pair(aOut + 4, low / 100u);
+            digit_pair(aOut + 6, low % 100u);
+        }
+        // (the digits of a value below 10^8: their count)
+        inline std::size_t up_to_eight_digits(char16_t* aOut, std::uint32_t aValue)
+        {
+            auto const up_to_four = [](char16_t* aTo, std::uint32_t aFour) -> std::size_t
+            {
+                if (aFour < 10u)
+                {
+                    aTo[0] = static_cast<char16_t>(u'0' + aFour);
+                    return 1u;
+                }
+                if (aFour < 100u)
+                {
+                    digit_pair(aTo, aFour);
+                    return 2u;
+                }
+                if (aFour < 1000u)
+                {
+                    aTo[0] = static_cast<char16_t>(u'0' + aFour / 100u);
+                    digit_pair(aTo + 1, aFour % 100u);
+                    return 3u;
+                }
+                digit_pair(aTo, aFour / 100u);
+                digit_pair(aTo + 2, aFour % 100u);
+                return 4u;
+            };
+            if (aValue < 10000u)
+                return up_to_four(aOut, aValue);
+            auto const count = up_to_four(aOut, aValue / 10000u);
+            auto const low = aValue % 10000u;
+            digit_pair(aOut + count, low / 100u);
+            digit_pair(aOut + count + 2, low % 100u);
+            return count + 4u;
+        }
+    }
+
     std::size_t number_characters(double aValue, char16_t (&aBuffer)[32])
     {
         // (a safe integer's digits directly (the common case); else Number::toString's)
@@ -177,34 +237,20 @@ namespace neos::javascript_runtime
             auto const integer = static_cast<std::int64_t>(aValue);
             if (static_cast<double>(integer) == aValue)
             {
-                // (-0 is "0"; two digits at a time)
-                static constexpr char sPairs[] =
-                    "0001020304050607080910111213141516171819202122232425262728293031323334353637383940414243444546474849"
-                    "5051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
-                std::uint64_t magnitude = integer < 0 ? static_cast<std::uint64_t>(-integer) : static_cast<std::uint64_t>(integer);
-                char16_t reversed[20];
-                std::size_t count = 0u;
-                while (magnitude >= 100u)
-                {
-                    auto const pair = static_cast<std::size_t>(magnitude % 100u) * 2u;
-                    magnitude /= 100u;
-                    reversed[count++] = static_cast<char16_t>(sPairs[pair + 1u]);
-                    reversed[count++] = static_cast<char16_t>(sPairs[pair]);
-                }
-                if (magnitude >= 10u)
-                {
-                    auto const pair = static_cast<std::size_t>(magnitude) * 2u;
-                    reversed[count++] = static_cast<char16_t>(sPairs[pair + 1u]);
-                    reversed[count++] = static_cast<char16_t>(sPairs[pair]);
-                }
-                else
-                    reversed[count++] = static_cast<char16_t>(u'0' + magnitude);
-                std::size_t length = 0u;
+                // (-0 is "0"; below 2^53 an integer has at most 16 digits: up to eight, then eight)
+                auto const magnitude = integer < 0 ? static_cast<std::uint64_t>(-integer) : static_cast<std::uint64_t>(integer);
+                auto* p = aBuffer;
                 if (integer < 0)
-                    aBuffer[length++] = u'-';
-                while (count > 0u)
-                    aBuffer[length++] = reversed[--count];
-                return length;
+                    *p++ = u'-';
+                if (magnitude < 100000000u)
+                    p += up_to_eight_digits(p, static_cast<std::uint32_t>(magnitude));
+                else
+                {
+                    p += up_to_eight_digits(p, static_cast<std::uint32_t>(magnitude / 100000000u));
+                    eight_digits(p, static_cast<std::uint32_t>(magnitude % 100000000u));
+                    p += 8;
+                }
+                return static_cast<std::size_t>(p - aBuffer);
             }
         }
         auto const text = es::number_to_string(aValue);
@@ -219,7 +265,7 @@ namespace neos::javascript_runtime
             return index_key(static_cast<std::uint64_t>(aValue));
         char16_t buffer[32];
         auto const length = number_characters(aValue, buffer);
-        return make_string(std::u16string{ buffer, length });
+        return make_string(std::u16string_view{ buffer, length });
     }
 
     value to_string(value aValue)

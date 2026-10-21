@@ -165,13 +165,6 @@ namespace neos::python_runtime::detail
 
         // --- Python's statements
 
-        // (aException's context (as raise in an except clause sets it): aContext)
-        [[noreturn]] void raise_in_except(py const& aException, py const& aContext)
-        {
-            aException.set_attr("__context__", aContext);
-            py_raise(aException);
-        }
-
         // (try: aBody() finally: aFinally())
         template <typename Body, typename Final>
         py try_finally(Body&& aBody, Final&& aFinally)
@@ -1073,7 +1066,6 @@ namespace neos::python_runtime::detail
 #if defined(_WIN32)
                         struct _stat64 status{};
                         int const statResult = ::_fstat64(f.fd, &status);
-                        int const statError = errno;
                         bool const invalidHandle = statResult < 0 && ::GetLastError() == ERROR_INVALID_HANDLE;
 #else
                         struct stat status{};

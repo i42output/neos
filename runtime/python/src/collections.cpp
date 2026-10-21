@@ -53,7 +53,6 @@ namespace neos::python_runtime
     {
         namespace
         {
-            object* empty_tuple() { return make_tuple(); }
 
             object* call_with(object* aCallable, std::vector<object*> aArgs, object* aKwargs = nullptr)    // (steals the arguments)
             {
@@ -69,14 +68,6 @@ namespace neos::python_runtime
                     return as<str_object>(name.get())->value;
                 clear_error();
                 return type_name(aObject);
-            }
-
-            std::string repr_text(object* aObject)
-            {
-                std::string text;
-                if (!repr_of(aObject, text))
-                    return {};
-                return text;
             }
 
             object* dict_type() { return type_object_for("dict", "dict"); }

@@ -251,10 +251,16 @@ namespace neos::javascript_runtime
         string() : cell{ cell_type::String } {}
         explicit string(std::u16string aText) : cell{ cell_type::String }, text{ std::move(aText) }, length{ static_cast<std::uint32_t>(text.size()) } {}
         string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, left{ aLeft }, right{ aRight }, length{ aLength } {}
+        struct small_tag {};
+        string(small_tag, std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, smallText{ true }
+        {
+            std::copy(aText.begin(), aText.end(), small);
+        }
     public:
         void trace(tracer& aTracer) override;
     public:
         std::u16string const& flat();
+        std::u16string_view chars() { return smallText ? std::u16string_view{ small, length } : std::u16string_view{ flat() }; }  ///< (its code units (flat))
         std::size_t hash();
         std::int64_t array_index();     ///< (-1: not an array index)
     public:
@@ -268,12 +274,17 @@ namespace neos::javascript_runtime
         bool pinned = false;            ///< (interned for as long as the program runs (e.g. compiled code's literals); else an interned
                                         ///< string lives while it is referred to)
         std::int64_t arrayIndex = -2;   ///< (-2: not computed yet)
+        // (a short string's code units, in place (no memory of their own) until it is flattened (text is then made from them))
+        static constexpr std::size_t SmallCapacity = 16u;
+        bool smallText = false;
+        char16_t small[SmallCapacity];
     };
 
     inline constexpr std::uint32_t MaxStringLength = (1u << 30) - 25u;
 
     value make_string(std::u16string aText);
     value make_string(std::u16string_view aText);
+    value make_small_string(std::u16string_view aText);        ///< (at most string::SmallCapacity code units)
     value make_string_utf8(std::string_view aText);             ///< (WTF-8: surrogates are allowed; C0 80 is NUL)
     value make_string(char16_t aCharacter);
     value ascii(char const* aText);                             ///< (an interned string)
@@ -821,6 +832,7 @@ namespace neos::javascript_runtime
 
     neos_rt_host const* host();
     void* current_program();
+    void program_ended();                   ///< (the running program has ended: see neos_runtime_plugin_end)
     // the standard streams (aStream: 1 (output) or 2 (error)): the running program's, as its host gives them (they may be redirected, 
     // e.g. to a window: see neos_rt_host::std_write), else the process's (stdout and stderr)
     void write_standard(int aStream, std::string_view aText);

@@ -525,22 +525,35 @@ namespace neos::javascript_runtime
             return word;
         }
 
-        // (the program's globals that hold values that it may compare with others (e.g. a function that a call site calls directly):
-        // their values are kept (a value that was collected could be the same as a new one))
-        std::vector<unsigned long long*>& rooted_words()
+        // (the programs' globals that the runtime uses (until their programs end: see program_ended): mirrors of global bindings (see
+        // global_mirror) and words whose values are kept (that a program may compare with others, e.g. the function that a call site
+        // calls directly: a value that was collected could be the same as a new one))
+        struct program_word_use
         {
-            static std::vector<unsigned long long*> sWords;
+            void* program;
+            unsigned long long* word;
+            realm* mirrorRealm;     ///< (a mirror: its realm and name; else the word's value is kept)
+            value name;
+        };
+        std::vector<program_word_use>& program_words()
+        {
+            static std::vector<program_word_use> sWords;
             return sWords;
         }
         root_tracer const sWordRoots{ [](tracer& aTracer)
         {
-            for (auto* word : rooted_words())
-                aTracer.mark(static_cast<value>(*word));
+            for (auto const& w : program_words())
+            {
+                if (w.mirrorRealm == nullptr)
+                    aTracer.mark(static_cast<value>(*w.word));
+                else
+                    aTracer.mark(w.name);
+            }
         } };
 
         value global_root(std::int32_t aGlobal)
         {
-            rooted_words().push_back(program_word(aGlobal));
+            program_words().push_back(program_word_use{ current_program(), program_word(aGlobal), nullptr, 0u });
             return Undefined;
         }
 
@@ -554,6 +567,7 @@ namespace neos::javascript_runtime
             auto& r = the_realm();
             obj(r.global).mirrored = true;
             r.mirrors[name].push_back(word);
+            program_words().push_back(program_word_use{ current_program(), word, &r, name });
             global_mirror_update(r, name);
             return Undefined;
         }
@@ -895,6 +909,16 @@ namespace neos::javascript_runtime
                     throw_type_error("Cannot read properties of " + std::string{ aObject == Null ? "null" : "undefined" } + " (reading '" + utf8(aKey) + "')");
                 return get_v(aObject, aKey);
             });
+        }
+
+        value get_length(value aObject)
+        {
+            // (x.length: a string's or a (non-sparse) array's length directly; else as get_named gets it)
+            if (is_string(aObject))
+                return number(static_cast<double>(string_length(aObject)));
+            if (auto const* a = as_array(aObject); a != nullptr && !a->sparse)
+                return number(static_cast<double>(a->length));
+            return get_named(aObject, the_names().length);
         }
 
         value set(value aObject, value aKey, value aValue, std::int32_t aStrict)
@@ -1449,6 +1473,7 @@ namespace neos::javascript_runtime
             { "global_mirror", NEOS_RT_FUNCTION(global_mirror), I64, 2u, { I64, I32 }, 0u },
             { "global_root", NEOS_RT_FUNCTION(global_root), I64, 1u, { I32 }, 0u },
             { "concat_string_number", NEOS_RT_FUNCTION(concat_string_number), I64, 3u, { I64, I64, I32 }, 0u },
+            { "get_length", NEOS_RT_FUNCTION(get_length), I64, 1u, { I64 }, 0u },
             { "global_delete", NEOS_RT_FUNCTION(global_delete), I64, 1u, { I64 }, 0u },
             { "env_new", NEOS_RT_FUNCTION(env_new), I64, 2u, { I64, I32 }, 0u },
             { "env_copy", NEOS_RT_FUNCTION(env_copy), I64, 1u, { I64 }, 0u },
@@ -1583,5 +1608,31 @@ namespace neos::javascript_runtime
     std::span<neos_rt_function const> api_functions()
     {
         return api::sFunctions;
+    }
+
+    void program_ended()
+    {
+        // (the running program has ended (its globals are about to go): its mirrors are no longer kept (a global lexical binding whose
+        // value was its mirror has its value back) and the values of its words that were kept no longer are)
+        auto* const program = current_program();
+        auto& words = api::program_words();
+        for (auto const& w : words)
+        {
+            if (w.program != program || w.mirrorRealm == nullptr)
+                continue;
+            auto& r = *w.mirrorRealm;
+            if (auto const m = r.mirrors.find(w.name); m != r.mirrors.end())
+            {
+                std::erase(m->second, w.word);
+                if (m->second.empty())
+                    r.mirrors.erase(m);
+            }
+            if (auto const b = r.lexicals.find(w.name); b != r.lexicals.end() && b->second.slot == w.word)
+            {
+                b->second.stored = static_cast<value>(*w.word);
+                b->second.slot = nullptr;
+            }
+        }
+        std::erase_if(words, [&](api::program_word_use const& w) { return w.program == program; });
     }
 }

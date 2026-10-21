@@ -45,6 +45,9 @@
 // descriptor, family, type, protocol and timeout) is the module's (keyed by the object), as CPython's is in the object. Its operations release
 // the GIL while they wait (with a timeout, as CPython's do: the descriptor is non-blocking and poll() (Windows: select()) waits).
 
+#if defined(_WIN32) && !defined(_WINSOCK_DEPRECATED_NO_WARNINGS)
+#define _WINSOCK_DEPRECATED_NO_WARNINGS // (gethostbyname and gethostbyaddr: socket.gethostbyname's and socket.gethostbyaddr's, as CPython's)
+#endif
 #include "sockets.hpp"
 #if defined(_WIN32)
 #include <mstcpip.h>
@@ -325,8 +328,8 @@ namespace neos::python_runtime::detail
 #else
         char const* const sFsErrors = "surrogateescape";
 #endif
-        py fs_decode(py const& aBytes) { return aBytes.method("decode", { S("utf-8"), S(sFsErrors) }); }
-        py fs_encode(py const& aText) { return aText.method("encode", { S("utf-8"), S(sFsErrors) }); }
+        [[maybe_unused]] py fs_decode(py const& aBytes) { return aBytes.method("decode", { S("utf-8"), S(sFsErrors) }); }
+        [[maybe_unused]] py fs_encode(py const& aText) { return aText.method("encode", { S("utf-8"), S(sFsErrors) }); }
 
         // (PyArg_ParseTuple's check of the number of arguments)
         void check_count(char const* aFunction, std::size_t aCount, std::size_t aMin, std::size_t aMax)
@@ -613,7 +616,7 @@ namespace neos::python_runtime::detail
         }
 
         // (a new socket object (new_sockobject))
-        py new_sockobject(socket_type aFd, int aFamily, int aType, int aProto)
+        [[maybe_unused]] py new_sockobject(socket_type aFd, int aFamily, int aType, int aProto)
         {
             py const result = builtin("object").attr("__new__")(state().sockClass);
             init_sockobject(sock_of(result), aFd, aFamily, aType, aProto);

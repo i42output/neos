@@ -481,8 +481,6 @@ namespace neos::python_runtime
                 return binary(NEOS_PY_ADD, start.get(), scaled.get(), false);
             }
 
-            bool float_argument(object* aValue, double& aResult) { return to_double(aValue, aResult); }
-
             double normalvariate(random_object& r, double aMu, double aSigma)
             {
                 double const magic = 4.0 * std::exp(-0.5) / std::sqrt(2.0);

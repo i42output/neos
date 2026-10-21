@@ -2780,7 +2780,7 @@ namespace neos::python_runtime
                 }
                 return floatLeft ? order : -order;
             }
-            if (lk == NEOS_PY_COMPLEX && (rnum || rk == NEOS_PY_COMPLEX) || rk == NEOS_PY_COMPLEX && lnum)
+            if ((lk == NEOS_PY_COMPLEX && (rnum || rk == NEOS_PY_COMPLEX)) || (rk == NEOS_PY_COMPLEX && lnum))
             {
                 double ar = 0.0, ai = 0.0, br = 0.0, bi = 0.0;
                 if (lk == NEOS_PY_COMPLEX) { ar = as<complex_object>(aLhs)->real; ai = as<complex_object>(aLhs)->imag; } else to_double(aLhs, ar);

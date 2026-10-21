@@ -112,7 +112,6 @@ namespace neos::python_runtime::detail
         py boolean(bool aValue) { return py::boolean(aValue); }
         py S(char const* aText) { return py{ aText }; }
         bool is_str(py const& aValue) { return isinstance(aValue, builtin("str")); }
-        bool callable(py const& aValue) { return builtin("callable")(aValue).truthy(); }
 
         py attr_or(py const& aObject, char const* aName, py const& aDefault)
         {
@@ -128,9 +127,7 @@ namespace neos::python_runtime::detail
             }
         }
         bool has_attr(py const& aObject, py const& aName) { return builtin("hasattr")(aObject, aName).truthy(); }
-        py get_attr(py const& aObject, py const& aName) { return builtin("getattr")(aObject, aName); }
         py get_attr(py const& aObject, py const& aName, py const& aDefault) { return builtin("getattr")(aObject, aName, aDefault); }
-        void set_attr(py const& aObject, py const& aName, py const& aValue) { builtin("setattr")(aObject, aName, aValue); }
 
         // (the pending exception, if it is an instance of aClass: taken (aException); otherwise it remains raised)
         bool caught_instance(py const& aClass, py& aException)
@@ -145,13 +142,6 @@ namespace neos::python_runtime::detail
             return false;
         }
 
-        py dict_of(std::vector<std::pair<char const*, py>> const& aItems)
-        {
-            py const d = py_dict();
-            for (auto const& [k, v] : aItems)
-                d.set_item(py{ k }, v);
-            return d;
-        }
         py slice(py const& aSequence, std::optional<long long> aStart, std::optional<long long> aStop = std::nullopt)
         {
             py const start = aStart ? py{ *aStart } : none();
@@ -171,22 +161,6 @@ namespace neos::python_runtime::detail
         py join(char const* aSeparator, py const& aItems) { return py{ aSeparator }.method("join", { aItems }); }
         py list_of(py const& aIterable) { return builtin("list")(aIterable); }
         py sys_attr(char const* aName) { return import_attribute("sys", aName); }
-        // (for x in aIterable: aBody(x) (lazily: a generator's items as it makes them))
-        void for_each(py const& aIterable, std::function<void(py const&)> const& aBody)
-        {
-            py const it{ iter(aIterable.get()) };
-            for (;;)
-            {
-                auto const item = next(it.get());
-                if (item == nullptr)
-                {
-                    if (failed())
-                        throw raised{};
-                    break;
-                }
-                aBody(py{ item });
-            }
-        }
 
         // (a closure as a function of the module)
         py function(std::string const& aName, std::string const& aQualname, native_body aBody, char const* aDoc = "")
@@ -330,7 +304,6 @@ namespace neos::python_runtime::detail
         }
 
         py os_path(char const* aName) { return py{ fn_import("os") }.attr("path").attr(aName); }
-        py level(char const* aName) { return state().nameToLevel[S(aName)]; }
 
         py check_level(py const& aLevel)
         {

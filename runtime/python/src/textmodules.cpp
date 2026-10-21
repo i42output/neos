@@ -56,12 +56,6 @@ namespace neos::python_runtime
         {
             object* borrowed(object* aObject) { retain(aObject); return aObject; }
 
-            object* call_with(object* aCallable, std::vector<object*> aArgs, object* aKwargs = nullptr)    // (steals the arguments)
-            {
-                ref const args{ make_tuple(std::move(aArgs)) };
-                return call(aCallable, args.get(), aKwargs);
-            }
-
             // --- string
 
             std::string attribute_string(object* aObject, char const* aName, std::string const& aDefault)

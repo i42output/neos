@@ -1070,8 +1070,7 @@ namespace neos::compilers::javascript
             if (auto const mirror = iCompiler.global_mirror(aReference.name))
             {
                 // (the binding's mirror: its value; Empty: the slow way (uninitialized, an accessor, not found ...))
-                key(aReference.name);
-                drop();     // (the key's literal exists (the entry point creates the literals before it registers the mirrors))
+                iCompiler.literal_string(utf8_encoding(aReference.name));     // (the key's literal exists: the entry point registers the mirror with it)
                 op(opcode::GlobalGet);
                 u32(*mirror);
                 tee(iScratch);
@@ -3586,6 +3585,12 @@ namespace neos::compilers::javascript
         switch (aNode->kind)
         {
         case construct::Dot:
+            if (name_of(aNode->child(1u)) == "length")
+            {
+                // (x.length: a string's or an array's directly)
+                runtime("get_length", { I64 }, I64);
+                break;
+            }
             key(name_of(aNode->child(1u)));
             runtime("get_named", { I64, I64 }, I64);
             break;
@@ -3787,19 +3792,11 @@ namespace neos::compilers::javascript
                 release(v);
             return;
         }
-        auto const arguments = [&]()
-        {
-            for (std::uint32_t i = 0u; i < RegisterArguments; ++i)
-            {
-                if (i < values.size())
-                    get(values[i]);
-                else
-                    undefined();
-            }
-        };
         if (aKnown != nullptr)
         {
-            // (the function that the callee probably is (its function object): called directly)
+            // (the function that the callee probably is (its function object): called directly; what it does not read (new.target,
+            // arguments beyond its parameters) is passed as 0)
+            bool const reads = !aKnown->simpleParameters || aKnown->usesArguments || aKnown->directEval;
             get(aCallee);
             op(opcode::GlobalGet);
             u32(iCompiler.function_closure(*aKnown));
@@ -3809,9 +3806,20 @@ namespace neos::compilers::javascript
             iControls.push_back(control{ control_kind::Block });
             get(aCallee);
             get(aThis);
-            undefined();
+            if (reads || aKnown->usesNewTarget)
+                undefined();
+            else
+                i64(0);
             i32(static_cast<std::int32_t>(argc));
-            arguments();
+            for (std::uint32_t i = 0u; i < RegisterArguments; ++i)
+            {
+                if (i < values.size())
+                    get(values[i]);
+                else if (reads || i < aKnown->length)
+                    undefined();
+                else
+                    i64(0);
+            }
             call(aKnown->index);
             op(opcode::Else);
         }
@@ -7043,16 +7051,7 @@ namespace neos::compilers::javascript
         case construct::Remainder:
             if (auto* const divisor = integer_binding(aNode->child(1u)))
             {
-                auto const* x = unparenthesized(aNode->child(0u));
-                if (auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end(); name != iNumericNames.end())
-                    if (auto const shadow = iIntegralShadows.find(name->second); shadow != iIntegralShadows.end())
-                    {
-                        numeric(aNode->child(0u));
-                        integer_remainder(*divisor, shadow->second);
-                        return;
-                    }
-                numeric(aNode->child(0u));
-                integer_remainder(*divisor);
+                integer_remainder(aNode->child(0u), *divisor);
                 return;
             }
             numeric(aNode->child(0u));
@@ -7417,75 +7416,125 @@ namespace neos::compilers::javascript
         auto* const divisor = integer_binding(r->child(1u));
         if (divisor == nullptr || num_type(r->child(0u)) == numeric_rep::None)
             return false;
-        std::optional<std::pair<std::uint32_t, std::uint32_t>> shadow;
-        auto const* x = unparenthesized(r->child(0u));
-        if (auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end(); name != iNumericNames.end())
-            if (auto const s = iIntegralShadows.find(name->second); s != iIntegralShadows.end())
-                shadow = s->second;
-        numeric(r->child(0u));
-        integer_remainder(*divisor, shadow, true);
+        integer_remainder(r->child(0u), *divisor, true);
         return true;
     }
 
-    void function_generator::integer_remainder(binding& aDivisor, std::optional<std::pair<std::uint32_t, std::uint32_t>> const& aShadow, bool aZero)
+    void function_generator::integer_remainder(node* aDividend, binding& aDivisor, bool aZero)
     {
-        // (an f64 (on the stack) % an integer binding: of an integer dividend below 2^53 (in magnitude) and a divisor that is neither 0 nor
-        // -1, the integers' remainder with the dividend's sign (a zero remainder too); else the runtime's)
-        auto const a = temporary(F64);
-        set(a);
-        auto const b = temporary(I64);
-        get(aDivisor.slot);
-        counter_value(&aDivisor);
-        if (rep_of(&aDivisor) == numeric_rep::I32)
-            op(opcode::I64SConvertI32);
-        set(b);
-        if (aShadow)
-            get(aShadow->second);   // (the dividend's integer value is known (see integral_shadows))
+        // (a % an integer binding: of an integer dividend below 2^53 (in magnitude) and a divisor that is neither 0 nor -1, the integers'
+        // remainder with the dividend's sign (a zero remainder too); else the runtime's. aZero: whether it is 0 (an i32). An invariant
+        // dividend's integer value is known (see integral_shadows); a counter that needs no clamp is its local)
+        std::optional<std::pair<std::uint32_t, std::uint32_t>> shadow;
+        binding const* dividend = nullptr;
+        auto const* x = unparenthesized(aDividend);
+        if (auto const name = x->is(construct::Identifier) ? iNumericNames.find(x) : iNumericNames.end(); name != iNumericNames.end())
+            if (auto const s = iIntegralShadows.find(name->second); s != iIntegralShadows.end())
+            {
+                shadow = s->second;
+                dividend = name->second;
+            }
+        std::optional<std::uint32_t> a;
+        if (!shadow)
+        {
+            numeric(aDividend);
+            a = temporary(F64);
+            set(*a);
+        }
+        auto const dividend_value = [&]()
+        {
+            if (a)
+                get(*a);
+            else
+                get(dividend->slot);
+        };
+        bool const rawDivisor = rep_of(&aDivisor) == numeric_rep::I64 && (monotone(&aDivisor) == 0 || iBoundedCounters.contains(&aDivisor));
+        std::optional<std::uint32_t> b;
+        if (!rawDivisor)
+        {
+            b = temporary(I64);
+            get(aDivisor.slot);
+            counter_value(&aDivisor);
+            if (rep_of(&aDivisor) == numeric_rep::I32)
+                op(opcode::I64SConvertI32);
+            set(*b);
+        }
+        auto const divisor_value = [&]()
+        {
+            get(b ? *b : aDivisor.slot);
+        };
+        if (aZero)
+        {
+            // (block (i32) { block { br_if 0 (not integers: the runtime's); the integers' remainder is 0; br 1 } the runtime's is 0 }: a
+            // condition that the code generator (see condition blocks) can branch on directly)
+            op(opcode::Block);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            op(opcode::Block);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+        }
+        if (shadow)
+            get(shadow->second);
         else
         {
-            get(a);
+            get(*a);
             op(opcode::F64Abs);
             f64(SafeInteger);
             op(opcode::F64Lt);
-            get(a);
-            get(a);
+            get(*a);
+            get(*a);
             op(opcode::F64Trunc);
             op(opcode::F64Eq);
             op(opcode::I32And);
         }
         if (!iPositiveCounters.contains(&aDivisor))
         {
-            get(b);
+            divisor_value();
             i64(1);
             op(opcode::I64Add);
             i64(1);
             op(opcode::I64GtU);
             op(opcode::I32And);
         }
-        op(opcode::If);
-        iCode.push_back(aZero ? 0x7Fu : 0x7Cu);     // (i32 or f64)
-        iControls.push_back(control{ control_kind::Block });
-        if (aShadow)
-            get(aShadow->first);
+        if (aZero)
+        {
+            op(opcode::I32Eqz);
+            op(opcode::BrIf);
+            u32(0u);
+        }
         else
         {
-            get(a);
+            op(opcode::If);
+            iCode.push_back(0x7Cu);     // (f64)
+            iControls.push_back(control{ control_kind::Block });
+        }
+        if (shadow)
+            get(shadow->first);
+        else
+        {
+            get(*a);
             op(opcode::I64SConvertF64);
         }
-        get(b);
+        divisor_value();
         op(opcode::I64RemS);
         if (aZero)
+        {
             op(opcode::I64Eqz);
+            op(opcode::Br);
+            u32(1u);
+            end_control();
+        }
         else
         {
             op(opcode::F64SConvertI64);
-            get(a);
+            dividend_value();
             op(opcode::F64CopySign);
+            op(opcode::Else);
         }
-        op(opcode::Else);
-        get(a);
+        dividend_value();
         op(opcode::I64ReinterpretF64);
-        get(b);
+        divisor_value();
         op(opcode::F64SConvertI64);
         op(opcode::I64ReinterpretF64);
         runtime("remainder", { I64, I64 }, I64);
@@ -7497,8 +7546,10 @@ namespace neos::compilers::javascript
             op(opcode::F64Eq);
         }
         end_control();
-        release(b);
-        release(a);
+        if (b)
+            release(*b);
+        if (a)
+            release(*a);
     }
 
     void function_generator::f64_remainder(node* aDividend, node* aDivisor)

@@ -1075,8 +1075,6 @@ namespace neos::python_runtime::detail
         }
 
         // (traceback._levenshtein_distance: Python's (of characters))
-        py char_lower(std::string const& aChar) { return py{ aChar }.method("lower"); }
-
         std::size_t substitution_cost(py const& a, py const& b)
         {
             if (a == b)

@@ -796,7 +796,7 @@ namespace neos::python_runtime
                         if (!parse_arguments("mappingproxy", tuple_items(aArgs), aKwargs, { "mapping" }, 1u, 0u, a))
                             return nullptr;
                         auto const k = kind_of(a[0]);
-                        if (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || !has_special_method(a[0], "keys") && k != NEOS_PY_DICT && kind_of(builtin_value(a[0])) != NEOS_PY_DICT)
+                        if (k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || (!has_special_method(a[0], "keys") && k != NEOS_PY_DICT && kind_of(builtin_value(a[0])) != NEOS_PY_DICT))
                             return error("TypeError", std::string{ "mappingproxy() argument must be a mapping, not " } + type_name(a[0]));
                         return make_mapping_proxy(a[0]);
                     }, nullptr, nullptr));

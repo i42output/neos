@@ -119,7 +119,7 @@ namespace neos::python_runtime::detail
         }
 
         // (an int as a C unsigned short (_PyLong_UnsignedShort_Converter))
-        unsigned short as_unsigned_short(py const& aValue)
+        [[maybe_unused]] unsigned short as_unsigned_short(py const& aValue)
         {
             if (kind_of(aValue.get()) == NEOS_PY_INT && aValue < py{ 0 })
                 py_raise("ValueError", "value must be positive");
@@ -131,7 +131,7 @@ namespace neos::python_runtime::detail
         }
 
         // (an int's low bits as a C unsigned int (unsigned_int(bitwise=True): PyLong_AsUnsignedLongMask))
-        unsigned int as_unsigned_int_mask(py const& aValue)
+        [[maybe_unused]] unsigned int as_unsigned_int_mask(py const& aValue)
         {
             py const index = import_attribute("operator", "index")(aValue);
             return static_cast<unsigned int>((index & py{ 0xFFFFFFFFLL }).as_index());
@@ -166,7 +166,7 @@ namespace neos::python_runtime::detail
         using namespace_type = std::vector<std::pair<char const*, py>>;
 
         // (a class of the module: type(aName, (object,), namespace))
-        py make_select_class(char const* aName, namespace_type const& aNamespace, char const* aDoc)
+        [[maybe_unused]] py make_select_class(char const* aName, namespace_type const& aNamespace, char const* aDoc)
         {
             py const ns = py_dict();
             ns.set_item(S("__module__"), S(sModule));
@@ -824,7 +824,7 @@ namespace neos::python_runtime::detail
 #endif
                 }
                 auto const add = [&](char const* aName, py const& aValue) { aAttributes.emplace_back(aName, aValue.reference()); };
-                auto const add_int = [&](char const* aName, long long aValue) { add(aName, py{ aValue }); };
+                [[maybe_unused]] auto const add_int = [&](char const* aName, long long aValue) { add(aName, py{ aValue }); };
                 add("__doc__", S("This module supports asynchronous I/O on multiple file descriptors.\n\n*** IMPORTANT NOTICE ***\n"
                     "On Windows, only sockets are supported; on Unix, all file descriptors."));
                 add("error", builtin("OSError"));

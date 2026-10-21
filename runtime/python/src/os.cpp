@@ -647,8 +647,6 @@ namespace neos::python_runtime
 
             // --- os.path functions
 
-            path_rules const& rules_of(void* aData) { return *static_cast<path_rules const*>(aData); }
-
             struct path_function
             {
                 char const* name;
@@ -1346,7 +1344,8 @@ namespace neos::python_runtime
             {
 #if defined(_WIN32)
                 std::error_code ec;
-                std::filesystem::directory_iterator it{ std::filesystem::u8path(aPath.empty() ? "." : aPath), ec };
+                std::string const path = aPath.empty() ? "." : aPath;
+                std::filesystem::directory_iterator it{ std::filesystem::path{ std::u8string_view{ reinterpret_cast<char8_t const*>(path.data()), path.size() } }, ec };
                 if (ec)
                 {
                     aErrno = ec.value() == static_cast<int>(std::errc::no_such_file_or_directory) || ec.value() == 2 || ec.value() == 3 ? ENOENT :
