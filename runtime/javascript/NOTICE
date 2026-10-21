@@ -92,3 +92,13 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 SPDX-License-Identifier: Unicode-3.0
+
+TC39 proposal-math-sum (src/builtins_basic.cpp)
+-----------------------------------------------
+
+Math.sumPrecise (math_sum_precise) follows the algorithm of the proposal's
+reference implementation (https://github.com/tc39/proposal-math-sum,
+polyfill/polyfill.mjs, by Kevin Gibbons): Shewchuk's exact summation with its
+handling of intermediate overflow (partials kept as multiples of 2^1024) and
+of the final rounding. Changes: translated from JavaScript to C++. (The
+repository has no licence file of its own.)

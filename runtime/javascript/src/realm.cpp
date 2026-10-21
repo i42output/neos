@@ -35,6 +35,7 @@
 
 #include "js.hpp"
 #include "api.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -42,6 +43,7 @@ namespace neos::javascript_runtime
     {
         realm* sRealm = nullptr;            // (the first realm: the program's)
         thread_local realm* tCurrent = nullptr;
+        thread_local realm* tCaller = nullptr;
         names* sNames = nullptr;
 
         std::unordered_map<std::u16string, value>& symbol_registry()
@@ -51,6 +53,39 @@ namespace neos::javascript_runtime
         }
 
         void initialize(realm& r);
+
+        // (the realms: they live as long as the program)
+        std::vector<realm*>& realms()
+        {
+            static std::vector<realm*> sRealms;
+            return sRealms;
+        }
+
+        root_tracer const sRealmRoots{ [](tracer& aTracer)
+        {
+            for (auto* r : realms())
+            {
+                // (its values (intrinsics, well-known symbols ...) are the words of the structure; its maps' values)
+                aTracer.conservative(r, r + 1);
+                for (auto const& t : r->templates)
+                    aTracer.mark(t.second);
+                for (auto const& [name, binding] : r->lexicals)
+                {
+                    aTracer.mark(name);
+                    aTracer.mark(binding.v);
+                }
+            }
+            for (auto const& entry : symbol_registry())
+                aTracer.mark(entry.second);
+        } };
+    }
+
+    bool is_object_prototype(object const& aObject)
+    {
+        for (auto* r : realms())
+            if (r->objectPrototype != Undefined && &obj(r->objectPrototype) == &aObject)
+                return true;
+        return false;
     }
 
     realm& the_realm()
@@ -63,8 +98,9 @@ namespace neos::javascript_runtime
         return sRealm != nullptr;
     }
 
-    realm_scope::realm_scope(realm* aRealm) : iPrevious{ tCurrent }
+    realm_scope::realm_scope(realm* aRealm) : iPrevious{ tCurrent }, iPreviousCaller{ tCaller }
     {
+        tCaller = &the_realm();
         if (aRealm != nullptr)
             tCurrent = aRealm;
     }
@@ -72,6 +108,7 @@ namespace neos::javascript_runtime
     realm_scope::~realm_scope()
     {
         tCurrent = iPrevious;
+        tCaller = iPreviousCaller;
     }
 
     realm* exchange_realm(realm* aRealm)
@@ -79,9 +116,21 @@ namespace neos::javascript_runtime
         return std::exchange(tCurrent, aRealm);
     }
 
+    realm* exchange_caller_realm(realm* aRealm)
+    {
+        return std::exchange(tCaller, aRealm);
+    }
+
+    realm& caller_realm()
+    {
+        return tCaller != nullptr ? *tCaller : the_realm();
+    }
+
     realm* create_realm()
     {
+        gc_pause const pause;
         auto* r = new realm{ .registry = symbol_registry() };
+        realms().push_back(r);
         realm_scope scope{ r };
         initialize(*r);
         return r;
@@ -95,8 +144,9 @@ namespace neos::javascript_runtime
             auto& o = obj(p);
             if (o.cls == object_class::Proxy)
             {
-                proxy_function_realm(p);
-                break;
+                proxy_function_realm(p);    // (throws if revoked)
+                p = proxy_target(p);
+                continue;
             }
             auto* f = as_function(p);
             if (f == nullptr)
@@ -120,6 +170,7 @@ namespace neos::javascript_runtime
 
     void initialize_realm()
     {
+        gc_pause const pause;
         sNames = new names{};
         auto& n = *sNames;
         n.length = ascii("length");
@@ -176,6 +227,7 @@ namespace neos::javascript_runtime
         n.entries = ascii("entries");
 
         sRealm = new realm{ .registry = symbol_registry() };
+        realms().push_back(sRealm);
         initialize(*sRealm);
     }
 

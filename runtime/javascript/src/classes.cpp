@@ -63,6 +63,24 @@ namespace neos::javascript_runtime
         public:
             class_definition() : cell{ cell_type::Internal } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                for (auto const* methods : { &instanceMethods, &staticMethods })
+                    for (auto const& m : *methods)
+                    {
+                        aTracer.mark(m.key);
+                        aTracer.mark(m.method);
+                        aTracer.mark(m.getter);
+                        aTracer.mark(m.setter);
+                    }
+                for (auto const* elements : { &instanceFields, &staticElements })
+                    for (auto const& e : *elements)
+                    {
+                        aTracer.mark(e.key);
+                        aTracer.mark(e.function);
+                    }
+            }
+        public:
             std::vector<private_method> instanceMethods;
             std::vector<private_method> staticMethods;
             std::vector<class_element> instanceFields;
@@ -271,7 +289,7 @@ namespace neos::javascript_runtime
         auto& d = definition_of(function_of(aConstructor));
         for (auto const& m : d.staticMethods)
             private_method_add(aConstructor, m);
-        auto const elements = std::move(d.staticElements);
+        rooted_vector<class_element> const elements{ d.staticElements.begin(), d.staticElements.end() };
         d.staticElements.clear();
         for (auto const& e : elements)
         {

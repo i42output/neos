@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 7
+#define NEOS_RUNTIME_PLUGIN_VERSION 8
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -248,6 +248,15 @@ typedef struct neos_rt_host
        follow it): the first aCount of them (or all, if there are fewer) are stored in aArguments (valid until the process ends); 
        returns how many there are */
     unsigned (*arguments)(char const** aArguments, unsigned aCount);
+    /* (version 8) the values that the interpreter holds for the program's frames (their locals and operand stacks), e.g. for a
+       language runtime's garbage collector: aVisit(aData, values, count) is called for each run of them (64 bit words: a value of
+       a narrower type is in the low bits of its word); aCoroutine NULL: the frames of the calling thread's running code (the
+       programs it is running, across the coroutines that resumed the one it is running), else those of a suspended coroutine.
+       Native code's (JIT) frames are on the native stack of their thread (or coroutine): none of their values are visited */
+    void (*values)(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData);
+    /* (version 8) load, with the source's length (aSourceLength bytes: the source may contain NUL characters) */
+    void* (*load_n)(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
+        char const** aError);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

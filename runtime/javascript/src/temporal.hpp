@@ -460,6 +460,8 @@ namespace neos::javascript_runtime::temporal
         time_record time;               ///< (PlainTime, PlainDateTime)
         time_zone timeZone;             ///< (ZonedDateTime)
         duration_fields duration;       ///< (Duration)
+    public:
+        void trace(tracer& aTracer) override;   ///< (temporal_objects.cpp: its time zone's identifier too)
     };
 
     inline temporal_object* as_temporal(value aValue, object_class aClass)

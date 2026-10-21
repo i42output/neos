@@ -3736,7 +3736,16 @@ namespace neos::language
         for (auto const& outputLine : lines)
         {
             if (std::abs(static_cast<int>(line - lineNumber)) <= 5)
-                oss << std::setw(numberWidth) << lineNumber << (lineNumber == line ? ">" : "|") << outputLine << std::endl;
+            {
+                // (a NUL is shown escaped: the report is printed as a C string)
+                std::string shown;
+                for (auto const c : outputLine)
+                    if (c == '\0')
+                        shown += "\\0";
+                    else
+                        shown += c;
+                oss << std::setw(numberWidth) << lineNumber << (lineNumber == line ? ">" : "|") << shown << std::endl;
+            }
             ++lineNumber;
         }
         oss << std::string(col + numberWidth, '-') << "^" << std::endl;

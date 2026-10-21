@@ -214,7 +214,7 @@ namespace neos::javascript_runtime
         value own_keys(value aValue, bool aSymbols)
         {
             auto const o = to_object(aValue);
-            std::vector<value> result;
+            value_list result;
             for (auto const key : obj(o).own_property_keys())
                 if (is_symbol(key) == aSymbols)
                     result.push_back(key);
@@ -271,7 +271,7 @@ namespace neos::javascript_runtime
                 throw_type_error("Object.groupBy called on null or undefined");
             if (!is_callable(callback))
                 throw_type_error(describe(callback) + " is not a function");
-            std::vector<std::pair<value, std::vector<value>>> groups;
+            rooted_vector<std::pair<value, value_list>> groups;
             auto record = get_iterator(items);
             double k = 0.0;
             while (auto const next = iterator_step_value(record))
@@ -289,7 +289,7 @@ namespace neos::javascript_runtime
                 }
                 auto existing = std::find_if(groups.begin(), groups.end(), [&](auto const& g) { return same_value(g.first, key); });
                 if (existing == groups.end())
-                    groups.emplace_back(key, std::vector<value>{ *next });
+                    groups.emplace_back(key, value_list{ *next });
                 else
                     existing->second.push_back(*next);
                 ++k;
@@ -343,7 +343,7 @@ namespace neos::javascript_runtime
             return to_object(aThis);
         }
 
-        value object_prototype_to_string(value aThis, arguments, value, function_object&)
+        value object_prototype_to_string_of(value aThis)
         {
             if (aThis == Undefined)
                 return ascii("[object Undefined]");
@@ -455,12 +455,23 @@ namespace neos::javascript_runtime
         {
             return lookup_accessor(aThis, argument(aArguments, 0u), false);
         }
+
+        value object_prototype_to_string(value aThis, arguments, value, function_object&)
+        {
+            return object_prototype_to_string_of(aThis);
+        }
+    }
+
+    value object_prototype_to_string_value(value aObject)
+    {
+        // (%Object.prototype.toString% itself (Array.prototype.toString's fallback))
+        return object_prototype_to_string_of(aObject);
     }
 
     void object_define_properties(value aObject, value aProperties)
     {
         auto const props = to_object(aProperties);
-        std::vector<std::pair<value, property_descriptor>> descriptors;
+        rooted_vector<std::pair<value, property_descriptor>> descriptors;
         for (auto const key : obj(props).own_property_keys())
         {
             auto const desc = obj(props).get_own_property(key);

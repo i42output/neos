@@ -357,6 +357,7 @@ namespace neos
                     machine const* program = nullptr;
                     jit::compiled_module const* native = nullptr;
                     std::vector<frame> const* frames = nullptr;     ///< (the interpreter's)
+                    std::vector<value> const* stack = nullptr;      ///< (the interpreter's operand stack)
                     jit::invocation invocation;                     ///< (generated code's)
                     void* context = nullptr;                        ///< (its program's (see neos_rt_host::thread_context), once known)
                 };
@@ -366,12 +367,14 @@ namespace neos
                 struct activation_scope
                 {
                     activation a;
-                    activation_scope(machine const* aProgram, jit::compiled_module const* aNative, std::vector<frame> const* aFrames)
+                    activation_scope(machine const* aProgram, jit::compiled_module const* aNative, std::vector<frame> const* aFrames,
+                        std::vector<value> const* aStack = nullptr)
                     {
                         a.previous = tActivation;
                         a.program = aProgram;
                         a.native = aNative;
                         a.frames = aFrames;
+                        a.stack = aStack;
                         tActivation = &a;
                     }
                     ~activation_scope() { tActivation = a.previous; }
@@ -566,7 +569,7 @@ namespace neos
                         }
                         std::vector<value> stack;
                         std::vector<frame> frames;
-                        activation_scope const activating{ this, nullptr, &frames };
+                        activation_scope const activating{ this, nullptr, &frames, &stack };
                         decoded_reader code{ iTokens };
                         auto enter = [&](std::uint32_t aCallee, std::vector<value> aCallArguments)
                         {
@@ -1273,6 +1276,21 @@ namespace neos
                             throw trap{ "out of bounds memory access" };
                         return std::string_view{ reinterpret_cast<char const*>(&iMemory[aAddress + StringHeaderSize]), length };
                     }
+                    // memory (zeroed) of a size (e.g. an object's)
+                    std::uint32_t allocate(std::uint32_t aBytes)
+                    {
+                        if (!iHeap)
+                            iHeap = global("__heap_base");
+                        auto const address = *iHeap;
+                        auto const end = (static_cast<std::uint64_t>(address) + aBytes + 7u) & ~std::uint64_t{ 7u };
+                        if (end > 0xFFFFFFFFu)
+                            throw trap{ "out of memory" };
+                        *iHeap = static_cast<std::uint32_t>(end);
+                        if (*iHeap > iMemory.size())
+                            resize_memory((*iHeap / 65536u + 1u) * 65536u);
+                        std::memset(&iMemory[address], 0, static_cast<std::size_t>(end - address));
+                        return address;
+                    }
                     // memory for a string (its characters are then written)
                     std::uint32_t new_string(std::uint64_t aBytes, std::uint32_t aUtf16Units, std::uint32_t aCodePoints)
                     {
@@ -1536,6 +1554,7 @@ namespace neos
                         ObjectRelease,
                         Raise,
                         Exit,
+                        Allocate,
                         Checked,
                         Runtime
                     };
@@ -1556,7 +1575,8 @@ namespace neos
                             { "neos::object_retain", import_kind::ObjectRetain },
                             { "neos::object_release", import_kind::ObjectRelease },
                             { "neos::raise", import_kind::Raise },  // (an error: the program stops)
-                            { "neos::exit", import_kind::Exit }     // (the program stops: its exit status)
+                            { "neos::exit", import_kind::Exit },    // (the program stops: its exit status)
+                            { "neos::allocate", import_kind::Allocate } // (memory (zeroed) of a size: its address)
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
@@ -1750,6 +1770,9 @@ namespace neos
                             throw trap{ read_string(as_u32(aBuffer[0])) };
                         case import_kind::Exit:
                             throw exit_request{ static_cast<std::int32_t>(as_i32(aBuffer[0])) };
+                        case import_kind::Allocate:
+                            aBuffer[0] = of_u32(allocate(as_u32(aBuffer[0])));
+                            break;
                         case import_kind::Checked:
                             {
                                 auto const code = *jit::checked_arithmetic(*iFunctions.at(aFunction).import);
@@ -2073,15 +2096,19 @@ namespace neos
 
                 void* host_thread_context()
                 {
-                    // (one context for each program and its native code)
+                    // (one context for each program and its native code (the contexts are never removed: the thread's last one is
+                    // remembered, so that a runtime plugin that asks again (e.g. for each call) does not take the lock))
                     static std::mutex sMutex;
                     static std::list<running> sContexts;
+                    thread_local running* tLast = nullptr;
+                    if (tLast != nullptr && tLast->program == tRunning.program && tLast->native == tRunning.native)
+                        return tLast;
                     std::lock_guard<std::mutex> lock{ sMutex };
                     for (auto& r : sContexts)
                         if (r.program == tRunning.program && r.native == tRunning.native)
-                            return &r;
+                            return tLast = &r;
                     sContexts.push_back(tRunning);
-                    return &sContexts.back();
+                    return tLast = &sContexts.back();
                 }
 
                 void host_thread_attach(void* aContext)
@@ -2117,7 +2144,8 @@ namespace neos
                     return sPrograms;
                 }
 
-                void* host_load(char const* aLanguage, char const* aSource, char const* aSourceName, char const* aOptions, char const** aError)
+                void* host_load_n(char const* aLanguage, char const* aSource, size_t aSourceLength, char const* aSourceName, char const* aOptions,
+                    char const** aError)
                 {
                     thread_local std::string tError;
                     auto fail = [&](std::string aMessage) -> void*
@@ -2142,7 +2170,8 @@ namespace neos
                         auto const running = tRunning;
                         try
                         {
-                            compiled = the_compile_service()(aLanguage, aSource, aSourceName != nullptr ? aSourceName : "", aOptions != nullptr ? aOptions : "", error);
+                            compiled = the_compile_service()(aLanguage, std::string{ aSource, aSourceLength }, aSourceName != nullptr ? aSourceName : "",
+                                aOptions != nullptr ? aOptions : "", error);
                         }
                         catch (std::exception const& e)
                         {
@@ -2172,6 +2201,11 @@ namespace neos
                     {
                         return fail(e.what());
                     }
+                }
+
+                void* host_load(char const* aLanguage, char const* aSource, char const* aSourceName, char const* aOptions, char const** aError)
+                {
+                    return host_load_n(aLanguage, aSource, std::strlen(aSource), aSourceName, aOptions, aError);
                 }
 
                 char const* host_run(void* aContext, neos_rt_type aResult, neos_rt_value* aResultValue)
@@ -2267,6 +2301,38 @@ namespace neos
                     return count;
                 }
 
+                // (the interpreter's values of activations: their frames' locals and their operand stacks)
+                void visit_values(activation const* aActivation, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
+                {
+                    static_assert(sizeof(value) == sizeof(unsigned long long));
+                    for (auto* a = aActivation; a != nullptr; a = a->previous)
+                    {
+                        if (a->frames != nullptr)
+                            for (auto const& f : *a->frames)
+                                if (!f.locals.empty())
+                                    aVisit(aData, reinterpret_cast<unsigned long long const*>(f.locals.data()), f.locals.size());
+                        if (a->stack != nullptr && !a->stack->empty())
+                            aVisit(aData, reinterpret_cast<unsigned long long const*>(a->stack->data()), a->stack->size());
+                    }
+                }
+
+                void host_values(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
+                {
+                    if (aVisit == nullptr)
+                        return;
+                    if (aCoroutine != nullptr)
+                    {
+                        auto const& c = *reinterpret_cast<coroutine const*>(aCoroutine);
+                        if (!c.finished && c.activations != nullptr)
+                            visit_values(c.activations, aVisit, aData);
+                        return;
+                    }
+                    // (the running code's: then that of the code that resumed the coroutine running, and so on)
+                    visit_values(tActivation, aVisit, aData);
+                    for (auto* c = tCoroutine; c != nullptr; c = c->previous)
+                        visit_values(c->resumerActivations, aVisit, aData);
+                }
+
                 unsigned host_function_frame(void* aContext, unsigned aFunction, neos_rt_frame* aFrame)
                 {
                     auto const& context = aContext != nullptr ? *static_cast<running const*>(aContext) : tRunning;
@@ -2303,7 +2369,7 @@ namespace neos
 
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
-                    host_function_frame, host_arguments };
+                    host_function_frame, host_arguments, host_values, host_load_n };
             }
 
             void const* runtime::host()

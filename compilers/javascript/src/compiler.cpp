@@ -44,10 +44,17 @@ namespace neos::compilers::javascript
         iKind = code_kind::Script;
         iEvalFlags = 0u;
         iModuleMain = false;
+        iEvalPrivateNames.clear();
         if (options.starts_with("eval:"))
         {
+            // ("eval:<flags>[:#name...]": the private names of the classes that enclose the call)
             iKind = code_kind::DirectEval;
             iEvalFlags = static_cast<std::uint32_t>(std::stoul(options.substr(5u)));
+            for (auto p = options.find(":#", 5u); p != std::string::npos; p = options.find(":#", p + 1u))
+            {
+                auto const end = options.find(':', p + 1u);
+                iEvalPrivateNames.insert(options.substr(p + 1u, end == std::string::npos ? std::string::npos : end - p - 1u));
+            }
         }
         else if (options == "eval-indirect")
             iKind = code_kind::IndirectEval;
@@ -456,6 +463,7 @@ namespace neos::compilers::javascript
         // (await operators that parse as calls of a function named await (e.g. await (x), await `x`))
         await_operators(aScript, iKind == code_kind::Module);
         check_early_errors(aScript);
+        if_clause_functions(aScript);
         yield_identifiers(aScript, false);
         array_commas(aScript);
         iFunctions.clear();
@@ -514,8 +522,11 @@ namespace neos::compilers::javascript
             bool conflict = false;
             for (auto* s = blockScope->parent; s != nullptr; s = s->parent)
             {
+                // (a lexical binding, a block's function declaration, or a catch clause's binding that is in a pattern (a simple catch
+                // parameter may be redeclared by a var (Annex B.3.4)))
                 if (auto* b = s->find(name); b != nullptr && (b->lexical() || b->kind == binding_kind::Parameter ||
-                    (b->kind == binding_kind::Catch && false)))
+                    (b->kind == binding_kind::Function && s->kind == scope_kind::Block && s != function->body) ||
+                    (b->kind == binding_kind::Catch && s->owner != nullptr && s->owner->size() == 2u && !s->owner->child(0u)->is(construct::Binding))))
                     conflict = true;
                 if (s == function->top)
                     break;
@@ -524,11 +535,18 @@ namespace neos::compilers::javascript
                 conflict = true;
             if (conflict)
                 continue;
-            if (function->top->find(name) == nullptr)
-                declare(function->top, name, binding_kind::Var, nullptr);
+            if (function->body->find(name) == nullptr && function->top->find(name) == nullptr)
+                declare(function->body, name, binding_kind::Var, nullptr);     // (the var scope: the body's, if parameters have expressions)
             declaration->annexB = true;
         }
         iAnnexBFunctions.clear();
+        // (a script's top-level lexical declarations are bindings of the global lexical environment that other scripts (e.g. eval code,
+        // functions the Function constructor makes, $262.evalScript's scripts) see: a script's that no function uses is a local of the
+        // script's function unless its source could run other code that names it)
+        if (iKind == code_kind::EvaluateScript || (iKind == code_kind::Script && !iModule && script_may_run_code()))
+            for (auto& b : script->top->bindings)
+                if (b->lexical())
+                    b->captured = true;
         // (eval code: new.target, super.x and super() only where the code that calls eval may use them)
         if (eval_code())
             for (auto* statement : aScript->children)
@@ -566,6 +584,61 @@ namespace neos::compilers::javascript
             eval_context_errors(c);
     }
 
+    bool compiler::script_may_run_code() const
+    {
+        // (the script names something that runs a source (eval, the Function constructors, $262, import()) or gets a function's constructor)
+        auto const word = [&](std::string_view aWord)
+        {
+            for (auto p = iSource.find(aWord); p != std::string_view::npos; p = iSource.find(aWord, p + 1u))
+            {
+                auto const before = p > 0u ? static_cast<unsigned char>(iSource[p - 1u]) : ' ';
+                auto const after = p + aWord.size() < iSource.size() ? static_cast<unsigned char>(iSource[p + aWord.size()]) : ' ';
+                auto const identifier = [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '$' || c >= 0x80u || c == '\\'; };
+                if (!identifier(before) && !identifier(after))
+                    return true;
+            }
+            return false;
+        };
+        for (auto const w : { "eval", "Function", "GeneratorFunction", "AsyncFunction", "$262", "import" })
+            if (word(w))
+                return true;
+        // (a property named constructor (x.constructor, x["constructor"]): a function's is a Function constructor)
+        for (auto p = iSource.find("constructor"); p != std::string_view::npos; p = iSource.find("constructor", p + 1u))
+        {
+            auto q = p;
+            while (q > 0u && (iSource[q - 1u] == ' ' || iSource[q - 1u] == '\t' || iSource[q - 1u] == '\n' || iSource[q - 1u] == '\r'))
+                --q;
+            if (q > 0u && (iSource[q - 1u] == '.' || iSource[q - 1u] == '"' || iSource[q - 1u] == '\'' || iSource[q - 1u] == '`'))
+                return true;
+        }
+        // (an escaped identifier may name any of them)
+        return iSource.find("\\u") != std::string_view::npos;
+    }
+
+    void compiler::if_clause_functions(node* aNode)
+    {
+        // (Annex B.3.4: a function declaration as an if statement's clause (sloppy code; it parses as an expression statement) is as if it
+        // were in a block of its own)
+        if (aNode->is(construct::If))
+            for (std::size_t i = 1u; i < aNode->size(); ++i)
+            {
+                auto* c = aNode->child(i);
+                if (c->is(construct::ExpressionStatement) && c->size() == 1u && c->child(0u)->is(construct::FunctionExpression) &&
+                    c->source.starts_with("function") && c->child(0u)->source.starts_with("function"))
+                {
+                    auto* f = c->child(0u);
+                    f->kind = construct::Function;
+                    auto* block = make_node(construct::Block, f->source);
+                    block->children.push_back(f);
+                    f->parent = block;
+                    block->parent = aNode;
+                    aNode->children[i] = block;
+                }
+            }
+        for (auto* c : aNode->children)
+            if_clause_functions(c);
+    }
+
     void compiler::yield_identifiers(node* aNode, bool aGenerator)
     {
         // (outside generators (sloppy code), yield is an identifier: "yield" and "yield * x" parse as yield expressions)
@@ -573,8 +646,29 @@ namespace neos::compilers::javascript
             aNode->is(construct::AsyncFunction) || aNode->is(construct::AsyncFunctionExpression) || aNode->is(construct::Method) ||
             aNode->is(construct::GeneratorMethod) || aNode->is(construct::AsyncMethod) || aNode->is(construct::AsyncGeneratorMethod) ||
             aNode->is(construct::Getter) || aNode->is(construct::Setter))
+        {
+            // (a method's computed name is its enclosing code's (as yield is there), not the method's)
+            bool const method = aNode->is(construct::Method) || aNode->is(construct::GeneratorMethod) || aNode->is(construct::AsyncMethod) ||
+                aNode->is(construct::AsyncGeneratorMethod) || aNode->is(construct::Getter) || aNode->is(construct::Setter);
+            if (method && aNode->size() > 0u)
+            {
+                node keyHolder{ construct::Script, aNode->source };
+                keyHolder.children.push_back(aNode->child(0u));
+                yield_identifiers(&keyHolder, aGenerator);
+                aNode->children[0u] = keyHolder.children[0u];
+                aNode->children[0u]->parent = aNode;
+            }
             aGenerator = generator_header(aNode);
+            for (std::size_t i = method ? 1u : 0u; i < aNode->size(); ++i)
+                yield_identifiers_child(aNode, i, aGenerator);
+            return;
+        }
         for (std::size_t i = 0u; i < aNode->size(); ++i)
+            yield_identifiers_child(aNode, i, aGenerator);
+    }
+
+    void compiler::yield_identifiers_child(node* aNode, std::size_t i, bool aGenerator)
+    {
         {
             auto* c = aNode->child(i);
             if (!aGenerator && c->is(construct::Yield))
@@ -585,13 +679,13 @@ namespace neos::compilers::javascript
                 {
                     identifier->parent = aNode;
                     aNode->children[i] = identifier;
-                    continue;
+                    return;
                 }
                 auto rest = c->source.substr(5u);
                 while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t' || rest.front() == '\n' || rest.front() == '\r'))
                     rest.remove_prefix(1u);
                 if (!rest.starts_with("*"))
-                    continue;
+                    return;
                 // (yield * x ...: the multiplication's right operand is the leftmost operand of the expression that follows)
                 auto const binary = [](node const* n)
                 {
@@ -873,14 +967,21 @@ namespace neos::compilers::javascript
                     declare_pattern(aInner->top, p, binding_kind::Parameter);
                 }
                 aInner->length = length;
+                // (a parameter list with expressions (defaults, patterns): each parameter is uninitialized until it is bound, in order)
+                if (!aInner->simpleParameters)
+                    for (auto& b : aInner->top->bindings)
+                        if (b->kind == binding_kind::Parameter)
+                            b->tdz = true;
                 if (!aInner->simpleParameters && aInner->strict && body != nullptr && body->is(construct::Body) && directive_strict(body))
                     error(aFunctionNode->source, "Illegal 'use strict' directive in function with non-simple parameter list");
             }
             if (body != nullptr && body->is(construct::Body))
             {
+                // (parameters with expressions: the body's var declarations are bindings of an environment of their own (a var named as a
+                // parameter starts with its value))
                 if (!aInner->simpleParameters)
                     aInner->body = new_scope(scope_kind::Block, aInner->top, body, aInner);
-                hoist_var(body, aInner->top, aInner);
+                hoist_var(body, aInner->body, aInner);
                 for (auto* s : body->children)
                     collect(s, aInner->body, aInner);
             }
@@ -1103,8 +1204,10 @@ namespace neos::compilers::javascript
                 if (s->function != aFunction)
                 {
                     b->captured = true;
-                    for (auto* f = aFunction; f != nullptr && f != s->function; f = f->parent)
-                        f->needsOuterEnvironment = true;
+                    // (a script's binding (not eval code's or a module's) is found as a global: through no environment (see resolve))
+                    if (s->kind != scope_kind::Script || eval_code() || iModule)
+                        for (auto* f = aFunction; f != nullptr && f != s->function; f = f->parent)
+                            f->needsOuterEnvironment = true;
                 }
                 return;
             }
@@ -1184,7 +1287,7 @@ namespace neos::compilers::javascript
                         internal(f->thisBinding, "%this");
                     if (inner->usesNewTarget && !f->script)
                         internal(f->newTargetBinding, "%newtarget");
-                    if ((inner->usesSuper || inner->usesSuperCall) && !f->script)
+                    if ((inner->usesSuper || inner->usesSuperCall) && (!f->script || eval_code()))
                         internal(f->homeBinding, "%home");
                     if ((inner->usesSuperCall || inner->usesArguments) && !f->script)
                         internal(f->calleeBinding == nullptr || f->calleeBinding->kind != binding_kind::Internal ? f->calleeBinding : f->calleeBinding, "%callee");
@@ -1207,7 +1310,9 @@ namespace neos::compilers::javascript
                     bool shadowed = false;
                     for (auto* s = aScope; s != nullptr; s = s->parent)
                     {
-                        if (s->find(name) != nullptr && !(s->find(name)->kind == binding_kind::Internal))
+                        // (a var named arguments of the function itself is its arguments object's binding (it is initialized with it))
+                        if (auto* b = s->find(name); b != nullptr && b->kind != binding_kind::Internal &&
+                            !(b->kind == binding_kind::Var && s->kind == scope_kind::Function && !s->function->arrow && s == s->function->top))
                         {
                             shadowed = true;
                             break;
@@ -1242,6 +1347,19 @@ namespace neos::compilers::javascript
                         for (auto* f = s->function; f != nullptr; f = f->parent)
                             f->needsOuterEnvironment = f->needsOuterEnvironment || f != s->function;
                     }
+                    // (the function that calls eval and those that enclose it: their closures' environments (the eval code may name any
+                    // binding of the scopes that enclose them, e.g. a class's private names))
+                    for (auto* f = aFunction; f != nullptr && !f->script; f = f->parent)
+                        f->needsOuterEnvironment = true;
+                    // (and the functions within those (already analysed, e.g. in earlier parameters): a name they use that is not a
+                    // binding of theirs may be the eval code's var binding (found through their closures' environments))
+                    for (auto& g : iFunctions)
+                        for (auto* f = g.parent; f != nullptr; f = f->parent)
+                            if (f == aFunction)
+                            {
+                                g.needsOuterEnvironment = true;
+                                break;
+                            }
                     for (auto* f = aFunction; f != nullptr; f = f->parent)
                     {
                         f->usesThis = true;
@@ -1285,7 +1403,7 @@ namespace neos::compilers::javascript
                 bool declared = false;
                 for (auto* s = aScope; s != nullptr && !declared; s = s->parent)
                     declared = s->find(name) != nullptr;
-                if (!declared)
+                if (!declared && !iEvalPrivateNames.contains(name))
                     error(aNode->source, "Private field '" + name + "' must be declared in an enclosing class");
                 use(name, aScope, aFunction, aNode);
             }

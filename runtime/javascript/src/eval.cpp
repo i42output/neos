@@ -54,6 +54,17 @@ namespace neos::javascript_runtime
         public:
             environment_names() : cell{ cell_type::Internal } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                for (auto const& entry : entries)
+                    aTracer.mark(entry.first);
+                for (auto const& [name, v] : extension)
+                {
+                    aTracer.mark(name);
+                    aTracer.mark(v);
+                }
+            }
+        public:
             bool varScope = false;
             std::vector<std::pair<value, char>> entries;
             std::vector<std::pair<value, value>> extension;     ///< (a var scope: the var bindings that sloppy direct evals declared)
@@ -206,6 +217,30 @@ namespace neos::javascript_runtime
 
         thread_local std::vector<eval_context> tContexts;
 
+        // (the names of environments (environment_names), by their descriptors (interned literals))
+        std::unordered_map<value, value>& names_cache()
+        {
+            static std::unordered_map<value, value> sCache;
+            return sCache;
+        }
+
+        root_tracer const sEvalRoots{ [](tracer& aTracer)
+        {
+            for (auto const& c : tContexts)
+            {
+                aTracer.mark(c.environment);
+                aTracer.mark(c.thisValue);
+                aTracer.mark(c.newTarget);
+                aTracer.mark(c.home);
+                aTracer.mark(c.result);
+            }
+            for (auto const& [descriptor, names] : names_cache())
+            {
+                aTracer.mark(descriptor);
+                aTracer.mark(names);
+            }
+        } };
+
         // (the programs compiled (the same source with the same options is compiled once))
         std::map<std::pair<std::string, std::string>, void*>& programs()
         {
@@ -216,13 +251,16 @@ namespace neos::javascript_runtime
         void* compile(std::string const& aSource, std::string const& aOptions)
         {
             auto& cache = programs();
-            if (auto const existing = cache.find({ aOptions, aSource }); existing != cache.end())
+            // (source with a tagged template is compiled for each evaluation: each evaluation's template objects are its own (they are
+            // by site of the program))
+            bool const cacheable = aSource.find('`') == std::string::npos;
+            if (auto const existing = cacheable ? cache.find({ aOptions, aSource }) : cache.end(); existing != cache.end())
                 return existing->second;
             auto const* h = host();
-            if (h == nullptr || h->load == nullptr)
+            if (h == nullptr || h->load_n == nullptr)
                 throw_error(the_realm().evalErrorPrototype, "code cannot be compiled while the program runs");
             char const* failure = nullptr;
-            auto const program = h->load("javascript", aSource.c_str(), "<eval>", aOptions.c_str(), &failure);
+            auto const program = h->load_n("javascript", aSource.data(), aSource.size(), "<eval>", aOptions.c_str(), &failure);
             if (program == nullptr)
             {
                 std::string message = failure != nullptr ? failure : "invalid code";
@@ -233,7 +271,8 @@ namespace neos::javascript_runtime
                     message.pop_back();
                 throw_syntax_error(message);
             }
-            cache.emplace(std::pair{ aOptions, aSource }, program);
+            if (cacheable)
+                cache.emplace(std::pair{ aOptions, aSource }, program);
             return program;
         }
 
@@ -243,6 +282,11 @@ namespace neos::javascript_runtime
             auto& extra = extra_arguments();
             auto const base = extra.size();
             neos_rt_value result{};
+#if defined(_WIN32)
+            // (generated code runs on a fiber of its own: this stack's live part is scanned while it runs)
+            NEOS_JS_SPILL_REGISTERS();
+            stack_switch const switching{ stack_pointer() };
+#endif
             auto const trap = host()->run(aProgram, NEOS_RT_VOID, &result);
             extra.resize(base);
             auto const context = tContexts.back();
@@ -265,10 +309,65 @@ namespace neos::javascript_runtime
             return wtf8(str(aSource));
         }
 
+        // (a source that is a regular expression literal alone (white space and a semicolon aside): its body and flags)
+        std::optional<std::pair<std::u16string, std::u16string>> lone_regexp_literal(std::u16string_view aSource)
+        {
+            auto const lineTerminator = [](char16_t c) { return c == u'\n' || c == u'\r' || c == u'\u2028' || c == u'\u2029'; };
+            auto const space = [&](char16_t c) { return c == u' ' || c == u'\t' || c == u'\v' || c == u'\f' || lineTerminator(c); };
+            std::size_t i = 0u;
+            auto const n = aSource.size();
+            while (i < n && space(aSource[i]))
+                ++i;
+            if (i >= n || aSource[i] != u'/')
+                return {};
+            ++i;
+            if (i >= n || aSource[i] == u'*' || aSource[i] == u'/')
+                return {};
+            auto const body = i;
+            bool inClass = false;
+            for (;; ++i)
+            {
+                if (i >= n || lineTerminator(aSource[i]))
+                    return {};
+                auto const c = aSource[i];
+                if (c == u'\\')
+                {
+                    if (++i >= n || lineTerminator(aSource[i]))
+                        return {};
+                }
+                else if (c == u'[')
+                    inClass = true;
+                else if (c == u']')
+                    inClass = false;
+                else if (c == u'/' && !inClass)
+                    break;
+            }
+            auto const bodyEnd = i++;
+            auto const flags = i;
+            while (i < n && ((aSource[i] >= u'a' && aSource[i] <= u'z') || (aSource[i] >= u'A' && aSource[i] <= u'Z') ||
+                (aSource[i] >= u'0' && aSource[i] <= u'9') || aSource[i] == u'_' || aSource[i] == u'$'))
+                ++i;
+            if (i < n && (aSource[i] == u'\\' || aSource[i] >= 0x80u))
+                return {};
+            auto const flagsEnd = i;
+            while (i < n && space(aSource[i]))
+                ++i;
+            if (i < n && aSource[i] == u';')
+                ++i;
+            while (i < n && space(aSource[i]))
+                ++i;
+            if (i != n)
+                return {};
+            return std::make_pair(std::u16string{ aSource.substr(body, bodyEnd - body) }, std::u16string{ aSource.substr(flags, flagsEnd - flags) });
+        }
+
         value perform_eval(value aSource, std::string const& aOptions, eval_context const& aContext)
         {
             if (!is_string(aSource))
                 return aSource;
+            // (a regular expression literal alone: the RegExp (its errors are SyntaxErrors, as the literal's early errors are), not compiled)
+            if (auto const literal = lone_regexp_literal(str(aSource)))
+                return make_regexp(make_string(literal->first), make_string(literal->second));
             return run(compile(source_text(aSource), aOptions), aContext);
         }
 
@@ -346,7 +445,7 @@ namespace neos::javascript_runtime
         {
             // ("V" or "-" (a var scope or not), then ",<kind><name>" for each binding)
             auto& env = cell_of<environment>(aEnvironment);
-            static std::unordered_map<value, value> sCache;     // (descriptors (interned literals) -> names)
+            auto& sCache = names_cache();     // (descriptors (interned literals) -> names)
             if (auto const existing = sCache.find(aDescriptor); existing != sCache.end())
             {
                 // (the names are shared; the extension is the environment's own)
@@ -402,6 +501,13 @@ namespace neos::javascript_runtime
                         return v;
                     }
                 case binding_reference::Object:
+                    // (an object environment's GetBindingValue: the property may have gone (strict: a ReferenceError))
+                    if (!has_property(b.object, name))
+                    {
+                        if ((aTypeof & 2) != 0)
+                            throw_reference_error(name_text(name) + " is not defined");
+                        return Undefined;
+                    }
                     return get(b.object, name);
                 case binding_reference::GlobalLexical:
                     {
@@ -413,7 +519,7 @@ namespace neos::javascript_runtime
                 case binding_reference::Global:
                     return get(the_realm().global, name);
                 default:
-                    if (aTypeof != 0)
+                    if ((aTypeof & 1) != 0)
                         return Undefined;
                     throw_reference_error(name_text(name) + " is not defined");
                 }
@@ -452,6 +558,9 @@ namespace neos::javascript_runtime
                         return Undefined;
                     }
                 case binding_reference::Object:
+                    // (an object environment's SetMutableBinding: the property may have gone (strict: a ReferenceError))
+                    if (!has_property(b.object, name) && strict)
+                        throw_reference_error(name_text(name) + " is not defined");
                     set(b.object, name, aValue, strict);
                     return Undefined;
                 case binding_reference::GlobalLexical:
@@ -476,6 +585,167 @@ namespace neos::javascript_runtime
                     set(the_realm().global, name, aValue, false);
                     return Undefined;
                 }
+            });
+        }
+
+        // (a reference to a name that is found by name (with, sloppy direct eval): resolved once (its base: the declarative environment
+        // or the object that has it, True the global lexical environment, False the global object, Null unresolvable), then read and
+        // written (PutValue uses the reference that was resolved before the value was computed))
+        value dyn_reference(value aEnvironment, value aName)
+        {
+            return guarded([&]() -> value
+            {
+                auto const b = find_binding(aEnvironment, intern(aName));
+                switch (b.kind)
+                {
+                case binding_reference::Slot:
+                case binding_reference::Extension:
+                    return value_of(*b.env);
+                case binding_reference::Object:
+                    return b.object;
+                case binding_reference::GlobalLexical:
+                    return True;
+                case binding_reference::Global:
+                    return False;
+                default:
+                    return Null;
+                }
+            });
+        }
+
+        namespace
+        {
+            // (the binding of a reference's environment (Null: none, e.g. a deleted eval var))
+            binding_reference reference_binding(value aBase, value aName)
+            {
+                binding_reference result;
+                auto& env = cell_of<environment>(aBase);
+                if (auto* n = names_of(env))
+                {
+                    for (std::size_t i = 0u; i < n->entries.size(); ++i)
+                        if (n->entries[i].first == aName && n->entries[i].second != 'i')
+                        {
+                            result.kind = binding_reference::Slot;
+                            result.env = &env;
+                            result.index = i;
+                            result.bindingKind = n->entries[i].second;
+                            return result;
+                        }
+                    for (std::size_t i = 0u; i < n->extension.size(); ++i)
+                        if (n->extension[i].first == aName)
+                        {
+                            result.kind = binding_reference::Extension;
+                            result.env = &env;
+                            result.index = i;
+                            return result;
+                        }
+                }
+                return result;
+            }
+        }
+
+        value dyn_reference_this(value aBase)
+        {
+            // (a call of a name: its this is the object of the with statement whose environment has it (WithBaseObject), else undefined)
+            return is_object(aBase) ? aBase : Undefined;
+        }
+
+        value dyn_reference_get(value aBase, value aName, std::int32_t aStrict)
+        {
+            return guarded([&]() -> value
+            {
+                auto const name = intern(aName);
+                if (aBase == Null)
+                    throw_reference_error(name_text(name) + " is not defined");
+                if (aBase == False)
+                    return get(the_realm().global, name);
+                if (aBase == True)
+                {
+                    auto const v = global_lexicals()[name].v;
+                    if (v == Empty)
+                        throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
+                    return v;
+                }
+                if (is_object(aBase))
+                {
+                    // (an object environment's GetBindingValue: the property may have gone (strict: a ReferenceError))
+                    if (!has_property(aBase, name))
+                    {
+                        if (aStrict != 0)
+                            throw_reference_error(name_text(name) + " is not defined");
+                        return Undefined;
+                    }
+                    return get(aBase, name);
+                }
+                auto const b = reference_binding(aBase, name);
+                if (b.kind == binding_reference::None)
+                    throw_reference_error(name_text(name) + " is not defined");
+                auto const v = slot_of(b);
+                if (v == Empty)
+                    throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
+                return v;
+            });
+        }
+
+        value dyn_reference_set(value aBase, value aName, value aValue, std::int32_t aFlags)
+        {
+            // (aFlags: 1 strict)
+            return guarded([&]() -> value
+            {
+                bool const strict = (aFlags & 1) != 0;
+                auto const name = intern(aName);
+                if (aBase == Null)
+                {
+                    if (strict)
+                        throw_reference_error(name_text(name) + " is not defined");
+                    set(the_realm().global, name, aValue, false);
+                    return Undefined;
+                }
+                if (aBase == False)
+                {
+                    if (!has_property(the_realm().global, name) && strict)
+                        throw_reference_error(name_text(name) + " is not defined");
+                    set(the_realm().global, name, aValue, strict);
+                    return Undefined;
+                }
+                if (aBase == True)
+                {
+                    auto& g = global_lexicals()[name];
+                    if (g.v == Empty)
+                        throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
+                    if (g.constant)
+                        throw_type_error("Assignment to constant variable.");
+                    g.v = aValue;
+                    return Undefined;
+                }
+                if (is_object(aBase))
+                {
+                    // (an object environment (with): a property that was deleted since is an error only in strict code)
+                    if (!has_property(aBase, name) && strict)
+                        throw_reference_error(name_text(name) + " is not defined");
+                    set(aBase, name, aValue, strict);
+                    return Undefined;
+                }
+                auto const b = reference_binding(aBase, name);
+                if (b.kind == binding_reference::None)
+                {
+                    if (strict)
+                        throw_reference_error(name_text(name) + " is not defined");
+                    return Undefined;
+                }
+                auto& slot = slot_of(b);
+                if (slot == Empty)
+                    throw_reference_error("Cannot access '" + name_text(name) + "' before initialization");
+                if (b.bindingKind == 'c')
+                    throw_type_error("Assignment to constant variable.");
+                if (b.bindingKind == 'n')
+                {
+                    if (strict)
+                        throw_type_error("Assignment to constant variable.");
+                    return Undefined;
+                }
+                slot = aValue;
+                return Undefined;
             });
         }
 
@@ -624,7 +894,22 @@ namespace neos::javascript_runtime
                 context.thisValue = aThis;
                 context.newTarget = aNewTarget;
                 context.home = aHome;
-                return perform_eval(aSource, "eval:" + std::to_string(aFlags), context);
+                // (the private names of the classes that enclose the call (the eval code may use them): its options' list)
+                std::string privateNames;
+                for (auto e = aEnvironment; e != Undefined && is_internal(e);)
+                {
+                    auto& env = cell_of<environment>(e);
+                    if (auto* n = names_of(env))
+                        for (auto const& entry : n->entries)
+                            if (entry.second == 'i' && is_string(entry.first))
+                            {
+                                auto const name = utf8(entry.first);
+                                if (name.starts_with("#"))
+                                    privateNames += ":" + name;
+                            }
+                    e = env.parent;
+                }
+                return perform_eval(aSource, "eval:" + std::to_string(aFlags) + privateNames, context);
             });
         }
 

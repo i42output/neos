@@ -47,6 +47,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/language/emit.hpp>
@@ -58,6 +59,11 @@ namespace neos::compilers::javascript
     using namespace emitter;
 
     std::string name_of(node const* aNode);
+
+    namespace
+    {
+        std::string operator_text(std::string_view aBetween);
+    }
 
     namespace
     {
@@ -668,9 +674,29 @@ namespace neos::compilers::javascript
         iCode.resize(iCode.size() + 5u);
     }
 
+    namespace
+    {
+        // (NEOS_JS_WASM=<file>: each function's code is appended to the file (for debugging code generation): its name, locals, code
+        // (hex) and calls)
+        char const* wasm_dump_path()
+        {
+            static char const* const sPath = std::getenv("NEOS_JS_WASM");
+            return sPath;
+        }
+
+        std::map<std::uint32_t, std::string>& wasm_dump_names()
+        {
+            static std::map<std::uint32_t, std::string> sNames;
+            return sNames;
+        }
+    }
+
     void function_generator::runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult)
     {
-        call(iCompiler.runtime_function("javascript::" + aName, aParameters, aResult));
+        auto const index = iCompiler.runtime_function("javascript::" + aName, aParameters, aResult);
+        if (wasm_dump_path() != nullptr)
+            wasm_dump_names()[index] = aName;
+        call(index);
     }
 
     void function_generator::function_index(function_info& aFunction, bool aBody)
@@ -810,9 +836,15 @@ namespace neos::compilers::javascript
         {
             auto const rep = rep_of(b.get());
             if (!b->captured)
-                b->slot = local(rep == numeric_rep::F64 ? F64 : I64);
-            if (b->kind == binding_kind::Internal || b->kind == binding_kind::Parameter || rep != numeric_rep::None)
+                b->slot = local(rep == numeric_rep::F64 ? F64 : rep == numeric_rep::I32 ? I32 : I64);
+            if (b->kind == binding_kind::Internal || (b->kind == binding_kind::Parameter && !b->tdz) || rep != numeric_rep::None)
                 continue;
+            if (b->kind == binding_kind::Parameter)
+            {
+                constant(values::Empty);    // (uninitialized until it is bound)
+                initialize_binding(b.get());
+                continue;
+            }
             if (b->kind == binding_kind::Var || b->kind == binding_kind::Function || b->kind == binding_kind::Catch)
             {
                 if (aScope->kind == scope_kind::Script && (!iCompiler.eval_code() || !iFunction.strict))
@@ -913,6 +945,7 @@ namespace neos::compilers::javascript
             get(aReference.local);
             if (auto const rep = rep_of(aReference.target); rep != numeric_rep::None)
             {
+                counter_value(aReference.target);
                 box(rep);
                 break;
             }
@@ -960,7 +993,14 @@ namespace neos::compilers::javascript
         case reference::Dynamic:
             environment_value();
             key(aReference.name);
-            i32(aTypeof ? 1 : 0);
+            if (aReference.name.starts_with("#"))
+            {
+                // (eval code's private name: a class's (an internal binding of an environment that encloses the call))
+                runtime("eval_internal", { I64, I64 }, I64);
+                check();
+                break;
+            }
+            i32((aTypeof ? 1 : 0) | (iFunction.strict ? 2 : 0));
             runtime("dyn_get", { I64, I64, I32 }, I64);
             check();
             break;
@@ -1131,8 +1171,20 @@ namespace neos::compilers::javascript
     void function_generator::generate()
     {
         iScratch = local();
-        infer_numeric();
+        // (a numeric version: when its parameters' arguments are numbers (see version_check))
+        bool versioned = false;
+        if (version_eligible())
+        {
+            iNumericParameters = true;
+            infer_numeric();
+            versioned = !iNumericArguments.empty() || iIntrinsicMask != 0u;
+            iNumericParameters = versioned;
+        }
+        if (!versioned)
+            infer_numeric();
         begin(control_kind::Exit);
+        auto const generate_code = [&]()
+        {
         prologue();
         auto* declaration = iFunction.declaration;
         if (iFunction.script)
@@ -1185,7 +1237,10 @@ namespace neos::compilers::javascript
             }
             else
                 hoist_functions(script, iFunction.top);
-            statements(script);
+            if (iCompiler.iModule && has_using(script))
+                disposal_scope([&]() { statements(script); });     // (a module's using declarations: disposed when it has been evaluated)
+            else
+                statements(script);
             if (iCompletion)
                 get(*iCompletion);
             else
@@ -1244,6 +1299,33 @@ namespace neos::compilers::javascript
                 complete_return();
             }
         }
+        };
+        if (versioned)
+        {
+            // (the numeric version is a block that the function's block starts with, which it leaves (br 1): what follows it (the general
+            // version) is cold code to the JIT)
+            op(opcode::Block);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            version_check();
+            op(opcode::I32Eqz);
+            op(opcode::BrIf);
+            u32(0u);
+            auto const scopes = iScopes;
+            generate_code();
+            op(opcode::Br);
+            u32(1u);
+            end_control();
+            // (the general version)
+            iScopes = scopes;
+            iThisLocal = ThisLocal;
+            iFunctionEnvironment = std::nullopt;
+            iNumericParameters = false;
+            infer_numeric();
+            generate_code();
+        }
+        else
+            generate_code();
         end_control();
         if (iFunction.async && !iFunction.generator && !iFunction.script && !iBody)
             runtime("rejected_promise", {}, I64);  // (an async function whose parameters threw returns a rejected promise)
@@ -1254,6 +1336,24 @@ namespace neos::compilers::javascript
         for (auto const& r : iRelocations)
             code.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ r.first, r.second });
         auto const index = iBody ? iFunction.bodyIndex : iFunction.index;
+        if (auto const path = wasm_dump_path())
+            if (auto* file = std::fopen(path, "ab"))
+            {
+                std::fprintf(file, "function %u %s\nlocals", index, iFunction.script ? "<script>" : iFunction.name.c_str());
+                for (auto t : iLocals)
+                    std::fprintf(file, " %d", static_cast<int>(t));
+                std::fprintf(file, "\ncalls");
+                for (auto const& r : iRelocations)
+                {
+                    auto const name = wasm_dump_names().find(r.second);
+                    std::fprintf(file, " %u:%s", r.first, name != wasm_dump_names().end() ? name->second.c_str() : std::to_string(r.second).c_str());
+                }
+                std::fprintf(file, "\ncode ");
+                for (auto b : iCode)
+                    std::fprintf(file, "%02x", b);
+                std::fprintf(file, "\n");
+                std::fclose(file);
+            }
         iCompiler.generator().set_function_body(index, code);
         // (its locals)
         iCompiler.generator().set_function_locals(index, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
@@ -1275,6 +1375,9 @@ namespace neos::compilers::javascript
         bool needsEnvironment = iFunction.needsOuterEnvironment;
         for (auto* f : iFunction.functions)
             needsEnvironment = needsEnvironment || f->needsOuterEnvironment;
+        // (a named generator or async function expression: its body finds its name (captured) in the closure's environment)
+        if ((iFunction.generator || iFunction.async) && iFunction.calleeBinding != nullptr && iFunction.calleeBinding->captured)
+            needsEnvironment = true;
         if (iBody)
         {
             // (a generator's or async function's body: its environment is its top scope's (the function made it))
@@ -1286,7 +1389,10 @@ namespace neos::compilers::javascript
             if (iFunction.top->hasEnvironment)
                 iFunctionEnvironment = std::nullopt;    // (else the environment is the function's closure's)
             if (iFunction.body != iFunction.top)
+            {
                 enter_scope(iFunction.body);
+                body_vars_from_parameters();
+            }
             return;
         }
         if (!iFunction.script && needsEnvironment)
@@ -1332,6 +1438,11 @@ namespace neos::compilers::javascript
                 get(ThisLocal);
                 initialize_binding(iFunction.thisBinding);
             }
+            if (iFunction.homeBinding != nullptr)
+            {
+                runtime("eval_home", {}, I64);
+                initialize_binding(iFunction.homeBinding);
+            }
             return;
         }
         if (iFunction.script)
@@ -1341,7 +1452,7 @@ namespace neos::compilers::javascript
                 if (!b->captured && b->lexical())
                 {
                     auto const rep = rep_of(b.get());
-                    b->slot = local(rep == numeric_rep::F64 ? F64 : I64);
+                    b->slot = local(rep == numeric_rep::F64 ? F64 : rep == numeric_rep::I32 ? I32 : I64);
                     if (rep != numeric_rep::None)
                         continue;
                     constant(values::Empty);
@@ -1349,15 +1460,17 @@ namespace neos::compilers::javascript
                 }
             // (its declarations: var and function declarations are properties of the global object; lexical declarations bindings of the
             // global lexical environment)
-            for (auto& b : iFunction.top->bindings)
-            {
-                if (b->lexical() && !b->captured && !iCompiler.iModule)
-                    continue;
-                key(b->name);
-                i32(b->kind == binding_kind::Var ? 0 : b->kind == binding_kind::Function ? 1 : b->kind == binding_kind::Let ? 2 : 3);
-                runtime("global_declare", { I64, I32 }, I64);
-                check_void();
-            }
+            for (int pass = 0; pass < 2; ++pass)
+                for (auto& b : iFunction.top->bindings)
+                {
+                    if (b->lexical() && !b->captured && !iCompiler.iModule)
+                        continue;
+                    key(b->name);
+                    i32((b->kind == binding_kind::Var ? 0 : b->kind == binding_kind::Function ? 1 : (b->kind == binding_kind::Let || b->kind == binding_kind::Class) ? 2 : 3) |
+                        (pass == 0 ? 8 : 0));
+                    runtime("global_declare", { I64, I32 }, I64);
+                    check_void();
+                }
             return;
         }
         // (this: in sloppy mode undefined and null are the global object and a primitive is its object)
@@ -1368,7 +1481,11 @@ namespace neos::compilers::javascript
             runtime("sloppy_this", { I64 }, I64);
             set(iThisLocal);
         }
-        if (iFunction.argumentsBinding != nullptr || iFunction.top->bindings.size() > 0u)
+        bool extraArguments = iFunction.argumentsBinding != nullptr;
+        for (auto* c : iFunction.declaration->children)
+            if (c->is(construct::Parameters))
+                extraArguments = extraArguments || c->size() > RegisterArguments || (c->size() > 0u && c->children.back()->is(construct::Rest));
+        if (extraArguments)
         {
             // (more than four arguments: the extra arguments)
             iArgumentsBase = local(I32);
@@ -1409,7 +1526,23 @@ namespace neos::compilers::javascript
         instantiate_parameters();
         // (a generator's or async function's body scope is its body function's)
         if (iFunction.body != iFunction.top && !iFunction.generator && !iFunction.async)
+        {
             enter_scope(iFunction.body);
+            body_vars_from_parameters();
+        }
+    }
+
+    void function_generator::body_vars_from_parameters()
+    {
+        // (parameters with expressions: a var of the body named as a parameter (or arguments) starts with its value)
+        for (auto& b : iFunction.body->bindings)
+            if (b->kind == binding_kind::Var)
+                if (auto* p = iFunction.top->find(b->name); p != nullptr && p != b.get() &&
+                    (p->kind == binding_kind::Parameter || p == iFunction.argumentsBinding))
+                {
+                    load_binding(p);
+                    initialize_binding(b.get());
+                }
     }
 
     void function_generator::instantiate_parameters()
@@ -1659,8 +1792,23 @@ namespace neos::compilers::javascript
                     auto* local = iScopes.back()->find(f->name);
                     if (local != nullptr)
                     {
-                        auto* outer = iFunction.top;
-                        if (iFunction.script)
+                        auto* outer = iFunction.body != nullptr ? iFunction.body : iFunction.top;
+                        if (iFunction.script && iCompiler.eval_code() && iFunctionEnvironment)
+                        {
+                            // (eval code: the var binding (EvalDeclarationInstantiation declared it) of the code that called eval (or the
+                            // global object's property), found from the eval's environment (not the block's, where the name is the function's))
+                            load_binding(local);
+                            auto const value = temporary();
+                            set(value);
+                            get(*iFunctionEnvironment);
+                            key(f->name);
+                            get(value);
+                            i32(0);
+                            runtime("dyn_set", { I64, I64, I64, I32 }, I64);
+                            check_void();
+                            release(value);
+                        }
+                        else if (iFunction.script)
                         {
                             load_binding(local);
                             auto const value = temporary();
@@ -1805,6 +1953,29 @@ namespace neos::compilers::javascript
                 bind_pattern(target, true, binding_kind::Let);
                 continue;
             }
+            if (target->is(construct::Binding) && !aNode->is(construct::Using) && !aNode->is(construct::AwaitUsing))
+            {
+                // (a numeric local: its initial value as its rep)
+                auto const r = resolve(name_of(target), target);
+                if (auto const rep = r.kind == reference::Local ? rep_of(r.target) : numeric_rep::None; rep != numeric_rep::None)
+                {
+                    typed(d->child(1u), rep);
+                    set(r.local);
+                    continue;
+                }
+                if (!lexical && r.kind == reference::Dynamic && !r.name.starts_with("#"))
+                {
+                    // (a var found by name (e.g. in a with statement): it is resolved before its initializer is evaluated)
+                    auto const base = dynamic_reference(r);
+                    named_evaluation(d->child(1u), name_of(target));
+                    auto const value = temporary();
+                    set(value);
+                    dynamic_reference_set(base, r, value);
+                    release(value);
+                    release(base);
+                    continue;
+                }
+            }
             if (target->is(construct::Binding))
                 named_evaluation(d->child(1u), name_of(target));
             else
@@ -1905,8 +2076,58 @@ namespace neos::compilers::javascript
 
     void function_generator::condition(node* aNode)
     {
+        auto* n = aNode;
+        while (n->is(construct::Parenthesized) && n->size() == 1u)
+            n = n->child(0u);
+        if (n->is(construct::Not))
+        {
+            condition(n->child(0u));
+            op(opcode::I32Eqz);
+            return;
+        }
+        if (n->is(construct::And) || n->is(construct::Or))
+        {
+            // (ToBoolean(a && b) is ToBoolean(a) && ToBoolean(b); ToBoolean(a || b) is ToBoolean(a) || ToBoolean(b))
+            condition(n->child(0u));
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            if (n->is(construct::And))
+                condition(n->child(1u));
+            else
+                i32(1);
+            op(opcode::Else);
+            if (n->is(construct::And))
+                i32(0);
+            else
+                condition(n->child(1u));
+            end_control();
+            return;
+        }
         if (numeric_condition(aNode))
             return;
+        if (auto const t = num_type(n); t != numeric_rep::None)
+        {
+            // (a number: true unless it is 0, -0 or NaN)
+            typed(n, t);
+            if (t == numeric_rep::I32)
+            {
+                i32(0);
+                op(opcode::I32Ne);
+            }
+            else if (t == numeric_rep::I64)
+            {
+                i64(0);
+                op(opcode::I64Ne);
+            }
+            else
+            {
+                op(opcode::F64Abs);
+                f64(0.0);
+                op(opcode::F64Gt);
+            }
+            return;
+        }
         expression(aNode);
         // (booleans: inline)
         tee(iScratch);
@@ -2030,6 +2251,9 @@ namespace neos::compilers::javascript
             }
         };
         copy_environment();
+        std::vector<std::pair<binding const*, int>> shadows;
+        if (test != nullptr && !iInvariantNumerics.empty())
+            bound_shadows(test->child(0u), shadows);
         begin(control_kind::Breakable, {}, aLabels);
         iControls.back().loop = true;
         auto const exit = iControls.size() - 1u;
@@ -2055,6 +2279,8 @@ namespace neos::compilers::javascript
         u32(0u);
         end_control();
         end_control();
+        for (auto const& key : shadows)
+            iBoundShadows.erase(key);
     }
 
     void function_generator::for_in_of_statement(node* aNode, std::vector<std::string> const& aLabels)
@@ -2345,11 +2571,11 @@ namespace neos::compilers::javascript
         {
             tail_positions(aNode->child(0u));
             expression(aNode->child(0u));
+            if (iFunction.async && iFunction.generator)
+                await_value();  // (an async generator's return value is awaited (return; is not))
         }
         else
             undefined();
-        if (iFunction.async && iFunction.generator)
-            await_value();  // (an async generator's return value is awaited)
         complete_return();
     }
 
@@ -2375,7 +2601,7 @@ namespace neos::compilers::javascript
             else
                 get(iThisLocal);
             runtime("derived_result", { I64, I64 }, I64);
-            check();
+            // (its exception is the constructor's (not its handlers', which this return has left): returned as it is)
         }
         op(opcode::Return);
     }
@@ -2437,6 +2663,12 @@ namespace neos::compilers::javascript
                 bind_pattern(handlerNode->child(0u), true, binding_kind::Catch);
             else
                 drop();
+            if (iCompletion)
+            {
+                // (the completion value is the catch block's (undefined if it has none), not the try block's)
+                undefined();
+                set(*iCompletion);
+            }
             statement(handlerNode->children.back());
             leave_scope(s);
             if (fin)
@@ -2464,7 +2696,23 @@ namespace neos::compilers::javascript
             auto const completion = iControls.back().completionLocal;
             auto const value = iControls.back().valueLocal;
             end_control();
+            // (the completion value: the try (or catch) block's, unless the finally block completes abruptly (then its own, or undefined))
+            std::optional<std::uint32_t> savedCompletion;
+            if (iCompletion)
+            {
+                savedCompletion = temporary();
+                get(*iCompletion);
+                set(*savedCompletion);
+                undefined();
+                set(*iCompletion);
+            }
             statement(finallyNode->child(0u));
+            if (savedCompletion)
+            {
+                get(*savedCompletion);
+                set(*iCompletion);
+                release(*savedCompletion);
+            }
             // (the completion that the finally block interrupted)
             get(completion);
             i32(CompletionThrow);
@@ -2794,9 +3042,9 @@ namespace neos::compilers::javascript
         auto* outer = &iFunction;
         while (outer->arrow && outer->parent != nullptr)
             outer = outer->parent;
-        if (outer->script && iCompiler.eval_code())
+        if (outer->script && iCompiler.eval_code() && (outer == &iFunction || outer->homeBinding == nullptr))
         {
-            // (eval code: the home object of the function that called eval)
+            // (eval code: the home object of the function that called eval (its arrow functions': the eval code's %home binding's))
             runtime("eval_home", {}, I64);
             return;
         }
@@ -2826,6 +3074,8 @@ namespace neos::compilers::javascript
     {
         // (whether its value is used: only the expression of an expression statement (or a for statement's update) is discarded)
         iDiscardedNow = std::exchange(iDiscarded, false);
+        if (numeric_value(aNode))
+            return;
         switch (aNode->kind)
         {
         case construct::Null:
@@ -3210,26 +3460,37 @@ namespace neos::compilers::javascript
     void function_generator::super_property(node* aNode)
     {
         // super.x / super[x]: the home object's prototype's property, with this as its receiver
-        this_value(aNode);
-        auto const thisValue = temporary();
-        set(thisValue);
-        if (aNode->is(construct::SuperDot))
-            key(name_of(aNode->child(0u)));
-        else
-        {
-            expression(aNode->child(0u));
-            runtime("to_property_key", { I64 }, I64);
-            check();
-        }
-        auto const keyValue = temporary();
-        set(keyValue);
-        home_object_value();
+        std::uint32_t thisValue = 0u, keyValue = 0u;
+        auto const base = super_reference(aNode, thisValue, keyValue);
+        get(base);
         get(keyValue);
         get(thisValue);
         runtime("super_get", { I64, I64, I64 }, I64);
         check();
+        release(base);
         release(keyValue);
         release(thisValue);
+    }
+
+    std::uint32_t function_generator::super_reference(node* aTarget, std::uint32_t& aThis, std::uint32_t& aKey)
+    {
+        // (super.x / super[x]'s reference: this, the key (super[x]'s: not yet a property key (GetValue or PutValue makes it one)) and
+        // the super base (the home object's prototype when the reference is made (GetSuperBase)), as temporaries; returns the base)
+        this_value(aTarget);
+        aThis = temporary();
+        set(aThis);
+        if (aTarget->is(construct::SuperDot))
+            key(name_of(aTarget->child(0u)));
+        else
+            expression(aTarget->child(0u));
+        aKey = temporary();
+        set(aKey);
+        home_object_value();
+        runtime("super_base", { I64 }, I64);
+        check();
+        auto const base = temporary();
+        set(base);
+        return base;
     }
 
     void function_generator::arguments_values(std::vector<node*> const& aArguments, std::optional<std::uint32_t>& aSpread)
@@ -3439,10 +3700,25 @@ namespace neos::compilers::javascript
         std::vector<node*> arguments{ aNode->children.begin() + 1, aNode->children.end() };
         auto const callee = temporary();
         auto const thisValue = temporary();
-        while (calleeNode->is(construct::Parenthesized) && (calleeNode->child(0u)->is(construct::Dot) || calleeNode->child(0u)->is(construct::Index) ||
-            calleeNode->child(0u)->is(construct::Identifier)))
+        // ((a.b)(): a parenthesized reference is the reference (its base is the this))
+        while (calleeNode->is(construct::Parenthesized) && calleeNode->size() == 1u && is_call_reference(calleeNode->child(0u)))
             calleeNode = calleeNode->child(0u);
-        if (calleeNode->is(construct::Dot) || calleeNode->is(construct::Index) || calleeNode->is(construct::DotPrivate))
+        if (calleeNode->is(construct::Optional))
+        {
+            // ((a?.b)(): the chain's reference's base is the this)
+            std::optional<std::uint32_t> chainThis;
+            optional_chain(calleeNode, &chainThis);
+            set(callee);
+            if (chainThis)
+            {
+                get(*chainThis);
+                release(*chainThis);
+            }
+            else
+                undefined();
+            set(thisValue);
+        }
+        else if (calleeNode->is(construct::Dot) || calleeNode->is(construct::Index) || calleeNode->is(construct::DotPrivate))
         {
             // (a method call: this is the object)
             expression(calleeNode->child(0u));
@@ -3478,21 +3754,61 @@ namespace neos::compilers::javascript
             identifier(calleeNode);
             set(callee);
             std::vector<std::uint32_t> values;
-            for (auto* a : arguments)
+            bool const spread = std::any_of(arguments.begin(), arguments.end(), [](node* a) { return a->is(construct::Spread); });
+            std::optional<std::uint32_t> list;
+            if (spread)
             {
-                if (a->is(construct::Spread))
-                    iCompiler.error(a->source, "unsupported: spread arguments of eval");
-                expression(a);
-                auto const v = temporary();
-                set(v);
-                values.push_back(v);
+                // (spread arguments: the argument list (its first element is the source; its length decides whether there is one))
+                i32(static_cast<std::int32_t>(arguments.size()));
+                runtime("array", { I32 }, I64);
+                list = temporary();
+                set(*list);
+                for (auto* a : arguments)
+                {
+                    get(*list);
+                    if (a->is(construct::Spread))
+                    {
+                        expression(a->child(0u));
+                        runtime("array_spread", { I64, I64 }, I64);
+                    }
+                    else
+                    {
+                        expression(a);
+                        runtime("array_push", { I64, I64 }, I64);
+                    }
+                    check_void();
+                }
             }
-            get(callee);
-            if (!values.empty())
-                get(values[0]);
             else
-                undefined();
-            i32(static_cast<std::int32_t>(values.size()));
+                for (auto* a : arguments)
+                {
+                    expression(a);
+                    auto const v = temporary();
+                    set(v);
+                    values.push_back(v);
+                }
+            get(callee);
+            if (list)
+            {
+                get(*list);
+                key("0");
+                runtime("get_named", { I64, I64 }, I64);
+                check();
+                get(*list);
+                key("length");
+                runtime("get_named", { I64, I64 }, I64);
+                check();
+                op(opcode::F64ReinterpretI64);
+                op(opcode::I32SConvertF64);
+            }
+            else
+            {
+                if (!values.empty())
+                    get(values[0]);
+                else
+                    undefined();
+                i32(static_cast<std::int32_t>(values.size()));
+            }
             {
                 // (the eval code's context: strict, and what it may use (new.target, super.x, super(), arguments))
                 auto* outer = &iFunction;
@@ -3544,27 +3860,36 @@ namespace neos::compilers::javascript
                 check();
             for (auto v : values)
                 release(v);
+            if (list)
+                release(*list);
             release(thisValue);
             release(callee);
             return;
         }
         else
         {
-            // (a with statement's object is the this of a function that is its property)
-            expression(calleeNode);
-            set(callee);
-            undefined();
-            set(thisValue);
+            // (a with statement's object is the this of a function that is its property: the reference is resolved once (its base is
+            // the this))
+            std::optional<reference> dynamicCallee;
             if (calleeNode->is(construct::Identifier))
+                if (auto const r = resolve(name_of(calleeNode), calleeNode); r.kind == reference::Dynamic && !r.name.starts_with("#"))
+                    dynamicCallee = r;
+            if (dynamicCallee)
             {
-                auto const r = resolve(name_of(calleeNode), calleeNode);
-                if (r.kind == reference::Dynamic)
-                {
-                    environment_value();
-                    key(r.name);
-                    runtime("dyn_this", { I64, I64 }, I64);
-                    set(thisValue);
-                }
+                auto const base = dynamic_reference(*dynamicCallee);
+                dynamic_reference_get(base, *dynamicCallee);
+                set(callee);
+                get(base);
+                runtime("dyn_reference_this", { I64 }, I64);
+                set(thisValue);
+                release(base);
+            }
+            else
+            {
+                expression(calleeNode);
+                set(callee);
+                undefined();
+                set(thisValue);
             }
         }
         call_value(callee, thisValue, arguments, tail_call(aNode));
@@ -3747,7 +4072,27 @@ namespace neos::compilers::javascript
         release(result);
     }
 
-    void function_generator::optional_chain(node* aNode)
+    bool function_generator::is_call_reference(node* aNode) const
+    {
+        // (an expression whose value is a reference that a call takes its this from (or a direct eval's eval))
+        switch (aNode->kind)
+        {
+        case construct::Dot:
+        case construct::Index:
+        case construct::DotPrivate:
+        case construct::SuperDot:
+        case construct::SuperIndex:
+        case construct::Identifier:
+        case construct::Optional:
+            return true;
+        case construct::Parenthesized:
+            return aNode->size() == 1u && is_call_reference(aNode->child(0u));
+        default:
+            return false;
+        }
+    }
+
+    void function_generator::optional_chain(node* aNode, std::optional<std::uint32_t>* aThis)
     {
         // a?.b.c: if a is null or undefined the whole chain is undefined (the chain's optional links branch out of its block)
         begin(control_kind::Block, I64);
@@ -3810,13 +4155,31 @@ namespace neos::compilers::javascript
                     check();
                 }
                 break;
+            case construct::SuperDot:
+            case construct::SuperIndex:
+                if (aThis != nullptr)
+                {
+                    *aThis = temporary();
+                    this_value(n);
+                    set(**aThis);
+                }
+                super_property(n);
+                break;
+            case construct::Optional:
+                // (a parenthesized chain (a call's callee): a chain of its own)
+                optional_chain(n, aThis);
+                break;
             case construct::Call:
             case construct::OptionalCall:
                 {
                     std::optional<std::uint32_t> thisLocal;
                     auto* calleeNode = n->child(0u);
+                    // ((a.b)?.(): a parenthesized reference is the reference (its base is the this))
+                    while (calleeNode->is(construct::Parenthesized) && calleeNode->size() == 1u && is_call_reference(calleeNode->child(0u)))
+                        calleeNode = calleeNode->child(0u);
                     bool const member = calleeNode->is(construct::Dot) || calleeNode->is(construct::Index) || calleeNode->is(construct::OptionalDot) ||
-                        calleeNode->is(construct::OptionalIndex) || calleeNode->is(construct::DotPrivate) || calleeNode->is(construct::OptionalPrivate);
+                        calleeNode->is(construct::OptionalIndex) || calleeNode->is(construct::DotPrivate) || calleeNode->is(construct::OptionalPrivate) ||
+                        calleeNode->is(construct::SuperDot) || calleeNode->is(construct::SuperIndex) || calleeNode->is(construct::Optional);
                     link(calleeNode, member ? &thisLocal : nullptr);
                     if (n->is(construct::OptionalCall))
                         short_circuit();
@@ -3838,7 +4201,7 @@ namespace neos::compilers::javascript
                 break;
             }
         };
-        link(aNode->child(0u), nullptr);
+        link(aNode->child(0u), aThis);
         end_control();
     }
 
@@ -4093,28 +4456,18 @@ namespace neos::compilers::javascript
         // (the operator: the text between the target and the value)
         auto const between = std::string_view{ target->source.data() + target->source.size(),
             static_cast<std::size_t>(valueNode->source.data() - (target->source.data() + target->source.size())) };
-        std::string oper;
-        for (auto c : between)
-            if (!std::isspace(static_cast<unsigned char>(c)))
-                oper.push_back(c);
-        // (comments between them: the operator is what is not a comment)
-        if (auto const p = oper.find("/*"); p != std::string::npos)
-        {
-            std::string cleaned;
-            for (std::size_t i = 0u; i < oper.size(); ++i)
-            {
-                if (oper.compare(i, 2u, "/*") == 0)
-                {
-                    auto const e = oper.find("*/", i + 2u);
-                    i = e == std::string::npos ? oper.size() : e + 1u;
-                    continue;
-                }
-                cleaned.push_back(oper[i]);
-            }
-            oper = cleaned;
-        }
+        std::string oper = operator_text(between);
         while (target->is(construct::Parenthesized) && (oper != "=" || (!target->child(0u)->is(construct::Object) && !target->child(0u)->is(construct::Array))))
             target = target->child(0u);
+        // ((x) = function () {}: a parenthesized target is not an IdentifierRef: the function is not named)
+        bool const covered = target != aNode->child(0u);
+        auto const nameable = [&](node* aValue, std::string_view aName)
+        {
+            if (covered)
+                expression(aValue);
+            else
+                named_evaluation(aValue, aName);
+        };
         if (oper == "=")
         {
             if (target->is(construct::Object) || target->is(construct::Array))
@@ -4132,14 +4485,42 @@ namespace neos::compilers::javascript
                 auto const r = resolve(name_of(target), target);
                 if (iFunction.strict && (r.name == "eval" || r.name == "arguments"))
                     iCompiler.error(target->source, "Unexpected eval or arguments in strict mode");
+                if (numeric_assignment(r, valueNode, "="))
+                    return;
                 if (r.kind == reference::Global && iFunction.strict)
                 {
                     // (a strict assignment to an undeclared name: a ReferenceError, after the value is evaluated (but the binding is
-                    // checked first))
-                }
-                if (numeric_assignment(r, valueNode, "="))
+                    // resolved first: global_set's flags (see global_resolved))
+                    key(r.name);
+                    runtime("global_resolved", { I64 }, I32);
+                    auto const flags = local(I32);
+                    set(flags);
+                    nameable(valueNode, r.name);
+                    auto const value = temporary();
+                    set(value);
+                    key(r.name);
+                    get(value);
+                    get(flags);
+                    runtime("global_set", { I64, I64, I32 }, I64);
+                    check_void();
+                    get(value);
+                    release(value);
                     return;
-                named_evaluation(valueNode, r.name);
+                }
+                if (r.kind == reference::Dynamic)
+                {
+                    // (a name found by name: the reference is resolved before the value is evaluated (PutValue uses it))
+                    auto const base = dynamic_reference(r);
+                    nameable(valueNode, r.name);
+                    auto const value = temporary();
+                    set(value);
+                    dynamic_reference_set(base, r, value);
+                    get(value);
+                    release(value);
+                    release(base);
+                    return;
+                }
+                nameable(valueNode, r.name);
                 store(r, false, target);
                 return;
             }
@@ -4178,30 +4559,20 @@ namespace neos::compilers::javascript
             }
             if (target->is(construct::SuperDot) || target->is(construct::SuperIndex))
             {
-                this_value(target);
-                auto const thisValue = temporary();
-                set(thisValue);
-                if (target->is(construct::SuperDot))
-                    key(name_of(target->child(0u)));
-                else
-                {
-                    expression(target->child(0u));
-                    runtime("to_property_key", { I64 }, I64);
-                    check();
-                }
-                auto const keyValue = temporary();
-                set(keyValue);
+                std::uint32_t thisValue = 0u, keyValue = 0u;
+                auto const base = super_reference(target, thisValue, keyValue);
                 expression(valueNode);
                 auto const value = temporary();
                 set(value);
-                home_object_value();
+                get(base);
                 get(keyValue);
                 get(value);
                 get(thisValue);
-                runtime("super_set", { I64, I64, I64, I64 }, I64);
+                runtime(iFunction.strict ? "super_set" : "super_set_sloppy", { I64, I64, I64, I64 }, I64);
                 check_void();
                 get(value);
                 release(value);
+                release(base);
                 release(keyValue);
                 release(thisValue);
                 return;
@@ -4236,8 +4607,17 @@ namespace neos::compilers::javascript
                 iCompiler.error(target->source, "Unexpected eval or arguments in strict mode");
             if (numeric_assignment(*r, valueNode, oper))
                 return;
-            readTarget = [&]() { load(*r); };
-            writeTarget = [&](std::uint32_t aValue) { get(aValue); store(*r, false, target); drop(); };
+            if (r->kind == reference::Dynamic)
+            {
+                object = dynamic_reference(*r);
+                readTarget = [&]() { dynamic_reference_get(object, *r); };
+                writeTarget = [&](std::uint32_t aValue) { dynamic_reference_set(object, *r, aValue); };
+            }
+            else
+            {
+                readTarget = [&]() { load(*r); };
+                writeTarget = [&](std::uint32_t aValue) { get(aValue); store(*r, false, target); drop(); };
+            }
         }
         else if (target->is(construct::Dot) || target->is(construct::Index) || target->is(construct::DotPrivate))
         {
@@ -4286,22 +4666,18 @@ namespace neos::compilers::javascript
         }
         else if (target->is(construct::SuperDot) || target->is(construct::SuperIndex))
         {
-            this_value(target);
-            thisValue = temporary();
-            set(thisValue);
-            if (target->is(construct::SuperDot))
-                key(name_of(target->child(0u)));
-            else
+            // (the key is made a property key once (by GetValue))
+            object = super_reference(target, thisValue, keyValue);
+            if (target->is(construct::SuperIndex))
             {
-                expression(target->child(0u));
+                get(keyValue);
                 runtime("to_property_key", { I64 }, I64);
                 check();
+                set(keyValue);
             }
-            keyValue = temporary();
-            set(keyValue);
             readTarget = [&]()
             {
-                home_object_value();
+                get(object);
                 get(keyValue);
                 get(thisValue);
                 runtime("super_get", { I64, I64, I64 }, I64);
@@ -4309,11 +4685,11 @@ namespace neos::compilers::javascript
             };
             writeTarget = [&](std::uint32_t aValue)
             {
-                home_object_value();
+                get(object);
                 get(keyValue);
                 get(aValue);
                 get(thisValue);
-                runtime("super_set", { I64, I64, I64, I64 }, I64);
+                runtime(iFunction.strict ? "super_set" : "super_set_sloppy", { I64, I64, I64, I64 }, I64);
                 check_void();
             };
         }
@@ -4353,7 +4729,7 @@ namespace neos::compilers::javascript
             iCode.push_back(0x7Eu);
             iControls.push_back(control{ control_kind::Block });
             if (target->is(construct::Identifier))
-                named_evaluation(valueNode, r->name);
+                nameable(valueNode, r->name);
             else
                 expression(valueNode);
             auto const value = temporary();
@@ -4382,6 +4758,37 @@ namespace neos::compilers::javascript
             release(rhs);
         }
         release(current);
+    }
+
+    std::uint32_t function_generator::dynamic_reference(reference const& aReference)
+    {
+        // (a name found by name: its reference's base (see the runtime's dyn_reference))
+        environment_value();
+        key(aReference.name);
+        runtime("dyn_reference", { I64, I64 }, I64);
+        check();
+        auto const base = temporary();
+        set(base);
+        return base;
+    }
+
+    void function_generator::dynamic_reference_get(std::uint32_t aBase, reference const& aReference)
+    {
+        get(aBase);
+        key(aReference.name);
+        i32(iFunction.strict ? 1 : 0);
+        runtime("dyn_reference_get", { I64, I64, I32 }, I64);
+        check();
+    }
+
+    void function_generator::dynamic_reference_set(std::uint32_t aBase, reference const& aReference, std::uint32_t aValue)
+    {
+        get(aBase);
+        key(aReference.name);
+        get(aValue);
+        i32(iFunction.strict ? 1 : 0);
+        runtime("dyn_reference_set", { I64, I64, I64, I32 }, I64);
+        check_void();
     }
 
     void function_generator::update(node* aNode)
@@ -4414,11 +4821,22 @@ namespace neos::compilers::javascript
                 release(old);
                 return;
             }
-            load(r);
-            compute();
-            get(updated);
-            store(r, false, target);
-            drop();
+            if (r.kind == reference::Dynamic)
+            {
+                auto const base = dynamic_reference(r);
+                dynamic_reference_get(base, r);
+                compute();
+                dynamic_reference_set(base, r, updated);
+                release(base);
+            }
+            else
+            {
+                load(r);
+                compute();
+                get(updated);
+                store(r, false, target);
+                drop();
+            }
         }
         else if (target->is(construct::Dot) || target->is(construct::Index) || target->is(construct::DotPrivate))
         {
@@ -4461,31 +4879,29 @@ namespace neos::compilers::javascript
         }
         else if (target->is(construct::SuperDot) || target->is(construct::SuperIndex))
         {
-            this_value(target);
-            auto const thisValue = temporary();
-            set(thisValue);
-            if (target->is(construct::SuperDot))
-                key(name_of(target->child(0u)));
-            else
+            std::uint32_t thisValue = 0u, keyValue = 0u;
+            auto const base = super_reference(target, thisValue, keyValue);
+            if (target->is(construct::SuperIndex))
             {
-                expression(target->child(0u));
+                // (the key is made a property key once (by GetValue))
+                get(keyValue);
                 runtime("to_property_key", { I64 }, I64);
                 check();
+                set(keyValue);
             }
-            auto const keyValue = temporary();
-            set(keyValue);
-            home_object_value();
+            get(base);
             get(keyValue);
             get(thisValue);
             runtime("super_get", { I64, I64, I64 }, I64);
             check();
             compute();
-            home_object_value();
+            get(base);
             get(keyValue);
             get(updated);
             get(thisValue);
-            runtime("super_set", { I64, I64, I64, I64 }, I64);
+            runtime(iFunction.strict ? "super_set" : "super_set_sloppy", { I64, I64, I64, I64 }, I64);
             check_void();
+            release(base);
             release(keyValue);
             release(thisValue);
         }
@@ -4724,6 +5140,115 @@ namespace neos::compilers::javascript
             assign_target(aTarget);
     }
 
+    function_generator::prepared_reference function_generator::prepare_reference(node* aElement, bool aBinding)
+    {
+        // (a destructuring assignment's element whose target is a property reference: the reference is evaluated (its object and key)
+        // before the element's value is taken; likewise a name found by name (e.g. in a with statement): it is resolved first (also a
+        // var binding's (KeyedBindingInitialization's ResolveBinding)))
+        prepared_reference result;
+        auto* t = aElement;
+        if (t->is(aBinding ? construct::Initializer : construct::Assign))
+            t = t->child(0u);
+        while (t->is(construct::Parenthesized))
+            t = t->child(0u);
+        result.target = t;
+        if (t->is(aBinding ? construct::Binding : construct::Identifier))
+        {
+            if (auto const r = resolve(name_of(t), t); r.kind == reference::Dynamic && !r.name.starts_with("#"))
+            {
+                result.object = dynamic_reference(r);
+                result.dynamic = r;
+                result.prepared = true;
+            }
+            return result;
+        }
+        if (aBinding)
+            return result;
+        if (t->is(construct::Dot) || t->is(construct::Index) || t->is(construct::DotPrivate))
+        {
+            expression(t->child(0u));
+            result.object = temporary();
+            set(result.object);
+            if (t->is(construct::Dot))
+                key(name_of(t->child(1u)));
+            else if (t->is(construct::DotPrivate))
+                load(resolve(name_of(t->child(1u)), t));
+            else
+                expression(t->child(1u));
+            result.keyValue = temporary();
+            set(result.keyValue);
+            result.prepared = true;
+        }
+        else if (t->is(construct::SuperDot) || t->is(construct::SuperIndex))
+        {
+            result.superBase = super_reference(t, result.object, result.keyValue);
+            result.prepared = true;
+        }
+        return result;
+    }
+
+    void function_generator::assign_prepared(prepared_reference const& aReference, node* aElement)
+    {
+        // (the value on the stack: assigned to the element (its default if it is undefined) through its prepared reference)
+        if (!aReference.prepared)
+        {
+            assign_target(aElement);
+            return;
+        }
+        auto const value = temporary();
+        set(value);
+        if (aElement->is(construct::Assign) || aElement->is(construct::Initializer))
+        {
+            get(value);
+            constant(values::Undefined);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            if (aReference.dynamic)
+                named_evaluation(aElement->child(1u), aReference.dynamic->name);
+            else
+                expression(aElement->child(1u));
+            set(value);
+            end_control();
+        }
+        auto* t = aReference.target;
+        if (aReference.dynamic)
+        {
+            dynamic_reference_set(aReference.object, *aReference.dynamic, value);
+            release(value);
+            release(aReference.object);
+            return;
+        }
+        if (t->is(construct::SuperDot) || t->is(construct::SuperIndex))
+        {
+            get(aReference.superBase);
+            get(aReference.keyValue);
+            get(value);
+            get(aReference.object);
+            runtime(iFunction.strict ? "super_set" : "super_set_sloppy", { I64, I64, I64, I64 }, I64);
+            check_void();
+            release(aReference.superBase);
+        }
+        else
+        {
+            get(aReference.object);
+            get(aReference.keyValue);
+            get(value);
+            if (t->is(construct::DotPrivate))
+                runtime("private_set", { I64, I64, I64 }, I64);
+            else
+            {
+                i32(iFunction.strict ? 1 : 0);
+                runtime(t->is(construct::Dot) ? "set_named" : "set", { I64, I64, I64, I32 }, I64);
+            }
+            check_void();
+        }
+        release(value);
+        release(aReference.keyValue);
+        release(aReference.object);
+    }
+
     void function_generator::assign_target(node* aTarget)
     {
         // (an assignment pattern (an object or array literal), or an assignment target expression; the value on the stack)
@@ -4778,25 +5303,15 @@ namespace neos::compilers::javascript
             {
                 auto const value = temporary();
                 set(value);
-                this_value(aTarget);
-                auto const thisValue = temporary();
-                set(thisValue);
-                if (aTarget->is(construct::SuperDot))
-                    key(name_of(aTarget->child(0u)));
-                else
-                {
-                    expression(aTarget->child(0u));
-                    runtime("to_property_key", { I64 }, I64);
-                    check();
-                }
-                auto const keyValue = temporary();
-                set(keyValue);
-                home_object_value();
+                std::uint32_t thisValue = 0u, keyValue = 0u;
+                auto const base = super_reference(aTarget, thisValue, keyValue);
+                get(base);
                 get(keyValue);
                 get(value);
                 get(thisValue);
-                runtime("super_set", { I64, I64, I64, I64 }, I64);
+                runtime(iFunction.strict ? "super_set" : "super_set_sloppy", { I64, I64, I64, I64 }, I64);
                 check_void();
+                release(base);
                 release(keyValue);
                 release(thisValue);
                 release(value);
@@ -4830,6 +5345,19 @@ namespace neos::compilers::javascript
                 assign_target(inner);
             }
             break;
+        case construct::Call:
+            if (!iFunction.strict)
+            {
+                // (a call as a for-in/of head's target (sloppy code, web compatibility): the call, then a ReferenceError)
+                drop();
+                expression(aTarget);
+                drop();
+                runtime("throw_invalid_assignment", {}, I64);
+                check_void();
+                break;
+            }
+            iCompiler.error(aTarget->source, "Invalid destructuring assignment target");
+            break;
         default:
             iCompiler.error(aTarget->source, "Invalid destructuring assignment target");
         }
@@ -4861,12 +5389,16 @@ namespace neos::compilers::javascript
                     runtime("array_push", { I64, I64 }, I64);
                     drop();
                 }
+                auto const reference = aBinding && aInitialize ? prepared_reference{} : prepare_reference(p->child(0u), aBinding);
                 get(source);
                 get(excluded);
                 runtime("object_rest", { I64, I64 }, I64);
                 check();
                 release(excluded);
-                bind_element(p->child(0u), aBinding, aInitialize);
+                if (aBinding && !reference.prepared)
+                    bind_element(p->child(0u), aBinding, aInitialize);
+                else
+                    assign_prepared(reference, p->child(0u));
                 continue;
             }
             node* keyNode = nullptr;
@@ -4890,6 +5422,7 @@ namespace neos::compilers::javascript
             case construct::ShorthandDefault:
                 {
                     // ({ a = 1 } = value)
+                    auto const reference = prepare_reference(p->child(0u));
                     key(name_of(p->child(0u)));
                     auto const k = temporary();
                     tee(k);
@@ -4912,7 +5445,7 @@ namespace neos::compilers::javascript
                     end_control();
                     get(value);
                     release(value);
-                    assign_target(p->child(0u));
+                    assign_prepared(reference, p->child(0u));
                     if (!hasRest)
                         release(k);
                 }
@@ -4929,11 +5462,15 @@ namespace neos::compilers::javascript
             drop();
             if (hasRest)
                 keys.push_back(k);
+            auto const reference = aBinding && aInitialize ? prepared_reference{} : prepare_reference(target, aBinding);
             get(source);
             get(k);
             runtime("get", { I64, I64 }, I64);
             check();
-            bind_element(target, aBinding, aInitialize);
+            if (aBinding && !reference.prepared)
+                bind_element(target, aBinding, aInitialize);
+            else
+                assign_prepared(reference, target);
             if (!hasRest)
                 release(k);
         }
@@ -4962,12 +5499,17 @@ namespace neos::compilers::javascript
         {
             if (e->is(construct::Rest) || e->is(construct::Spread))
             {
+                auto const reference = aBinding && aInitialize ? prepared_reference{} : prepare_reference(e->child(0u), aBinding);
                 get(iterator);
                 runtime("iterator_rest", { I64 }, I64);
                 check();
-                bind_element(e->child(0u), aBinding, aInitialize);
+                if (aBinding && !reference.prepared)
+                    bind_element(e->child(0u), aBinding, aInitialize);
+                else
+                    assign_prepared(reference, e->child(0u));
                 continue;
             }
+            auto const reference = ((aBinding && aInitialize) || e->is(construct::Hole)) ? prepared_reference{} : prepare_reference(e, aBinding);
             get(iterator);
             runtime("iterator_value", { I64 }, I64);
             check();
@@ -4976,7 +5518,10 @@ namespace neos::compilers::javascript
                 drop();
                 continue;
             }
-            bind_element(e, aBinding, aInitialize);
+            if (aBinding && !reference.prepared)
+                bind_element(e, aBinding, aInitialize);
+            else
+                assign_prepared(reference, e);
         }
         branch(cleanup);
         end_control();
@@ -5251,32 +5796,39 @@ namespace neos::compilers::javascript
 
     namespace
     {
+        // (the operator in a source between two operands: its punctuators (not white space, Unicode's included, or comments))
+        std::string operator_text(std::string_view aBetween)
+        {
+            std::string result;
+            for (std::size_t i = 0u; i < aBetween.size(); ++i)
+            {
+                if (aBetween.compare(i, 2u, "/*") == 0)
+                {
+                    auto const e = aBetween.find("*/", i + 2u);
+                    i = e == std::string_view::npos ? aBetween.size() : e + 1u;
+                    continue;
+                }
+                if (aBetween.compare(i, 2u, "//") == 0)
+                {
+                    while (i < aBetween.size() && aBetween[i] != '\n' && aBetween[i] != '\r' &&
+                        !(aBetween.compare(i, 3u, "\xE2\x80\xA8") == 0 || aBetween.compare(i, 3u, "\xE2\x80\xA9") == 0))
+                        ++i;
+                    --i;
+                    continue;
+                }
+                if (std::string_view{ "*/%+-<>&^|=?!" }.find(aBetween[i]) != std::string_view::npos)
+                    result.push_back(aBetween[i]);
+            }
+            return result;
+        }
+
         // (an assignment's operator)
         std::string assignment_operator(node const* aNode)
         {
             auto const* target = aNode->child(0u);
             auto const* valueNode = aNode->child(1u);
-            auto const between = std::string_view{ target->source.data() + target->source.size(),
-                static_cast<std::size_t>(valueNode->source.data() - (target->source.data() + target->source.size())) };
-            std::string result;
-            for (std::size_t i = 0u; i < between.size(); ++i)
-            {
-                if (between.compare(i, 2u, "/*") == 0)
-                {
-                    auto const e = between.find("*/", i + 2u);
-                    i = e == std::string_view::npos ? between.size() : e + 1u;
-                    continue;
-                }
-                if (between.compare(i, 2u, "//") == 0)
-                {
-                    while (i < between.size() && between[i] != '\n')
-                        ++i;
-                    continue;
-                }
-                if (!std::isspace(static_cast<unsigned char>(between[i])))
-                    result.push_back(between[i]);
-            }
-            return result;
+            return operator_text(std::string_view{ target->source.data() + target->source.size(),
+                static_cast<std::size_t>(valueNode->source.data() - (target->source.data() + target->source.size())) });
         }
 
         // (a numeric literal's value, if it is one (not legacy octal))
@@ -5316,19 +5868,120 @@ namespace neos::compilers::javascript
         return existing != iNumeric.end() ? existing->second : numeric_rep::None;
     }
 
+    namespace
+    {
+        bool integral(numeric_rep aRep)
+        {
+            return aRep == numeric_rep::I32 || aRep == numeric_rep::I64;
+        }
+
+        // (the representation of the values of both (None if either is None))
+        numeric_rep join(numeric_rep aLeft, numeric_rep aRight)
+        {
+            if (aLeft == numeric_rep::None || aRight == numeric_rep::None)
+                return numeric_rep::None;
+            if (aLeft == numeric_rep::F64 || aRight == numeric_rep::F64)
+                return numeric_rep::F64;
+            if (aLeft == numeric_rep::I64 || aRight == numeric_rep::I64)
+                return numeric_rep::I64;
+            return numeric_rep::I32;
+        }
+
+        // (a numeric literal's value, or a negated numeric literal's)
+        std::optional<double> constant_number(node const* aNode)
+        {
+            aNode = unparenthesized(aNode);
+            if (aNode->is(construct::Negate) && aNode->size() == 1u)
+            {
+                if (auto const n = literal_number(aNode->child(0u)))
+                    return -*n;
+                return {};
+            }
+            return literal_number(aNode);
+        }
+
+        bool int32_constant(std::optional<double> const& aValue)
+        {
+            return small_integer(aValue) && *aValue < 2147483648.0;
+        }
+
+        // (a counter's step: an i64 counter's updates are at most 256 (in magnitude), so that its value stays below 2^62 (an f64 add of
+        // such a step to a value of at least 2^62 (whose ulp is at least 1024) does not change it): see counter_guard)
+        bool counter_step(std::optional<double> const& aValue)
+        {
+            return small_integer(aValue) && std::fabs(*aValue) <= 256.0;
+        }
+
+        // (ToInt32 of a number)
+        std::int32_t to_int32_value(double aValue)
+        {
+            if (!std::isfinite(aValue))
+                return 0;
+            auto const m = std::fmod(std::trunc(aValue), 4294967296.0);
+            return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::int64_t>(m < 0.0 ? m + 4294967296.0 : m)));
+        }
+
+        bool power_of_two(double aValue)
+        {
+            int exponent = 0;
+            return aValue != 0.0 && std::isfinite(aValue) && std::fabs(std::frexp(aValue, &exponent)) == 0.5;
+        }
+
+        intrinsic intrinsic_named(std::string_view aName, std::size_t aArguments)
+        {
+            if (aName == "imul")
+                return aArguments == 2u ? intrinsic::Imul : intrinsic::None;
+            if (aArguments != 1u)
+                return intrinsic::None;
+            if (aName == "floor")
+                return intrinsic::Floor;
+            if (aName == "ceil")
+                return intrinsic::Ceil;
+            if (aName == "trunc")
+                return intrinsic::Trunc;
+            if (aName == "sqrt")
+                return intrinsic::Sqrt;
+            if (aName == "abs")
+                return intrinsic::Abs;
+            return intrinsic::None;
+        }
+
+        // (the representation of a numeric local after an assignment with an operator (None: not a number))
+        numeric_rep assignment_rep(std::string const& aOperator, numeric_rep aValue, std::optional<double> const& aConstant)
+        {
+            if (aOperator == "=")
+                return aValue;
+            if (aOperator == "+=")
+                return counter_step(aConstant) ? numeric_rep::I64 : aValue != numeric_rep::None ? numeric_rep::F64 : numeric_rep::None;
+            if (aOperator == "-=")
+                return counter_step(aConstant) ? numeric_rep::I64 : numeric_rep::F64;   // (a number less any value is a number (or throws))
+            if (aOperator == "&=" || aOperator == "|=" || aOperator == "^=" || aOperator == "<<=" || aOperator == ">>=")
+                return numeric_rep::I32;
+            if (aOperator == ">>>=")
+                return numeric_rep::I64;
+            if (aOperator == "&&=" || aOperator == "||=" || aOperator == "??=")
+                return aValue != numeric_rep::None ? numeric_rep::F64 : numeric_rep::None;
+            return numeric_rep::F64;
+        }
+    }
+
     numeric_rep function_generator::num_type(node* aNode)
     {
-        // (I64: an integer (an i64 local or an integer literal); F64: another number; None: any value)
+        // (I32: a 32-bit integer; I64: an integer (an i64 local, an integer literal); F64: another number; None: any value)
         aNode = const_cast<node*>(unparenthesized(aNode));
+        if (aNode->is(construct::Number) || (aNode->is(construct::Negate) && aNode->size() == 1u && unparenthesized(aNode->child(0u))->is(construct::Number)))
+        {
+            auto const n = constant_number(aNode);
+            if (!n)
+                return numeric_rep::None;
+            return int32_constant(n) ? numeric_rep::I32 : small_integer(n) ? numeric_rep::I64 : numeric_rep::F64;
+        }
+        auto const operands = [&]()
+        {
+            return num_type(aNode->child(0u)) != numeric_rep::None && num_type(aNode->child(1u)) != numeric_rep::None;
+        };
         switch (aNode->kind)
         {
-        case construct::Number:
-            {
-                auto const n = literal_number(aNode);
-                if (!n)
-                    return numeric_rep::None;
-                return small_integer(n) ? numeric_rep::I64 : numeric_rep::F64;
-            }
         case construct::Identifier:
             {
                 auto const existing = iNumericNames.find(aNode);
@@ -5337,21 +5990,55 @@ namespace neos::compilers::javascript
         case construct::Negate:
         case construct::Plus:
             return num_type(aNode->child(0u)) != numeric_rep::None ? numeric_rep::F64 : numeric_rep::None;
+        case construct::BitNot:
+            return num_type(aNode->child(0u)) != numeric_rep::None ? numeric_rep::I32 : numeric_rep::None;
         case construct::Add:
         case construct::Subtract:
         case construct::Multiply:
         case construct::Divide:
         case construct::Remainder:
-            return num_type(aNode->child(0u)) != numeric_rep::None && num_type(aNode->child(1u)) != numeric_rep::None ? numeric_rep::F64 : numeric_rep::None;
+            return operands() ? numeric_rep::F64 : numeric_rep::None;
+        case construct::BitAnd:
+        case construct::BitOr:
+        case construct::BitXor:
+        case construct::ShiftLeft:
+        case construct::ShiftRight:
+            return operands() ? numeric_rep::I32 : numeric_rep::None;
+        case construct::ShiftRightUnsigned:
+            return operands() ? numeric_rep::I64 : numeric_rep::None;
+        case construct::Conditional:
+            return join(num_type(aNode->child(1u)), num_type(aNode->child(2u)));
+        case construct::Call:
+            switch (intrinsic_of(aNode))
+            {
+            case intrinsic::None:
+                return numeric_rep::None;
+            case intrinsic::Imul:
+                return numeric_rep::I32;
+            default:
+                return numeric_rep::F64;
+            }
         default:
             return numeric_rep::None;
         }
+    }
+
+    intrinsic function_generator::intrinsic_of(node* aNode) const
+    {
+        auto const existing = iIntrinsics.find(aNode);
+        return existing != iIntrinsics.end() ? existing->second : intrinsic::None;
     }
 
     void function_generator::infer_numeric()
     {
         iNumeric.clear();
         iNumericNames.clear();
+        iNumericArguments.clear();
+        iInvariantNumerics.clear();
+        iUnitCounters.clear();
+        iMonotoneCounters.clear();
+        iIntrinsics.clear();
+        iIntrinsicMask = 0u;
         static bool const sDisabled = std::getenv("NEOS_JS_NO_NUMERIC") != nullptr;
         if (sDisabled || iBody || iFunction.generator || iFunction.async)
             return;
@@ -5360,6 +6047,7 @@ namespace neos::compilers::javascript
             node* declarator = nullptr;
             int declarators = 0;
             bool eligible = true;
+            std::optional<std::uint32_t> parameter;     ///< (the numeric version's parameter: its index)
             std::vector<node*> sites;       ///< (its references: reads, assignments and updates)
             std::vector<node*> assignments;
             std::vector<node*> updates;
@@ -5373,6 +6061,28 @@ namespace neos::compilers::javascript
                 if (!b->captured && (b->kind == binding_kind::Let || b->kind == binding_kind::Const || (b->kind == binding_kind::Var && s.kind != scope_kind::Script)))
                     uses[b.get()];
         }
+        if (iNumericParameters && iFunction.declaration != nullptr)
+        {
+            // (the numeric version: its first four parameters (each named once), whose arguments are numbers)
+            for (auto* c : iFunction.declaration->children)
+                if (c->is(construct::Parameters))
+                {
+                    std::map<std::string, int> names;
+                    for (auto* p : c->children)
+                        if (p->is(construct::Binding))
+                            ++names[name_of(p)];
+                    for (std::uint32_t i = 0u; i < c->size() && i < RegisterArguments; ++i)
+                    {
+                        auto* p = c->child(i);
+                        if (!p->is(construct::Binding) || names[name_of(p)] != 1)
+                            continue;
+                        auto* b = iFunction.top->find(name_of(p));
+                        if (b != nullptr && b->kind == binding_kind::Parameter && !b->captured)
+                            uses[b].parameter = i;
+                    }
+                    break;
+                }
+        }
         if (uses.empty())
             return;
         // (the references: by the scopes of the function (a node's scope is its children's))
@@ -5385,9 +6095,36 @@ namespace neos::compilers::javascript
                     return b;
             return nullptr;
         };
+        // (the numeric version's calls of Math functions that can be computed inline: Math is not a binding of the program (other than
+        // the global object's property, which its entry checks))
+        std::unordered_map<node const*, intrinsic> intrinsics;
+        auto const intrinsic_call = [&](node* aCall) -> intrinsic
+        {
+            if (!iNumericParameters || iCompiler.eval_code() || iCompiler.iModule || aCall->size() < 1u)
+                return intrinsic::None;
+            auto* callee = const_cast<node*>(unparenthesized(aCall->child(0u)));
+            if (!callee->is(construct::Dot) || callee->size() < 2u || !callee->child(0u)->is(construct::Identifier) || name_of(callee->child(0u)) != "Math")
+                return intrinsic::None;
+            for (std::size_t i = 1u; i < aCall->size(); ++i)
+                if (aCall->child(i)->is(construct::Spread))
+                    return intrinsic::None;
+            auto const result = intrinsic_named(name_of(callee->child(1u)), aCall->size() - 1u);
+            if (result == intrinsic::None || lookup("Math") != nullptr)
+                return intrinsic::None;
+            for (auto* s = iFunction.top->parent; s != nullptr; s = s->parent)
+                if (s->kind == scope_kind::With || s->dynamic || s->find("Math") != nullptr || iCompiler.sloppy_eval_var_scope(s))
+                    return intrinsic::None;
+            return result;
+        };
         bool inTarget = false;      // (a destructuring assignment's target or a for-in/of head: its identifiers are assigned any value)
         std::function<void(node*)> walk = [&](node* aNode)
         {
+            if (aNode->annexB && aNode->function != nullptr)
+            {
+                // (a block's function declaration that assigns the function's var binding (Annex B.3.3): that binding holds a function)
+                if (auto* b = iFunction.body->find(aNode->function->name); b != nullptr && uses.contains(b))
+                    uses[b].eligible = false;
+            }
             if (aNode->function != nullptr && aNode->function != &iFunction)
             {
                 // (another function (its uses of this function's bindings captured them); a field's key is this function's)
@@ -5442,6 +6179,8 @@ namespace neos::compilers::javascript
                 {
                     auto& u = uses[b];
                     auto* d = aNode->parent;
+                    if (u.parameter && d != nullptr && d->is(construct::Parameters))
+                        break;      // (the parameter itself)
                     if (d != nullptr && d->is(construct::Declarator) && d->child(0u) == aNode && d->parent != nullptr &&
                         (d->parent->is(construct::Let) || d->parent->is(construct::Const) || d->parent->is(construct::Var)))
                     {
@@ -5497,6 +6236,10 @@ namespace neos::compilers::javascript
                     }
                 }
                 break;
+            case construct::Call:
+                if (auto const k = intrinsic_call(aNode); k != intrinsic::None)
+                    intrinsics[aNode] = k;
+                break;
             default:
                 break;
             }
@@ -5515,9 +6258,20 @@ namespace neos::compilers::javascript
             for (auto* c : iFunction.declaration->children)
                 walk(c);
         }
-        // (eligibility: declared once, with an initializer, where it is reached before its uses)
+        // (eligibility: declared once, with an initializer, where it is reached before its uses (a parameter: not declared again))
         for (auto& [b, u] : uses)
         {
+            if (b == iFunction.argumentsBinding)
+            {
+                // (var arguments: the binding holds the arguments object first)
+                u.eligible = false;
+                continue;
+            }
+            if (u.parameter)
+            {
+                u.eligible = u.eligible && u.declarators == 0;
+                continue;
+            }
             if (!u.eligible || u.declarators != 1 || u.declarator == nullptr || u.declarator->size() < 2u)
             {
                 u.eligible = false;
@@ -5546,64 +6300,385 @@ namespace neos::compilers::javascript
                 if (site->source.data() < end)
                     placed = false;
             u.eligible = placed;
+            // (a const that is assigned: the assignment throws (its general code does))
+            if (b->kind == binding_kind::Const && (!u.assignments.empty() || !u.updates.empty()))
+                u.eligible = false;
         }
-        // (the types: integers (counters) and numbers, until none changes)
-        for (auto& [b, u] : uses)
-            if (u.eligible)
-                iNumeric[b] = small_integer(literal_number(u.declarator->child(1u))) ? numeric_rep::I64 : numeric_rep::F64;
-        for (bool changed = true; changed;)
+        // (the representations: the least that holds every value assigned (a parameter's argument is any number), from i32 up)
+        auto const solve = [&]()
         {
-            changed = false;
+            iNumeric.clear();
             for (auto& [b, u] : uses)
+                if (u.eligible)
+                    iNumeric[b] = u.parameter ? numeric_rep::F64 : numeric_rep::I32;
+            for (bool changed = true; changed;)
             {
-                auto const rep = rep_of(b);
-                if (rep == numeric_rep::None)
-                    continue;
-                auto result = rep;
-                auto const demote = [&](numeric_rep aTo)
+                changed = false;
+                for (auto& [b, u] : uses)
                 {
-                    if (aTo == numeric_rep::None || (aTo == numeric_rep::F64 && result == numeric_rep::I64))
-                        result = aTo;
-                };
-                if (num_type(u.declarator->child(1u)) == numeric_rep::None)
-                    demote(numeric_rep::None);
-                for (auto* a : u.assignments)
-                {
-                    auto const oper = assignment_operator(a);
-                    auto* value = a->child(1u);
-                    if (oper == "=" || oper == "+=" || oper == "&&=" || oper == "||=" || oper == "??=")
+                    auto const rep = rep_of(b);
+                    if (rep == numeric_rep::None)
+                        continue;
+                    auto result = rep;
+                    if (!u.parameter)
+                        result = join(result, num_type(u.declarator->child(1u)));
+                    for (auto* a : u.assignments)
                     {
-                        if (num_type(value) == numeric_rep::None)
-                            demote(numeric_rep::None);
-                        else if (!((oper == "+=" || oper == "=") && small_integer(literal_number(value))))
-                            demote(numeric_rep::F64);
-                        if (oper != "=" && oper != "+=")
-                            demote(numeric_rep::F64);
+                        auto* value = a->child(1u);
+                        result = join(result, assignment_rep(assignment_operator(a), num_type(value), constant_number(value)));
                     }
-                    else if (oper == "-=")
+                    if (!u.updates.empty())
+                        result = join(result, numeric_rep::I64);
+                    if (result != rep)
                     {
-                        if (!small_integer(literal_number(value)))
-                            demote(numeric_rep::F64);
+                        if (result == numeric_rep::None)
+                            iNumeric.erase(b);
+                        else
+                            iNumeric[b] = result;
+                        changed = true;
                     }
-                    else
-                        demote(numeric_rep::F64);
-                }
-                if (result != rep)
-                {
-                    if (result == numeric_rep::None)
-                        iNumeric.erase(b);
-                    else
-                        iNumeric[b] = result;
-                    changed = true;
                 }
             }
+        };
+        iIntrinsics = intrinsics;
+        solve();
+        if (!iIntrinsics.empty() && (iFunction.declaration == nullptr || !pure(iFunction.declaration->children.back())))
+        {
+            // (intrinsics are computed inline only in a version that runs no other code (that could change their bindings once its entry has
+            // checked them))
+            iIntrinsics.clear();
+            solve();
         }
+        for (auto const& i : iIntrinsics)
+            iIntrinsicMask |= 1u << static_cast<std::uint32_t>(i.second);
+        for (auto& [b, u] : uses)
+            if (u.parameter && rep_of(b) != numeric_rep::None)
+                iNumericArguments.emplace_back(*u.parameter, b);
+        std::sort(iNumericArguments.begin(), iNumericArguments.end());
+        for (auto& [b, u] : uses)
+            if (rep_of(b) == numeric_rep::F64 && u.assignments.empty() && u.updates.empty() && (u.parameter || b->kind == binding_kind::Const))
+                iInvariantNumerics.insert(b);
+        for (auto& [b, u] : uses)
+        {
+            // (a counter: initialized to a safe integer, changed only by steps of one)
+            if (rep_of(b) != numeric_rep::I64 || u.parameter || u.declarator == nullptr || u.declarator->size() < 2u)
+                continue;
+            auto const initial = constant_number(u.declarator->child(1u));
+            if (!(num_type(u.declarator->child(1u)) == numeric_rep::I32 || (initial && *initial == std::trunc(*initial) && std::fabs(*initial) <= SafeInteger)))
+                continue;
+            bool unit = true;
+            bool up = false;
+            bool down = false;
+            for (auto* a : u.assignments)
+            {
+                auto const oper = assignment_operator(a);
+                auto const step = constant_number(a->child(1u));
+                if (!((oper == "+=" || oper == "-=") && step && std::fabs(*step) == 1.0))
+                    unit = false;
+                else
+                    ((*step > 0.0) == (oper == "+=") ? up : down) = true;
+            }
+            for (auto* a : u.updates)
+                (a->is(construct::PreIncrement) || a->is(construct::PostIncrement) ? up : down) = true;
+            if (unit)
+            {
+                iUnitCounters.insert(b);
+                if (up != down)
+                    iMonotoneCounters[b] = up ? 1 : -1;
+            }
+        }
+    }
+
+    namespace
+    {
+        // (a comparison of an integer and an invariant f64 (i OP x): the integer bound of x that the integer is compared with (as i64s
+        // compare): its rounding (ceil or floor) and the bound that a NaN gives (the comparison is false))
+        int bound_variant(construct aKind)
+        {
+            switch (aKind)
+            {
+            case construct::LessThan: return 1;         // (i < x: i < ceil(x); NaN: the least)
+            case construct::LessEqual: return 0;        // (i <= x: i <= floor(x); NaN: the least)
+            case construct::GreaterThan: return 2;      // (i > x: i > floor(x); NaN: the greatest)
+            case construct::GreaterEqual: return 3;     // (i >= x: i >= ceil(x); NaN: the greatest)
+            default: return -1;
+            }
+        }
+
+        construct reversed_comparison(construct aKind)
+        {
+            switch (aKind)
+            {
+            case construct::LessThan: return construct::GreaterThan;
+            case construct::GreaterThan: return construct::LessThan;
+            case construct::LessEqual: return construct::GreaterEqual;
+            case construct::GreaterEqual: return construct::LessEqual;
+            default: return aKind;
+            }
+        }
+    }
+
+    void function_generator::bound_shadows(node* aTest, std::vector<std::pair<binding const*, int>>& aAdded)
+    {
+        // (before a loop: the integer bounds of the invariant f64s that its test compares integers with (computed once, not each iteration))
+        if (aTest == nullptr || aTest->function != nullptr)
+            return;
+        auto* n = const_cast<node*>(unparenthesized(aTest));
+        if (bound_variant(n->kind) >= 0 && n->size() == 2u)
+        {
+            for (int side = 0; side < 2; ++side)
+            {
+                auto* x = const_cast<node*>(unparenthesized(n->child(side == 0 ? 1u : 0u)));
+                auto* i = n->child(side == 0 ? 0u : 1u);
+                if (!x->is(construct::Identifier) || !integral(num_type(i)) || num_type(x) != numeric_rep::F64)
+                    continue;
+                auto const name = iNumericNames.find(x);
+                if (name == iNumericNames.end() || !iInvariantNumerics.contains(name->second))
+                    continue;
+                auto const kind = side == 0 ? n->kind : reversed_comparison(n->kind);
+                auto const variant = bound_variant(kind);
+                // (a monotone counter compared: its own bound (see the end))
+                auto const counter = unparenthesized(i)->is(construct::Identifier) && iNumericNames.contains(unparenthesized(i)) ?
+                    monotone(iNumericNames.at(unparenthesized(i))) : 0;
+                auto const key = std::make_pair(static_cast<binding const*>(name->second), variant + (counter > 0 ? 16 : counter < 0 ? 32 : 0));
+                if (iBoundShadows.contains(key))
+                    continue;
+                bool const ceiling = (variant & 1) != 0;
+                bool const nanHigh = (variant & 2) != 0;
+                auto const value = temporary(F64);
+                numeric(x);
+                set(value);
+                get(value);
+                get(value);
+                op(opcode::F64Ne);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                i64(nanHigh ? std::numeric_limits<std::int64_t>::max() : std::numeric_limits<std::int64_t>::min());
+                op(opcode::Else);
+                get(value);
+                f64(4611686018427387904.0);     // (2^62: beyond the integers (counters) compared)
+                op(opcode::F64Ge);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                i64(std::numeric_limits<std::int64_t>::max());
+                op(opcode::Else);
+                get(value);
+                f64(-4611686018427387904.0);
+                op(opcode::F64Le);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                i64(std::numeric_limits<std::int64_t>::min());
+                op(opcode::Else);
+                get(value);
+                op(ceiling ? opcode::F64Ceil : opcode::F64Floor);
+                op(opcode::I64SConvertF64);
+                end_control();
+                end_control();
+                end_control();
+                release(value);
+                auto const shadow = local(I64);
+                set(shadow);
+                if (counter != 0)
+                {
+                    // (a monotone counter c (its local) is compared, not its value v (min(c, 2^53) up, max(c, -2^53) down): v OP bound is
+                    // c OP bound, unless the bound is beyond where v stops (then v OP bound is always true or always false, as c OP the
+                    // extreme i64 is (c never gets there)))
+                    bool const strictBelowOrAtLeast = kind == construct::LessThan || kind == construct::GreaterEqual;
+                    bool const strictAboveOrAtMost = kind == construct::GreaterThan || kind == construct::LessEqual;
+                    get(shadow);
+                    if (counter > 0)
+                    {
+                        i64(strictBelowOrAtLeast ? 9007199254740993ll : 9007199254740992ll);
+                        op(opcode::I64GeS);
+                    }
+                    else
+                    {
+                        i64(strictAboveOrAtMost ? -9007199254740993ll : -9007199254740992ll);
+                        op(opcode::I64LeS);
+                    }
+                    op(opcode::If);
+                    iCode.push_back(0x40u);
+                    iControls.push_back(control{ control_kind::Block });
+                    i64(counter > 0 ? std::numeric_limits<std::int64_t>::max() : std::numeric_limits<std::int64_t>::min());
+                    set(shadow);
+                    end_control();
+                }
+                iBoundShadows[key] = shadow;
+                aAdded.push_back(key);
+            }
+            return;
+        }
+        if (n->is(construct::And) || n->is(construct::Or) || n->is(construct::Parenthesized))
+            for (auto* c : n->children)
+                bound_shadows(c, aAdded);
+    }
+
+    bool function_generator::pure(node* aNode)
+    {
+        // (code that runs no user code (and so changes no binding but its locals): literals, locals, operations of numbers, intrinsic calls of
+        // numbers and control flow)
+        if (aNode == nullptr)
+            return true;
+        auto const all = [&](std::size_t aFirst = 0u)
+        {
+            for (std::size_t i = aFirst; i < aNode->size(); ++i)
+                if (!pure(aNode->child(i)))
+                    return false;
+            return true;
+        };
+        auto const numbers = [&]()
+        {
+            for (auto* c : aNode->children)
+                if (num_type(c) == numeric_rep::None)
+                    return false;
+            return all();
+        };
+        switch (aNode->kind)
+        {
+        case construct::Number:
+        case construct::True:
+        case construct::False:
+        case construct::Null:
+        case construct::String:
+        case construct::Empty:
+        case construct::Break:
+        case construct::Continue:
+            return true;
+        case construct::Identifier:
+            return iNumericNames.contains(aNode);
+        case construct::Parenthesized:
+        case construct::Comma:
+        case construct::Body:
+        case construct::Block:
+        case construct::If:
+        case construct::While:
+        case construct::Do:
+        case construct::For:
+        case construct::ForInit:
+        case construct::ForTest:
+        case construct::ForUpdate:
+        case construct::ExpressionStatement:
+        case construct::Return:
+        case construct::Not:
+        case construct::And:
+        case construct::Or:
+        case construct::Coalesce:
+        case construct::Conditional:
+        case construct::StrictEqual:
+        case construct::StrictNotEqual:
+            return all();
+        case construct::Labelled:
+            return aNode->size() == 2u && pure(aNode->child(1u));
+        case construct::Let:
+        case construct::Const:
+        case construct::Var:
+            for (auto* d : aNode->children)
+                if (!d->is(construct::Declarator) || d->size() < 1u || !d->child(0u)->is(construct::Binding) || (d->size() > 1u && !pure(d->child(1u))))
+                    return false;
+            return true;
+        case construct::Negate:
+        case construct::Plus:
+        case construct::BitNot:
+        case construct::Add:
+        case construct::Subtract:
+        case construct::Multiply:
+        case construct::Divide:
+        case construct::Remainder:
+        case construct::BitAnd:
+        case construct::BitOr:
+        case construct::BitXor:
+        case construct::ShiftLeft:
+        case construct::ShiftRight:
+        case construct::ShiftRightUnsigned:
+        case construct::LessThan:
+        case construct::GreaterThan:
+        case construct::LessEqual:
+        case construct::GreaterEqual:
+        case construct::Equal:
+        case construct::NotEqual:
+            return numbers();
+        case construct::Assign:
+            {
+                auto* target = unparenthesized(aNode->child(0u));
+                if (!target->is(construct::Identifier) || !iNumericNames.contains(target) || !pure(aNode->child(1u)))
+                    return false;
+                auto const oper = assignment_operator(aNode);
+                return oper == "=" || oper == "&&=" || oper == "||=" || oper == "??=" ||
+                    (num_type(const_cast<node*>(target)) != numeric_rep::None && num_type(aNode->child(1u)) != numeric_rep::None);
+            }
+        case construct::PreIncrement:
+        case construct::PreDecrement:
+        case construct::PostIncrement:
+        case construct::PostDecrement:
+            {
+                auto* target = const_cast<node*>(unparenthesized(aNode->child(0u)));
+                return target->is(construct::Identifier) && iNumericNames.contains(target) && num_type(target) != numeric_rep::None;
+            }
+        case construct::Call:
+            return intrinsic_of(aNode) != intrinsic::None && all(1u);
+        default:
+            return false;
+        }
+    }
+
+    bool function_generator::version_eligible() const
+    {
+        // (a function (not a generator, async function, class constructor, ...) with simple parameters and without the arguments object, direct
+        // eval, with statements, functions or tagged templates (whose code would be generated twice))
+        static bool const sDisabled = std::getenv("NEOS_JS_NO_NUMERIC") != nullptr || std::getenv("NEOS_JS_NO_VERSIONS") != nullptr;
+        if (sDisabled || iBody || iFunction.script || iFunction.generator || iFunction.async || iFunction.classConstructor || iFunction.fieldInitializer ||
+            iFunction.staticBlock || iFunction.directEval || iFunction.usesArguments || iFunction.argumentsBinding != nullptr || !iFunction.simpleParameters ||
+            !iFunction.functions.empty() || iFunction.declaration == nullptr || iCompiler.eval_code() || iFunction.declaration->source.size() > 20000u)
+            return false;
+        for (auto const& s : iCompiler.iScopes)
+            if (s.function == &iFunction && (s.dynamic || s.kind == scope_kind::With || s.hasEnvironment))
+                return false;
+        std::function<bool(node const*)> tagged = [&](node const* aNode)
+        {
+            if (aNode->is(construct::Tagged) || aNode->is(construct::ClassExpression) || aNode->is(construct::Class))
+                return true;
+            for (auto const* c : aNode->children)
+                if (tagged(c))
+                    return true;
+            return false;
+        };
+        return !tagged(iFunction.declaration);
+    }
+
+    void function_generator::version_check()
+    {
+        // (the numeric version's parameters' arguments are numbers and its intrinsics' bindings the built-in functions)
+        bool first = true;
+        for (auto const& a : iNumericArguments)
+        {
+            get(FirstArgumentLocal + a.first);
+            constant(values::TagSpecial);
+            op(opcode::I64LtU);
+            if (!first)
+                op(opcode::I32And);
+            first = false;
+        }
+        if (iIntrinsicMask != 0u)
+        {
+            i32(static_cast<std::int32_t>(iIntrinsicMask));
+            runtime("intrinsics_original", { I32 }, I32);
+            if (!first)
+                op(opcode::I32And);
+            first = false;
+        }
+        if (first)
+            i32(1);
     }
 
     void function_generator::box(numeric_rep aRep)
     {
         if (aRep == numeric_rep::I64)
             op(opcode::F64SConvertI64);
+        else if (aRep == numeric_rep::I32)
+            op(opcode::F64SConvertI32);
         if (aRep != numeric_rep::None)
             op(opcode::I64ReinterpretF64);
     }
@@ -5615,22 +6690,29 @@ namespace neos::compilers::javascript
         op(opcode::F64ReinterpretI64);
         if (aRep == numeric_rep::I64)
             op(opcode::I64SConvertF64);
+        else if (aRep == numeric_rep::I32)
+            op(opcode::I32SConvertF64);
     }
 
     void function_generator::numeric(node* aNode)
     {
         aNode = const_cast<node*>(unparenthesized(aNode));
+        if (auto const c = constant_number(aNode); c && (aNode->is(construct::Number) || aNode->is(construct::Negate)))
+        {
+            f64(*c);
+            return;
+        }
         switch (aNode->kind)
         {
-        case construct::Number:
-            f64(*literal_number(aNode));
-            return;
         case construct::Identifier:
             {
                 auto* b = iNumericNames.at(aNode);
                 get(b->slot);
+                counter_value(b);
                 if (rep_of(b) == numeric_rep::I64)
                     op(opcode::F64SConvertI64);
+                else if (rep_of(b) == numeric_rep::I32)
+                    op(opcode::F64SConvertI32);
             }
             return;
         case construct::Negate:
@@ -5643,45 +6725,317 @@ namespace neos::compilers::javascript
         case construct::Remainder:
             numeric(aNode->child(0u));
             numeric(aNode->child(1u));
-            f64_remainder();
+            f64_remainder(aNode->child(0u), aNode->child(1u));
             return;
+        case construct::Add:
+        case construct::Subtract:
+        case construct::Multiply:
+        case construct::Divide:
+            numeric(aNode->child(0u));
+            numeric(aNode->child(1u));
+            op(aNode->is(construct::Add) ? opcode::F64Add : aNode->is(construct::Subtract) ? opcode::F64Sub : aNode->is(construct::Multiply) ? opcode::F64Mul : opcode::F64Div);
+            return;
+        case construct::ShiftRightUnsigned:
+            int32(aNode->child(0u));
+            int32(aNode->child(1u));
+            op(opcode::I32ShrU);
+            op(opcode::F64UConvertI32);
+            return;
+        case construct::Conditional:
+            condition(aNode->child(0u));
+            op(opcode::If);
+            iCode.push_back(0x7Cu);     // (f64)
+            iControls.push_back(control{ control_kind::Block });
+            numeric(aNode->child(1u));
+            op(opcode::Else);
+            numeric(aNode->child(2u));
+            end_control();
+            return;
+        case construct::Call:
+            {
+                static std::map<intrinsic, opcode> const sOperations = {
+                    { intrinsic::Floor, opcode::F64Floor }, { intrinsic::Ceil, opcode::F64Ceil }, { intrinsic::Trunc, opcode::F64Trunc },
+                    { intrinsic::Sqrt, opcode::F64Sqrt }, { intrinsic::Abs, opcode::F64Abs } };
+                if (auto const o = sOperations.find(intrinsic_of(aNode)); o != sOperations.end())
+                {
+                    numeric(aNode->child(1u));
+                    op(o->second);
+                    return;
+                }
+            }
+            break;
         default:
             break;
         }
-        numeric(aNode->child(0u));
-        numeric(aNode->child(1u));
+        // (a 32-bit integer)
+        int32(aNode);
+        op(opcode::F64SConvertI32);
+    }
+
+    void function_generator::int32(node* aNode)
+    {
+        // (ToInt32 of a number: an i32)
+        aNode = const_cast<node*>(unparenthesized(aNode));
+        if (auto const c = constant_number(aNode); c && (aNode->is(construct::Number) || aNode->is(construct::Negate)))
+        {
+            i32(to_int32_value(*c));
+            return;
+        }
+        static std::map<construct, opcode> const sOperations = {
+            { construct::BitAnd, opcode::I32And }, { construct::BitOr, opcode::I32Ior }, { construct::BitXor, opcode::I32Xor },
+            { construct::ShiftLeft, opcode::I32Shl }, { construct::ShiftRight, opcode::I32ShrS }, { construct::ShiftRightUnsigned, opcode::I32ShrU } };
         switch (aNode->kind)
         {
-        case construct::Add: op(opcode::F64Add); break;
-        case construct::Subtract: op(opcode::F64Sub); break;
-        case construct::Multiply: op(opcode::F64Mul); break;
-        case construct::Divide: op(opcode::F64Div); break;
-        default: break;
+        case construct::Identifier:
+            {
+                auto* b = iNumericNames.at(aNode);
+                get(b->slot);
+                counter_value(b);
+                if (rep_of(b) == numeric_rep::I64)
+                    op(opcode::I32ConvertI64);  // (an integer below 2^63: its low 32 bits)
+                else if (rep_of(b) == numeric_rep::F64)
+                    to_int32();
+            }
+            return;
+        case construct::BitAnd:
+        case construct::BitOr:
+        case construct::BitXor:
+        case construct::ShiftLeft:
+        case construct::ShiftRight:
+        case construct::ShiftRightUnsigned:
+            int32(aNode->child(0u));
+            int32(aNode->child(1u));
+            op(sOperations.at(aNode->kind));    // (shift counts are masked (& 31) as JavaScript's are)
+            return;
+        case construct::BitNot:
+            int32(aNode->child(0u));
+            i32(-1);
+            op(opcode::I32Xor);
+            return;
+        case construct::Add:
+        case construct::Subtract:
+            if (num_type(aNode->child(0u)) == numeric_rep::I32 && num_type(aNode->child(1u)) == numeric_rep::I32)
+            {
+                // (the sum of 32-bit integers is exact: its ToInt32 is the i32 sum)
+                int32(aNode->child(0u));
+                int32(aNode->child(1u));
+                op(aNode->is(construct::Add) ? opcode::I32Add : opcode::I32Sub);
+                return;
+            }
+            break;
+        case construct::Conditional:
+            condition(aNode->child(0u));
+            op(opcode::If);
+            iCode.push_back(0x7Fu);     // (i32)
+            iControls.push_back(control{ control_kind::Block });
+            int32(aNode->child(1u));
+            op(opcode::Else);
+            int32(aNode->child(2u));
+            end_control();
+            return;
+        case construct::Call:
+            if (intrinsic_of(aNode) == intrinsic::Imul)
+            {
+                int32(aNode->child(1u));
+                int32(aNode->child(2u));
+                op(opcode::I32Mul);
+                return;
+            }
+            break;
+        default:
+            break;
         }
+        if (num_type(aNode) == numeric_rep::I64)
+        {
+            integer(aNode);
+            op(opcode::I32ConvertI64);
+            return;
+        }
+        numeric(aNode);
+        to_int32();
     }
 
     void function_generator::integer(node* aNode)
     {
-        // (an integer (num_type I64): as an i64)
+        // (an integer (num_type I64 or I32): as an i64)
         aNode = const_cast<node*>(unparenthesized(aNode));
-        if (aNode->is(construct::Number))
-            i64(static_cast<std::int64_t>(*literal_number(aNode)));
-        else
-            get(iNumericNames.at(aNode)->slot);
+        if (auto const c = constant_number(aNode); c && (aNode->is(construct::Number) || aNode->is(construct::Negate)))
+        {
+            i64(static_cast<std::int64_t>(*c));
+            return;
+        }
+        switch (aNode->kind)
+        {
+        case construct::Identifier:
+            {
+                auto* b = iNumericNames.at(aNode);
+                get(b->slot);
+                counter_value(b);
+                if (rep_of(b) == numeric_rep::I32)
+                    op(opcode::I64SConvertI32);
+            }
+            return;
+        case construct::ShiftRightUnsigned:
+            int32(aNode->child(0u));
+            int32(aNode->child(1u));
+            op(opcode::I32ShrU);
+            op(opcode::I64UConvertI32);
+            return;
+        case construct::Conditional:
+            condition(aNode->child(0u));
+            op(opcode::If);
+            iCode.push_back(0x7Eu);     // (i64)
+            iControls.push_back(control{ control_kind::Block });
+            integer(aNode->child(1u));
+            op(opcode::Else);
+            integer(aNode->child(2u));
+            end_control();
+            return;
+        default:
+            int32(aNode);
+            op(opcode::I64SConvertI32);
+            return;
+        }
     }
 
-    void function_generator::counter_guard(std::uint32_t aSlot, std::uint32_t aOld, std::int64_t aStep)
+    void function_generator::typed(node* aNode, numeric_rep aRep)
     {
-        // (an i64 counter beyond 2^53: as a double would be (its old value plus the step, rounded))
+        switch (aRep)
+        {
+        case numeric_rep::I32:
+            int32(aNode);
+            break;
+        case numeric_rep::I64:
+            integer(aNode);
+            break;
+        default:
+            numeric(aNode);
+            break;
+        }
+    }
+
+    void function_generator::to_int32()
+    {
+        // (an f64: its ToInt32: below 2^63 (in magnitude) the low 32 bits of its truncation; NaN and the infinities 0; beyond, its truncation
+        // less a multiple of 2^32 (exact: Sterbenz), then its low 32 bits)
+        auto const t = temporary(F64);
+        tee(t);
+        op(opcode::F64Abs);
+        f64(9223372036854775808.0);
+        op(opcode::F64Lt);
+        op(opcode::If);
+        iCode.push_back(0x7Fu);
+        iControls.push_back(control{ control_kind::Block });
+        get(t);
+        op(opcode::I64SConvertF64);
+        op(opcode::I32ConvertI64);
+        op(opcode::Else);
+        get(t);
+        op(opcode::F64Abs);
+        f64(std::numeric_limits<double>::infinity());
+        op(opcode::F64Lt);
+        op(opcode::If);
+        iCode.push_back(0x7Fu);
+        iControls.push_back(control{ control_kind::Block });
+        get(t);
+        get(t);
+        f64(1.0 / 4294967296.0);
+        op(opcode::F64Mul);
+        op(opcode::F64Trunc);
+        f64(4294967296.0);
+        op(opcode::F64Mul);
+        op(opcode::F64Sub);
+        op(opcode::I64SConvertF64);
+        op(opcode::I32ConvertI64);
+        op(opcode::Else);
+        i32(0);
+        end_control();
+        end_control();
+        release(t);
+    }
+
+    int function_generator::monotone(binding const* aBinding) const
+    {
+        auto const m = iMonotoneCounters.find(aBinding);
+        return m != iMonotoneCounters.end() ? m->second : 0;
+    }
+
+    void function_generator::counter_value(binding const* aBinding)
+    {
+        // (a monotone counter's value (its local on the stack): as a double would be: a counter that only steps up by one from a safe integer
+        // stays at 2^53 once it gets there (2^53 plus one rounds to 2^53), so its value is min(local, 2^53) (the local counts on: it would
+        // reach 2^63 only after centuries); stepping down, max(local, -2^53). Without a branch: limit + ((local - limit) & mask), the mask
+        // all ones if the difference is negative (up) or positive (down))
+        auto const direction = monotone(aBinding);
+        if (direction == 0)
+            return;
+        auto const limit = direction > 0 ? 9007199254740992ll : -9007199254740992ll;
+        auto const difference = temporary(I64);
+        i64(limit);
+        op(opcode::I64Sub);
+        set(difference);
+        get(difference);
+        if (direction > 0)
+        {
+            get(difference);
+            i64(63);
+            op(opcode::I64ShrS);
+        }
+        else
+        {
+            i64(0);
+            get(difference);
+            op(opcode::I64Sub);
+            i64(63);
+            op(opcode::I64ShrS);
+        }
+        op(opcode::I64And);
+        i64(limit);
+        op(opcode::I64Add);
+        release(difference);
+    }
+
+    bool function_generator::raw_counter(node* aNode, node* aOther)
+    {
+        // (a monotone counter compared with an i32 or a constant within (-2^53, 2^53): its local compares as its value does (beyond 2^53
+        // both are beyond the other operand))
+        auto* n = const_cast<node*>(unparenthesized(aNode));
+        if (!n->is(construct::Identifier))
+            return false;
+        auto const name = iNumericNames.find(n);
+        if (name == iNumericNames.end() || monotone(name->second) == 0)
+            return false;
+        if (num_type(aOther) == numeric_rep::I32)
+            return true;
+        auto const k = constant_number(aOther);
+        return k && std::fabs(*k) < 9007199254740992.0;
+    }
+
+    void function_generator::counter_guard(std::uint32_t aSlot, std::int64_t aStep, binding const* aBinding)
+    {
+        // (an i64 counter beyond 2^53: as a double would be (its old value (its value less the step) plus the step, rounded); a counter whose
+        // only changes are steps of one from a safe integer is never beyond 2^53 (2^53 plus one rounds to 2^53): only 2^53 + 1 is)
+        if (aBinding != nullptr && (aStep == 1 || aStep == -1) && monotone(aBinding) == aStep)
+            return;     // (a monotone counter: its value is clamped when it is read (see counter_value))
         get(aSlot);
+        if (aBinding != nullptr && (aStep == 1 || aStep == -1) && iUnitCounters.contains(aBinding))
+        {
+            i64(aStep == 1 ? 9007199254740993ll : -9007199254740993ll);
+            op(opcode::I64Eq);
+        }
+        else
+        {
         i64(9007199254740992ll);
         op(opcode::I64Add);
         i64(2 * 9007199254740992ll);
         op(opcode::I64GtU);
+        }
         op(opcode::If);
         iCode.push_back(0x40u);
         iControls.push_back(control{ control_kind::Block });
-        get(aOld);
+        get(aSlot);
+        i64(aStep);
+        op(opcode::I64Sub);
         op(opcode::F64SConvertI64);
         f64(static_cast<double>(aStep));
         op(opcode::F64Add);
@@ -5690,59 +7044,141 @@ namespace neos::compilers::javascript
         end_control();
     }
 
-    void function_generator::f64_remainder()
+    void function_generator::f64_remainder(node* aDividend, node* aDivisor)
     {
-        // (two f64s: the remainder (as % computes it): integers (below 2^53, a divisor that is not 0): i64.rem_s (0 with the dividend's
-        // sign); else the runtime's)
+        // (two f64s: the remainder (as % computes it): of integers below 2^53 (in magnitude) and a divisor that is not 0, a - b * trunc(a / b),
+        // which is exact (a / b is within half an ulp, which is less than 1 / b, of the exact quotient, so its truncation is the exact
+        // quotient's), with the dividend's sign (a zero remainder too); else the runtime's)
+        auto const divisor = aDivisor != nullptr ? constant_number(aDivisor) : std::nullopt;
+        bool const constantDivisor = divisor && *divisor != 0.0 && *divisor == std::trunc(*divisor) && std::fabs(*divisor) < SafeInteger;
+        auto const lhs = aDividend != nullptr ? num_type(aDividend) : numeric_rep::F64;
+        auto const rhs = aDivisor != nullptr ? num_type(aDivisor) : numeric_rep::F64;
         auto const b = temporary(F64);
         set(b);
         auto const a = temporary(F64);
         set(a);
-        get(a);
-        op(opcode::F64Abs);
-        f64(SafeInteger);
-        op(opcode::F64Lt);
-        get(a);
-        get(a);
-        op(opcode::F64Trunc);
-        op(opcode::F64Eq);
-        op(opcode::I32And);
-        get(b);
-        op(opcode::F64Abs);
-        f64(SafeInteger);
-        op(opcode::F64Lt);
-        op(opcode::I32And);
-        get(b);
-        get(b);
-        op(opcode::F64Trunc);
-        op(opcode::F64Eq);
-        op(opcode::I32And);
-        get(b);
-        f64(0.0);
-        op(opcode::F64Ne);
-        op(opcode::I32And);
-        op(opcode::If);
-        iCode.push_back(0x7Cu);     // (f64)
-        iControls.push_back(control{ control_kind::Block });
-        get(a);
-        op(opcode::I64SConvertF64);
-        get(b);
-        op(opcode::I64SConvertF64);
-        op(opcode::I64RemS);
-        op(opcode::F64SConvertI64);
-        get(a);
-        op(opcode::F64CopySign);    // (a zero remainder has the dividend's sign)
-        op(opcode::Else);
-        get(a);
-        op(opcode::I64ReinterpretF64);
-        get(b);
-        op(opcode::I64ReinterpretF64);
-        runtime("remainder", { I64, I64 }, I64);
-        check();
-        op(opcode::F64ReinterpretI64);
-        end_control();
+        int conditions = 0;
+        auto const both = [&]()
+        {
+            if (++conditions > 1)
+                op(opcode::I32And);
+        };
+        auto const safe_integer = [&](std::uint32_t aLocal, numeric_rep aRep)
+        {
+            if (aRep == numeric_rep::I32)
+                return;
+            get(aLocal);
+            op(opcode::F64Abs);
+            f64(SafeInteger);
+            op(opcode::F64Lt);
+            both();
+            if (aRep == numeric_rep::I64)
+                return;
+            get(aLocal);
+            get(aLocal);
+            op(opcode::F64Trunc);
+            op(opcode::F64Eq);
+            both();
+        };
+        safe_integer(a, lhs);
+        if (!constantDivisor)
+        {
+            safe_integer(b, rhs);
+            get(b);
+            f64(0.0);
+            op(opcode::F64Ne);
+            both();
+        }
+        auto const fast = [&]()
+        {
+            get(a);
+            get(a);
+            if (constantDivisor && power_of_two(*divisor))
+            {
+                f64(1.0 / *divisor);
+                op(opcode::F64Mul);
+            }
+            else
+            {
+                get(b);
+                op(opcode::F64Div);
+            }
+            op(opcode::F64Trunc);
+            get(b);
+            op(opcode::F64Mul);
+            op(opcode::F64Sub);
+            get(a);
+            op(opcode::F64CopySign);    // (a zero remainder has the dividend's sign)
+        };
+        if (conditions == 0)
+            fast();
+        else
+        {
+            op(opcode::If);
+            iCode.push_back(0x7Cu);     // (f64)
+            iControls.push_back(control{ control_kind::Block });
+            fast();
+            op(opcode::Else);
+            get(a);
+            op(opcode::I64ReinterpretF64);
+            get(b);
+            op(opcode::I64ReinterpretF64);
+            runtime("remainder", { I64, I64 }, I64);
+            check();
+            op(opcode::F64ReinterpretI64);
+            end_control();
+        }
         release(a);
         release(b);
+    }
+
+    bool function_generator::numeric_value(node* aNode)
+    {
+        // (a unary operation, conditional expression or intrinsic call of numbers: its value)
+        auto* n = const_cast<node*>(unparenthesized(aNode));
+        switch (n->kind)
+        {
+        case construct::Negate:
+        case construct::Plus:
+        case construct::BitNot:
+        case construct::Conditional:
+        case construct::Call:
+            if (auto const t = num_type(n); t != numeric_rep::None)
+            {
+                typed(n, t);
+                box(t);
+                return true;
+            }
+            return false;
+        default:
+            return false;
+        }
+    }
+
+    namespace
+    {
+        struct compare_opcodes
+        {
+            opcode f64;
+            opcode i64;
+            opcode i32;
+        };
+
+        std::optional<compare_opcodes> compare_of(construct aKind)
+        {
+            switch (aKind)
+            {
+            case construct::LessThan: return compare_opcodes{ opcode::F64Lt, opcode::I64LtS, opcode::I32LtS };
+            case construct::GreaterThan: return compare_opcodes{ opcode::F64Gt, opcode::I64GtS, opcode::I32GtS };
+            case construct::LessEqual: return compare_opcodes{ opcode::F64Le, opcode::I64LeS, opcode::I32LeS };
+            case construct::GreaterEqual: return compare_opcodes{ opcode::F64Ge, opcode::I64GeS, opcode::I32GeS };
+            case construct::StrictEqual:
+            case construct::Equal: return compare_opcodes{ opcode::F64Eq, opcode::I64Eq, opcode::I32Eq };
+            case construct::StrictNotEqual:
+            case construct::NotEqual: return compare_opcodes{ opcode::F64Ne, opcode::I64Ne, opcode::I32Ne };
+            default: return {};
+            }
+        }
     }
 
     bool function_generator::numeric_binary(node* aNode)
@@ -5751,8 +7187,6 @@ namespace neos::compilers::javascript
         auto const rhs = num_type(aNode->child(1u));
         if (lhs == numeric_rep::None || rhs == numeric_rep::None)
             return false;
-        std::optional<opcode> compare;
-        std::optional<opcode> integerCompare;
         switch (aNode->kind)
         {
         case construct::Add:
@@ -5763,33 +7197,80 @@ namespace neos::compilers::javascript
             numeric(aNode);
             op(opcode::I64ReinterpretF64);
             return true;
-        case construct::LessThan: compare = opcode::F64Lt; integerCompare = opcode::I64LtS; break;
-        case construct::GreaterThan: compare = opcode::F64Gt; integerCompare = opcode::I64GtS; break;
-        case construct::LessEqual: compare = opcode::F64Le; integerCompare = opcode::I64LeS; break;
-        case construct::GreaterEqual: compare = opcode::F64Ge; integerCompare = opcode::I64GeS; break;
-        case construct::StrictEqual:
-        case construct::Equal: compare = opcode::F64Eq; integerCompare = opcode::I64Eq; break;
-        case construct::StrictNotEqual:
-        case construct::NotEqual: compare = opcode::F64Ne; integerCompare = opcode::I64Ne; break;
+        case construct::BitAnd:
+        case construct::BitOr:
+        case construct::BitXor:
+        case construct::ShiftLeft:
+        case construct::ShiftRight:
+            int32(aNode);
+            box(numeric_rep::I32);
+            return true;
+        case construct::ShiftRightUnsigned:
+            integer(aNode);
+            box(numeric_rep::I64);
+            return true;
         default:
-            return false;
+            break;
         }
-        if (lhs == numeric_rep::I64 && rhs == numeric_rep::I64)
+        auto const compare = compare_of(aNode->kind);
+        if (!compare)
+            return false;
+        if (lhs == numeric_rep::I32 && rhs == numeric_rep::I32)
+        {
+            int32(aNode->child(0u));
+            int32(aNode->child(1u));
+            op(compare->i32);
+        }
+        else if (integral(lhs) && integral(rhs))
         {
             integer(aNode->child(0u));
             integer(aNode->child(1u));
-            op(*integerCompare);
+            op(compare->i64);
         }
         else
         {
             numeric(aNode->child(0u));
             numeric(aNode->child(1u));
-            op(*compare);
+            op(compare->f64);
         }
         op(opcode::I64UConvertI32);
         constant(values::False);
         op(opcode::I64Add);
         return true;
+    }
+
+    bool function_generator::bound_comparison(node* aComparison)
+    {
+        // (i OP x, x an invariant f64 whose integer bound the loop computed: an i64 comparison)
+        auto* n = aComparison;
+        for (int side = 0; side < 2; ++side)
+        {
+            auto* x = const_cast<node*>(unparenthesized(n->child(side == 0 ? 1u : 0u)));
+            auto* i = n->child(side == 0 ? 0u : 1u);
+            if (!x->is(construct::Identifier) || !integral(num_type(i)))
+                continue;
+            auto const name = iNumericNames.find(x);
+            if (name == iNumericNames.end())
+                continue;
+            auto const kind = side == 0 ? n->kind : reversed_comparison(n->kind);
+            auto const variant = bound_variant(kind);
+            if (variant < 0)
+                continue;
+            auto const counter = unparenthesized(i)->is(construct::Identifier) && iNumericNames.contains(unparenthesized(i)) ?
+                monotone(iNumericNames.at(unparenthesized(i))) : 0;
+            auto const shadow = iBoundShadows.find(std::make_pair(static_cast<binding const*>(name->second),
+                variant + (counter > 0 ? 16 : counter < 0 ? 32 : 0)));
+            if (shadow == iBoundShadows.end())
+                continue;
+            if (counter != 0)
+                get(iNumericNames.at(unparenthesized(i))->slot);   // (its local (see bound_shadows))
+            else
+                integer(i);
+            get(shadow->second);
+            op(compare_of(kind)->i64);
+            return true;
+        }
+        return false;
     }
 
     bool function_generator::numeric_condition(node* aNode)
@@ -5812,21 +7293,35 @@ namespace neos::compilers::javascript
         auto const rhs = num_type(n->child(1u));
         if (lhs == numeric_rep::None && rhs == numeric_rep::None)
             return false;
-        if (lhs == numeric_rep::I64 && rhs == numeric_rep::I64)
-        {
-            static std::map<construct, opcode> const sIntegerCompares = {
-                { construct::LessThan, opcode::I64LtS }, { construct::GreaterThan, opcode::I64GtS }, { construct::LessEqual, opcode::I64LeS },
-                { construct::GreaterEqual, opcode::I64GeS }, { construct::StrictEqual, opcode::I64Eq }, { construct::StrictNotEqual, opcode::I64Ne } };
-            integer(n->child(0u));
-            integer(n->child(1u));
-            op(sIntegerCompares.at(n->kind));
-            return true;
-        }
         if (lhs != numeric_rep::None && rhs != numeric_rep::None)
         {
-            numeric(n->child(0u));
-            numeric(n->child(1u));
-            op(*compare);
+            auto const opcodes = compare_of(n->kind);
+            if (!iBoundShadows.empty() && (integral(lhs) != integral(rhs)) && bound_comparison(n))
+                return true;
+            if (lhs == numeric_rep::I32 && rhs == numeric_rep::I32)
+            {
+                int32(n->child(0u));
+                int32(n->child(1u));
+                op(opcodes->i32);
+            }
+            else if (integral(lhs) && integral(rhs))
+            {
+                for (int side = 0; side < 2; ++side)
+                {
+                    auto* operand = n->child(side == 0 ? 0u : 1u);
+                    if (raw_counter(operand, n->child(side == 0 ? 1u : 0u)))
+                        get(iNumericNames.at(const_cast<node*>(unparenthesized(operand)))->slot);
+                    else
+                        integer(operand);
+                }
+                op(opcodes->i64);
+            }
+            else
+            {
+                numeric(n->child(0u));
+                numeric(n->child(1u));
+                op(opcodes->f64);
+            }
             return true;
         }
         // (one is a number: the other is evaluated in order)
@@ -5897,8 +7392,8 @@ namespace neos::compilers::javascript
         if (aReference.kind != reference::Local || aReference.target == nullptr)
             return false;
         auto const rep = rep_of(aReference.target);
-        if (rep == numeric_rep::None)
-            return false;
+        if (rep == numeric_rep::None || rep == numeric_rep::I32)
+            return false;   // (not I32: a counter is an I64)
         auto const slot = aReference.local;
         if (rep == numeric_rep::F64)
         {
@@ -5920,21 +7415,29 @@ namespace neos::compilers::javascript
             return true;
         }
         // (an i64: exact below 2^53; beyond, as a double rounds)
-        auto const old = temporary(I64);
+        std::int64_t const step = aIncrement ? 1 : -1;
+        std::optional<std::uint32_t> old;
+        if (aPostfix && !iDiscardedNow)
+        {
+            old = temporary(I64);
+            get(slot);
+            set(*old);
+        }
         get(slot);
-        tee(old);
-        i64(aIncrement ? 1 : -1);
+        i64(step);
         op(opcode::I64Add);
         set(slot);
-        counter_guard(slot, old, aIncrement ? 1 : -1);
+        counter_guard(slot, step, aReference.target);
         if (iDiscardedNow)
             constant(values::Undefined);
         else
         {
-            get(aPostfix ? old : slot);
+            get(old ? *old : slot);
+            counter_value(aReference.target);
             box(numeric_rep::I64);
         }
-        release(old);
+        if (old)
+            release(*old);
         return true;
     }
 
@@ -5947,42 +7450,61 @@ namespace neos::compilers::javascript
         if (rep == numeric_rep::None)
             return false;
         auto const slot = aReference.local;
-        if (rep == numeric_rep::I64 && (aOperator == "+=" || aOperator == "-=") && small_integer(literal_number(aValue)))
+        auto const value = num_type(aValue);
+        auto const result = [&]()
         {
-            auto const k = static_cast<std::int64_t>(*literal_number(aValue)) * (aOperator == "-=" ? -1 : 1);
-            auto const old = temporary(I64);
-            get(slot);
-            tee(old);
-            i64(k);
-            op(opcode::I64Add);
-            set(slot);
-            counter_guard(slot, old, k);
             if (iDiscardedNow)
                 constant(values::Undefined);
             else
             {
                 get(slot);
-                box(numeric_rep::I64);
+                counter_value(aReference.target);
+                box(rep);
             }
-            release(old);
-            return true;
-        }
-        if (aOperator == "=" && num_type(aValue) != numeric_rep::None)
+        };
+        auto const step = constant_number(aValue);
+        if (rep == numeric_rep::I64 && (aOperator == "+=" || aOperator == "-=") && counter_step(step))
         {
-            if (rep == numeric_rep::I64)
-            {
-                i64(static_cast<std::int64_t>(*literal_number(aValue)));
-                tee(slot);
-                box(numeric_rep::I64);
-                return true;
-            }
-            numeric(aValue);
-            tee(slot);
-            op(opcode::I64ReinterpretF64);
+            auto const k = static_cast<std::int64_t>(*step) * (aOperator == "-=" ? -1 : 1);
+            get(slot);
+            i64(k);
+            op(opcode::I64Add);
+            set(slot);
+            counter_guard(slot, k, aReference.target);
+            result();
             return true;
         }
-        if (rep == numeric_rep::F64 && num_type(aValue) != numeric_rep::None &&
-            (aOperator == "+=" || aOperator == "-=" || aOperator == "*=" || aOperator == "/=" || aOperator == "%="))
+        if (value == numeric_rep::None || (aOperator == ">>>=" && rep == numeric_rep::I32))
+            return false;   // (>>>= of an i32 local makes it an i64 (see infer_numeric))
+        if (aOperator == "=")
+        {
+            typed(aValue, rep);     // (its rep holds the value's (see infer_numeric))
+            set(slot);
+            result();
+            return true;
+        }
+        static std::map<std::string, opcode> const sInt32 = {
+            { "&=", opcode::I32And }, { "|=", opcode::I32Ior }, { "^=", opcode::I32Xor }, { "<<=", opcode::I32Shl }, { ">>=", opcode::I32ShrS },
+            { ">>>=", opcode::I32ShrU } };
+        if (auto const o = sInt32.find(aOperator); o != sInt32.end())
+        {
+            get(slot);
+            if (rep == numeric_rep::I64)
+                op(opcode::I32ConvertI64);
+            else if (rep == numeric_rep::F64)
+                to_int32();
+            int32(aValue);
+            op(o->second);
+            bool const unsignedResult = aOperator == ">>>=";
+            if (rep == numeric_rep::I64)
+                op(unsignedResult ? opcode::I64UConvertI32 : opcode::I64SConvertI32);
+            else if (rep == numeric_rep::F64)
+                op(unsignedResult ? opcode::F64UConvertI32 : opcode::F64SConvertI32);
+            set(slot);
+            result();
+            return true;
+        }
+        if (rep == numeric_rep::F64 && (aOperator == "+=" || aOperator == "-=" || aOperator == "*=" || aOperator == "/=" || aOperator == "%="))
         {
             get(slot);
             numeric(aValue);
@@ -5995,9 +7517,9 @@ namespace neos::compilers::javascript
             else if (aOperator == "/=")
                 op(opcode::F64Div);
             else
-                f64_remainder();
-            tee(slot);
-            op(opcode::I64ReinterpretF64);
+                f64_remainder(nullptr, aValue);
+            set(slot);
+            result();
             return true;
         }
         return false;
@@ -6079,7 +7601,7 @@ namespace neos::compilers::javascript
         bool contains_await(node const* aNode)
         {
             // (top-level await: outside functions)
-            if (aNode->is(construct::Await) || aNode->is(construct::ForAwaitOf) || aNode->is(construct::AwaitUsing))
+            if (aNode->is(construct::Await) || aNode->is(construct::ForAwaitOf) || aNode->is(construct::AwaitUsing) || aNode->is(construct::ForAwaitUsing))
                 return true;
             if (aNode->function != nullptr)
             {

@@ -666,7 +666,7 @@ namespace neos::javascript_runtime
 
     value create_array_from_list(std::span<value const> aElements)
     {
-        return make_array(std::vector<value>{ aElements.begin(), aElements.end() });
+        return make_array(value_list{ aElements.begin(), aElements.end() });
     }
 
     double length_of_array_like(value aObject)
@@ -676,12 +676,12 @@ namespace neos::javascript_runtime
         return to_length(get(aObject, the_names().length));
     }
 
-    std::vector<value> create_list_from_array_like(value aObject, bool aKeysOnly)
+    value_list create_list_from_array_like(value aObject, bool aKeysOnly)
     {
         if (!is_object(aObject))
             throw_type_error("CreateListFromArrayLike called on non-object");
         auto const length = length_of_array_like(aObject);
-        std::vector<value> result;
+        value_list result;
         for (double i = 0.0; i < length; ++i)
         {
             auto const next = get(aObject, index_key(static_cast<std::uint64_t>(i)));
@@ -757,10 +757,10 @@ namespace neos::javascript_runtime
         return value_of(the_heap().make<object>(prototype, aClass));
     }
 
-    std::vector<value> enumerable_own_properties(value aObject, int aKind)
+    value_list enumerable_own_properties(value aObject, int aKind)
     {
         auto& o = obj(aObject);
-        std::vector<value> result;
+        value_list result;
         for (auto const key : o.own_property_keys())
         {
             if (!is_string(key))
@@ -1029,10 +1029,10 @@ namespace neos::javascript_runtime
         return result;
     }
 
-    std::vector<value> iterate_to_list(value aIterable)
+    value_list iterate_to_list(value aIterable)
     {
         auto record = get_iterator(aIterable);
-        std::vector<value> result;
+        value_list result;
         while (auto const next = iterator_step_value(record))
             result.push_back(*next);
         return result;

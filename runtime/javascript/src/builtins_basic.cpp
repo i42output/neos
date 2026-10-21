@@ -784,12 +784,15 @@ namespace neos::javascript_runtime
 
         value math_sum_precise(value, arguments aArguments, value, function_object&)
         {
-            // (Math.sumPrecise: the exactly rounded sum of an iterable's numbers (Shewchuk's algorithm))
+            // (Math.sumPrecise: the exactly rounded sum of an iterable's numbers (Shewchuk's algorithm, with the overflow and final rounding
+            // handling of the algorithm of the TC39 proposal-math-sum reference implementation (polyfill/polyfill.mjs, Kevin Gibbons)))
             auto record = get_iterator(argument(aArguments, 0u));
             std::vector<double> partials;
             bool any = false;
             bool positiveInfinity = false, negativeInfinity = false, nan = false;
             bool allNegativeZero = true;
+            double overflow = 0.0;
+            double constexpr twoTo1023 = 8.98846567431158e+307;
             while (auto const next = iterator_step_value(record))
             {
                 if (!is_number(*next))
@@ -805,21 +808,34 @@ namespace neos::javascript_runtime
                     (x > 0.0 ? positiveInfinity : negativeInfinity) = true;
                 if (!(x == 0.0 && std::signbit(x)))
                     allNegativeZero = false;
-                if (!std::isfinite(x))
+                if (!std::isfinite(x) || nan || positiveInfinity || negativeInfinity)
                     continue;
-                std::size_t i = 0u;
-                for (double y : partials)
+                // (a partial that overflows is kept as a multiple of 2^1024 (overflow) (see the proposal's reference implementation))
+                std::size_t used = 0u;
+                for (std::size_t j = 0u; j < partials.size(); ++j)
                 {
+                    double y = partials[j];
                     if (std::fabs(x) < std::fabs(y))
                         std::swap(x, y);
-                    double const hi = x + y;
-                    double const lo = y - (hi - x);
+                    double hi = x + y;
+                    double lo = y - (hi - x);
+                    if (std::isinf(hi))
+                    {
+                        double const sign = hi > 0.0 ? 1.0 : -1.0;
+                        overflow += sign;
+                        x = (x - sign * twoTo1023) - sign * twoTo1023;
+                        if (std::fabs(x) < std::fabs(y))
+                            std::swap(x, y);
+                        hi = x + y;
+                        lo = y - (hi - x);
+                    }
                     if (lo != 0.0)
-                        partials[i++] = lo;
+                        partials[used++] = lo;
                     x = hi;
                 }
-                partials.resize(i);
-                partials.push_back(x);
+                partials.resize(used);
+                if (x != 0.0)
+                    partials.push_back(x);
             }
             if (nan || (positiveInfinity && negativeInfinity))
                 return CanonicalNaN;
@@ -828,11 +844,63 @@ namespace neos::javascript_runtime
             if (negativeInfinity)
                 return number(-std::numeric_limits<double>::infinity());
             if (!any || allNegativeZero)
-                return number(any ? -0.0 : -0.0);
-            double sum = 0.0;
-            for (auto p : partials)
-                sum += p;
-            return number(sum);
+                return number(-0.0);
+            double constexpr maxDouble = std::numeric_limits<double>::max();
+            double constexpr maxUlp = 1.99584030953471981166e+292;    // (2^(1023 - 52))
+            auto n = static_cast<std::ptrdiff_t>(partials.size()) - 1;
+            double hi = 0.0;
+            double lo = 0.0;
+            if (overflow != 0.0)
+            {
+                double const next = n >= 0 ? partials[static_cast<std::size_t>(n)] : 0.0;
+                --n;
+                if (std::fabs(overflow) > 1.0 || (overflow > 0.0 && next > 0.0) || (overflow < 0.0 && next < 0.0))
+                    return number(overflow > 0.0 ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity());
+                // (halved so that the arithmetic doesn't overflow)
+                double const a = overflow * twoTo1023;
+                double const b = next / 2.0;
+                hi = a + b;
+                lo = b - (hi - a);
+                lo *= 2.0;
+                if (std::isinf(2.0 * hi))
+                {
+                    // (rounding to the maximum value: only a further partial of the opposite sign makes it finite)
+                    if (hi > 0.0)
+                        return number(hi == twoTo1023 && lo == -(maxUlp / 2.0) && n >= 0 && partials[static_cast<std::size_t>(n)] < 0.0 ?
+                            maxDouble : std::numeric_limits<double>::infinity());
+                    return number(hi == -twoTo1023 && lo == (maxUlp / 2.0) && n >= 0 && partials[static_cast<std::size_t>(n)] > 0.0 ?
+                        -maxDouble : -std::numeric_limits<double>::infinity());
+                }
+                if (lo != 0.0)
+                {
+                    partials.resize(static_cast<std::size_t>(n + 2));
+                    partials[static_cast<std::size_t>(n + 1)] = lo;
+                    ++n;
+                    lo = 0.0;
+                }
+                hi *= 2.0;
+            }
+            // (the exact sum of the partials, until precision is lost)
+            while (n >= 0)
+            {
+                double const x = hi;
+                double const y = partials[static_cast<std::size_t>(n)];
+                --n;
+                hi = x + y;
+                lo = y - (hi - x);
+                if (lo != 0.0)
+                    break;
+            }
+            // (a roundoff of exactly half an ulp: the next partial decides the rounding)
+            if (n >= 0 && ((lo < 0.0 && partials[static_cast<std::size_t>(n)] < 0.0) || (lo > 0.0 && partials[static_cast<std::size_t>(n)] > 0.0)))
+            {
+                double const y = lo * 2.0;
+                double const x = hi + y;
+                double const yr = x - hi;
+                if (y == yr)
+                    hi = x;
+            }
+            return number(hi);
         }
     }
 
@@ -888,6 +956,27 @@ namespace neos::javascript_runtime
         obj(aRealm.global).put(ascii("Math"), m);
     }
 
+    bool math_intrinsic(value aFunction, std::uint32_t aIntrinsic)
+    {
+        // (whether a function is the built-in Math function that the compiler's intrinsic aIntrinsic (1 imul, 2 floor, 3 ceil, 4 trunc, 5 sqrt,
+        // 6 abs) computes inline)
+        if (!is_object(aFunction) || obj(aFunction).cls != object_class::Function)
+            return false;
+        auto const& f = static_cast<function_object const&>(obj(aFunction));
+        if (f.kind != function_kind::Native)
+            return false;
+        switch (aIntrinsic)
+        {
+        case 1u: return f.native == &math_imul;
+        case 2u: return f.native == &math1<std::floor>;
+        case 3u: return f.native == &math1<std::ceil>;
+        case 4u: return f.native == &math1<std::trunc>;
+        case 5u: return f.native == &math1<std::sqrt>;
+        case 6u: return f.native == &math_abs;
+        default: return false;
+        }
+    }
+
     // --- iterators
 
     namespace
@@ -902,6 +991,12 @@ namespace neos::javascript_runtime
         {
         public:
             array_iterator(value aPrototype) : object{ aPrototype, object_class::ArrayIterator } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(iterated);
+            }
         public:
             value iterated = Undefined;
             double next = 0.0;

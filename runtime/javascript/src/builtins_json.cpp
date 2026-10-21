@@ -64,8 +64,8 @@ namespace neos::javascript_runtime
             value val = Undefined;
             std::size_t start = 0u;
             std::size_t end = 0u;
-            std::vector<parse_record> elements;
-            std::vector<std::pair<value, parse_record>> entries;
+            rooted_vector<parse_record> elements;
+            rooted_vector<std::pair<value, parse_record>> entries;
             std::unique_ptr<std::unordered_map<value, std::size_t>> index;  ///< (entries' keys -> entries (built when needed))
 
             parse_record* entry(value aKey)
@@ -257,7 +257,7 @@ namespace neos::javascript_runtime
                 if (++iDepth > MaxNesting)
                     too_deep();
                 ++iPosition;    // ([)
-                std::vector<value> elements;
+                value_list elements;
                 skip_whitespace();
                 if (iPosition < iText.size() && iText[iPosition] == u']')
                     ++iPosition;
@@ -613,7 +613,7 @@ namespace neos::javascript_runtime
         class json_serializer
         {
         public:
-            json_serializer(value aReplacerFunction, std::vector<value> const* aPropertyList, std::u16string aGap) :
+            json_serializer(value aReplacerFunction, value_list const* aPropertyList, std::u16string aGap) :
                 iReplacerFunction{ aReplacerFunction }, iPropertyList{ aPropertyList }, iGap{ std::move(aGap) }, iToJSON{ ascii("toJSON") }, iRawJSON{ ascii("rawJSON") }
             {
             }
@@ -738,14 +738,14 @@ namespace neos::javascript_runtime
                 iOutput.push_back(u'\n');
                 iOutput.append(iIndent);
             }
-            static std::vector<value> keys_of(value aObject)
+            static value_list keys_of(value aObject)
             {
                 auto& o = obj(aObject);
                 if (o.cls != object_class::Ordinary)
                     return enumerable_own_properties(aObject, 0);
                 // (an ordinary object: its enumerable string keys, indices first (ascending) then the others in order of creation)
-                std::vector<value> result;
-                std::vector<std::pair<std::uint32_t, value>> indices;
+                value_list result;
+                rooted_vector<std::pair<std::uint32_t, value>> indices;
                 result.reserve(o.properties.size());
                 o.properties.for_each([&](property const& p)
                 {
@@ -759,7 +759,7 @@ namespace neos::javascript_runtime
                 if (!indices.empty())
                 {
                     std::sort(indices.begin(), indices.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
-                    std::vector<value> all;
+                    value_list all;
                     all.reserve(indices.size() + result.size());
                     for (auto const& i : indices)
                         all.push_back(i.second);
@@ -773,7 +773,7 @@ namespace neos::javascript_runtime
                 enter(aValue);
                 auto const stepback = iIndent.size();
                 iIndent += iGap;
-                std::vector<value> ownKeys;
+                value_list ownKeys;
                 if (iPropertyList == nullptr)
                     ownKeys = keys_of(aValue);
                 auto const& keys = iPropertyList != nullptr ? *iPropertyList : ownKeys;
@@ -823,10 +823,10 @@ namespace neos::javascript_runtime
             }
         private:
             value iReplacerFunction;
-            std::vector<value> const* iPropertyList;
+            value_list const* iPropertyList;
             std::u16string iGap;
             std::u16string iIndent;
-            std::vector<value> iStack;
+            value_list iStack;
             std::u16string iOutput;
             value iToJSON;
             value iRawJSON;
@@ -838,7 +838,7 @@ namespace neos::javascript_runtime
             auto const replacer = argument(aArguments, 1u);
             auto space = argument(aArguments, 2u);
             value replacerFunction = Undefined;
-            std::optional<std::vector<value>> propertyList;
+            std::optional<value_list> propertyList;
             if (is_object(replacer))
             {
                 if (is_callable(replacer))

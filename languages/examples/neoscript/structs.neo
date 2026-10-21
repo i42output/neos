@@ -1,0 +1,93 @@
+// neoscript example: structs (values)
+
+using neo.string;
+using neo.stream;
+
+struct point
+{
+    i32 x;
+    i32 y;
+
+    fn this()
+    {
+    }
+
+    fn this(ax, ay : i32)
+    {
+        x = ax;
+        y = ay;
+    }
+
+    fn plus(other : point) -> point
+    {
+        return point(x + other.x, y + other.y);
+    }
+
+    fn text() -> string
+    {
+        return "(" + neo::to_string(x) + ", " + neo::to_string(y) + ")";
+    }
+
+    // a function that changes its object is mutable
+    fn swap() mutable -> point
+    {
+        i32 t = x;
+        x = y;
+        y = t;
+        return this;
+    }
+
+    // a procedure can change its object
+    proc move(dx, dy : in i32)
+    {
+        x = x + dx;
+        y = y + dy;
+    }
+}
+
+struct line
+{
+    // (a struct that is a field is part of its object)
+    point from;
+    point to;
+    string name = "line";
+    bool visible = true;
+    char tag = 'L';
+    f64 weight = 1.5;
+}
+
+proc nudge(p : in point)
+{
+    // (p is the caller's argument's copy)
+    p.move(100, 100);
+}
+
+proc main()
+{
+    point a = point(1, 2);
+    point b = a;
+    b.move(10, 10);
+    neo::print("a = " + a.text() + ", b = " + b.text() + "\n");
+    nudge(a);
+    neo::print("after nudge(a): " + a.text() + "\n");
+    neo::print("a + b = " + a.plus(b).text() + "\n");
+    line l;
+    l.from = a;
+    l.to.x = 5;
+    a.x = 77;
+    line copy = l;
+    copy.from.y = -8;
+    neo::print(l.name + " " + l.from.text() + " -> " + l.to.text() + ", its copy's from: " + copy.from.text() + "\n");
+    if (l.visible)
+        neo::print("tag " + neo::to_string(l.tag) + ", weight * 2 = " + neo::to_string(rounded(l.weight * 2.0)) + "\n");
+    point c = point(4, 5);
+    point d = c.swap();
+    d.x = 0;
+    neo::print("swapped " + c.text() + ", its copy " + d.text() + "\n");
+}
+
+fn rounded(x : f64) -> i32
+{
+    i32 n = x;
+    return n;
+}

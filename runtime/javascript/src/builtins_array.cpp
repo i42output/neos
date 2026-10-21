@@ -83,6 +83,13 @@ namespace neos::javascript_runtime
                 return make_array(static_cast<std::size_t>(aLength));
             }
             auto c = get(aOriginal, the_names().constructor);
+            if (is_constructor(c))
+            {
+                // (another realm's %Array%: an array of this realm)
+                auto& realmC = function_realm(c);
+                if (&realmC != &the_realm() && c == realmC.array)
+                    c = Undefined;
+            }
             if (is_object(c))
             {
                 c = get(c, the_realm().symSpecies);
@@ -259,7 +266,7 @@ namespace neos::javascript_runtime
             auto const o = to_object(aThis);
             auto const a = array_species_create(o, 0.0);
             double n = 0.0;
-            std::vector<value> items;
+            value_list items;
             items.push_back(o);
             items.insert(items.end(), aArguments.begin(), aArguments.end());
             for (auto const e : items)
@@ -552,7 +559,7 @@ namespace neos::javascript_runtime
             auto const separator = argument(aArguments, 0u);
             std::u16string const sep = separator == Undefined ? std::u16string{ u"," } : str(to_string(separator));
             // (cycles: an array being joined joins as the empty string)
-            static thread_local std::vector<value> tJoining;
+            static thread_local value_list tJoining;
             if (std::find(tJoining.begin(), tJoining.end(), o) != tJoining.end())
                 return the_names().empty;
             tJoining.push_back(o);
@@ -838,10 +845,10 @@ namespace neos::javascript_runtime
             return str(to_string(x)) < str(to_string(y));
         }
 
-        void sort_values(std::vector<value>& aValues, value aComparator)
+        void sort_values(value_list& aValues, value aComparator)
         {
             // (a stable merge sort: the comparator can be inconsistent)
-            std::vector<value> buffer(aValues.size());
+            value_list buffer(aValues.size());
             std::function<void(std::size_t, std::size_t)> sort = [&](std::size_t aLow, std::size_t aHigh)
             {
                 if (aHigh - aLow < 2u)
@@ -862,9 +869,9 @@ namespace neos::javascript_runtime
             sort(0u, aValues.size());
         }
 
-        std::vector<value> sort_indexed_properties(value aObject, double aLength, value aComparator, bool aSkipHoles)
+        value_list sort_indexed_properties(value aObject, double aLength, value aComparator, bool aSkipHoles)
         {
-            std::vector<value> items;
+            value_list items;
             for (double k = 0.0; k < aLength; ++k)
             {
                 auto const pk = key(k);
@@ -961,7 +968,7 @@ namespace neos::javascript_runtime
             auto const len = length_of_array_like(o);
             if (len > 4294967295.0)
                 throw_range_error("Invalid array length");
-            std::vector<value> elements;
+            value_list elements;
             for (double k = 0.0; k < len; ++k)
                 elements.push_back(get(o, key(len - k - 1.0)));
             return make_array(std::move(elements));
@@ -1001,7 +1008,7 @@ namespace neos::javascript_runtime
                 throw_type_error("Invalid array length");
             if (newLen > 4294967295.0)
                 throw_range_error("Invalid array length");
-            std::vector<value> elements;
+            value_list elements;
             double i = 0.0;
             for (; i < actualStart; ++i)
                 elements.push_back(get(o, key(i)));
@@ -1022,17 +1029,11 @@ namespace neos::javascript_runtime
                 throw_range_error("Invalid index");
             if (len > 4294967295.0)
                 throw_range_error("Invalid array length");
-            std::vector<value> elements;
+            value_list elements;
             for (double k = 0.0; k < len; ++k)
                 elements.push_back(k == actual ? argument(aArguments, 1u) : get(o, key(k)));
             return make_array(std::move(elements));
         }
-    }
-
-    value object_prototype_to_string_value(value aObject)
-    {
-        auto const f = get(the_realm().objectPrototype, the_names().toString);
-        return call(f, aObject);
     }
 
     void init_array(realm& aRealm)

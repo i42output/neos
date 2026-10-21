@@ -101,6 +101,9 @@ namespace neos::compilers::javascript
             return aCharacter <= '9' ? static_cast<unsigned>(aCharacter - '0') : static_cast<unsigned>((aCharacter | 0x20) - 'a' + 10);
         }
 
+        // (HTML-like comments (Annex B.1.1) are comments: not in a module's code)
+        thread_local bool tHtmlComments = true;
+
         // (the position of the next token after aPosition (white space and comments skipped); aLineTerminator: a line terminator was skipped)
         std::size_t next_token(std::string_view aText, std::size_t aPosition, bool& aLineTerminator)
         {
@@ -116,9 +119,12 @@ namespace neos::compilers::javascript
                 }
                 else if (is_white_space(c))
                     aPosition += length;
-                else if (c == U'/' && aPosition + 1u < aText.size() && aText[aPosition + 1u] == '/')
+                else if ((c == U'/' && aPosition + 1u < aText.size() && aText[aPosition + 1u] == '/') || (tHtmlComments && aText.substr(aPosition).starts_with("<!--")) ||
+                    (tHtmlComments && aLineTerminator && aText.substr(aPosition).starts_with("-->")))
                 {
-                    aLineTerminator = true;     // (a line comment ends at a line terminator (or the end))
+                    // (a line comment (or an HTML-like one (Annex B.1.1): <!--, or --> at the start of a line) ends at a line terminator (or the
+                    // end))
+                    aLineTerminator = true;
                     while (aPosition < aText.size())
                     {
                         auto const d = code_point(aText, aPosition, length);
@@ -625,6 +631,7 @@ namespace neos::compilers::javascript
                 }
                 context c;
                 c.module = iCompiler.iKind == compiler::code_kind::Module;
+                tHtmlComments = !c.module;
                 c.strict = c.module || directive_strict(aScript);
                 c.await = c.module;     // (a module's top level: await expressions)
                 if (iCompiler.iKind == compiler::code_kind::DirectEval)
@@ -636,7 +643,7 @@ namespace neos::compilers::javascript
                     c.superProperty = (flags & compiler::EvalMethod) != 0u;
                     c.superCall = (flags & compiler::EvalDerivedConstructor) != 0u;
                     c.noArguments = (flags & compiler::EvalFieldInitializer) != 0u;
-                    iPrivateNamesUnknown = true;
+                    iPrivateNamesUnknown = false;   // (its options name the private names of the classes that enclose the call)
                 }
                 // (a module's top-level function declarations are lexical declarations)
                 declarations(aScript->children, !c.module, c.strict);
@@ -982,7 +989,7 @@ namespace neos::compilers::javascript
                         bool declared = false;
                         for (auto const* s = c.classes; s != nullptr && !declared; s = s->outer)
                             declared = s->names.contains(name);
-                        if (!declared && !iPrivateNamesUnknown)
+                        if (!declared && !iCompiler.iEvalPrivateNames.contains(name) && !iPrivateNamesUnknown)
                             error(aNode, "Private field '" + name + "' must be declared in an enclosing class");
                     }
                     return;
@@ -1459,6 +1466,7 @@ namespace neos::compilers::javascript
                 case construct::Template:
                 case construct::Computed:
                 case construct::Arguments:
+                case construct::ImportCall:     // (its arguments are in parentheses)
                     return false;
                 case construct::Index:
                 case construct::Call:

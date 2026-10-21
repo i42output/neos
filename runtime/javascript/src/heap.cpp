@@ -31,40 +31,16 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-// The heap (its cells: strings, symbols, BigInts, objects and environments) and strings
+// The heap's values (strings, symbols, BigInts, objects and environments: see gc.cpp for its memory and collection) and strings
 
 #include <algorithm>
 #include <charconv>
 #include "js.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
     // --- the heap
-
-    heap::heap()
-    {
-        iCells.reserve(1u << 16);
-        iCells.push_back(nullptr);  // (handle 0 refers to nothing)
-    }
-
-    heap::~heap()
-    {
-        // (the process is ending: cells are not destroyed (their destructors could refer to others))
-    }
-
-    void heap::add(cell& aCell)
-    {
-        if (iCells.size() >= 0xFFFFFFFFu)
-            throw std::bad_alloc{};
-        aCell.handle = static_cast<std::uint32_t>(iCells.size());
-        iCells.push_back(&aCell);
-    }
-
-    heap& the_heap()
-    {
-        static heap* sHeap = new heap{};
-        return *sHeap;
-    }
 
     bool valid(value aValue)
     {
@@ -159,12 +135,25 @@ namespace neos::javascript_runtime
             static intern_table* sTable = new intern_table{};
             return *sTable;
         }
+
+        // (pinned interned strings live as long as the program (compiled code's literals are interned strings that it keeps in its 
+        // globals; the runtime keeps others in statics); the others live while they are referred to: those that die are removed)
+        root_tracer const sInternedRoots{ [](tracer& aTracer)
+        {
+            for (auto const& entry : interned().strings)
+                if (cell_of<string>(entry.second).pinned)
+                    aTracer.mark(entry.second);
+        }, [](tracer& aTracer)
+        {
+            std::erase_if(interned().strings, [&](auto const& aEntry) { return !aTracer.alive(aEntry.second); });
+        } };
     }
 
     value make_string(std::u16string aText)
     {
         if (aText.size() > MaxStringLength)
             throw_range_error("invalid string length");
+        the_heap().account(aText.size() * sizeof(char16_t));
         auto& s = the_heap().make<string>(std::move(aText));
         return TagString | s.handle;
     }
@@ -298,9 +287,13 @@ namespace neos::javascript_runtime
     {
         auto& table = interned();
         if (auto existing = table.strings.find(aText); existing != table.strings.end())
+        {
+            cell_of<string>(existing->second).pinned = true;
             return existing->second;
+        }
         auto& s = the_heap().make<string>(std::u16string{ aText });
         s.interned = true;
+        s.pinned = true;
         auto const result = TagString | s.handle;
         table.strings.emplace(std::u16string_view{ s.text }, result);
         return result;
@@ -395,7 +388,11 @@ namespace neos::javascript_runtime
         }
         char digits[24];
         auto const end = std::to_chars(std::begin(digits), std::end(digits), aIndex).ptr;
-        return intern(utf16_ascii(std::string_view{ digits, static_cast<std::size_t>(end - digits) }));
+        auto text = utf16_ascii(std::string_view{ digits, static_cast<std::size_t>(end - digits) });
+        auto& table = interned();
+        if (auto existing = table.strings.find(std::u16string_view{ text }); existing != table.strings.end())
+            return existing->second;
+        return intern(make_string(std::move(text)));    // (not pinned: it lives while it is referred to)
     }
 
     // --- symbols

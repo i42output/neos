@@ -51,6 +51,12 @@ namespace neos::javascript_runtime
             {
             }
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(target);
+                aTracer.mark(handler);
+            }
             value get_prototype_of() override;
             bool set_prototype_of(value aPrototype) override;
             bool is_extensible() override;
@@ -61,7 +67,7 @@ namespace neos::javascript_runtime
             value get(value aKey, value aReceiver) override;
             bool set(value aKey, value aValue, value aReceiver) override;
             bool delete_property(value aKey) override;
-            std::vector<value> own_property_keys() override;
+            value_list own_property_keys() override;
             bool callable() const override { return isCallable; }
             bool constructor() const override { return isConstructor; }
             value call(value aThis, arguments aArguments) override;
@@ -315,7 +321,7 @@ namespace neos::javascript_runtime
             return true;
         }
 
-        std::vector<value> proxy_object::own_property_keys()
+        value_list proxy_object::own_property_keys()
         {
             auto const [t, target, handler] = trap("ownKeys");
             if (t == Undefined)
@@ -330,8 +336,8 @@ namespace neos::javascript_runtime
                     throw_type_error("'ownKeys' on proxy: trap returned duplicate entries");
             auto const extensibleTarget = obj(target).is_extensible();
             auto const targetKeys = obj(target).own_property_keys();
-            std::vector<value> targetConfigurableKeys;
-            std::vector<value> targetNonconfigurableKeys;
+            value_list targetConfigurableKeys;
+            value_list targetNonconfigurableKeys;
             for (auto const key : targetKeys)
             {
                 auto const desc = obj(target).get_own_property(key);

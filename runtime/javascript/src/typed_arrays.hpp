@@ -37,6 +37,7 @@
 #pragma once
 
 #include "js.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -80,6 +81,12 @@ namespace neos::javascript_runtime
         array_buffer_object(value aPrototype, bool aShared) :
             object{ aPrototype, aShared ? object_class::SharedArrayBuffer : object_class::ArrayBuffer } {}
     public:
+        void trace(tracer& aTracer) override
+        {
+            object::trace(aTracer);
+            aTracer.mark(detachKey);
+        }
+    public:
         bool shared() const { return cls == object_class::SharedArrayBuffer; }
         std::size_t byte_length() const { return data.size(); }
         std::uint8_t* bytes() { return data.data(); }
@@ -115,13 +122,19 @@ namespace neos::javascript_runtime
     public:
         typed_array_object(value aPrototype, element_type aType) : object{ aPrototype, object_class::TypedArray }, type{ aType } {}
     public:
+        void trace(tracer& aTracer) override
+        {
+            object::trace(aTracer);
+            aTracer.mark(buffer);
+        }
+    public:
         std::optional<property_descriptor> get_own_property(value aKey) override;
         bool define_own_property(value aKey, property_descriptor const& aDescriptor) override;
         bool has_property(value aKey) override;
         value get(value aKey, value aReceiver) override;
         bool set(value aKey, value aValue, value aReceiver) override;
         bool delete_property(value aKey) override;
-        std::vector<value> own_property_keys() override;
+        value_list own_property_keys() override;
         bool prevent_extensions() override;
     public:
         array_buffer_object& buffer_object() const { return static_cast<array_buffer_object&>(obj(buffer)); }
@@ -205,6 +218,12 @@ namespace neos::javascript_runtime
     {
     public:
         explicit data_view_object(value aPrototype) : object{ aPrototype, object_class::DataView } {}
+    public:
+        void trace(tracer& aTracer) override
+        {
+            object::trace(aTracer);
+            aTracer.mark(buffer);
+        }
     public:
         array_buffer_object& buffer_object() const { return static_cast<array_buffer_object&>(obj(buffer)); }
     public:

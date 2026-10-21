@@ -40,8 +40,10 @@
 // added while it is in progress and skips those deleted before it reaches them, as the specification's list of entries
 // (with ~empty~ for a deleted one) has it.
 //
-// There is no garbage collector yet: a weak collection holds its keys strongly, WeakRef.prototype.deref always returns
-// the target and a FinalizationRegistry never calls its cleanup callback.
+// Weak references (see gc.hpp): a WeakMap's or WeakSet's entries are ephemerons (an entry's value lives while its key does; the
+// entries whose keys die are removed); a WeakRef's target is cleared when it dies (it is kept alive until the end of the job that
+// created the WeakRef or dereferenced it); a FinalizationRegistry's cells whose targets die are removed and its cleanup callback is
+// called (in a job of its own) with each one's held value.
 
 #include <algorithm>
 #include <unordered_set>
@@ -175,6 +177,20 @@ namespace neos::javascript_runtime
                 if (existing != iCursors.end())
                     iCursors.erase(existing);
             }
+            bool has_cursors() const { return !iCursors.empty(); }
+            template <typename Predicate>
+            void remove_cursors_if(Predicate&& aPredicate)
+            {
+                std::erase_if(iCursors, aPredicate);
+            }
+            void trace(tracer& aTracer) const
+            {
+                for (auto const& e : iEntries)
+                {
+                    aTracer.mark(e.key);
+                    aTracer.mark(e.data);
+                }
+            }
         private:
             void compact()
             {
@@ -240,6 +256,18 @@ namespace neos::javascript_runtime
         public:
             collection_object(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                data.trace(aTracer);
+                // (the cursors of its iterators that die are removed (they are positions in the iterators' cells))
+                if (data.has_cursors())
+                    aTracer.after_marking(*this, [](cell& aCell, tracer& aTracer)
+                    {
+                        static_cast<collection_object&>(aCell).data.remove_cursors_if([&](std::uint32_t* aCursor) { return !aTracer.alive(static_cast<void const*>(aCursor)); });
+                    });
+            }
+        public:
             keyed_data data;
         };
 
@@ -247,6 +275,12 @@ namespace neos::javascript_runtime
         {
         public:
             collection_iterator(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(collection);
+            }
         public:
             value collection = Undefined;   ///< (undefined: done)
             std::uint32_t position = 0u;
@@ -258,6 +292,19 @@ namespace neos::javascript_runtime
         public:
             weak_collection(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                if (data.empty())
+                    return;
+                // (ephemerons: a value is marked if its key is; the entries whose keys die are removed)
+                aTracer.ephemerons(data);
+                aTracer.after_marking(*this, [](cell& aCell, tracer& aTracer)
+                {
+                    std::erase_if(static_cast<weak_collection&>(aCell).data, [&](auto const& aEntry) { return !aTracer.alive(aEntry.first); });
+                });
+            }
+        public:
             std::unordered_map<value, value> data;  ///< (objects and symbols: by identity)
         };
 
@@ -265,6 +312,31 @@ namespace neos::javascript_runtime
         {
         public:
             explicit finalization_registry(value aPrototype) : object{ aPrototype, object_class::FinalizationRegistry } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(cleanup);
+                if (cells.empty())
+                    return;
+                // (its cells' held values live; their targets and unregister tokens are weak: a cell whose target dies is removed and the
+                // cleanup callback is called with its held value (in a job); a token that dies is forgotten)
+                for (auto const& c : cells)
+                    aTracer.mark(c.heldValue);
+                aTracer.after_marking(*this, [](cell& aCell, tracer& aTracer)
+                {
+                    auto& registry = static_cast<finalization_registry&>(aCell);
+                    std::erase_if(registry.cells, [&](registration& aCell)
+                    {
+                        if (aCell.unregisterToken != Empty && !aTracer.alive(aCell.unregisterToken))
+                            aCell.unregisterToken = Empty;
+                        if (aTracer.alive(aCell.target))
+                            return false;
+                        enqueue_job(registry.cleanup, aCell.heldValue);
+                        return true;
+                    });
+                });
+            }
         public:
             struct registration
             {
@@ -708,7 +780,7 @@ namespace neos::javascript_runtime
             if (static_cast<double>(set.data.size()) <= other.size)
             {
                 // (the result's elements as they are now: only this method changes the result)
-                std::vector<value> elements;
+                value_list elements;
                 for (auto const& e : resultData.entries())
                     if (e.key != Empty)
                         elements.push_back(e.key);
@@ -912,6 +984,7 @@ namespace neos::javascript_runtime
                 throw_type_error("WeakRef: invalid target " + describe(target));
             auto const result = ordinary_create_from_constructor(aNewTarget, &realm::weakRefPrototype, object_class::WeakRef);
             obj(result).internal = target;
+            keep_during_job(target);
             return result;
         }
 
@@ -919,7 +992,10 @@ namespace neos::javascript_runtime
         {
             if (!is_object(aThis) || obj(aThis).cls != object_class::WeakRef)
                 throw_type_error("Method WeakRef.prototype.deref called on incompatible receiver " + describe(aThis));
-            return obj(aThis).internal;
+            auto const target = obj(aThis).internal;
+            if (target != Undefined)
+                keep_during_job(target);
+            return target;
         }
 
         // --- FinalizationRegistry
@@ -986,9 +1062,9 @@ namespace neos::javascript_runtime
         }
     }
 
-    std::vector<value> collection_entries(value aCollection)
+    value_list collection_entries(value aCollection)
     {
-        std::vector<value> result;
+        value_list result;
         auto& o = obj(aCollection);
         if (o.cls != object_class::Map && o.cls != object_class::Set)
             return result;

@@ -1,0 +1,147 @@
+// neoscript example: classes and interfaces
+
+using neo.string;
+using neo.stream;
+
+namespace geometry
+{
+    interface i_named
+    {
+        fn name() -> string;
+    }
+
+    // an interface can extend interfaces
+    interface i_shape extends i_named
+    {
+        fn area() -> f64;
+        proc scale(factor : in f64);
+    }
+
+    // a class's methods are virtual (unless they, or it, are final)
+    class shape implements i_shape
+    {
+        protected string label = "shape";
+
+        fn name() -> string
+        {
+            return label;
+        }
+
+        fn area() -> f64
+        {
+            return 0.0;
+        }
+
+        proc scale(factor : in f64)
+        {
+        }
+
+        // a method calls its object's methods without naming it (this.area())
+        fn describe() -> string
+        {
+            return name() + " (area " + neo::to_string(rounded(area())) + ")";
+        }
+
+        private fn rounded(x : f64) -> i32
+        {
+            i32 n = x + 0.5;
+            return n;
+        }
+    }
+
+    class rectangle extends shape
+    {
+        protected f64 width;
+        protected f64 height;
+
+        fn this(w, h : f64)
+        {
+            width = w;
+            height = h;
+            label = "rectangle";
+        }
+
+        fn area() -> f64 override
+        {
+            return width * height;
+        }
+
+        proc scale(factor : in f64)
+        {
+            width = width * factor;
+            height = height * factor;
+        }
+    }
+
+    // a final class cannot be extended
+    class square final extends rectangle
+    {
+        fn this(side : f64)
+        {
+            width = side;
+            height = side;
+            label = "square";
+        }
+    }
+
+    class circle extends shape
+    {
+        private f64 radius;
+
+        fn this(r : f64)
+        {
+            radius = r;
+            label = "circle";
+        }
+
+        // a final method cannot be overridden
+        fn area() -> f64 final
+        {
+            return 3.14159265 * radius * radius;
+        }
+
+        proc scale(factor : in f64)
+        {
+            radius = radius * factor;
+        }
+    }
+}
+
+// another name of a type
+shape is geometry::i_shape;
+
+fn total_area(a, b : shape) -> f64
+{
+    return a.area() + b.area();
+}
+
+proc show(s : in shape)
+{
+    neo::print(s.name() + ": " + neo::to_string(rounded(s.area())) + "\n");
+}
+
+fn rounded(x : f64) -> i32
+{
+    i32 n = x + 0.5;
+    return n;
+}
+
+proc main()
+{
+    geometry::rectangle r = geometry::rectangle(3.0, 4.0);
+    geometry::square s = geometry::square(5.0);
+    geometry::circle c = geometry::circle(2.0);
+    show(r);
+    show(s);
+    show(c);
+    // an object of a class is shared by its references
+    shape any = c;
+    any.scale(2.0);
+    show(c);
+    neo::print("total area of the rectangle and the square: " + neo::to_string(rounded(total_area(r, s))) + "\n");
+    geometry::shape base = s;
+    neo::print(base.describe() + "\n");
+    auto big = geometry::rectangle(1.0, 2.0);
+    big.scale(10.0);
+    neo::print(big.describe() + "\n");
+}

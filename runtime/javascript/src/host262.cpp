@@ -42,6 +42,7 @@
 #include <memory>
 #include <thread>
 #include "js.hpp"
+#include "gc.hpp"
 #include "api.hpp"
 
 namespace neos::javascript_runtime
@@ -65,6 +66,7 @@ namespace neos::javascript_runtime
 
         value gc(value, arguments, value, function_object&)
         {
+            collect_garbage();
             return Undefined;
         }
 
@@ -100,6 +102,7 @@ namespace neos::javascript_runtime
         struct agent
         {
             realm* agentRealm = nullptr;    ///< (its realm, while it is suspended)
+            realm* agentCallerRealm = nullptr;  ///< (likewise its caller realm)
             neos_rt_coroutine* coroutine = nullptr;
             value source = Undefined;
             value callback = Undefined;     ///< (receiveBroadcast's)
@@ -110,6 +113,8 @@ namespace neos::javascript_runtime
             std::function<bool()> done;
             std::optional<double> deadline;
             std::vector<value> savedArguments;
+            void const* generator = nullptr;    ///< (the generator running when it was resumed: a different one runs within it)
+            std::deque<std::function<void()>> jobs;     ///< (its job queue)
         };
 
         std::vector<std::unique_ptr<agent>>& agents()
@@ -140,7 +145,21 @@ namespace neos::javascript_runtime
             }
             for (;;)
             {
-                if (a.message && a.callback != Undefined)
+                if (!a.jobs.empty())
+                {
+                    auto job = std::move(a.jobs.front());
+                    a.jobs.pop_front();
+                    try
+                    {
+                        job();
+                    }
+                    catch (js_exception const& e)
+                    {
+                        std::string const line = "Uncaught (agent) " + inspect(e.thrown, false) + "\n";
+                        std::fwrite(line.data(), 1u, line.size(), stdout);
+                    }
+                }
+                else if (a.message && a.callback != Undefined)
                 {
                     auto const m = *a.message;
                     a.message.reset();
@@ -168,7 +187,7 @@ namespace neos::javascript_runtime
                 return true;
             if (a.waiting)
                 return a.done() || (a.deadline && monotonic_ms() >= *a.deadline);
-            return a.message && a.callback != Undefined;
+            return !a.jobs.empty() || (a.message && a.callback != Undefined);
         }
 
         void resume(agent& a)
@@ -179,10 +198,13 @@ namespace neos::javascript_runtime
             extra.insert(extra.end(), a.savedArguments.begin(), a.savedArguments.end());
             a.savedArguments.clear();
             auto* const previousRealm = exchange_realm(a.agentRealm);
+            auto* const previousCallerRealm = exchange_caller_realm(a.agentCallerRealm);
             auto* const previousAgent = std::exchange(tAgent, &a);
+            a.generator = running_generator();
             int const finished = host()->coroutine_resume(a.coroutine);
             tAgent = previousAgent;
             a.agentRealm = exchange_realm(previousRealm);
+            a.agentCallerRealm = exchange_caller_realm(previousCallerRealm);
             if (finished != 0)
                 a.finished = true;
             else
@@ -206,6 +228,10 @@ namespace neos::javascript_runtime
 
         value agent_start(value, arguments aArguments, value, function_object&)
         {
+            // (agents run on coroutines whose stacks the collector does not scan: while there are agents, no garbage is collected)
+            static std::optional<gc_pause> sNoCollection;
+            if (!sNoCollection)
+                sNoCollection.emplace();
             auto a = std::make_unique<agent>();
             a->source = to_string(argument(aArguments, 0u));
             {
@@ -279,12 +305,25 @@ namespace neos::javascript_runtime
         return std::chrono::duration<double, std::milli>{ std::chrono::steady_clock::now() - sStart }.count();
     }
 
+    bool in_agent()
+    {
+        return tAgent != nullptr;
+    }
+
     bool agents_running()
     {
         for (auto const& a : agents())
             if (!a->finished && a.get() != tAgent)
                 return true;
         return tAgent != nullptr;
+    }
+
+    bool agent_enqueue_job(std::function<void()>& aJob)
+    {
+        if (tAgent == nullptr)
+            return false;
+        tAgent->jobs.push_back(std::move(aJob));
+        return true;
     }
 
     void agent_yield()
@@ -298,6 +337,13 @@ namespace neos::javascript_runtime
 
     void agent_block(std::function<bool()> const& aDone, std::optional<double> aDeadline)
     {
+        if (tAgent != nullptr && running_generator() != tAgent->generator)
+        {
+            // (an agent within a generator or async function (whose coroutine is not the agent's): it cannot be suspended; it waits)
+            while (!aDone() && aDeadline && monotonic_ms() < *aDeadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds{ 1 });
+            return;
+        }
         if (tAgent != nullptr)
         {
             // (an agent: it is suspended until it is done or its deadline passes)

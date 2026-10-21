@@ -152,9 +152,9 @@ namespace neos::javascript_runtime
         return object::delete_property(aKey);
     }
 
-    std::vector<value> typed_array_object::own_property_keys()
+    value_list typed_array_object::own_property_keys()
     {
-        std::vector<value> result;
+        value_list result;
         if (!out_of_bounds())
         {
             auto const n = length();
@@ -434,7 +434,7 @@ namespace neos::javascript_runtime
                     auto const usingIterator = get_method(first, the_realm().symIterator);
                     if (usingIterator != Undefined)
                     {
-                        std::vector<value> values;
+                        value_list values;
                         auto record = get_iterator_from_method(first, usingIterator);
                         while (auto const next = iterator_step_value(record))
                             values.push_back(*next);
@@ -478,7 +478,7 @@ namespace neos::javascript_runtime
             auto const usingIterator = get_method(source, the_realm().symIterator);
             if (usingIterator != Undefined)
             {
-                std::vector<value> values;
+                value_list values;
                 auto record = get_iterator_from_method(source, usingIterator);
                 while (auto const next = iterator_step_value(record))
                     values.push_back(*next);
@@ -660,7 +660,7 @@ namespace neos::javascript_runtime
             auto const length = static_cast<double>(t.length());
             auto const callback = callback_argument(aArguments, "filter");
             auto const thisArg = argument(aArguments, 1u);
-            std::vector<value> kept;
+            value_list kept;
             for (double k = 0.0; k < length; ++k)
             {
                 auto const kValue = typed_array_get_element(t, k);
@@ -935,9 +935,9 @@ namespace neos::javascript_runtime
         }
 
         // (SortIndexedProperties for a typed array: its elements, sorted (a stable merge sort: the comparator can be inconsistent))
-        std::vector<value> sorted_elements(typed_array_object& aTypedArray, std::size_t aLength, value aComparator)
+        value_list sorted_elements(typed_array_object& aTypedArray, std::size_t aLength, value aComparator)
         {
-            std::vector<value> items;
+            value_list items;
             items.reserve(aLength);
             for (std::size_t k = 0u; k < aLength; ++k)
                 items.push_back(typed_array_get_element(aTypedArray, static_cast<double>(k)));
@@ -947,7 +947,7 @@ namespace neos::javascript_runtime
                 std::stable_sort(items.begin(), items.end(), [](value a, value b) { return compare_elements(a, b, Undefined) < 0.0; });
                 return items;
             }
-            std::vector<value> buffer(items.size());
+            value_list buffer(items.size());
             auto sort = [&](auto& aSelf, std::size_t aLow, std::size_t aHigh) -> void
             {
                 if (aHigh - aLow < 2u)

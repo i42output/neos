@@ -146,6 +146,8 @@ namespace neos::javascript_runtime
             return true;
         if (!extensible)
             return false;
+        if (proto == Null && is_object_prototype(*this))
+            return false;   // (an immutable prototype exotic object (SetImmutablePrototype))
         auto p = aPrototype;
         while (p != Null)
         {
@@ -458,7 +460,7 @@ namespace neos::javascript_runtime
         return false;
     }
 
-    std::vector<value> object::ordinary_own_property_keys()
+    value_list object::ordinary_own_property_keys()
     {
         std::vector<std::pair<std::uint32_t, value>> indices;
         std::vector<value> strings;
@@ -473,7 +475,7 @@ namespace neos::javascript_runtime
                 strings.push_back(p.key);
         });
         std::sort(indices.begin(), indices.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
-        std::vector<value> result;
+        value_list result;
         result.reserve(indices.size() + strings.size() + symbols.size());
         for (auto const& i : indices)
             result.push_back(i.second);
@@ -482,7 +484,7 @@ namespace neos::javascript_runtime
         return result;
     }
 
-    std::vector<value> object::own_property_keys()
+    value_list object::own_property_keys()
     {
         return ordinary_own_property_keys();
     }
@@ -508,11 +510,11 @@ namespace neos::javascript_runtime
         return value_of(a);
     }
 
-    value make_array(std::vector<value> aElements)
+    value make_array(value_list aElements)
     {
         auto& a = the_heap().make<array_object>(the_realm().arrayPrototype);
         a.length = static_cast<std::uint32_t>(aElements.size());
-        a.elements = std::move(aElements);
+        a.elements.assign(aElements.begin(), aElements.end());
         return value_of(a);
     }
 
@@ -731,9 +733,9 @@ namespace neos::javascript_runtime
         return ordinary_delete(aKey);
     }
 
-    std::vector<value> array_object::own_property_keys()
+    value_list array_object::own_property_keys()
     {
-        std::vector<value> result;
+        value_list result;
         if (!sparse)
         {
             for (std::size_t i = 0u; i < elements.size(); ++i)
@@ -772,7 +774,7 @@ namespace neos::javascript_runtime
             return call_compiled(*this, aThis, aArguments, Undefined);
         case function_kind::Bound:
             {
-                std::vector<value> all = boundArguments;
+                value_list all{ boundArguments.begin(), boundArguments.end() };
                 all.insert(all.end(), aArguments.begin(), aArguments.end());
                 return javascript_runtime::call(boundTarget, boundThis, all);
             }
@@ -799,7 +801,7 @@ namespace neos::javascript_runtime
             }
         case function_kind::Bound:
             {
-                std::vector<value> all = boundArguments;
+                value_list all{ boundArguments.begin(), boundArguments.end() };
                 all.insert(all.end(), aArguments.begin(), aArguments.end());
                 if (aNewTarget == value_of(*this))
                     aNewTarget = boundTarget;

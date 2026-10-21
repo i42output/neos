@@ -49,6 +49,13 @@ namespace neos::javascript_runtime
         public:
             explicit regexp_object(value aPrototype) : object{ aPrototype, object_class::RegExp } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(source);
+                aTracer.mark(flags);
+            }
+        public:
             value source = Undefined;
             value flags = Undefined;
             std::uint32_t flagBits = 0u;
@@ -68,6 +75,13 @@ namespace neos::javascript_runtime
         {
         public:
             explicit regexp_string_iterator(value aPrototype) : object{ aPrototype, object_class::RegExpStringIterator } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(iteratingRegExp);
+                aTracer.mark(iteratedString);
+            }
         public:
             value iteratingRegExp = Undefined;
             value iteratedString = Undefined;
@@ -94,6 +108,13 @@ namespace neos::javascript_runtime
             std::int32_t lastParen[2] = { -1, -1 };
         };
         legacy_statics sLegacy;
+
+        root_tracer const sRegExpRoots{ [](tracer& aTracer)
+        {
+            aTracer.conservative(&sKeys, &sKeys + 1);
+            aTracer.mark(sLegacy.input);
+            aTracer.mark(sLegacy.subject);
+        } };
 
         void update_legacy_statics(value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
         {
@@ -261,7 +282,7 @@ namespace neos::javascript_runtime
         }
 
         // (the groups object of a match (aGroupNames: by group (1...), the key of the name whose value it gives, or undefined))
-        value make_groups(regexp::program const& aProgram, std::span<value const> aElements, std::vector<value>* aGroupNames = nullptr)
+        value make_groups(regexp::program const& aProgram, std::span<value const> aElements, value_list* aGroupNames = nullptr)
         {
             if (!aProgram.hasNamedGroups)
                 return Undefined;
@@ -301,7 +322,7 @@ namespace neos::javascript_runtime
             auto const index = captures[0];
             auto const e = captures[1];
             auto const n = program->captureCount;
-            std::vector<value> elements(n + 1u, Undefined);
+            value_list elements(n + 1u, Undefined);
             elements[0] = substring(text, index, e);
             for (std::uint32_t i = 1u; i <= n; ++i)
                 if (captures[i * 2u] != -1)
@@ -310,16 +331,16 @@ namespace neos::javascript_runtime
             auto& ao = obj(a);
             ao.put(the_names().index, number(index), AttributesDefault);
             ao.put(the_names().input, aS, AttributesDefault);
-            std::vector<value> groupNames;
+            value_list groupNames;
             auto const groups = make_groups(*program, elements, &groupNames);
             ao.put(the_names().groups, groups, AttributesDefault);
             if (hasIndices)
             {
                 // (MakeMatchIndicesIndexPairArray)
-                std::vector<value> pairs(n + 1u, Undefined);
+                value_list pairs(n + 1u, Undefined);
                 auto const pair = [&](std::int32_t aStart, std::int32_t aEnd)
                 {
-                    return make_array(std::vector<value>{ number(aStart), number(aEnd) });
+                    return make_array(value_list{ number(aStart), number(aEnd) });
                 };
                 pairs[0] = pair(index, e);
                 for (std::uint32_t i = 1u; i <= n; ++i)
@@ -711,7 +732,7 @@ namespace neos::javascript_runtime
             bool const fullUnicode = flags_contain(flags, u'u') || flags_contain(flags, u'v');
             set(aThis, the_names().lastIndex, number(0.0), true);
             auto const& text = str(s);
-            std::vector<value> results;
+            value_list results;
             if (has_builtin_exec(aThis))
             {
                 // (%RegExp.prototype.exec%: the matches without their arrays (which are not observable))
@@ -806,14 +827,14 @@ namespace neos::javascript_runtime
             }
             std::u16string accumulatedResult;
             std::size_t nextSourcePosition = 0u;
-            std::vector<value> captures;
+            value_list captures;
             auto const replace = [&](value aMatched, std::size_t aPosition, value aNamedCaptures)
             {
                 auto const matchLength = string_length(aMatched);
                 std::u16string replacement;
                 if (functionalReplace)
                 {
-                    std::vector<value> replacerArgs;
+                    value_list replacerArgs;
                     replacerArgs.reserve(captures.size() + 4u);
                     replacerArgs.push_back(aMatched);
                     replacerArgs.insert(replacerArgs.end(), captures.begin(), captures.end());
@@ -864,7 +885,7 @@ namespace neos::javascript_runtime
                     value namedCaptures = Undefined;
                     if (program->hasNamedGroups)
                     {
-                        std::vector<value> elements{ Undefined };
+                        value_list elements{ Undefined };
                         elements.insert(elements.end(), captures.begin(), captures.end());
                         namedCaptures = make_groups(*program, elements);
                     }
@@ -873,7 +894,7 @@ namespace neos::javascript_runtime
             }
             else
             {
-                std::vector<value> results;
+                value_list results;
                 for (;;)
                 {
                     auto const result = regexp_exec(aThis, s);
@@ -934,7 +955,7 @@ namespace neos::javascript_runtime
             auto const newFlags = flags_contain(flags, u'y') ? flags : concat(flags, ascii("y"));
             value const args[] = { aThis, newFlags };
             auto const splitter = construct(c, args);
-            std::vector<value> a;
+            value_list a;
             auto const limit = argument(aArguments, 1u);
             std::uint32_t const lim = limit == Undefined ? 0xFFFFFFFFu : to_uint32(limit);
             if (lim == 0u)

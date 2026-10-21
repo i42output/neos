@@ -98,8 +98,9 @@ namespace neos::javascript_runtime
         f.properties.add(n.name, aName, Undefined, AttributeConfigurable);
         if (!f.strict && f.flavour == function_flavour::Normal)
         {
-            // (a sloppy function's caller and arguments: null (the implementation-defined extension, as other engines have it))
-            f.properties.add(n.caller, Null, Undefined, 0u);
+            // (a sloppy function's caller and arguments (the implementation-defined extension other engines have): its caller is
+            // undefined (its caller isn't tracked: test262's "extension not supported"), its arguments null)
+            f.properties.add(n.caller, Undefined, Undefined, 0u);
             f.properties.add(n.arguments, Null, Undefined, 0u);
         }
         auto const result = value_of(f);
@@ -127,6 +128,12 @@ namespace neos::javascript_runtime
         {
         public:
             arguments_object(value aPrototype) : object{ aPrototype, object_class::Arguments } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(env);
+            }
         public:
             bool mapped(value aKey, std::uint32_t& aSlot) const
             {

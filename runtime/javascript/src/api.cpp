@@ -39,6 +39,7 @@
 #include <iostream>
 #include "js.hpp"
 #include "api.hpp"
+#include "gc.hpp"
 #include "typed_arrays.hpp"
 
 namespace neos::javascript_runtime
@@ -59,9 +60,15 @@ namespace neos::javascript_runtime
             bool pending = false;
             value callee = Undefined;
             value thisValue = Undefined;
-            std::vector<value> arguments;
+            value_list arguments;
         };
         thread_local tail_call_record tTail;
+        root_tracer const sTailRoots{ [](tracer& aTracer)
+        {
+            // (a pending tail call's callee and this (its arguments are a rooted list))
+            aTracer.mark(tTail.callee);
+            aTracer.mark(tTail.thisValue);
+        } };
         thread_local bool tDeferTail = false;   // (the next compiled call leaves its tail call pending (the trampoline makes it))
         inline constexpr value TailPending = TagSpecial | 7u;
 
@@ -181,6 +188,11 @@ namespace neos::javascript_runtime
         for (std::size_t i = 0u; i < 4u; ++i)
             values[4u + i].i64 = static_cast<long long>(i < aArguments.size() ? aArguments[i] : Undefined);
         neos_rt_value result{};
+#if defined(_WIN32)
+        // (generated code runs on a fiber of its own: this stack's live part is scanned while it runs)
+        NEOS_JS_SPILL_REGISTERS();
+        stack_switch const switching{ stack_pointer() };
+#endif
         void* previous = nullptr;
         if (aProgram != nullptr && aProgram != current_program())
         {
@@ -300,12 +312,36 @@ namespace neos::javascript_runtime
 
         value global_declare(value aName, std::int32_t aKind)
         {
-            // (aKind: 0 var, 1 function, 2 let, 3 const or class)
+            // (aKind: 0 var, 1 function, 2 let, 3 const or class; | 8: only the checks (GlobalDeclarationInstantiation checks every
+            // declaration before it creates any))
             return guard([&]() -> value
             {
                 auto const name = intern(aName);
                 auto& g = obj(the_realm().global);
                 auto& lexicals = global_lexicals();
+                bool const checkOnly = (aKind & 8) != 0;
+                aKind &= 7;
+                if (checkOnly)
+                {
+                    if (lexicals.contains(name))
+                        throw_syntax_error("Identifier '" + name_text(name) + "' has already been declared");
+                    auto const existing = g.get_own_property(name);
+                    if (aKind >= 2)
+                    {
+                        if (existing && !existing->configurable.value_or(false))
+                            throw_syntax_error("Identifier '" + name_text(name) + "' has already been declared");
+                    }
+                    else if (aKind == 1)
+                    {
+                        // (CanDeclareGlobalFunction)
+                        if (!existing ? !g.is_extensible() : (!existing->configurable.value_or(false) &&
+                            (existing->is_accessor() || !existing->writable.value_or(false) || !existing->enumerable.value_or(false))))
+                            throw_type_error("Cannot declare global function " + name_text(name));
+                    }
+                    else if (!existing && !g.is_extensible())
+                        throw_type_error("Cannot declare global variable " + name_text(name));     // (CanDeclareGlobalVar)
+                    return Undefined;
+                }
                 if (aKind >= 2)
                 {
                     if (lexicals.contains(name))
@@ -360,10 +396,36 @@ namespace neos::javascript_runtime
                     return b->second.v;
                 }
                 auto const global = the_realm().global;
+                // (an own data property of an ordinary global object: its value (as [[HasProperty]] and [[Get]] would find it))
+                if (auto& g = obj(global); g.cls == object_class::Ordinary)
+                    if (auto const* p = g.own(name); p != nullptr && !p->accessor())
+                        return p->data;
                 if (!has_property(global, name))
                     throw_reference_error(name_text(name) + " is not defined");
                 return get(global, name);
             });
+        }
+
+        std::int32_t intrinsics_original(std::int32_t aMask)
+        {
+            // (the compiler's intrinsics (bits of aMask: 1 << its number): whether Math.<name>, as compiled code would find it, is the built-in
+            // function, and finding it runs no code: Math is a data property of the global object (not shadowed by a global lexical
+            // declaration) whose value is an ordinary object with the function as its own data property)
+            static char const* const sNames[] = { nullptr, "imul", "floor", "ceil", "trunc", "sqrt", "abs" };
+            auto const mathName = ascii("Math");
+            if (global_lexicals().contains(mathName))
+                return 0;
+            auto const* math = obj(the_realm().global).own(mathName);
+            if (math == nullptr || math->accessor() || !is_object(math->data) || obj(math->data).cls != object_class::Ordinary)
+                return 0;
+            for (std::uint32_t i = 1u; i < std::size(sNames); ++i)
+                if ((static_cast<std::uint32_t>(aMask) & (1u << i)) != 0u)
+                {
+                    auto const* f = obj(math->data).own(ascii(sNames[i]));
+                    if (f == nullptr || f->accessor() || !math_intrinsic(f->data, i))
+                        return 0;
+                }
+            return 1;
         }
 
         value global_get_typeof(value aName)
@@ -385,11 +447,23 @@ namespace neos::javascript_runtime
             });
         }
 
+        std::int32_t global_resolved(value aName)
+        {
+            // (a strict assignment's reference, resolved before its value is evaluated: global_set's flags (strict; 2: unresolvable))
+            auto const name = intern(aName);
+            if (global_lexicals().contains(name) || has_property(the_realm().global, name))
+                return 1;
+            return 3;
+        }
+
         value global_set(value aName, value aValue, std::int32_t aStrict)
         {
+            // (aStrict: 1 strict; 2 the reference was unresolvable (strict: a ReferenceError))
             return guard([&]() -> value
             {
                 auto const name = intern(aName);
+                if ((aStrict & 2) != 0)
+                    throw_reference_error(name_text(name) + " is not defined");
                 auto& lexicals = global_lexicals();
                 if (auto const b = lexicals.find(name); b != lexicals.end())
                 {
@@ -401,9 +475,9 @@ namespace neos::javascript_runtime
                     return aValue;
                 }
                 auto const global = the_realm().global;
-                if (aStrict != 0 && !has_property(global, name))
+                if ((aStrict & 1) != 0 && !has_property(global, name))
                     throw_reference_error(name_text(name) + " is not defined");
-                set(global, name, aValue, aStrict != 0);
+                set(global, name, aValue, (aStrict & 1) != 0);
                 return aValue;
             });
         }
@@ -588,9 +662,9 @@ namespace neos::javascript_runtime
 
         namespace
         {
-            std::vector<value> argument_list(std::int32_t aCount, value a0, value a1, value a2, value a3, std::int32_t aBase)
+            value_list argument_list(std::int32_t aCount, value a0, value a1, value a2, value a3, std::int32_t aBase)
             {
-                std::vector<value> result;
+                value_list result;
                 value const registers[] = { a0, a1, a2, a3 };
                 for (std::int32_t i = 0; i < aCount; ++i)
                     result.push_back(i < 4 ? registers[i] : tExtraArguments[static_cast<std::size_t>(aBase + i - 4)]);
@@ -642,7 +716,7 @@ namespace neos::javascript_runtime
             return guard([&]() -> value
             {
                 auto const& elements = as_array(aArguments)->elements;
-                return javascript_runtime::call(aCallee, aThis, std::vector<value>{ elements.begin(), elements.end() });
+                return javascript_runtime::call(aCallee, aThis, value_list{ elements.begin(), elements.end() });
             });
         }
 
@@ -651,7 +725,7 @@ namespace neos::javascript_runtime
             return guard([&]() -> value
             {
                 auto const& elements = as_array(aArguments)->elements;
-                std::vector<value> list{ elements.begin(), elements.end() };
+                value_list list{ elements.begin(), elements.end() };
                 for (auto& v : list)
                     if (v == Empty)
                         v = Undefined;
@@ -688,7 +762,7 @@ namespace neos::javascript_runtime
             return guard([&]() -> value
             {
                 auto const list = argument_list(aCount, a0, a1, a2, a3, aBase);
-                std::vector<value> elements;
+                value_list elements;
                 for (std::int32_t i = aStart; i < aCount; ++i)
                     elements.push_back(list[static_cast<std::size_t>(i)]);
                 return make_array(std::move(elements));
@@ -701,6 +775,8 @@ namespace neos::javascript_runtime
             {
                 if (is_object(aResult))
                     return aResult;
+                // (these errors are thrown once the callee's context is gone: they are its caller's realm's)
+                realm_scope const callerRealm{ &caller_realm() };
                 if (aResult != Undefined)
                     throw_type_error("Derived constructors may only return object or undefined");
                 if (aThis == Empty)
@@ -799,28 +875,51 @@ namespace neos::javascript_runtime
             });
         }
 
-        value super_get(value aHome, value aKey, value aThis)
+        value super_base(value aHome)
         {
+            // (GetSuperBase: the home object's prototype (when the super reference is made))
             return guard([&]() -> value
             {
                 if (!is_object(aHome))
                     throw_syntax_error("'super' keyword unexpected here");
-                auto const prototype = obj(aHome).get_prototype_of();
+                return obj(aHome).get_prototype_of();
+            });
+        }
+
+        value super_get(value aBase, value aKey, value aThis)
+        {
+            // (aBase: the reference's super base (see super_base))
+            return guard([&]() -> value
+            {
+                auto const prototype = aBase;
                 if (is_nullish(prototype))
                     throw_type_error("Cannot read properties of " + std::string{ prototype == Null ? "null" : "undefined" });
                 return obj(prototype).get(to_property_key(aKey), aThis);
             });
         }
 
-        value super_set(value aHome, value aKey, value aValue, value aThis)
+        value super_set(value aBase, value aKey, value aValue, value aThis)
         {
             return guard([&]() -> value
             {
-                auto const prototype = obj(aHome).get_prototype_of();
+                auto const prototype = aBase;
                 if (is_nullish(prototype))
                     throw_type_error("Cannot set properties of " + std::string{ prototype == Null ? "null" : "undefined" });
                 if (!obj(prototype).set(to_property_key(aKey), aValue, aThis))
                     throw_type_error("Cannot assign to read only property '" + describe_key(aKey) + "' of object");
+                return aValue;
+            });
+        }
+
+        value super_set_sloppy(value aBase, value aKey, value aValue, value aThis)
+        {
+            // (sloppy code (an object literal's method): a failed set is not an error)
+            return guard([&]() -> value
+            {
+                auto const prototype = aBase;
+                if (is_nullish(prototype))
+                    throw_type_error("Cannot set properties of " + std::string{ prototype == Null ? "null" : "undefined" });
+                obj(prototype).set(to_property_key(aKey), aValue, aThis);
                 return aValue;
             });
         }
@@ -1064,7 +1163,7 @@ namespace neos::javascript_runtime
             return guard([&]() -> value
             {
                 auto& record = iterator_record_of(aRecord);
-                std::vector<value> elements;
+                value_list elements;
                 while (!record.done)
                     if (auto const next = iterator_step_value(record))
                         elements.push_back(*next);
@@ -1268,6 +1367,8 @@ namespace neos::javascript_runtime
             { "global_define_function", NEOS_RT_FUNCTION(global_define_function), I64, 2u, { I64, I64 }, 0u },
             { "global_get", NEOS_RT_FUNCTION(global_get), I64, 1u, { I64 }, 0u },
             { "global_get_typeof", NEOS_RT_FUNCTION(global_get_typeof), I64, 1u, { I64 }, 0u },
+            { "intrinsics_original", NEOS_RT_FUNCTION(intrinsics_original), I32, 1u, { I32 }, 0u },
+            { "global_resolved", NEOS_RT_FUNCTION(global_resolved), I32, 1u, { I64 }, 0u },
             { "global_set", NEOS_RT_FUNCTION(global_set), I64, 3u, { I64, I64, I32 }, 0u },
             { "global_init", NEOS_RT_FUNCTION(global_init), I64, 2u, { I64, I64 }, 0u },
             { "global_delete", NEOS_RT_FUNCTION(global_delete), I64, 1u, { I64 }, 0u },
@@ -1306,8 +1407,10 @@ namespace neos::javascript_runtime
             { "set", NEOS_RT_FUNCTION(set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "set_named", NEOS_RT_FUNCTION(set_named), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "delete", NEOS_RT_FUNCTION(delete_), I64, 3u, { I64, I64, I32 }, 0u },
+            { "super_base", NEOS_RT_FUNCTION(super_base), I64, 1u, { I64 }, 0u },
             { "super_get", NEOS_RT_FUNCTION(super_get), I64, 3u, { I64, I64, I64 }, 0u },
             { "super_set", NEOS_RT_FUNCTION(super_set), I64, 4u, { I64, I64, I64, I64 }, 0u },
+            { "super_set_sloppy", NEOS_RT_FUNCTION(super_set_sloppy), I64, 4u, { I64, I64, I64, I64 }, 0u },
             { "require_object_coercible", NEOS_RT_FUNCTION(require_object_coercible), I64, 1u, { I64 }, 0u },
             { "typeof", NEOS_RT_FUNCTION(typeof_), I64, 1u, { I64 }, 0u },
             { "to_boolean", NEOS_RT_FUNCTION(to_boolean_), I32, 1u, { I64 }, 0u },
@@ -1361,6 +1464,10 @@ namespace neos::javascript_runtime
             { "dyn_set", NEOS_RT_FUNCTION(dyn_set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "dyn_delete", NEOS_RT_FUNCTION(dyn_delete), I64, 2u, { I64, I64 }, 0u },
             { "dyn_this", NEOS_RT_FUNCTION(dyn_this), I64, 2u, { I64, I64 }, 0u },
+            { "dyn_reference", NEOS_RT_FUNCTION(dyn_reference), I64, 2u, { I64, I64 }, 0u },
+            { "dyn_reference_get", NEOS_RT_FUNCTION(dyn_reference_get), I64, 3u, { I64, I64, I32 }, 0u },
+            { "dyn_reference_this", NEOS_RT_FUNCTION(dyn_reference_this), I64, 1u, { I64 }, 0u },
+            { "dyn_reference_set", NEOS_RT_FUNCTION(dyn_reference_set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "eval_declare", NEOS_RT_FUNCTION(eval_declare), I64, 3u, { I64, I64, I32 }, 0u },
             { "eval_function", NEOS_RT_FUNCTION(eval_function), I64, 3u, { I64, I64, I64 }, 0u },
             { "eval_direct", NEOS_RT_FUNCTION(eval_direct), I64, 8u, { I64, I64, I32, I32, I64, I64, I64, I64 }, 0u },

@@ -29,6 +29,9 @@ if(MSVC)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/std:c++latest;/Zc:__cplusplus>" "$<$<COMPILE_LANGUAGE:C,CXX>:/bigobj;/utf-8>")
     set(CMAKE_DEBUG_POSTFIX "d")
     add_definitions(-D_UNICODE)
+    # (executables' main thread stack: 16MB, as the stacks of coroutines and generated code are at least 8MB: a parse may go deep (see the
+    # code parsers' max level in src/schema.cpp))
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /STACK:16777216")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # (members named as the types they have (e.g. "opcode opcode;"): accepted by MSVC and Clang)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
@@ -188,6 +191,12 @@ add_neos_concept_library(python.core
     concepts/src/python/python.cpp)
 target_include_directories(python.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/python/include") # (the language's constructs)
 target_include_directories(python.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/python/include")
+add_neos_concept_library(neoscript.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/neoscript/plugin.cpp
+    concepts/src/neoscript/neoscript.cpp)
+target_include_directories(neoscript.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/neoscript/include")
+target_include_directories(neoscript.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/neoscript/include")
 add_neos_concept_library(javascript.core
     concepts/src/common/dllmain.cpp
     concepts/src/javascript/plugin.cpp
@@ -219,6 +228,9 @@ add_neos_compiler_plugin(compiler.javascript javascript
 # (the compiler checks regular expression literals' patterns with the runtime's regular expression parser (and Unicode data))
 target_include_directories(compiler.javascript.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/javascript/src")
 target_compile_definitions(compiler.javascript.objects PRIVATE NEOS_JAVASCRIPT_COMPILER)
+add_neos_compiler_plugin(compiler.neoscript neoscript
+    compilers/neoscript/src/plugin.cpp
+    compilers/neoscript/src/compiler.cpp)
 add_neos_compiler_plugin(compiler.python python
     compilers/python/src/plugin.cpp
     compilers/python/src/compiler.cpp
@@ -232,7 +244,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal python.core javascript.core compiler.javascript compiler.python)
+add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core compiler.javascript compiler.python compiler.neoscript)
 
 # runtime stub (neos.stub): an image (an executable made by the console's "img" command) is a copy of it followed by a
 # program (see neos/image.hpp); it is built beside the console, which finds it there
@@ -344,6 +356,7 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/javascript.cpp
     runtime/javascript/src/api.cpp
     runtime/javascript/src/heap.cpp
+    runtime/javascript/src/gc.cpp
     runtime/javascript/src/object.cpp
     runtime/javascript/src/operations.cpp
     runtime/javascript/src/operators.cpp

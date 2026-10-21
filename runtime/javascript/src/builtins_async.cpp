@@ -138,7 +138,7 @@ namespace neos::javascript_runtime
                 }
                 set(a, the_names().length, number(len), true);
                 return a;
-            });
+            }, { c, asyncItems, mapfn, thisArg });
         }
 
         value error_is_error(value, arguments aArguments, value, function_object&)

@@ -92,9 +92,9 @@ namespace neos::javascript_runtime
                     return false;
                 return ordinary_delete(aKey);
             }
-            std::vector<value> own_property_keys() override
+            value_list own_property_keys() override
             {
-                std::vector<value> result;
+                value_list result;
                 auto const length = string_length(internal);
                 for (std::uint32_t i = 0u; i < length; ++i)
                     result.push_back(index_key(i));
@@ -531,7 +531,7 @@ namespace neos::javascript_runtime
 
         // (GetSubstitution: $$ $& $` $' $n $nn $<name>)
         std::u16string get_substitution(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-            std::vector<value> const& aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
+            std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
         {
             std::u16string result;
             auto const m = aCaptures.size();
@@ -739,7 +739,7 @@ namespace neos::javascript_runtime
             }
             auto const& text = text_of(s);
             auto const& separatorText = text_of(r);
-            std::vector<value> parts;
+            value_list parts;
             if (separatorText.empty())
             {
                 for (std::size_t i = 0u; i < text.size() && static_cast<double>(parts.size()) < lim; ++i)
@@ -813,6 +813,12 @@ namespace neos::javascript_runtime
         public:
             explicit string_iterator(value aPrototype) : object{ aPrototype, object_class::StringIterator } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(iterated);
+            }
+        public:
             value iterated = Undefined;
             std::size_t position = 0u;
         };
@@ -846,7 +852,7 @@ namespace neos::javascript_runtime
     }
 
     std::u16string get_substitution_text(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-        std::vector<value> const& aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
+        std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
     {
         return get_substitution(aMatched, aString, aPosition, aCaptures, aNamedCaptures, aReplacement);
     }

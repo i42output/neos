@@ -36,6 +36,7 @@
 #pragma once
 
 #include "js.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -119,6 +120,10 @@ namespace neos::javascript_runtime
         value dyn_set(value aEnvironment, value aName, value aValue, std::int32_t aFlags);
         value dyn_delete(value aEnvironment, value aName);
         value dyn_this(value aEnvironment, value aName);
+        value dyn_reference(value aEnvironment, value aName);
+        value dyn_reference_get(value aBase, value aName, std::int32_t aStrict);
+        value dyn_reference_this(value aBase);
+        value dyn_reference_set(value aBase, value aName, value aValue, std::int32_t aFlags);
         value eval_declare(value aEnvironment, value aName, std::int32_t aFlags);
         value eval_function(value aEnvironment, value aName, value aFunction);
         value eval_direct(value aCallee, value aSource, std::int32_t aCount, std::int32_t aFlags, value aEnvironment, value aThis, value aNewTarget, value aHome);

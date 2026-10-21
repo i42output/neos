@@ -230,8 +230,8 @@ namespace neos::javascript_runtime
         struct inspector
         {
             bool styled;
-            std::vector<value> seen;
-            std::set<value> circular;
+            value_list seen;
+            std::set<value, std::less<value>, root_allocator<value>> circular;
 
             std::string number_text(double aValue)
             {

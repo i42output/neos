@@ -53,6 +53,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -117,6 +118,8 @@ namespace neos::javascript_runtime
         Internal
     };
 
+    class tracer;
+
     class cell
     {
     public:
@@ -125,11 +128,17 @@ namespace neos::javascript_runtime
         cell& operator=(cell const&) = delete;
         virtual ~cell() = default;
     public:
+        // (the garbage collector (gc.hpp): a cell type that refers to other cells (values, or pointers to cells) overrides it, marking 
+        // them (and calling its base's); the default refers to none)
+        virtual void trace(tracer& aTracer) { (void)aTracer; }
+    public:
         cell_type const type;
         std::uint32_t handle = 0u;
         std::uint8_t marked = 0u;
     };
 
+    // (the heap: cells, by handle; a mark-sweep garbage collector (gc.cpp) frees the cells that cannot be reached (cells do not move: 
+    // a handle refers to its cell while the cell lives; freed handles are reused))
     class heap
     {
     public:
@@ -139,8 +148,21 @@ namespace neos::javascript_runtime
         template <typename T, typename... Args>
         T& make(Args&&... aArguments)
         {
-            auto* result = new T{ std::forward<Args>(aArguments)... };
-            add(*result);
+            iAllocatedBytes += sizeof(T);
+            if (++iAllocations >= iAllocationTrigger || iAllocatedBytes >= iByteTrigger)
+                allocating();
+            void* const memory = allocate(sizeof(T));
+            T* result;
+            try
+            {
+                result = ::new (memory) T{ std::forward<Args>(aArguments)... };
+            }
+            catch (...)
+            {
+                deallocate(memory);
+                throw;
+            }
+            add(*result, memory);
             return *result;
         }
         cell* find(std::uint32_t aHandle) const
@@ -152,13 +174,54 @@ namespace neos::javascript_runtime
             return *iCells[aHandle];
         }
         std::size_t size() const { return iCells.size(); }
+        void account(std::size_t aBytes) { iAllocatedBytes += aBytes; }    ///< (memory that a new cell owns (e.g. a string's text))
+        void collect();                                                     ///< (a full collection now (unless collection is disabled))
     private:
-        void add(cell& aCell);
+        void* allocate(std::size_t aSize);
+        void deallocate(void* aMemory) noexcept;
+        void allocating();
+        void add(cell& aCell, void* aMemory);
     private:
+        friend class collector;
         std::vector<cell*> iCells;
+        std::vector<std::uint32_t> iFreeHandles;
+        std::uint64_t iAllocations = 0u;
+        std::uint64_t iAllocationTrigger = ~std::uint64_t{};
+        std::uint64_t iAllocatedBytes = 0u;
+        std::uint64_t iByteTrigger = ~std::uint64_t{};
     };
 
     heap& the_heap();
+
+    // --- rooted containers: the values in a container that is not a cell's (e.g. a C++ local, or a static) are kept alive by the 
+    // garbage collector only if its memory is rooted (the collector scans the native stacks, not the C++ heap): a container of values 
+    // (or of structures with values) that outlives an allocation (or a call) uses root_allocator (e.g. value_list), unless it is a 
+    // member of a cell (whose trace marks them)
+
+    void* root_allocate(std::size_t aBytes);            ///< (gc.cpp: memory whose words are roots until it is freed)
+    void root_deallocate(void* aMemory) noexcept;
+
+    template <typename T>
+    struct root_allocator
+    {
+        using value_type = T;
+        root_allocator() noexcept = default;
+        template <typename U>
+        root_allocator(root_allocator<U> const&) noexcept {}
+        T* allocate(std::size_t aCount)
+        {
+            if (aCount > std::numeric_limits<std::size_t>::max() / sizeof(T))
+                throw std::bad_alloc{};
+            return static_cast<T*>(root_allocate(aCount * sizeof(T)));
+        }
+        void deallocate(T* aMemory, std::size_t) noexcept { root_deallocate(aMemory); }
+        template <typename U>
+        bool operator==(root_allocator<U> const&) const noexcept { return true; }
+    };
+
+    template <typename T>
+    using rooted_vector = std::vector<T, root_allocator<T>>;
+    using value_list = rooted_vector<value>;           ///< (a list of values that are kept alive while it lives)
 
     inline value value_of(cell const& aCell)
     {
@@ -189,6 +252,8 @@ namespace neos::javascript_runtime
         explicit string(std::u16string aText) : cell{ cell_type::String }, text{ std::move(aText) }, length{ static_cast<std::uint32_t>(text.size()) } {}
         string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, left{ aLeft }, right{ aRight }, length{ aLength } {}
     public:
+        void trace(tracer& aTracer) override;
+    public:
         std::u16string const& flat();
         std::size_t hash();
         std::int64_t array_index();     ///< (-1: not an array index)
@@ -200,6 +265,8 @@ namespace neos::javascript_runtime
         std::size_t hashValue = 0u;
         bool hashed = false;
         bool interned = false;
+        bool pinned = false;            ///< (interned for as long as the program runs (e.g. compiled code's literals); else an interned
+                                        ///< string lives while it is referred to)
         std::int64_t arrayIndex = -2;   ///< (-2: not computed yet)
     };
 
@@ -210,8 +277,8 @@ namespace neos::javascript_runtime
     value make_string_utf8(std::string_view aText);             ///< (WTF-8: surrogates are allowed; C0 80 is NUL)
     value make_string(char16_t aCharacter);
     value ascii(char const* aText);                             ///< (an interned string)
-    value intern(value aString);
-    value intern(std::u16string_view aText);
+    value intern(value aString);                                ///< (a string (that lives while it is referred to) as an interned string)
+    value intern(std::u16string_view aText);                    ///< (an interned string that lives as long as the program (pinned))
     value concat(value aLeft, value aRight);                    ///< (strings)
     std::u16string const& str(value aString);                   ///< (a string's code units (flattened))
     std::string utf8(value aString);                            ///< (lone surrogates: U+FFFD)
@@ -230,6 +297,8 @@ namespace neos::javascript_runtime
     public:
         symbol() : cell{ cell_type::Symbol } {}
         explicit symbol(value aDescription) : cell{ cell_type::Symbol }, description{ aDescription } {}
+    public:
+        void trace(tracer& aTracer) override;
     public:
         value description = Undefined;
         bool registered = false;        ///< (Symbol.for)
@@ -424,6 +493,8 @@ namespace neos::javascript_runtime
     public:
         explicit object(value aPrototype, object_class aClass = object_class::Ordinary) : cell{ cell_type::Object }, cls{ aClass }, proto{ aPrototype } {}
     public:
+        void trace(tracer& aTracer) override;   ///< (its prototype, properties, internal value (a WeakRef's target is weak) and private elements)
+    public:
         // ECMAScript's internal methods
         virtual value get_prototype_of();
         virtual bool set_prototype_of(value aPrototype);
@@ -435,7 +506,7 @@ namespace neos::javascript_runtime
         virtual value get(value aKey, value aReceiver);
         virtual bool set(value aKey, value aValue, value aReceiver);
         virtual bool delete_property(value aKey);
-        virtual std::vector<value> own_property_keys();
+        virtual value_list own_property_keys();
         virtual bool callable() const { return false; }
         virtual bool constructor() const { return false; }
         virtual value call(value aThis, arguments aArguments);
@@ -447,7 +518,7 @@ namespace neos::javascript_runtime
         value ordinary_get(value aKey, value aReceiver);
         bool ordinary_set(value aKey, value aValue, value aReceiver);
         bool ordinary_delete(value aKey);
-        std::vector<value> ordinary_own_property_keys();
+        value_list ordinary_own_property_keys();
         bool ordinary_set_prototype_of(value aPrototype);
         // (a property that the object is created with (or one known not to exist yet): no checks)
         void put(value aKey, value aValue, std::uint8_t aAttributes = AttributesHidden);
@@ -475,13 +546,15 @@ namespace neos::javascript_runtime
     public:
         explicit array_object(value aPrototype) : object{ aPrototype, object_class::Array } {}
     public:
+        void trace(tracer& aTracer) override;
+    public:
         std::optional<property_descriptor> get_own_property(value aKey) override;
         bool define_own_property(value aKey, property_descriptor const& aDescriptor) override;
         bool has_property(value aKey) override;
         value get(value aKey, value aReceiver) override;
         bool set(value aKey, value aValue, value aReceiver) override;
         bool delete_property(value aKey) override;
-        std::vector<value> own_property_keys() override;
+        value_list own_property_keys() override;
     public:
         bool set_length(property_descriptor const& aDescriptor);
         void make_sparse();
@@ -503,7 +576,7 @@ namespace neos::javascript_runtime
     };
 
     value make_array(std::size_t aLength = 0u);
-    value make_array(std::vector<value> aElements);
+    value make_array(value_list aElements);
     inline array_object* as_array(value aValue)
     {
         if (!is_object(aValue))
@@ -540,6 +613,8 @@ namespace neos::javascript_runtime
     struct function_object : object
     {
         function_object(value aPrototype, function_kind aKind) : object{ aPrototype, object_class::Function }, kind{ aKind } {}
+    public:
+        void trace(tracer& aTracer) override;
     public:
         bool callable() const override { return true; }
         bool constructor() const override { return isConstructor; }
@@ -594,6 +669,8 @@ namespace neos::javascript_runtime
     public:
         environment(value aParent, std::uint32_t aSize) : cell{ cell_type::Internal }, parent{ aParent }, slots(aSize, Undefined) {}
     public:
+        void trace(tracer& aTracer) override;
+    public:
         value parent;
         std::vector<value> slots;
         value withObject = Undefined;   ///< (a with statement's object environment: its object)
@@ -604,7 +681,16 @@ namespace neos::javascript_runtime
 
     struct js_exception
     {
+        // (the exceptions that exist (being thrown, or caught) are a list: their values are roots (gc.cpp), e.g. while a handler that
+        // rethrows calls JavaScript code (an iterator's return method))
+        js_exception(value aThrown);
+        js_exception(js_exception const& aOther);
+        js_exception& operator=(js_exception const& aOther);
+        ~js_exception();
+
         value thrown;
+        js_exception* previous;
+        js_exception* next;
     };
 
     [[noreturn]] void throw_value(value aValue);
@@ -681,16 +767,22 @@ namespace neos::javascript_runtime
     };
 
     realm& the_realm();                     ///< (the current realm: the realm of the function running)
+    bool is_object_prototype(object const& aObject);    ///< (a realm's %Object.prototype% (an immutable prototype exotic object))
     void initialize_realm();
     bool realm_initialized();
     realm* create_realm();                  ///< (a new realm ($262.createRealm))
     realm* exchange_realm(realm* aRealm);   ///< (the running realm is aRealm: the previous one (e.g. for a coroutine switch))
+    realm* exchange_caller_realm(realm* aRealm);    ///< (likewise the realm of the running function's caller (see caller_realm))
+    realm& caller_realm();                  ///< (the realm of the running function's caller: errors of [[Construct]] after the callee's context is gone are its)
     // (test262's agents (host262.cpp): an agent (or the main program) blocks until aDone or its deadline (milliseconds of monotonic_ms);
     // the other agents run meanwhile)
     double monotonic_ms();
     void agent_block(std::function<bool()> const& aDone, std::optional<double> aDeadline);
     bool agents_running();
+    bool in_agent();                        ///< (host262.cpp: a test262 agent is running)
     void agent_yield();
+    bool agent_enqueue_job(std::function<void()>& aJob);   ///< (host262.cpp: a job enqueued by a test262 agent goes to its queue)
+    void const* running_generator();        ///< (generators.cpp: the generator (or async function) running, if any)
     realm& function_realm(value aFunction); ///< (GetFunctionRealm)
     // (the current realm while it exists)
     class realm_scope
@@ -702,6 +794,7 @@ namespace neos::javascript_runtime
         realm_scope& operator=(realm_scope const&) = delete;
     private:
         realm* iPrevious;
+        realm* iPreviousCaller;
     };
 
     // (common interned strings)
@@ -774,13 +867,13 @@ namespace neos::javascript_runtime
     bool test_integrity_level(value aObject, bool aFrozen);
     value create_array_from_list(std::span<value const> aElements);
     double length_of_array_like(value aObject);
-    std::vector<value> create_list_from_array_like(value aObject, bool aKeysOnly = false);
+    value_list create_list_from_array_like(value aObject, bool aKeysOnly = false);
     bool ordinary_has_instance(value aConstructor, value aObject);
     bool instance_of(value aValue, value aTarget);
     value species_constructor(value aObject, value aDefault);
     value get_prototype_from_constructor(value aConstructor, value realm::*aDefault);
     value ordinary_create_from_constructor(value aConstructor, value realm::*aDefault, object_class aClass = object_class::Ordinary);
-    std::vector<value> enumerable_own_properties(value aObject, int aKind);   ///< (0: keys, 1: values, 2: entries)
+    value_list enumerable_own_properties(value aObject, int aKind);   ///< (0: keys, 1: values, 2: entries)
     void copy_data_properties(value aTarget, value aSource, std::span<value const> aExcluded = {});
     property_descriptor to_property_descriptor(value aObject);
     value from_property_descriptor(std::optional<property_descriptor> const& aDescriptor);
@@ -807,7 +900,7 @@ namespace neos::javascript_runtime
     void iterator_close(iterator_record const& aRecord);                    ///< (normal completion)
     void iterator_close_on_throw(iterator_record const& aRecord);           ///< (throw completion: the iterator's errors are ignored)
     value create_iter_result_object(value aValue, bool aDone);
-    std::vector<value> iterate_to_list(value aIterable);
+    value_list iterate_to_list(value aIterable);
 
     // number formatting helpers (numbers.cpp)
     std::string number_to_fixed(double aValue, int aDigits);
@@ -834,6 +927,7 @@ namespace neos::javascript_runtime
     void init_boolean(realm& aRealm);
     void init_number(realm& aRealm);
     void init_math(realm& aRealm);
+    bool math_intrinsic(value aFunction, std::uint32_t aIntrinsic);   ///< (builtins_basic.cpp: whether it is the Math function of a compiler intrinsic)
     void init_string(realm& aRealm);
     void init_array(realm& aRealm);
     void init_iterator(realm& aRealm);
@@ -866,7 +960,8 @@ namespace neos::javascript_runtime
     void perform_promise_then(value aPromise, value aOnFulfilled, value aOnRejected, value aResultPromise = Undefined,
         value aResolve = Undefined, value aReject = Undefined);
     void enqueue_job(value aJob, value aArgument = Undefined);   ///< (a function called with an argument)
-    void enqueue_job(std::function<void()> aJob);
+    void enqueue_job(std::function<void()> aJob);                ///< (a closure that captures no values (they would not be kept alive))
+    void enqueue_job(void (*aJob)(value const* aValues), std::initializer_list<value> aValues); ///< (a function and (up to six) values (kept alive))
     bool run_jobs();                                             ///< (false: a job threw (it was reported))
 
     void initialize_instance_elements(value aObject, value aConstructor);  ///< (classes.cpp: InitializeInstanceElements)
@@ -874,7 +969,9 @@ namespace neos::javascript_runtime
     // generators and async functions (generators.cpp)
     value generator_resume(value aGenerator, value aValue, int aMode);    ///< (aMode: 0 next, 1 throw, 2 return)
     value await_value(value aValue);    ///< (Await: suspends the running async function (or async generator) until aValue settles)
-    value async_native(std::function<value()> aBody);   ///< (a built-in's body run as an async function's: its promise)
+    // (a built-in's body run as an async function's: its promise (aCaptured: the values that the body captures (they are kept alive
+    // while it runs: the garbage collector does not see the values in a std::function)))
+    value async_native(std::function<value()> aBody, std::initializer_list<value> aCaptured);
     iterator_record create_async_from_sync_iterator(iterator_record const& aSyncRecord);
 
     void object_define_properties(value aObject, value aProperties);          ///< (ObjectDefineProperties)
@@ -887,7 +984,7 @@ namespace neos::javascript_runtime
     // strings (builtins_string.cpp, unicode.cpp)
     value make_string_iterator(value aString);
     std::u16string get_substitution_text(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-        std::vector<value> const& aCaptures, value aNamedCaptures, std::u16string const& aReplacement);   ///< (GetSubstitution)
+        std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement);   ///< (GetSubstitution)
     std::u16string case_map(std::u16string const& aText, bool aUpper);      ///< (toUpperCase/toLowerCase: full case mapping)
     value normalize_string(value aString, std::u16string const& aForm);     ///< (NFC, NFD, NFKC or NFKD)
 
@@ -896,5 +993,5 @@ namespace neos::javascript_runtime
     bool proxy_is_array(value aProxy);                              ///< (proxy.cpp: IsArray of a proxy's target)
     void proxy_function_realm(value aProxy);                        ///< (proxy.cpp: GetFunctionRealm of a proxy: throws if revoked)
     value proxy_target(value aProxy);                               ///< (proxy.cpp: a proxy's target (null if it is revoked))
-    std::vector<value> collection_entries(value aCollection);       ///< (builtins_collections.cpp: a Map's keys and values (k0, v0, k1, v1 ...) or a Set's values, in order)
+    value_list collection_entries(value aCollection);       ///< (builtins_collections.cpp: a Map's keys and values (k0, v0, k1, v1 ...) or a Set's values, in order)
 }

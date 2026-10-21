@@ -82,23 +82,27 @@
 
     WS ::= [ whitespace ] ;
     S ::= [ hspace ] ;
-    whitespace ::= { white space character | line terminator | comment } + ;
+    whitespace ::= { white space character | html close comment line | line terminator | comment } + ;
     hspace ::= { white space character | single line block comment } + ;
     white space character ::= U+0009 | U+000B | U+000C | U+0020 | U+00A0 | U+FEFF | U+1680 | U+2000 | U+2001 | U+2002 | U+2003 |
         U+2004 | U+2005 | U+2006 | U+2007 | U+2008 | U+2009 | U+200A | U+202F | U+205F | U+3000 ;
     line terminator ::= U+000A | U+000D | U+2028 | U+2029 ;
-    comment ::= line comment | block comment ;
+    comment ::= line comment | block comment | html open comment ;
+    (* Annex B.1.1: HTML-like comments ("<!--" begins a single line comment; "-->" does at the start of a line) *)
+    html open comment ::= "<!--" , { line comment character } ;
+    html close comment line ::= line terminator , html close comment ;
+    html close comment ::= { white space character | single line block comment } , "-->" , { line comment character } ;
     line comment ::= "//" , { line comment character } ;
-    line comment character ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D | '\xE2' ) ) | ( '\xE2' , '\x80' , not LS PS byte ) | ( '\xE2' , ( ! '\x80' .. '\x80' ) ) ;
+    line comment character ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D | '\xE2' ) ) | '\x00' | ( '\xE2' , '\x80' , not LS PS byte ) | ( '\xE2' , ( ! '\x80' .. '\x80' ) ) ;
     not LS PS byte ::= ( U+0001 .. '\xFF' - ( '\xA8' | '\xA9' ) ) | '\x00' ;
     not slash or star ::= ( U+0001 .. '\xFF' - ( '/' | '*' ) ) | '\x00' ;
     not slash star or line terminator ::= ( U+0001 .. '\xFF' - ( '/' | '*' | U+000A | U+000D | '\xE2' ) ) | '\x00' ;
     not line terminator byte ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D ) ) | '\x00' ;
-    block comment ::= "/*" , { ( ! '*' .. '*' ) | ( { '*' } + , not slash or star ) } , { '*' } + , '/' ;
+    block comment ::= "/*" , { ( ! '*' .. '*' ) | '\x00' | ( { '*' } + , not slash or star ) } , { '*' } + , '/' ;
     single line block comment ::= "/*" , { single line comment character | ( { '*' } + , not slash star or line terminator ) } , { '*' } + , '/' ;
-    single line comment character ::= ( U+0001 .. '\xFF' - ( '*' | U+000A | U+000D | '\xE2' ) ) | ( '\xE2' , '\x80' , not LS PS byte ) | ( '\xE2' , ( ! '\x80' .. '\x80' ) ) ;
+    single line comment character ::= ( U+0001 .. '\xFF' - ( '*' | U+000A | U+000D | '\xE2' ) ) | '\x00' | ( '\xE2' , '\x80' , not LS PS byte ) | ( '\xE2' , ( ! '\x80' .. '\x80' ) ) ;
 
-    hashbang ::= "#!" , { ( U+0001 .. '\xFF' - ( U+000A | U+000D ) ) } ;
+    hashbang ::= "#!" , { line comment character } ;
 
     (* --- identifiers and keywords *)
 
@@ -210,20 +214,20 @@
     binary digit ::= '0' | '1' ;
 
     string literal $ javascript.string ::=
-        ( '\"' , { ( U+0001 .. '\xFF' - ( '\"' | '\\' | U+000A | U+000D ) ) | escape sequence } , '\"' ) |
-        ( '\'' , { ( U+0001 .. '\xFF' - ( '\'' | '\\' | U+000A | U+000D ) ) | escape sequence } , '\'' ) ;
+        ( '\"' , { ( U+0001 .. '\xFF' - ( '\"' | '\\' | U+000A | U+000D ) ) | '\x00' | escape sequence } , '\"' ) |
+        ( '\'' , { ( U+0001 .. '\xFF' - ( '\'' | '\\' | U+000A | U+000D ) ) | '\x00' | escape sequence } , '\'' ) ;
     escape sequence ::= '\\' , ( ( ! U+000D .. U+000D ) | ( U+000D , [ U+000A ] ) ) ;
 
     template literal $ javascript.template ::= '`' , { template characters | template substitution | template dollar } , '`' ;
-    template characters $ javascript.template.string ::= { ( U+0001 .. '\xFF' - ( '`' | '\\' | '$' ) ) | escape sequence } + ;
+    template characters $ javascript.template.string ::= { ( U+0001 .. '\xFF' - ( '`' | '\\' | '$' ) ) | '\x00' | escape sequence } + ;
     template dollar $ javascript.template.string ::= '$' ;
     template substitution ::= "${" , WS , expression , WS , '}' ;
 
     regular expression literal $ javascript.regexp ::= '/' , regexp first character , { regexp character } , '/' , { identifier part } ;
-    regexp first character ::= ( U+0001 .. '\xFF' - ( '*' | '\\' | '/' | '[' | U+000A | U+000D ) ) | regexp backslash | regexp class ;
-    regexp character ::= ( U+0001 .. '\xFF' - ( '/' | '\\' | '[' | U+000A | U+000D ) ) | regexp backslash | regexp class ;
+    regexp first character ::= ( U+0001 .. '\xFF' - ( '*' | '\\' | '/' | '[' | U+000A | U+000D ) ) | '\x00' | regexp backslash | regexp class ;
+    regexp character ::= ( U+0001 .. '\xFF' - ( '/' | '\\' | '[' | U+000A | U+000D ) ) | '\x00' | regexp backslash | regexp class ;
     regexp backslash ::= '\\' , not line terminator byte ;
-    regexp class ::= '[' , { ( U+0001 .. '\xFF' - ( ']' | '\\' | U+000A | U+000D ) ) | regexp backslash } , ']' ;
+    regexp class ::= '[' , { ( U+0001 .. '\xFF' - ( ']' | '\\' | U+000A | U+000D ) ) | '\x00' | regexp backslash } , ']' ;
 
     (* --- expressions *)
 
@@ -397,7 +401,8 @@
     relational no in expression ::= ( shift expression | private in ) , { WS , relational no in tail } ;
     relational tail ::= less than tail | greater than tail | less equal tail | greater equal tail | instanceof tail | in tail ;
     relational no in tail ::= less than tail | greater than tail | less equal tail | greater equal tail | instanceof tail ;
-    less than tail $ javascript.lessthan ::= '<' , WS , shift expression ;
+    less than tail $ javascript.lessthan ::= less than , WS , shift expression ;
+    less than ::= ( '<' , [ "!--" ] ) - "<!--" ; (* (not the start of an HTML-like comment (Annex B.1.1)) *)
     greater than tail $ javascript.greaterthan ::= '>' , WS , shift expression ;
     less equal tail $ javascript.lessequal ::= "<=" , WS , shift expression ;
     greater equal tail $ javascript.greaterequal ::= ">=" , WS , shift expression ;
@@ -481,7 +486,7 @@
 
     (* --- statements *)
 
-    terminator ::= [ S , ';' ] ;
+    terminator ::= [ WS , ';' ] ; (* (a ';' after a line terminator is still the statement's: continue \n ; else ...) *)
 
     statement ::=
         block statement /
@@ -519,8 +524,12 @@
     variable statement $ javascript.var ::= var , WS , variable declaration list , terminator ;
     lexical declaration $ javascript.let ::= let , WS , variable declaration list , terminator ;
     lexical declaration $ javascript.const ::= const , WS , variable declaration list , terminator ;
-    using declaration $ javascript.using ::= using , S , variable declaration list , terminator ;
-    using declaration $ javascript.await.using ::= await , S , using , S , variable declaration list , terminator ;
+    using declaration $ javascript.using ::= using , S , using declaration list , terminator ;
+    using declaration $ javascript.await.using ::= await , S , using , S , using declaration list , terminator ;
+    using declaration list ::= using variable declaration , { WS , ',' , WS , using variable declaration } ;
+    using variable declaration $ javascript.declarator ::= binding identifier , [ WS , '=' , WS , assignment expression ] ;
+    using declaration list no in ::= using variable declaration no in , { WS , ',' , WS , using variable declaration no in } ;
+    using variable declaration no in $ javascript.declarator ::= binding identifier , [ WS , '=' , WS , assignment no in expression ] ;
     variable declaration list ::= variable declaration , { WS , ',' , WS , variable declaration } ;
     variable declaration $ javascript.declarator ::= binding target , [ WS , '=' , WS , assignment expression ] ;
     variable declaration list no in ::= variable declaration no in , { WS , ',' , WS , variable declaration no in } ;
@@ -537,8 +546,8 @@
         ( var , WS , variable declaration list no in ) $ javascript.var |
         ( let , WS , variable declaration list no in ) $ javascript.let |
         ( const , WS , variable declaration list no in ) $ javascript.const |
-        ( using , S , variable declaration list no in ) $ javascript.using |
-        ( await , S , using , S , variable declaration list no in ) $ javascript.await.using |
+        ( using , S , using declaration list no in ) $ javascript.using |
+        ( await , S , using , S , using declaration list no in ) $ javascript.await.using |
         expression no in ;
     for test $ javascript.for.test ::= expression ;
     for update $ javascript.for.update ::= expression ;
@@ -550,8 +559,9 @@
     for var binding $ javascript.for.var ::= var , WS , ( binding target | legacy for in initializer ) ;
     for let binding $ javascript.for.let ::= let , WS , binding target ;
     for const binding $ javascript.for.const ::= const , WS , binding target ;
-    for using binding $ javascript.for.using ::= using , S , binding target ;
-    for await using binding $ javascript.for.await.using ::= await , S , using , S , binding target ;
+    for using binding $ javascript.for.using ::= using , S , for using identifier ;
+    for await using binding $ javascript.for.await.using ::= await , S , using , S , binding identifier ;
+    for using identifier $ javascript.binding ::= name - ( "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default" | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally" | "for" | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null" | "return" | "super" | "switch" | "this" | "throw" | "true" | "try" | "typeof" | "var" | "void" | "while" | "with" | "of" ) ; (* (for (using of ...): using is an identifier) *)
     legacy for in initializer $ javascript.initializer ::= binding identifier , WS , '=' , WS , assignment no in expression ;
 
     continue statement $ javascript.continue ::= continue , [ S , label identifier ] , terminator ;
@@ -608,5 +618,5 @@
 
     (* --- programs (a script, or a module if the compiler is told it is one: its import and export declarations are then allowed) *)
 
-    program $ javascript.script ::= [ hashbang ] , WS , { module item , WS } ;
+    program $ javascript.script ::= [ hashbang ] , [ html close comment ] , WS , { module item , WS } ;
 }#

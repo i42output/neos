@@ -35,6 +35,7 @@
 
 #include <cstdlib>
 #include <deque>
+#include <array>
 #include "js.hpp"
 #include "api.hpp"
 
@@ -59,6 +60,20 @@ namespace neos::javascript_runtime
         public:
             explicit promise_object(value aPrototype) : object{ aPrototype, object_class::Promise } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(result);
+                for (auto const* reactions : { &fulfillReactions, &rejectReactions })
+                    for (auto const& r : *reactions)
+                    {
+                        aTracer.mark(r.promise);
+                        aTracer.mark(r.resolve);
+                        aTracer.mark(r.reject);
+                        aTracer.mark(r.handler);
+                    }
+            }
+        public:
             promise_state state = promise_state::Pending;
             value result = Undefined;
             std::vector<promise_reaction> fulfillReactions;
@@ -71,6 +86,12 @@ namespace neos::javascript_runtime
         {
         public:
             captures() : cell{ cell_type::Internal } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                aTracer.mark(values);
+                aTracer.mark(shared);
+            }
         public:
             std::vector<value> values;
             bool flag = false;
@@ -108,48 +129,78 @@ namespace neos::javascript_runtime
             return static_cast<promise_object&>(obj(aValue));
         }
 
-        // --- the job queue
+        // --- the job queue: a job is a function and the values it is called with (the queue's values are roots), or a closure (that
+        // captures no values)
 
-        std::deque<std::function<void()>>& jobs()
+        struct job
         {
-            static std::deque<std::function<void()>> sJobs;
+            void (*function)(value const* aValues) = nullptr;
+            value values[6] = { Undefined, Undefined, Undefined, Undefined, Undefined, Undefined };
+            std::function<void()> closure;
+        };
+
+        std::deque<job>& jobs()
+        {
+            static std::deque<job> sJobs;
             return sJobs;
         }
 
-        // (HostPromiseRejectionTracker: the promises rejected that have no handlers (in the order they were rejected))
-        std::vector<value>& unhandled_rejections()
+        void enqueue(void (*aFunction)(value const* aValues), std::initializer_list<value> aValues)
         {
-            static std::vector<value> sRejections;
+            if (in_agent())
+            {
+                // (a test262 agent's job: its own queue's (no garbage is collected while there are agents: its closure keeps its values))
+                std::array<value, 6> values{ Undefined, Undefined, Undefined, Undefined, Undefined, Undefined };
+                std::copy(aValues.begin(), aValues.end(), values.begin());
+                std::function<void()> job = [aFunction, values]() { aFunction(values.data()); };
+                if (agent_enqueue_job(job))
+                    return;
+            }
+            auto& j = jobs().emplace_back();
+            j.function = aFunction;
+            std::copy(aValues.begin(), aValues.end(), j.values);
+        }
+
+        // (HostPromiseRejectionTracker: the promises rejected that have no handlers (in the order they were rejected))
+        value_list& unhandled_rejections()
+        {
+            static value_list sRejections;
             return sRejections;
         }
 
+        root_tracer const sJobRoots{ [](tracer& aTracer)
+        {
+            for (auto const& j : jobs())
+                aTracer.mark(j.values);
+        } };
+
         // --- the abstract operations
 
-        void trigger_reactions(std::vector<promise_reaction> aReactions, value aArgument);
+        void trigger_reactions(std::span<promise_reaction const> aReactions, value aArgument);
         void reject_promise(value aPromise, value aReason);
 
         void fulfill_promise(value aPromise, value aValue)
         {
             auto& p = as_promise(aPromise);
-            auto reactions = std::move(p.fulfillReactions);
+            auto const reactions = std::move(p.fulfillReactions);
             p.result = aValue;
             p.fulfillReactions.clear();
             p.rejectReactions.clear();
             p.state = promise_state::Fulfilled;
-            trigger_reactions(std::move(reactions), aValue);
+            trigger_reactions(reactions, aValue);
         }
 
         void reject_promise(value aPromise, value aReason)
         {
             auto& p = as_promise(aPromise);
-            auto reactions = std::move(p.rejectReactions);
+            auto const reactions = std::move(p.rejectReactions);
             p.result = aReason;
             p.fulfillReactions.clear();
             p.rejectReactions.clear();
             p.state = promise_state::Rejected;
             if (!p.handled)
                 unhandled_rejections().push_back(aPromise);
-            trigger_reactions(std::move(reactions), aReason);
+            trigger_reactions(reactions, aReason);
         }
 
         void promise_reaction_job(promise_reaction const& aReaction, value aArgument)
@@ -184,10 +235,23 @@ namespace neos::javascript_runtime
             call(threw ? aReaction.reject : aReaction.resolve, Undefined, argument);
         }
 
-        void trigger_reactions(std::vector<promise_reaction> aReactions, value aArgument)
+        // (a reaction job: its values are the reaction's (its capability, type and handler) and the argument)
+        void enqueue_reaction_job(promise_reaction const& aReaction, value aArgument)
         {
-            for (auto& reaction : aReactions)
-                enqueue_job([reaction, aArgument]() { promise_reaction_job(reaction, aArgument); });
+            enqueue([](value const* aValues)
+            {
+                promise_reaction const reaction{ aValues[0], aValues[1], aValues[2], aValues[3] == True ? reaction_type::Reject : reaction_type::Fulfill,
+                    aValues[4] };
+                promise_reaction_job(reaction, aValues[5]);
+            }, { aReaction.promise, aReaction.resolve, aReaction.reject, boolean(aReaction.type == reaction_type::Reject), aReaction.handler,
+                aArgument });
+        }
+
+        void trigger_reactions(std::span<promise_reaction const> aReactions, value aArgument)
+        {
+            // (no allocation: the reactions (a promise's, that it no longer has) are in the jobs before a collection can happen)
+            for (auto const& reaction : aReactions)
+                enqueue_reaction_job(reaction, aArgument);
         }
 
         // (the resolving functions: they share their promise and whether it has been resolved)
@@ -226,8 +290,11 @@ namespace neos::javascript_runtime
                 return Undefined;
             }
             // (NewPromiseResolveThenableJob)
-            enqueue_job([promise, resolution, then]()
+            enqueue([](value const* aValues)
             {
+                auto const promise = aValues[0];
+                auto const resolution = aValues[1];
+                auto const then = aValues[2];
                 value resolve, reject;
                 create_resolving_functions(promise, resolve, reject);
                 try
@@ -240,7 +307,7 @@ namespace neos::javascript_runtime
                     value const argument[] = { e.thrown };
                     call(reject, Undefined, argument);
                 }
-            });
+            }, { promise, resolution, then });
             return Undefined;
         }
 
@@ -594,18 +661,21 @@ namespace neos::javascript_runtime
         {
             if (!is_object(aThis))
                 throw_type_error("Promise.try called on non-object");
-            auto const cap = new_capability(aThis);
+            // (the callback is called first: a value it returns is PromiseResolve'd (a promise of this constructor is returned as is;
+            // ecma262 #3883); a throw rejects a new promise)
+            value thrown;
             try
             {
                 auto const result = call(argument(aArguments, 0u), Undefined, aArguments.size() > 1u ? aArguments.subspan(1u) : arguments{});
-                value const argument[] = { result };
-                call(cap.resolve, Undefined, argument);
+                return promise_resolve(aThis, result);
             }
             catch (js_exception const& e)
             {
-                value const argument[] = { e.thrown };
-                call(cap.reject, Undefined, argument);
+                thrown = e.thrown;
             }
+            auto const cap = new_capability(aThis);
+            value const argument[] = { thrown };
+            call(cap.reject, Undefined, argument);
             return cap.promise;
         }
 
@@ -757,16 +827,14 @@ namespace neos::javascript_runtime
             break;
         case promise_state::Fulfilled:
             {
-                auto const result = p.result;
-                enqueue_job([fulfill, result]() { promise_reaction_job(fulfill, result); });
+                enqueue_reaction_job(fulfill, p.result);
             }
             break;
         case promise_state::Rejected:
             {
                 if (!p.handled)
                     std::erase(unhandled_rejections(), aPromise);
-                auto const result = p.result;
-                enqueue_job([reject, result]() { promise_reaction_job(reject, result); });
+                enqueue_reaction_job(reject, p.result);
             }
             break;
         }
@@ -775,16 +843,23 @@ namespace neos::javascript_runtime
 
     void enqueue_job(value aJob, value aArgument)
     {
-        enqueue_job([aJob, aArgument]()
+        enqueue([](value const* aValues)
         {
-            value const argument[] = { aArgument };
-            call(aJob, Undefined, argument);
-        });
+            value const argument[] = { aValues[1] };
+            call(aValues[0], Undefined, argument);
+        }, { aJob, aArgument });
+    }
+
+    void enqueue_job(void (*aJob)(value const* aValues), std::initializer_list<value> aValues)
+    {
+        enqueue(aJob, aValues);
     }
 
     void enqueue_job(std::function<void()> aJob)
     {
-        jobs().push_back(std::move(aJob));
+        if (agent_enqueue_job(aJob))
+            return;     // (a test262 agent's job: its own queue's)
+        jobs().emplace_back().closure = std::move(aJob);
     }
 
     bool run_jobs()
@@ -792,19 +867,26 @@ namespace neos::javascript_runtime
         // (an exception that a job does not handle is reported (false); the jobs that follow it still run)
         bool result = true;
         auto& queue = jobs();
+        // (the job that ran the script (or module) has ended: WeakRefs' targets are no longer kept)
+        clear_kept_objects();
         while (!queue.empty())
         {
-            auto job = std::move(queue.front());
+            // (the job's values are on this stack while it runs)
+            auto const j = std::move(queue.front());
             queue.pop_front();
             try
             {
-                job();
+                if (j.function != nullptr)
+                    j.function(j.values);
+                else
+                    j.closure();
             }
             catch (js_exception const& e)
             {
                 report_uncaught(e.thrown);
                 result = false;
             }
+            clear_kept_objects();
         }
         // (a promise rejected that no handler handled: reported as an uncaught exception (except by the test262 host, whose tests leave
         // rejected promises))
@@ -817,7 +899,7 @@ namespace neos::javascript_runtime
             report_uncaught(reason, true);
             result = false;
         }
-        rejections.clear();
+        value_list{}.swap(rejections);  // (freed: a rooted block's words are roots, beyond the vector's size too)
         return result;
     }
 

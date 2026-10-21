@@ -78,6 +78,39 @@ namespace neos::javascript_runtime
                 kind{ aKind }
             {
             }
+            ~generator_object()
+            {
+                // (a generator that cannot be resumed again (the garbage collector frees it): its coroutine (and stack) are discarded)
+                if (coroutine != nullptr)
+                    host()->coroutine_delete(coroutine);
+            }
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(callee);
+                aTracer.mark(thisValue);
+                aTracer.mark(environment);
+                aTracer.mark(savedArguments);
+                aTracer.mark(nativeValues);
+                aTracer.mark(resumption.v);
+                aTracer.mark(yielded);
+                aTracer.mark(result);
+                aTracer.mark(returnValue);
+                aTracer.mark(promise);
+                aTracer.mark(resolve);
+                aTracer.mark(reject);
+                for (auto const& r : queue)
+                {
+                    aTracer.mark(r.c.v);
+                    aTracer.mark(r.promise);
+                    aTracer.mark(r.resolve);
+                    aTracer.mark(r.reject);
+                }
+                // (a suspended body: its stack (and the interpreter's frames, if it is interpreted))
+                if (suspended != nullptr)
+                    aTracer.suspended_stack(suspended, &link, coroutine);
+            }
         public:
             generator_kind kind;
             generator_state state = generator_state::SuspendedStart;
@@ -90,6 +123,12 @@ namespace neos::javascript_runtime
             neos_rt_coroutine* coroutine = nullptr;
             std::vector<value> savedArguments;  ///< (its part of the extra arguments stack, while it is suspended)
             std::function<value()> native;      ///< (a built-in's body (an async built-in), instead of a compiled function)
+            std::vector<value> nativeValues;    ///< (the values that native captures)
+            // (its stack: the base of its coroutine's stack (once it has run), the segments of its stack while it is suspended (the
+            // innermost first, ending with link), and link (whose previous is the segment of the code that resumed it, while it runs))
+            void const* stackBase = nullptr;
+            stack_segment* suspended = nullptr;
+            stack_segment link;
             // (resumption: how it is resumed)
             completion resumption;
             // (suspension: the value a generator yielded; raw: an iterator result (yield* passes its iterator's results on))
@@ -109,6 +148,11 @@ namespace neos::javascript_runtime
 
         thread_local generator_object* tCurrent = nullptr;
 
+        root_tracer const sGeneratorRoots{ [](tracer& aTracer)
+        {
+            aTracer.mark(tCurrent);
+        } };
+
         generator_object& as_generator(value aValue)
         {
             return static_cast<generator_object&>(obj(aValue));
@@ -116,9 +160,13 @@ namespace neos::javascript_runtime
 
         // --- coroutines
 
-        void body_entry(void* aGenerator)
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        void body_run(generator_object& g)
         {
-            auto& g = *static_cast<generator_object*>(aGenerator);
             try
             {
                 if (g.native)
@@ -154,6 +202,16 @@ namespace neos::javascript_runtime
             }
         }
 
+        void body_entry(void* aGenerator)
+        {
+            // (the base of the coroutine's stack (for the garbage collector): body_run's frames are below it)
+            auto& g = *static_cast<generator_object*>(aGenerator);
+            char volatile base = 0;
+            g.stackBase = const_cast<char const*>(&base);
+            set_stack_base(g.stackBase);
+            body_run(g);
+        }
+
         // (resume (or start) its body: true if the body finished)
         bool run(generator_object& g)
         {
@@ -170,7 +228,18 @@ namespace neos::javascript_runtime
             g.savedArguments.clear();
             auto* const previous = tCurrent;
             tCurrent = &g;
+            // (while the coroutine runs, the live part of this stack is a segment (its values (and the callers' in registers) are roots);
+            // the coroutine's segments follow its own (link))
+            NEOS_JS_SPILL_REGISTERS();
+            stack_segment resumer{ stack_pointer(), stack_base(), stack_segments() };
+            g.link.previous = &resumer;
+            stack_segments() = g.suspended != nullptr ? g.suspended : &g.link;
+            if (g.stackBase != nullptr)
+                set_stack_base(g.stackBase);
             int const finished = h.coroutine_resume(g.coroutine);
+            set_stack_base(resumer.high);
+            stack_segments() = resumer.previous;
+            g.link.previous = nullptr;
             tCurrent = previous;
             if (finished != 0)
             {
@@ -186,7 +255,13 @@ namespace neos::javascript_runtime
         // (suspend the running body: its resumption follows)
         completion suspend(generator_object& g)
         {
+            // (while it is suspended, the live part of its stack is a segment, which the generator's trace scans)
+            NEOS_JS_SPILL_REGISTERS();
+            stack_segment here{ stack_pointer(), stack_base(), stack_segments() };
+            g.suspended = &here;
             host()->coroutine_suspend();
+            g.suspended = nullptr;
+            stack_segments() = here.previous;
             return g.resumption;
         }
 
@@ -457,6 +532,12 @@ namespace neos::javascript_runtime
         public:
             explicit async_from_sync_iterator(value aPrototype) : object{ aPrototype, object_class::AsyncFromSyncIterator } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(sync);
+            }
+        public:
             iterator_record sync;
         };
 
@@ -724,12 +805,18 @@ namespace neos::javascript_runtime
         return g.promise;
     }
 
-    value async_native(std::function<value()> aBody)
+    void const* running_generator()
+    {
+        return tCurrent;
+    }
+
+    value async_native(std::function<value()> aBody, std::initializer_list<value> aCaptured)
     {
         // (a built-in that runs as an async function (e.g. Array.fromAsync): its body may await (await_value); its promise)
         auto const& r = the_realm();
         auto& g = the_heap().make<generator_object>(Null, generator_kind::AsyncFunction);
         g.native = std::move(aBody);
+        g.nativeValues.assign(aCaptured.begin(), aCaptured.end());
         g.promise = new_promise_capability(r.promise, g.resolve, g.reject);
         g.state = generator_state::Executing;
         ran(g, run(g));

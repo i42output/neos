@@ -1,0 +1,97 @@
+// neoscript example: interfaces, overloads and out parameters
+
+using neo.string;
+using neo.stream;
+
+interface i_source
+{
+    proc next(value : out i32; more : out bool);
+}
+
+class counting implements i_source
+{
+    protected i32 current;
+    protected i32 last;
+
+    fn this(first, final_ : i32)
+    {
+        current = first;
+        last = final_;
+    }
+
+    proc next(value : out i32; more : out bool)
+    {
+        value = current;
+        more = current < last;
+        current = current + 1;
+    }
+}
+
+class squares extends counting
+{
+    fn this(first, final_ : i32)
+    {
+        current = first;
+        last = final_;
+    }
+
+    proc next(value : out i32; more : out bool) final
+    {
+        value = current * current;
+        more = current < last;
+        current = current + 1;
+    }
+}
+
+class accumulator
+{
+    i32 total;
+
+    proc add(n : in i32)
+    {
+        total = total + n;
+    }
+
+    proc add(s : in string)
+    {
+        total = total + neo::length(s);
+    }
+
+    proc add(source : in i_source)
+        value : i32;
+        more : bool;
+    {
+        more = true;
+        while (more)
+        {
+            source.next(value, more);
+            add(value);
+        }
+    }
+}
+
+// (overloads by the types of objects: the static type of the argument chooses)
+fn kind(s : counting) -> string
+{
+    return "counting";
+}
+
+fn kind(s : squares) -> string
+{
+    return "squares";
+}
+
+proc main()
+{
+    accumulator a;
+    a.add(5);
+    a.add("four");
+    neo::print("total " + neo::to_string(a.total) + "\n");
+    a.add(counting(1, 4));
+    neo::print("total " + neo::to_string(a.total) + "\n");
+    squares s = squares(1, 3);
+    counting c = s;
+    a.add(c);
+    neo::print("total " + neo::to_string(a.total) + "\n");
+    neo::print(kind(s) + " " + kind(c) + "\n");
+}

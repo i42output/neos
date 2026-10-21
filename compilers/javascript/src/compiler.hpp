@@ -178,7 +178,19 @@ namespace neos::compilers::javascript
     {
         None,           ///< (a value)
         F64,            ///< (a number: its double)
-        I64             ///< (an integer (a counter): an i64)
+        I64,            ///< (an integer (a counter): an i64)
+        I32             ///< (a 32-bit integer (never -0), e.g. the result of a bitwise operator: an i32)
+    };
+
+    enum class intrinsic : std::uint8_t
+    {
+        None,
+        Imul,           ///< (Math.imul(a, b))
+        Floor,          ///< (Math.floor(x))
+        Ceil,
+        Trunc,
+        Sqrt,
+        Abs
     };
 
     // --- code generation of one WebAssembly function
@@ -317,30 +329,41 @@ namespace neos::compilers::javascript
         void tagged_template(node* aNode);
         void function_expression(node* aNode);
         void class_expression(node* aNode, std::optional<std::string> aName = {});
-        void optional_chain(node* aNode);
+        void optional_chain(node* aNode, std::optional<std::uint32_t>* aThis = nullptr);
+        bool is_call_reference(node* aNode) const;
         void delete_expression(node* aNode);
         void yield_expression(node* aNode);
         void await_value();
         void resumption();
-        // numeric locals: local bindings whose values are always numbers are f64 (or i64) locals
+        // numeric locals: local bindings whose values are always numbers are f64 (or i64 or i32) locals
         void infer_numeric();
         numeric_rep rep_of(binding const* aBinding) const;
         numeric_rep num_type(node* aNode);
         void numeric(node* aNode);                  ///< (its value as an f64: num_type(aNode) is not None)
-        void box(numeric_rep aRep);                 ///< (an f64 or i64: as a value)
-        void unbox(numeric_rep aRep);               ///< (a value (a number): as an f64 or i64)
+        void int32(node* aNode);                    ///< (its value's ToInt32 as an i32: num_type(aNode) is not None)
+        void typed(node* aNode, numeric_rep aRep);  ///< (its value as aRep (an integer rep: num_type(aNode) is one))
+        void to_int32();                            ///< (the f64 on the stack: its ToInt32 (an i32))
+        void box(numeric_rep aRep);                 ///< (an f64 or i64 or i32: as a value)
+        void unbox(numeric_rep aRep);               ///< (a value (a number): as an f64 or i64 or i32)
+        bool numeric_value(node* aNode);            ///< (a unary, conditional or intrinsic call expression of numbers: its value emitted (else false))
         bool numeric_binary(node* aNode);           ///< (an operation of numbers: emitted (else false))
         bool numeric_condition(node* aNode);        ///< (an i32)
         bool numeric_update(reference const& aReference, bool aIncrement, bool aPostfix);
         bool numeric_assignment(reference const& aReference, node* aValue, std::string const& aOperator);
-        void f64_remainder();
+        void f64_remainder(node* aDividend, node* aDivisor);  ///< (the two f64s on the stack: the remainder (as % computes it))
+        intrinsic intrinsic_of(node* aNode) const;  ///< (a call that is compiled inline (see iIntrinsics))
+        // numeric versions: a function whose parameters are used as numbers is compiled twice: a version (chosen when it is called with
+        // numbers) whose parameters are numeric locals, and the general one
+        bool version_eligible() const;
+        bool pure(node* aNode);                     ///< (code that calls no user code and changes nothing but locals)
+        void version_check();                       ///< (an i32: whether the numeric version applies (its parameters' arguments are numbers ...))
         bool has_using(node* aStatements) const;
         void export_statement(node* aNode);
         void for_loop(node* init, node* test, node* update, node* body, scope* s, bool perIteration, std::vector<std::string> const& aLabels);
         std::string names_descriptor(scope const* aScope) const;
         void disposal_scope(std::function<void()> const& aBody);
         void integer(node* aNode);                  ///< (an integer (num_type I64) as an i64)
-        void counter_guard(std::uint32_t aSlot, std::uint32_t aOld, std::int64_t aStep);
+        void counter_guard(std::uint32_t aSlot, std::int64_t aStep, binding const* aBinding = nullptr);
         void super_property(node* aNode);
         void super_call(node* aNode);
         void property_key(node* aNode);     ///< (a property name node: its key)
@@ -359,6 +382,24 @@ namespace neos::compilers::javascript
         void set_home_object(std::uint32_t aFunction, std::uint32_t aHome);
         bool this_lexical() const;
         bool derived_eval_code() const;
+        struct prepared_reference
+        {
+            bool prepared = false;          ///< (a property reference: its object (or this, for super) and key were evaluated)
+            node* target = nullptr;
+            std::uint32_t object = 0u;
+            std::uint32_t keyValue = 0u;
+            std::optional<reference> dynamic;   ///< (a name found by name: its reference was resolved (its base is object))
+            std::uint32_t superBase = 0u;       ///< (super.x / super[x]: the super base (object is this))
+        };
+        std::uint32_t super_reference(node* aTarget, std::uint32_t& aThis, std::uint32_t& aKey);
+        prepared_reference prepare_reference(node* aElement, bool aBinding = false);
+        void assign_prepared(prepared_reference const& aReference, node* aElement);
+        void bound_shadows(node* aTest, std::vector<std::pair<binding const*, int>>& aAdded);
+        bool bound_comparison(node* aComparison);
+        void body_vars_from_parameters();
+        std::uint32_t dynamic_reference(reference const& aReference);
+        void dynamic_reference_get(std::uint32_t aBase, reference const& aReference);
+        void dynamic_reference_set(std::uint32_t aBase, reference const& aReference, std::uint32_t aValue);
         void this_value(node* aSite);
         void new_target_value();
         void home_object_value();
@@ -376,6 +417,17 @@ namespace neos::compilers::javascript
         std::vector<std::uint32_t> iDisposals;     ///< (the dispose capabilities of the blocks with using declarations being generated)
         bool iDiscardedNow = false;    ///< (the expression being generated is an expression statement's: its value is not used)
         std::unordered_map<node const*, binding*> iNumericNames;   ///< (the references (identifiers) to bindings that may be numeric)
+        std::set<binding const*> iUnitCounters;        ///< (i64 locals whose only changes are steps of one from a safe integer)
+        std::map<binding const*, int> iMonotoneCounters;    ///< (unit counters whose steps are all +1 (1) or all -1 (-1): no guards (see counter_value))
+        int monotone(binding const* aBinding) const;
+        void counter_value(binding const* aBinding);
+        bool raw_counter(node* aNode, node* aOther);
+        std::set<binding const*> iInvariantNumerics;   ///< (f64 locals that are never assigned (e.g. a numeric version's parameters))
+        std::map<std::pair<binding const*, int>, std::uint32_t> iBoundShadows;    ///< (a loop's integral bounds of such locals (see bound_shadows))
+        bool iNumericParameters = false;            ///< (the numeric version is being inferred or generated: its parameters may be numeric)
+        std::vector<std::pair<std::uint32_t, binding*>> iNumericArguments;  ///< (the numeric version's numeric parameters (by index))
+        std::unordered_map<node const*, intrinsic> iIntrinsics;    ///< (the numeric version's (pure) intrinsic calls: inline (its entry checks them))
+        std::uint32_t iIntrinsicMask = 0u;          ///< (the intrinsics they use (bits: 1 << intrinsic))
         std::vector<std::uint32_t> iFreeTemporaries;
         std::vector<control> iControls;
         std::vector<scope*> iScopes;    ///< (the scopes whose code is being generated, innermost last)
@@ -408,7 +460,13 @@ namespace neos::compilers::javascript
         // the syntax tree
         node* make_node(construct aKind, std::string_view aSource);
         void await_operators(node* aNode, bool aAwait);
+        void if_clause_functions(node* aNode);
+        bool script_may_run_code() const;
+    public:
+        std::set<std::string> iEvalPrivateNames;   ///< (direct eval code: the private names of the classes that enclose the call)
+    private:
         void yield_identifiers(node* aNode, bool aGenerator);
+        void yield_identifiers_child(node* aNode, std::size_t aIndex, bool aGenerator);
         void array_commas(node* aNode);
         void eval_context_errors(node* aNode);
         void build(construct aKind, std::string_view aSource);

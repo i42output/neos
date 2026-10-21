@@ -37,6 +37,7 @@
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
 #include "api.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -299,6 +300,11 @@ namespace neos::javascript_runtime
         public:
             explicit iterator_record_cell(iterator_record const& aRecord) : cell{ cell_type::Internal }, record{ aRecord } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                aTracer.mark(record);
+            }
+        public:
             iterator_record record;
         };
 
@@ -306,6 +312,14 @@ namespace neos::javascript_runtime
         {
         public:
             for_in_state() : cell{ cell_type::Internal } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                aTracer.mark(current);
+                aTracer.mark(keys);
+                for (auto const v : visited)
+                    aTracer.mark(v);
+            }
         public:
             value current = Null;
             std::vector<value> keys;
@@ -330,7 +344,8 @@ namespace neos::javascript_runtime
         if (!is_nullish(aObject))
         {
             state.current = to_object(aObject);
-            state.keys = obj(state.current).own_property_keys();
+            auto const keys = obj(state.current).own_property_keys();
+            state.keys.assign(keys.begin(), keys.end());
         }
         return TagInternal | state.handle;
     }
@@ -358,7 +373,10 @@ namespace neos::javascript_runtime
             state.keys.clear();
             state.next = 0u;
             if (state.current != Null)
-                state.keys = obj(state.current).own_property_keys();
+            {
+                auto const keys = obj(state.current).own_property_keys();
+                state.keys.assign(keys.begin(), keys.end());
+            }
         }
         return Empty;
     }

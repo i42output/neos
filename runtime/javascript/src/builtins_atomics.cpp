@@ -215,10 +215,20 @@ namespace neos::javascript_runtime
             return sWaiters;
         }
 
-        void resolve_waiter(waiter const& aWaiter, char const* aResult)
+        root_tracer const sWaiterRoots{ [](tracer& aTracer)
+        {
+            for (auto const& w : waiters())
+            {
+                aTracer.mark(w->buffer);
+                aTracer.mark(w->resolve);
+            }
+        } };
+
+        // (aResolve: a waiter's (no longer in the list: its value is on the caller's stack))
+        void resolve_waiter(value aResolve, char const* aResult)
         {
             value const argument[] = { ascii(aResult) };
-            call(aWaiter.resolve, Undefined, argument);
+            call(aResolve, Undefined, argument);
         }
 
         // (the timeout of a waiter: a job that runs (again) until its time has come or it has been notified)
@@ -233,12 +243,26 @@ namespace neos::javascript_runtime
                 auto const now = std::chrono::steady_clock::now();
                 if (now < aWaiter->timeoutTime)
                 {
+                    if (in_agent())
+                    {
+                        // (a test262 agent: it blocks (the others run) until the waiter is notified or times out)
+                        auto const deadline = monotonic_ms() + std::chrono::duration<double, std::milli>(aWaiter->timeoutTime - now).count();
+                        agent_block([aWaiter]()
+                        {
+                            auto const& l = waiters();
+                            return std::find(l.begin(), l.end(), aWaiter) == l.end() || std::chrono::steady_clock::now() >= aWaiter->timeoutTime;
+                        }, deadline);
+                        enqueue_timeout_job(aWaiter);
+                        return;
+                    }
+                    agent_yield();  // (the agents run (one may notify it))
                     std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(aWaiter->timeoutTime - now, std::chrono::milliseconds{ 1 }));
                     enqueue_timeout_job(aWaiter);
                     return;
                 }
+                auto const resolve = aWaiter->resolve;
                 list.erase(existing);
-                resolve_waiter(*aWaiter, "timed-out");
+                resolve_waiter(resolve, "timed-out");
             });
         }
 
@@ -254,11 +278,14 @@ namespace neos::javascript_runtime
             if (!t.buffer_object().shared())
                 return number(0.0);
             std::vector<std::shared_ptr<waiter>> notified;
+            value_list resolves;    // (the asynchronous waiters' resolving functions (no longer in the list: rooted here))
             auto& list = waiters();
             for (auto i = list.begin(); i != list.end() && static_cast<double>(notified.size()) < c;)
                 if ((*i)->buffer == t.buffer && (*i)->byteIndex == byteIndex)
                 {
                     notified.push_back(*i);
+                    if (!(*i)->sync)
+                        resolves.push_back((*i)->resolve);
                     i = list.erase(i);
                 }
                 else
@@ -266,8 +293,8 @@ namespace neos::javascript_runtime
             for (auto const& w : notified)
                 if (w->sync)
                     w->notified = true;
-                else
-                    resolve_waiter(*w, "ok");
+            for (auto const resolve : resolves)
+                resolve_waiter(resolve, "ok");
             return number(static_cast<double>(notified.size()));
         }
 

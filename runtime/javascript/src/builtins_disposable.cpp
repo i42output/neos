@@ -54,13 +54,28 @@ namespace neos::javascript_runtime
             bool async = false;                 ///< ([[Kind]]: async-dispose)
         };
 
-        using resource_stack = std::vector<disposable_resource>;
+        using resource_stack = std::vector<disposable_resource>;           ///< (a cell's (traced))
+        using resource_list = rooted_vector<disposable_resource>;           ///< (DisposeResources' (rooted: it is not a cell's member))
+
+        void trace_resources(tracer& aTracer, resource_stack const& aResources)
+        {
+            for (auto const& r : aResources)
+            {
+                aTracer.mark(r.resourceValue);
+                aTracer.mark(r.disposeMethod);
+            }
+        }
 
         // (a DisposeCapability: compiled code's using declarations' resources (of one block))
         class dispose_capability : public cell
         {
         public:
             dispose_capability() : cell{ cell_type::Internal } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                trace_resources(aTracer, resources);
+            }
         public:
             resource_stack resources;
         };
@@ -73,6 +88,12 @@ namespace neos::javascript_runtime
             {
             }
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                trace_resources(aTracer, resources);
+            }
+        public:
             bool disposed = false;              ///< ([[DisposableState]] / [[AsyncDisposableState]])
             resource_stack resources;           ///< ([[DisposableResourceStack]])
         };
@@ -82,7 +103,7 @@ namespace neos::javascript_runtime
         class dispose_resources
         {
         public:
-            dispose_resources(resource_stack aResources, value aCompletion, bool aThrew) :
+            dispose_resources(resource_list aResources, value aCompletion, bool aThrew) :
                 iResources{ std::move(aResources) }, iCompletion{ aCompletion }, iThrew{ aThrew }
             {
             }
@@ -140,6 +161,10 @@ namespace neos::javascript_runtime
             }
             bool threw() const { return iThrew; }
             value completion() const { return iCompletion; }
+            void trace(tracer& aTracer) const
+            {
+                aTracer.mark(iCompletion);  // (its resources are rooted)
+            }
         private:
             void add_error(value aError)
             {
@@ -157,7 +182,7 @@ namespace neos::javascript_runtime
                 }
             }
         private:
-            resource_stack iResources;          ///< (the resources not disposed yet: disposed from the back)
+            resource_list iResources;           ///< (the resources not disposed yet: disposed from the back)
             value iCompletion;
             bool iThrew;
             bool iNeedsAwait = false;
@@ -166,7 +191,7 @@ namespace neos::javascript_runtime
         };
 
         // (DisposeResources where an Await suspends the running async function: its completion's value, or throws)
-        value dispose_resources_awaiting(resource_stack aResources, value aCompletion, bool aThrew)
+        value dispose_resources_awaiting(resource_list aResources, value aCompletion, bool aThrew)
         {
             dispose_resources operation{ std::move(aResources), aCompletion, aThrew };
             while (auto const awaited = operation.run())
@@ -190,9 +215,16 @@ namespace neos::javascript_runtime
         class dispose_resources_job : public cell
         {
         public:
-            dispose_resources_job(resource_stack aResources, value aResolve, value aReject) :
+            dispose_resources_job(resource_list aResources, value aResolve, value aReject) :
                 cell{ cell_type::Internal }, operation{ std::move(aResources), Undefined, false }, resolve{ aResolve }, reject{ aReject }
             {
+            }
+        public:
+            void trace(tracer& aTracer) override
+            {
+                operation.trace(aTracer);
+                aTracer.mark(resolve);
+                aTracer.mark(reject);
             }
         public:
             dispose_resources operation;
@@ -418,7 +450,7 @@ namespace neos::javascript_runtime
             if (s.disposed)
                 return Undefined;
             s.disposed = true;
-            auto resources = std::move(s.resources);
+            resource_list resources{ s.resources.begin(), s.resources.end() };
             s.resources.clear();
             // (a DisposableStack's resources are all sync-dispose: it never awaits)
             return dispose_resources_awaiting(std::move(resources), Undefined, false);
@@ -469,7 +501,7 @@ namespace neos::javascript_runtime
                 return promise;
             }
             s.disposed = true;
-            auto resources = std::move(s.resources);
+            resource_list resources{ s.resources.begin(), s.resources.end() };
             s.resources.clear();
             dispose_job_continue(the_heap().make<dispose_resources_job>(std::move(resources), resolve, reject));
             return promise;
@@ -552,7 +584,7 @@ namespace neos::javascript_runtime
     value dispose_all(value aCapability, value aCompletion, bool aThrew)
     {
         auto& capability = cell_of<dispose_capability>(aCapability);
-        auto resources = std::move(capability.resources);
+        resource_list resources{ capability.resources.begin(), capability.resources.end() };
         capability.resources.clear();
         dispose_resources_awaiting(std::move(resources), aCompletion, aThrew);
         return Undefined;

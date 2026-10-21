@@ -128,6 +128,28 @@ namespace neos::javascript_runtime
         }
 
         module_record* tLoading = nullptr;          // (the module whose program is being run to define it)
+
+        // (the modules live as long as the program)
+        root_tracer const sModuleRoots{ [](tracer& aTracer)
+        {
+            auto const trace = [&](module_record const& aModule)
+            {
+                aTracer.mark(aModule.syntheticValue);
+                aTracer.mark(aModule.env);
+                aTracer.mark(aModule.ns);
+                aTracer.mark(aModule.meta);
+                aTracer.mark(aModule.evaluationError);
+                aTracer.mark(aModule.capability);
+                aTracer.mark(aModule.resolve);
+                aTracer.mark(aModule.reject);
+            };
+            for (auto const& entry : registry())
+                trace(*entry.second);
+            for (auto const& entry : by_program())
+                trace(*entry.second);
+            if (tLoading != nullptr)
+                trace(*tLoading);
+        } };
         std::uint64_t sAsyncEvaluationOrder = 1u;
 
         std::string main_path()
@@ -258,7 +280,8 @@ namespace neos::javascript_runtime
             r.emplace(key, m);
             auto const* h = host();
             char const* failure = nullptr;
-            auto const program = h->load("javascript", text.str().c_str(), aPath.c_str(), "module", &failure);
+            auto const source = text.str();
+            auto const program = h->load_n("javascript", source.data(), source.size(), aPath.c_str(), "module", &failure);
             if (program == nullptr)
             {
                 r.erase(aPath);
@@ -272,6 +295,11 @@ namespace neos::javascript_runtime
             auto* const previous = tLoading;
             tLoading = m;
             neos_rt_value result{};
+#if defined(_WIN32)
+            // (generated code runs on a fiber of its own: this stack's live part is scanned while it runs)
+            NEOS_JS_SPILL_REGISTERS();
+            stack_switch const switching{ stack_pointer() };
+#endif
             auto const trap = h->run(program, NEOS_RT_VOID, &result);
             tLoading = previous;
             if (trap != nullptr || !m->defined)
@@ -466,9 +494,9 @@ namespace neos::javascript_runtime
                     return ordinary_delete(aKey);
                 return !exported(aKey);
             }
-            std::vector<value> own_property_keys() override
+            value_list own_property_keys() override
             {
-                std::vector<value> result;
+                value_list result;
                 for (auto const& e : exports)
                     result.push_back(intern(std::u16string_view{ e }));
                 for (auto const& k : ordinary_own_property_keys())
@@ -839,11 +867,13 @@ namespace neos::javascript_runtime
             // (the module is loaded (and linked and evaluated) by a job of its own (HostLoadImportedModule completes asynchronously): a
             // module that the referrer's graph is evaluating is not evaluated within that evaluation)
             auto const path = resolve_specifier(referrer_path(), specifier);
-            enqueue_job([path, type, promise, resolve, reject]()
+            enqueue_job([](value const* aValues)
             {
+                // (aValues: the promise, its resolving functions, the module's path and type)
+                auto const promise = aValues[0], resolve = aValues[1], reject = aValues[2];
                 try
                 {
-                    auto& m = load(path, type);
+                    auto& m = load(utf8(aValues[3]), utf8(aValues[4]));
                     std::vector<module_record*> visited;
                     load_requested(m, visited);
                     link(m);
@@ -855,7 +885,7 @@ namespace neos::javascript_runtime
                     value const argument[] = { e.thrown };
                     call(reject, Undefined, argument);
                 }
-            });
+            }, { promise, resolve, reject, make_string_utf8(path), make_string_utf8(type) });
         }
         catch (js_exception const& e)
         {
@@ -964,14 +994,19 @@ namespace neos::javascript_runtime
                 auto e = aEnvironment;
                 while (e != Undefined && cell_of<environment>(e).parent != Undefined)
                     e = cell_of<environment>(e).parent;
+                module_record* module = nullptr;
                 for (auto const& [path, m] : registry())
                     if (m->env == e)
-                    {
-                        if (m->meta == Undefined)
-                            m->meta = make_object(Null);
-                        return m->meta;
-                    }
-                throw_syntax_error("import.meta is only valid in a module");
+                        module = m;
+                // (code whose environment does not reach its module's (it has no bindings of it): the module of the running program)
+                if (module == nullptr)
+                    if (auto const m = by_program().find(current_program()); m != by_program().end())
+                        module = m->second;
+                if (module == nullptr)
+                    throw_syntax_error("import.meta is only valid in a module");
+                if (module->meta == Undefined)
+                    module->meta = make_object(Null);
+                return module->meta;
             });
         }
 

@@ -547,6 +547,9 @@ namespace neos::language
                 iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>()));
             else
                 iPipeline.push_back(std::make_unique<schema_stage>(stageName, stages.at(stageKey).first, stages.at(stageKey).second, infix, discard, symbolMap, std::make_shared<parser>(iPipeline.back()->parser)));
+            // (code can nest deeply (e.g. functions within functions, each some 70 levels): the stacks it is parsed on are at least 8MB (a
+            // thread's (see CMakeLists.txt), a coroutine's or generated code's), and a level takes around 2KB)
+            iPipeline.back()->parser->set_max_level(3072u);
         }
 
         for (auto const& stagePtr : iPipeline)

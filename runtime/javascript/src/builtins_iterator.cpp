@@ -80,6 +80,25 @@ namespace neos::javascript_runtime
         public:
             iterator_helper(value aPrototype, helper_kind aKind) : object{ aPrototype, object_class::IteratorHelper }, kind{ aKind } {}
         public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(iterated);
+                aTracer.mark(function);
+                aTracer.mark(inner);
+                for (auto const& [method, iterable] : iterables)
+                {
+                    aTracer.mark(method);
+                    aTracer.mark(iterable);
+                }
+                for (auto const& i : iterators)
+                    aTracer.mark(i);
+                aTracer.mark(padding);
+                aTracer.mark(keys);
+                for (auto const v : buffer)
+                    aTracer.mark(v);
+            }
+        public:
             helper_kind kind;
             helper_state state = helper_state::SuspendedStart;
             iterator_record iterated;               ///< (map ... flatMap: the underlying iterator)
@@ -112,6 +131,12 @@ namespace neos::javascript_runtime
         {
         public:
             wrap_for_valid_iterator(value aPrototype) : object{ aPrototype, object_class::WrapForValidIterator } {}
+        public:
+            void trace(tracer& aTracer) override
+            {
+                object::trace(aTracer);
+                aTracer.mark(iterated);
+            }
         public:
             iterator_record iterated;
         };
@@ -147,7 +172,7 @@ namespace neos::javascript_runtime
         }
 
         // (IteratorCloseAll (in reverse order) with a normal completion or, if aThrown, a throw completion)
-        void iterator_close_all(std::vector<iterator_record> const& aIterators, std::optional<value> aThrown = {})
+        void iterator_close_all(std::span<iterator_record const> aIterators, std::optional<value> aThrown = {})
         {
             for (auto i = aIterators.rbegin(); i != aIterators.rend(); ++i)
             {
@@ -219,7 +244,7 @@ namespace neos::javascript_runtime
         }
 
         // ([[UnderlyingIterators]])
-        std::vector<iterator_record> underlying_iterators(iterator_helper const& aHelper)
+        rooted_vector<iterator_record> underlying_iterators(iterator_helper const& aHelper)
         {
             switch (aHelper.kind)
             {
@@ -227,7 +252,7 @@ namespace neos::javascript_runtime
                 return {};
             case helper_kind::Zip:
                 {
-                    std::vector<iterator_record> result;
+                    rooted_vector<iterator_record> result;
                     for (auto const i : aHelper.openIterators)
                         result.push_back(aHelper.iterators[i]);
                     return result;
@@ -248,7 +273,7 @@ namespace neos::javascript_runtime
             auto const count = h.iterators.size();
             if (count == 0u)
                 return {};
-            std::vector<value> results;
+            value_list results;
             results.reserve(count);
             for (std::size_t i = 0u; i < count; ++i)
             {
@@ -412,12 +437,12 @@ namespace neos::javascript_runtime
                         if (h.buffer.empty())
                             return {};
                         h.finished = true;
-                        return make_array(std::vector<value>{ h.buffer.begin(), h.buffer.end() });
+                        return make_array(value_list{ h.buffer.begin(), h.buffer.end() });
                     }
                     h.buffer.push_back(*v);
                     if (static_cast<double>(h.buffer.size()) == h.size)
                     {
-                        auto result = make_array(std::vector<value>{ h.buffer.begin(), h.buffer.end() });
+                        auto result = make_array(value_list{ h.buffer.begin(), h.buffer.end() });
                         h.buffer.clear();
                         return result;
                     }
@@ -433,7 +458,7 @@ namespace neos::javascript_runtime
                         if (h.allowPartial && !h.buffer.empty() && static_cast<double>(h.buffer.size()) < h.size)
                         {
                             h.finished = true;
-                            return make_array(std::vector<value>{ h.buffer.begin(), h.buffer.end() });
+                            return make_array(value_list{ h.buffer.begin(), h.buffer.end() });
                         }
                         return {};
                     }
@@ -441,7 +466,7 @@ namespace neos::javascript_runtime
                         h.buffer.pop_front();
                     h.buffer.push_back(*v);
                     if (static_cast<double>(h.buffer.size()) == h.size)
-                        return make_array(std::vector<value>{ h.buffer.begin(), h.buffer.end() });
+                        return make_array(value_list{ h.buffer.begin(), h.buffer.end() });
                 }
             }
             return {};
@@ -589,7 +614,7 @@ namespace neos::javascript_runtime
 
         value iterator_concat(value, arguments aArguments, value, function_object&)
         {
-            std::vector<std::pair<value, value>> iterables;
+            rooted_vector<std::pair<value, value>> iterables;
             for (auto const item : aArguments)
             {
                 if (!is_object(item))
@@ -600,7 +625,7 @@ namespace neos::javascript_runtime
                 iterables.emplace_back(method, item);
             }
             auto& h = make_helper(helper_kind::Concat);
-            h.iterables = std::move(iterables);
+            h.iterables.assign(iterables.begin(), iterables.end());
             return value_of(h);
         }
 
@@ -637,23 +662,23 @@ namespace neos::javascript_runtime
             return mode;
         }
 
-        value make_zip(std::vector<iterator_record> aIterators, zip_mode aMode, std::vector<value> aPadding, bool aKeyed, std::vector<value> aKeys)
+        value make_zip(rooted_vector<iterator_record> aIterators, zip_mode aMode, value_list aPadding, bool aKeyed, value_list aKeys)
         {
             auto& h = make_helper(helper_kind::Zip);
             h.mode = aMode;
             h.keyed = aKeyed;
-            h.keys = std::move(aKeys);
-            h.padding = std::move(aPadding);
+            h.keys.assign(aKeys.begin(), aKeys.end());
+            h.padding.assign(aPadding.begin(), aPadding.end());
             h.exhausted.assign(aIterators.size(), false);
             for (std::size_t i = 0u; i < aIterators.size(); ++i)
                 h.openIterators.push_back(i);
-            h.iterators = std::move(aIterators);
+            h.iterators.assign(aIterators.begin(), aIterators.end());
             return value_of(h);
         }
 
         // (IfAbruptCloseIterators)
         template <typename F>
-        auto close_all_if_abrupt(std::vector<iterator_record> const& aIterators, F&& aFunction) -> decltype(aFunction())
+        auto close_all_if_abrupt(std::span<iterator_record const> aIterators, F&& aFunction) -> decltype(aFunction())
         {
             try
             {
@@ -673,8 +698,8 @@ namespace neos::javascript_runtime
                 throw_type_error("Iterator.zip: " + describe(iterables) + " is not an object");
             value paddingOption;
             auto const mode = zip_options(argument(aArguments, 1u), paddingOption);
-            std::vector<iterator_record> iterators;
-            std::vector<value> padding;
+            rooted_vector<iterator_record> iterators;
+            value_list padding;
             auto inputIterator = get_iterator(iterables);
             for (;;)
             {
@@ -687,7 +712,7 @@ namespace neos::javascript_runtime
                 }
                 catch (js_exception const& e)
                 {
-                    std::vector<iterator_record> needClosing{ inputIterator };
+                    rooted_vector<iterator_record> needClosing{ inputIterator };
                     needClosing.insert(needClosing.end(), iterators.begin(), iterators.end());
                     iterator_close_all(needClosing, e.thrown);
                 }
@@ -728,10 +753,10 @@ namespace neos::javascript_runtime
                 throw_type_error("Iterator.zipKeyed: " + describe(iterables) + " is not an object");
             value paddingOption;
             auto const mode = zip_options(argument(aArguments, 1u), paddingOption);
-            std::vector<iterator_record> iterators;
-            std::vector<value> padding;
+            rooted_vector<iterator_record> iterators;
+            value_list padding;
             auto const allKeys = obj(iterables).own_property_keys();
-            std::vector<value> keys;
+            value_list keys;
             for (auto const key : allKeys)
             {
                 auto const desc = close_all_if_abrupt(iterators, [&]() { return obj(iterables).get_own_property(key); });
@@ -865,7 +890,7 @@ namespace neos::javascript_runtime
         {
             auto const o = this_iterator(aThis);
             auto iterated = get_iterator_direct(o);
-            std::vector<value> items;
+            value_list items;
             while (auto const v = iterator_step_value(iterated))
                 items.push_back(*v);
             return make_array(std::move(items));

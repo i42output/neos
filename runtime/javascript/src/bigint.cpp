@@ -51,7 +51,6 @@ namespace neos::javascript_runtime
     {
         using limb = std::uint32_t;
         using limbs = std::vector<limb>;
-        using u128 = unsigned __int128;
 
         constexpr std::uint64_t MaxBits = 1ull << 30;   ///< (the size of the largest BigInt (bits): a RangeError beyond)
 
@@ -664,10 +663,11 @@ namespace neos::javascript_runtime
                 auto const shift = length - 64u;
                 auto const whole = static_cast<std::size_t>(shift / 32u);
                 auto const part = static_cast<unsigned>(shift % 32u);
-                u128 window = 0u;
-                for (std::size_t i = 0u; i < 3u && whole + i < m.size(); ++i)
-                    window |= static_cast<u128>(m[whole + i]) << (32u * i);
-                auto top = static_cast<std::uint64_t>(window >> part);
+                // (the 96 bits from limb whole (lo: its two lowest limbs, hi: the third), shifted right by part (< 32): their low 64 bits)
+                auto const limb_at = [&](std::size_t aIndex) -> std::uint64_t { return aIndex < m.size() ? m[aIndex] : 0u; };
+                std::uint64_t const lo = limb_at(whole) | (limb_at(whole + 1u) << 32u);
+                std::uint64_t const hi = limb_at(whole + 2u);
+                auto top = part == 0u ? lo : (lo >> part) | (hi << (64u - part));
                 bool sticky = part != 0u && (m[whole] & ((limb{ 1u } << part) - 1u)) != 0u;
                 for (std::size_t i = 0u; !sticky && i < whole; ++i)
                     sticky = m[i] != 0u;

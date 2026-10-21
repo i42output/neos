@@ -39,7 +39,7 @@
         source.package.specification.file.extension: ".neo"
         source.package.implementation.file.extension: ".neo"
         copyright: "Copyright (C) 2024 Leigh Johnston"
-        version: "1.0.0"
+        version: "1.1.0"
     }
 
     stages: {
@@ -60,6 +60,7 @@
     libraries: [
         neos.core
         neos.math.universal
+        neos.neoscript
     ]
 
     discard: [ 
@@ -81,6 +82,30 @@
         boolean.operator.relational.greaterthanorequal
     ]
 }%
+
+(*
+  Types that a program defines (the neoscript compiler, neoscript.ncp, compiles them: see neos/language/neoscript.hpp):
+
+    struct name { members }                         a value (assigned, passed and converted to an interface as a copy)
+    class name [final] [extends base] [implements interface { , interface }] { members }
+                                                    an object (assigned and passed by reference); its methods are 
+                                                    virtual (unless final)
+    interface name [extends interface { , interface }] { method declarations }
+    name is type;                                   another name of a type
+
+  Members (public unless declared protected or private):
+
+    [access] [mutable] type name [= literal];       a field (a mutable field can be changed by a function that is not mutable)
+    [access] fn name(parameters) [mutable] -> type [final | override] { ... }
+                                                    a method that is a function: it cannot change its object unless it 
+                                                    is mutable
+    [access] proc name(parameters) [final | override] locals { ... }
+                                                    a method that is a procedure (it can change its object)
+    [access] fn this(parameters) { ... }            a constructor: type(arguments) is a new object; type name; is one made 
+                                                    by its default constructor
+
+  Within a method, this is its object and its object's members can be named without it (this.name).
+*)
 
 #{
     character literal $ string.utf8.character ::= 
@@ -111,7 +136,7 @@
     struct $ language.keyword ::= potential keyword ::= "struct" ;
     class $ language.keyword ::= potential keyword ::= "class" ;
     interface $ language.keyword ::= potential keyword ::= "interface" ;
-    auto $ language.type.auto ::= potential keyword ::= "auto" ;
+    auto $ language.keyword ::= potential keyword ::= "auto" ;
     def $ language.keyword ::= potential keyword ::= "def" ;
     fn $ language.keyword ::= potential keyword ::= "fn" ;
     proc $ language.keyword ::= potential keyword ::= "proc" ;
@@ -151,6 +176,7 @@
     f64 $ language.type.double ::= potential keyword ::= "f64" ;
     character $ language.type.character ::= potential keyword ::= "char" ;
     string $ language.type.string ::= potential keyword ::= "string" ;
+    object $ language.type.object ::= potential keyword ::= "object" ;
 
     true $ language.object.boolean.true ::= potential keyword ::= "true" ;
     false $ language.object.boolean.false ::= potential keyword ::= "false" ;
@@ -158,7 +184,6 @@
     qualified identifier ::= { namespace name , namespace separator } + , identifier ;
     identifier $ language.identifier ::= alpha , { alphanumeric | '_' } ;
     namespace name $ language.namespace.name ::= alpha , { alphanumeric | '_' } ;
-    package name ::= alpha , { alpha | ( "." , alpha ) } ; 
     potential keyword ::= { alphanumeric } + ;
 
     alpha ::= 'A' .. 'Z' | 'a' .. 'z' ;
@@ -173,6 +198,7 @@
     semicolon ::= ";" ;
     arrow ::= "->" ; 
     namespace separator ::= "::" ;
+    period ::= "." ;
     
     assign ::= "=" ;
 
@@ -198,19 +224,69 @@
 
 ${
     program $ language.program ::= { WS , ( using directive | import directive | namespace scope ) , WS } ;
-    using directive $ source.package.import ::= ( using , WS , ( identifier | package name ) $ source.package.name , WS , semicolon ) ;
+    using directive $ source.package.import ::= ( using , WS , package name $ source.package.name , WS , semicolon ) ;
+    package name ::= package name part $ neoscript.name , { period , package name part $ neoscript.name } ;
+    package name part ::= identifier | builtin type ;
     import directive $ language.function.import ::= ( import , WS , fn , WS , fn sig , WS , semicolon ) ;
     import directive $ language.function.import ::= ( import , WS , proc , WS , proc sig , WS , semicolon ) ;
 
     namespace scope ::= 
-        { ( comment | function | procedure | namespace def | import directive ) , WS } ;
+        { ( comment | function | procedure | namespace def | import directive | type definition | type alias ) , WS } ;
     namespace def $ language.namespace ::= 
         namespace , WS , ( identifier | namespace name ) $ language.namespace.name , WS , open scope $ language.namespace.scope.open , WS , namespace scope , WS , close scope $ language.namespace.scope.close ;
 
+    (* types that a program defines (a name or type of one of the neoscript compiler's constructs is a neoscript.name: the 
+       construct reads it from its source) *)
+    type definition ::= 
+        class definition | interface definition ;
+    class definition ::= 
+        class head $ neoscript.class , WS , open scope , WS , { class member , WS } , close scope $ neoscript.class.end ;
+    class head ::= 
+        ( struct | class ) , WS , simple name $ neoscript.name , [ WS , final ] , [ WS , extends , WS , qualified name $ neoscript.name ] , 
+        [ WS , implements , WS , qualified name $ neoscript.name , { WS , comma , WS , qualified name $ neoscript.name } ] ;
+    interface definition ::= 
+        interface head $ neoscript.interface , WS , open scope , WS , { interface member , WS } , close scope $ neoscript.class.end ;
+    interface head ::= 
+        interface , WS , simple name $ neoscript.name , [ WS , extends , WS , qualified name $ neoscript.name , { WS , comma , WS , qualified name $ neoscript.name } ] ;
+    type alias $ neoscript.alias ::= 
+        simple name $ neoscript.name , WS , is , WS , qualified name $ neoscript.name , WS , semicolon ;
+    class member ::= 
+        comment | method | field ;
+    access ::= 
+        public | protected | private ;
+    field $ neoscript.field ::= 
+        [ access , WS ] , [ mutable , WS ] , type name $ neoscript.name , WS , simple name $ neoscript.name , [ WS , assign , WS , field value ] , WS , semicolon ;
+    field value ::= 
+        math operand | true | false ;
+    method ::= 
+        [ access , WS ] , ( function | procedure | constructor ) ;
+    constructor $ language.function ::= 
+        fn , WS , constructor sig , WS , fn body ;
+    constructor sig $ language.function.signature ::= 
+        ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression ) ;
+    interface member ::= 
+        comment | abstract method ;
+    abstract method $ neoscript.method.abstract ::= 
+        [ access , WS ] , ( fn | proc ) , WS , simple name $ neoscript.name , WS , open expression , WS , 
+        [ abstract parameter block , { WS , semicolon , WS , abstract parameter block } ] , WS , close expression , 
+        [ WS , mutable ] , [ WS , arrow , WS , type name $ neoscript.name ] , WS , semicolon ;
+    abstract parameter block ::= 
+        simple name $ neoscript.name , { WS , comma , WS , simple name $ neoscript.name } , WS , colon , WS , abstract parameter type $ neoscript.name ;
+    abstract parameter type ::= 
+        [ ( in | out | inout ) , WS ] , type name ;
+    simple name ::= 
+        identifier ;
+    qualified name ::= 
+        qualified identifier | identifier ;
+    type name ::= 
+        builtin type | qualified identifier | identifier ;
+
     function $ language.function ::= ( [ def $ language.function.entry , WS ] , fn , WS , fn sig , WS , fn body ) ;
     procedure $ language.function ::= ( [ def $ language.function.entry , WS ] , proc , WS , proc sig , WS , proc locals , WS , proc body ) ;
-    fn sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression , WS , arrow , WS , type $ language.function.return.type ) ;
-    proc sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , proc parameters , WS , close expression ) ;
+    fn sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , fn parameters , WS , close expression , 
+        [ WS , mutable ] , WS , arrow , WS , type $ language.function.return.type , [ WS , ( final | override ) ] ) ;
+    proc sig $ language.function.signature ::= ( identifier $ language.function.name , WS , open expression , WS , proc parameters , WS , close expression , 
+        [ WS , mutable ] , [ WS , ( final | override ) ] ) ;
     fn parameters $ language.function.parameters ::= [ fn parameter block , { WS , semicolon , WS , fn parameter block } ] ;
     proc parameters $ language.function.parameters ::= [ proc parameter block , { WS , semicolon , WS , proc parameter block } ] ;
     fn parameter block ::= [ parameter , { WS , comma , WS , parameter } , WS , colon , WS , type ] ;
@@ -225,19 +301,29 @@ ${
     block $ language.scope ::= ( open scope , { WS , statement } , WS , close scope ) ;
 
     statement $ language.statement ::= 
-        ( initialize , WS , semicolon ) | ( assignment , WS , semicolon ) | ( expression , WS , semicolon ) | return statement | if statement | for loop | while loop | do while loop ;
+        ( initialize , WS , semicolon ) | ( object initialize , WS , semicolon ) | ( auto initialize , WS , semicolon ) | 
+        ( declaration , WS , semicolon ) | ( assignment , WS , semicolon ) | ( expression , WS , semicolon ) | 
+        return statement | if statement | for loop | while loop | do while loop ;
 
     initialize $ language.initialize ::= 
-        ( type , WS , identifier , WS , assign , WS , expression ) ;
+        ( builtin type , WS , identifier , WS , assign , WS , expression ) ;
+    object initialize $ neoscript.initialize ::= 
+        ( qualified name $ neoscript.name , WS , simple name $ neoscript.name , WS , assign , WS , expression ) ;
+    auto initialize $ neoscript.auto ::= 
+        ( auto , WS , simple name $ neoscript.name , WS , assign , WS , expression ) ;
+    declaration $ neoscript.declaration ::= 
+        ( type name $ neoscript.name , WS , simple name $ neoscript.name ) ;
 
-    assignment $ language.assignment ::= 
-        ( identifier , WS , assign , WS , expression ) ;
+    assignment $ neoscript.assignment ::= 
+        ( lvalue , WS , assign , WS , expression ) ;
+    lvalue ::= 
+        simple name $ neoscript.name , { WS , period , WS , simple name $ neoscript.name } ;
 
     expression $ language.expression ::= 
         function call | numeric expression | boolean expression ;
 
-    function call $ language.function.call ::= 
-        ( identifier | qualified identifier ) $ language.function.name , WS , open expression , WS , arguments , WS , close expression ;
+    function call $ neoscript.call ::= 
+        qualified name $ neoscript.name , WS , open expression , WS , arguments , WS , close expression ;
 
     arguments ::= [ argument , { WS , comma , WS , argument } ] ;
     argument $ language.function.argument ::= expression ;
@@ -270,7 +356,19 @@ ${
     factor ::= 
         primary / ( minus , WS , factor ) $ math.operator.negate ;
     primary ::= 
+        postfix expression | primary term ;
+    (* (an object's members: one operand) *)
+    postfix expression $ neoscript.postfix ::= 
+        primary term , { WS , member suffix } + ;
+    primary term ::= 
         ( open expression , WS , expression , WS , close expression ) | function call | math operand ;
+    (* a member of an object: a method called or a field *)
+    member suffix ::= 
+        method call | member ;
+    method call $ neoscript.call.method ::= 
+        period , WS , simple name $ neoscript.name , WS , open expression , WS , arguments , WS , close expression ;
+    member $ neoscript.member ::= 
+        period , WS , simple name $ neoscript.name ;
     math operand $ math.expression.operand ::= number | identifier $: language.variable | character literal | string literal ;
 
     return statement $ language.function.return ::= 
@@ -291,7 +389,7 @@ ${
     for step $ language.statement ::= 
         assignment | expression ;
     for init $ language.initialize ::= 
-        local , WS , colon , WS , type , WS , assign , WS , expression ;
+        local , WS , colon , WS , builtin type , WS , assign , WS , expression ;
 
     while loop $ language.statement.loop ::= 
         while clause , WS , block ;
@@ -304,7 +402,9 @@ ${
     number $ math.universal.integer ::= ( minus , positive integer ) | positive integer ;
     number $ math.universal.real ::= ( minus , positive real ) | positive real ;
 
-    type ::= bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | f32 | f64 | character | string | object ;
+    type ::= builtin type | user type ;
+    builtin type ::= isize | usize | bool | i8 | u8 | i16 | u16 | i32 | u32 | i64 | u64 | float | double | f32 | f64 | character | string | object ;
+    user type $ neoscript.type ::= qualified identifier | identifier ;
 
     WS ::= [ whitespace ] ;
 }$

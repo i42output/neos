@@ -36,6 +36,7 @@
 
 #include <cmath>
 #include "temporal.hpp"
+#include "gc.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -1153,5 +1154,11 @@ namespace neos::javascript_runtime
 
         // Date.prototype.toTemporalInstant
         method(aRealm.datePrototype, "toTemporalInstant", 0u, date_to_temporal_instant);
+    }
+
+    void temporal::temporal_object::trace(tracer& aTracer)
+    {
+        object::trace(aTracer);
+        aTracer.mark(timeZone.id);
     }
 }
