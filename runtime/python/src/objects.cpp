@@ -1170,6 +1170,11 @@ namespace neos::python_runtime
             limb_view a, b;
             if (!limbs_of(aLhs, a) || !limbs_of(aRhs, b))
                 return nullptr;
+            // (x + 0, x - 0 and 0 + x: the int itself (ints are immutable))
+            if ((aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT) && b.size == 0u && aLhs->type == &sIntType.base)
+                return (retain(aLhs), aLhs);
+            if (aOperation == NEOS_PY_ADD && a.size == 0u && aRhs->type == &sIntType.base)
+                return (retain(aRhs), aRhs);
             switch (aOperation)
             {
             case NEOS_PY_ADD: return add_views(a, b, false);
@@ -6564,10 +6569,29 @@ namespace neos::python_runtime
             return aOwned.get();
         }
 
+        // (an integer's limbs (a small integer's: no object is made for it))
+        bool integer_limbs(std::int64_t aValue, limb_view& aView)
+        {
+            if (integer_is_object(aValue))
+                return limbs_of(integer_object(aValue), aView);
+            view_of(int128_of(aValue >> 1), aView);
+            return true;
+        }
+
         std::int64_t fn_integer_binary(std::int32_t aOperation, std::int64_t aLhs, std::int64_t aRhs)
         {
             if (!integer_is_object(aLhs) && !integer_is_object(aRhs))
                 return integer_result(int_binary(aOperation, aLhs >> 1, aRhs >> 1));
+            // (+, - and * of an int beyond 128 bits: of their limbs, with no dispatch (x + 0, x - 0 and 0 + x: x))
+            if (limb_view a, b; (aOperation == NEOS_PY_ADD || aOperation == NEOS_PY_SUBTRACT || aOperation == NEOS_PY_MULTIPLY) &&
+                integer_limbs(aLhs, a) && integer_limbs(aRhs, b) && (a.size > 2u || b.size > 2u))
+            {
+                if (aOperation != NEOS_PY_MULTIPLY && b.size == 0u && integer_object(aLhs)->type == &sIntType.base)
+                    return (retain(integer_object(aLhs)), aLhs);
+                if (aOperation == NEOS_PY_ADD && a.size == 0u && integer_object(aRhs)->type == &sIntType.base)
+                    return (retain(integer_object(aRhs)), aRhs);
+                return integer_result(aOperation == NEOS_PY_MULTIPLY ? multiply_views(a, b) : add_views(a, b, aOperation == NEOS_PY_SUBTRACT));
+            }
             ref l, r;
             return integer_result(binary(aOperation, integer_borrowed(aLhs, l), integer_borrowed(aRhs, r), false));
         }
