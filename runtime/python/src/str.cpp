@@ -55,11 +55,18 @@ namespace neos::python_runtime
 
         std::u32string to_code_points(std::string_view aText)
         {
-            std::u32string result;
-            result.reserve(aText.size());
+            // (written in place (a code point per byte at most), then trimmed)
+            std::u32string result(aText.size(), U'\0');
+            auto out = result.data();
             for (std::size_t i = 0u; i < aText.size();)
             {
                 auto const b = static_cast<unsigned char>(aText[i]);
+                if (b < 0x80u)
+                {
+                    *out++ = b;
+                    ++i;
+                    continue;
+                }
                 char32_t c = b;
                 std::size_t n = 1u;
                 if (b >= 0xF0u && i + 3u < aText.size())
@@ -78,9 +85,10 @@ namespace neos::python_runtime
                     c = ((b & 0x1Fu) << 6) | (static_cast<unsigned char>(aText[i + 1u]) & 0x3Fu);
                     n = 2u;
                 }
-                result += c;
+                *out++ = c;
                 i += n;
             }
+            result.resize(static_cast<std::size_t>(out - result.data()));
             return result;
         }
 
@@ -769,14 +777,17 @@ namespace neos::python_runtime
                 std::string result;
                 std::string message;
                 std::size_t size = 0u;
+                // (the items' strs: an instance of a subclass of str's value)
+                auto const value_of = [](object* aItem) { return kind_of(aItem) == NEOS_PY_STR ? aItem : builtin_value(aItem); };
                 for (std::size_t i = 0u; i < items.size(); ++i)
                 {
-                    if (kind_of(items[i]) != NEOS_PY_STR)
+                    auto const value = value_of(items[i]);
+                    if (kind_of(value) != NEOS_PY_STR)
                     {
                         message = "sequence item " + std::to_string(i) + ": expected str instance, " + type_name(items[i]) + " found";
                         break;
                     }
-                    size += as<str_object>(items[i])->value.size() + (i != 0u ? separator.size() : 0u);
+                    size += as<str_object>(value)->value.size() + (i != 0u ? separator.size() : 0u);
                 }
                 if (message.empty())
                 {
@@ -785,7 +796,7 @@ namespace neos::python_runtime
                     {
                         if (i != 0u)
                             result += separator;
-                        result += as<str_object>(items[i])->value;
+                        result += as<str_object>(value_of(items[i]))->value;
                     }
                 }
                 for (auto item : collected)

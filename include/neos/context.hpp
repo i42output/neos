@@ -67,7 +67,8 @@ namespace neos
             Number,
             Constant,
             Type,
-            Function
+            Function,
+            Parameter
         };
         struct highlight_span
         {
@@ -129,6 +130,10 @@ namespace neos
         // compilation: see i_language_compiler::parsable_source); a later span replaces an earlier one that it overlaps; none: the source 
         // cannot be highlighted
         std::vector<highlight_span> highlight(std::string const& aSchemaPath, std::string_view aSource);
+        // the colours ("#RRGGBB") of the highlighting categories (by category; empty: none) in a theme (e.g. "dark" or "light") for a language 
+        // (the schema aSchemaPath): the syntax highlighting configuration's (highlighting.json: the one beside the schema, overridden by the 
+        // user's (~/.neos/highlighting.json; on Windows %LOCALAPPDATA%\neos\highlighting.json)); none: not configured
+        static std::vector<std::string> highlight_colours(std::string const& aSchemaPath, std::string const& aTheme);
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);

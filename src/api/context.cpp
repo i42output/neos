@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #include <neolib/core/string_utf.hpp>
@@ -541,7 +542,13 @@ namespace neos
                 for (auto const& stage : complete->pipeline())
                     for (auto const& discard : *stage->discard)
                         stage->parser->ignore(stage->symbolMap->at(discard));
-                existing->second = { complete, std::make_shared<language::schema>(aSchemaPath, concept_libraries()) };
+                auto whole = std::make_shared<language::schema>(aSchemaPath, concept_libraries());
+                // (a source is highlighted again as it is edited: its parsers parse incrementally (each parse reuses those of the previous 
+                // source that its edit does not affect); the trees that they parse are of their own copies of it (see neolib::parser::text))
+                for (auto const& highlightSchema : { complete, whole })
+                    for (auto const& stage : highlightSchema->pipeline())
+                        stage->parser->set_incremental(true);
+                existing->second = { complete, whole };
             }
             auto const& [complete, whole] = existing->second;
             if (!complete || !whole)
@@ -550,49 +557,158 @@ namespace neos
             std::string script{ aSource };
             if (!script.empty() && script.back() != '\n')
                 script += '\n';
-            // (the spans of the nodes of a tree of a text parsed: the script, or the script as the language rewrites it (the position in 
-            // the source of each byte of the text: none, the same))
+            // (the source of a part (aValue) of a text parsed: the script, or the script as the language rewrites it (the position in the 
+            // source of each byte of the text: none, the same)): none if it is not the source's)
+            auto source_of = [&](std::string_view aValue, std::string_view aText, std::vector<std::uint32_t> const* aPositions) -> std::optional<std::string_view>
+            {
+                if (aValue.empty() || aValue.data() < aText.data() || aValue.data() + aValue.size() > aText.data() + aText.size())
+                    return {};
+                std::size_t first = static_cast<std::size_t>(aValue.data() - aText.data());
+                std::string_view value = aValue;
+                if (aPositions)
+                {
+                    // (a part of the rewrite's is not the source's, nor are the bytes that it added at a part's ends (e.g. a prefix of a name))
+                    auto const NoPosition = language::i_language_compiler::NoPosition;
+                    auto begin = first;
+                    auto end = first + value.size();
+                    while (begin < end && (*aPositions)[begin] == NoPosition)
+                        ++begin;
+                    while (end > begin && (*aPositions)[end - 1u] == NoPosition)
+                        --end;
+                    if (begin == end)
+                        return {};
+                    value = aText.substr(begin, end - begin);
+                    first = (*aPositions)[begin];
+                    auto const last = (*aPositions)[end - 1u];
+                    if (last == NoPosition || last < first || last - first != value.size() - 1u)
+                        return {};
+                }
+                // (nor is one of text that the rewrite changed)
+                if (first + value.size() > aSource.size() || aSource.substr(first, value.size()) != value)
+                    return {};
+                return aSource.substr(first, value.size());
+            };
+            auto push = [&](std::string_view aValue, highlight_category aCategory, std::string_view aText, std::vector<std::uint32_t> const* aPositions)
+            {
+                if (auto const source = source_of(aValue, aText, aPositions))
+                {
+                    auto const first = static_cast<std::size_t>(source->data() - aSource.data());
+                    result.push_back(highlight_span{ first, first + source->size(), aCategory });
+                }
+            };
+            // (whether a node's concept is a (generic) concept: it, or one that its concept derives from (see i_semantic_concept::is), e.g. a 
+            // language's own concept for its parameters can be language.function.parameters)
+            auto const is_a = [&](language::parser::cst_node const& aNode, std::string_view aConcept)
+            {
+                if (!aNode.c)
+                    return false;
+                std::string_view const name{ *aNode.c };
+                if (name == aConcept)
+                    return true;
+                neolib::ref_ptr<language::i_semantic_concept> nodeConcept;
+                find_concept(neolib::string_view{ name }, nodeConcept);
+                return nodeConcept && nodeConcept->is(neolib::string_view{ aConcept });
+            };
+            // (the spans of the nodes of a tree of a text parsed (see push))
             auto add = [&](language::parser::cst_node const& aRoot, std::string_view aText, std::vector<std::uint32_t> const* aPositions)
             {
-                std::vector<language::parser::cst_node const*> nodes{ &aRoot };
-                while (!nodes.empty())
+                auto const within = [&](std::string_view aValue) { return aValue.data() >= aText.data() && aValue.data() + aValue.size() <= aText.data() + aText.size(); };
+                // (a function's parameters (their names (language.identifier): not within an expression (e.g. a default value), and of an 
+                // initialization only what it initializes; as parsed and in the source) and the text that they are its in: from its parameters to 
+                // the end of its body (the node that its parameters are in, and the lines after its parameters' that are indented more than it); 
+                // a parameter's name, and a name in its body that is it, are its parameter's)
+                struct function_scope
                 {
-                    auto const& node = *nodes.back();
-                    nodes.pop_back();
-                    if (node.c)
-                        if (auto const category = highlight_category_of(std::string_view{ *node.c }))
+                    std::size_t first;
+                    std::size_t last;
+                    std::vector<std::string_view> parameters;
+                    std::vector<std::string_view> sources;
+                };
+                std::vector<function_scope> functions;
+                auto const function_of = [&](language::parser::cst_node const& aParameters, language::parser::cst_node const* aFunction)
+                {
+                    function_scope result{ static_cast<std::size_t>(aParameters.value.data() - aText.data()), aText.size() };
+                    std::vector<language::parser::cst_node const*> parameterNodes{ &aParameters };
+                    while (!parameterNodes.empty())
+                    {
+                        auto const& node = *parameterNodes.back();
+                        parameterNodes.pop_back();
+                        if (is_a(node, "language.identifier"))
                         {
-                            if (!node.value.empty() && node.value.data() >= aText.data() && node.value.data() + node.value.size() <= aText.data() + aText.size())
+                            if (within(node.value))
                             {
-                                std::size_t first = static_cast<std::size_t>(node.value.data() - aText.data());
-                                std::string_view value = node.value;
-                                if (aPositions)
-                                {
-                                    // (a span of the rewrite's is not the source's, nor are the bytes that it added at a span's ends (e.g. a 
-                                    // prefix of a name))
-                                    auto const NoPosition = language::i_language_compiler::NoPosition;
-                                    auto begin = first;
-                                    auto end = first + value.size();
-                                    while (begin < end && (*aPositions)[begin] == NoPosition)
-                                        ++begin;
-                                    while (end > begin && (*aPositions)[end - 1u] == NoPosition)
-                                        --end;
-                                    if (begin == end)
-                                        continue;
-                                    value = aText.substr(begin, end - begin);
-                                    first = (*aPositions)[begin];
-                                    auto const last = (*aPositions)[end - 1u];
-                                    if (last == NoPosition || last < first || last - first != value.size() - 1u)
-                                        continue;
-                                }
-                                // (nor is one of text that the rewrite changed)
-                                if (first + value.size() <= aSource.size() && aSource.substr(first, value.size()) == value)
-                                    result.push_back(highlight_span{ first, first + value.size(), *category });
+                                result.parameters.push_back(node.value);
+                                if (auto const source = source_of(node.value, aText, aPositions))
+                                    result.sources.push_back(*source);
                             }
                             continue;
                         }
+                        if (is_a(node, "language.expression"))
+                            continue;
+                        if (is_a(node, "language.initialize"))
+                        {
+                            if (!node.children.empty())
+                                parameterNodes.push_back(node.children.front().get());
+                            continue;
+                        }
+                        for (auto const& child : node.children)
+                            parameterNodes.push_back(child.get());
+                    }
+                    auto const lineStart = aText.rfind('\n', result.first) == std::string_view::npos ? 0u : aText.rfind('\n', result.first) + 1u;
+                    auto const indentation = std::min(aText.find_first_not_of(" \t", lineStart), result.first) - lineStart;
+                    for (auto lineEnd = aText.find('\n', result.first); lineEnd != std::string_view::npos;)
+                    {
+                        auto const next = lineEnd + 1u;
+                        auto const nextEnd = std::min(aText.find('\n', next), aText.size());
+                        auto const content = aText.find_first_not_of(" \t\r", next);
+                        if (content != std::string_view::npos && content < nextEnd && content - next <= indentation)
+                        {
+                            result.last = next;
+                            break;
+                        }
+                        lineEnd = nextEnd < aText.size() ? nextEnd : std::string_view::npos;
+                    }
+                    if (aFunction != nullptr && within(aFunction->value))
+                        result.last = std::max(result.last, static_cast<std::size_t>(aFunction->value.data() + aFunction->value.size() - aText.data()));
+                    return result;
+                };
+                std::vector<std::string_view> identifiers;
+                // (the nodes, and their nearest ancestors that have concepts)
+                std::vector<std::pair<language::parser::cst_node const*, language::parser::cst_node const*>> nodes{ { &aRoot, nullptr } };
+                while (!nodes.empty())
+                {
+                    auto const [nodePtr, parent] = nodes.back();
+                    auto const& node = *nodePtr;
+                    nodes.pop_back();
+                    if (node.c)
+                    {
+                        if (auto const category = highlight_category_of(std::string_view{ *node.c }))
+                        {
+                            push(node.value, *category, aText, aPositions);
+                            continue;
+                        }
+                        if (is_a(node, "language.function.parameters") && within(node.value))
+                            functions.push_back(function_of(node, parent));
+                        else if (is_a(node, "language.identifier") && within(node.value))
+                            identifiers.push_back(node.value);
+                    }
                     for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
-                        nodes.push_back(child->get());
+                        nodes.emplace_back(child->get(), node.c ? &node : parent);
+                }
+                // (a name in a function's body that is one of its parameters' (as parsed, or in the source (e.g. a rewrite's name for it)) is its 
+                // parameter)
+                for (auto const& identifier : identifiers)
+                {
+                    auto const at = static_cast<std::size_t>(identifier.data() - aText.data());
+                    auto const source = source_of(identifier, aText, aPositions);
+                    for (auto const& function : functions)
+                        if (at >= function.first && at < function.last && 
+                            (std::find(function.parameters.begin(), function.parameters.end(), identifier) != function.parameters.end() ||
+                                (source && std::find(function.sources.begin(), function.sources.end(), *source) != function.sources.end())))
+                        {
+                            push(identifier, highlight_category::Parameter, aText, aPositions);
+                            break;
+                        }
                 }
             };
             // (the first stage (e.g. a tokenizer): its tokens and comments (even if the source does not parse as a whole))
@@ -603,10 +719,10 @@ namespace neos
                 if (single)
                 {
                     first.parser->create_ast();
-                    add(first.parser->ast(), script, nullptr);
+                    add(first.parser->ast(), first.parser->text(), nullptr);
                 }
                 else
-                    add(first.parser->cst(), script, nullptr);
+                    add(first.parser->cst(), first.parser->text(), nullptr);
             }
             // (the AST of the last stage (as the compiler parses the source, as the language's own pass over it rewrites it): spans of it 
             // replace those of the first stage)
@@ -624,7 +740,7 @@ namespace neos
                 {
                     auto const& last = *complete->pipeline().back();
                     last.parser->create_ast();
-                    add(last.parser->ast(), text, isRewritten ? &positions : nullptr);
+                    add(last.parser->ast(), last.parser->text(), isRewritten ? &positions : nullptr);
                 }
             }
         }
@@ -632,6 +748,48 @@ namespace neos
         {
             result.clear();
         }
+        return result;
+    }
+
+    std::vector<std::string> context::highlight_colours(std::string const& aSchemaPath, std::string const& aTheme)
+    {
+        // (highlighting.json: an object of themes, each an object of the categories' colours: "comment", "keyword", "string", "number", 
+        // "constant", "type", "function" and "parameter"; the installed configuration's (beside the schema), then the user's, which override 
+        // them: ~/.neos/highlighting.json (as vim's ~/.vim), or on Windows %LOCALAPPDATA%\neos\highlighting.json)
+        static char const* const sCategories[] = { "comment", "keyword", "string", "number", "constant", "type", "function", "parameter" };
+        static_assert(std::size(sCategories) == static_cast<std::size_t>(highlight_category::Parameter) + 1u);
+        std::vector<std::string> result(std::size(sCategories));
+        auto const apply = [&](std::filesystem::path const& aPath)
+        {
+            try
+            {
+                std::ifstream file{ aPath };
+                if (!file)
+                    return;
+                neolib::rjson configuration{ file };
+                auto const& themes = configuration.root().as<neolib::rjson_object>();
+                if (!themes.has(aTheme))
+                    return;
+                auto const& theme = themes.at(aTheme).as<neolib::rjson_object>();
+                for (std::size_t c = 0u; c < std::size(sCategories); ++c)
+                    if (theme.has(sCategories[c]))
+                        result[c] = std::string{ theme.at(sCategories[c]).as<neolib::rjson_string>() };
+            }
+            catch (...)
+            {
+                // (a configuration that cannot be read is not applied)
+            }
+        };
+        apply(std::filesystem::path{ aSchemaPath }.parent_path() / "highlighting.json");
+#if defined(_WIN32)
+        if (auto const localAppData = std::getenv("LOCALAPPDATA"); localAppData != nullptr && *localAppData != '\0')
+            apply(std::filesystem::path{ localAppData } / "neos" / "highlighting.json");
+#else
+        if (auto const home = std::getenv("HOME"); home != nullptr && *home != '\0')
+            apply(std::filesystem::path{ home } / ".neos" / "highlighting.json");
+#endif
+        if (std::all_of(result.begin(), result.end(), [](std::string const& aColour) { return aColour.empty(); }))
+            result.clear();
         return result;
     }
 }

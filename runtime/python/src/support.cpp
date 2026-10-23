@@ -426,7 +426,18 @@ namespace neos::python_runtime
             {
                 if (auto const globals = exec_globals_of(aFrame.program))
                     return (retain(globals), globals);
-                return fn_module_namespace(frame_module(aFrame).c_str(), nullptr);
+                auto const module = frame_module(aFrame);
+                // (an imported module's: its names (its __dict__))
+                if (module != "__main__")
+                    if (ref const modules{ imported_modules() }; modules && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
+                    {
+                        ref const key{ make_str(module) };
+                        auto const position = dict_find(builtin_value(modules.get()), key.get());
+                        if (position >= 0)
+                            return getattr(as<dict_object>(builtin_value(modules.get()))->items[static_cast<std::size_t>(position)].second, "__dict__");
+                        clear_error();
+                    }
+                return fn_module_namespace(module.c_str(), nullptr);
             }
 
             // (a frame's line: its line now, if it is running)
@@ -540,6 +551,40 @@ namespace neos::python_runtime
                         return (retain(self.frame), self.frame);
                     }
                     return error("AttributeError", std::string{ "'traceback' object has no attribute '" } + aName + "'");
+                };
+                // (tb_next can be set (Python/traceback.c's tb_next_set): a traceback or None, not one that leads back to it)
+                type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
+                {
+                    auto& self = as_traceback(aSelf);
+                    if (std::strcmp(aName, "tb_next") != 0)
+                    {
+                        if (std::strcmp(aName, "tb_lineno") == 0 || std::strcmp(aName, "tb_lasti") == 0 || std::strcmp(aName, "tb_frame") == 0)
+                            error("AttributeError", std::string{ "readonly attribute" });
+                        else
+                            error("AttributeError", std::string{ "'traceback' object has no attribute '" } + aName + "' and no __dict__ for setting new attributes");
+                        return -1;
+                    }
+                    if (aValue == nullptr)
+                    {
+                        error("TypeError", "can't delete tb_next attribute");
+                        return -1;
+                    }
+                    object* next = aValue == none() ? nullptr : aValue;
+                    if (next != nullptr && next->type != aSelf->type)
+                    {
+                        error("TypeError", std::string{ "expected traceback object or None, got '" } + type_name(aValue) + "'");
+                        return -1;
+                    }
+                    for (auto cursor = next; cursor != nullptr; cursor = as_traceback(cursor).next)
+                        if (cursor == aSelf)
+                        {
+                            error("ValueError", "traceback loop detected");
+                            return -1;
+                        }
+                    retain(next);
+                    release(self.next);
+                    self.next = next;
+                    return 0;
                 };
                 return type;
             }

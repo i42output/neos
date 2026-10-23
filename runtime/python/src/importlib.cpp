@@ -387,6 +387,57 @@ namespace neos::python_runtime::detail
             return result != nullptr;
         }
 
+        // (FileFinder (_bootstrap_external's): a finder of a directory's source modules and packages (its find_spec: their specs))
+        py make_file_finder()
+        {
+            py const ns = py_dict();
+            ns.set_item(S("__module__"), S("importlib.machinery"));
+            ns.set_item(S("__qualname__"), S("FileFinder"));
+            ns.set_item(S("__doc__"), S("File-based finder.\n\n    Interactions with the file system are cached for performance, being\n    refreshed when the directory the finder is handling has been modified.\n\n    "));
+            ns.set_item(S("__init__"), native("__init__", "importlib.machinery", "Initialize with the path to search on and a variable number of\n        2-tuples containing the loader and the file suffixes the loader\n        recognizes.", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+            {
+                py details;
+                auto const a = py_bind("FileFinder.__init__", { py_positional("self"), py_positional("path") }, aArgs, aKwargs, &details);
+                auto const& self = a[0];
+                self.set_attr("path", a[1].truthy() ? builtin("str")(a[1]) : S("."));
+                self.set_attr("_loaders", details);
+                return py::none();
+            }));
+            ns.set_item(S("__repr__"), native("__repr__", "importlib.machinery", "", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+            {
+                py_bind("FileFinder.__repr__", { py_positional("self") }, aArgs, aKwargs);
+                return S("FileFinder(" + aArgs[0].attr("path").repr() + ")");
+            }));
+            ns.set_item(S("invalidate_caches"), native("invalidate_caches", "importlib.machinery", "Invalidate the directory mtime.", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+            {
+                py_bind("FileFinder.invalidate_caches", { py_positional("self") }, aArgs, aKwargs);
+                return py::none();
+            }));
+            ns.set_item(S("find_spec"), native("find_spec", "importlib.machinery", "Try to find a spec for the specified module.\n\n        Returns the matching spec, or None if not found.\n        ", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+            {
+                auto const a = py_bind("FileFinder.find_spec", { py_positional("self"), py_positional("fullname"), py_positional("target", py::none()) }, aArgs, aKwargs);
+                auto const fullname = a[1].str();
+                auto const tail = fullname.substr(fullname.rfind('.') + 1u);
+                std::filesystem::path const directory{ a[0].attr("path").str() };
+                std::error_code ec;
+                if (auto const init = directory / tail / "__init__.py"; std::filesystem::is_regular_file(init, ec))
+                {
+                    py const spec = module_spec().call({ a[1], py::none() }, { { "origin", S(init.string()) }, { "is_package", boolean(true) } });
+                    spec.set_attr("submodule_search_locations", py_list({ S((directory / tail).string()) }));
+                    spec.set_attr("_set_fileattr", boolean(true));
+                    return spec;
+                }
+                if (auto const file = directory / (tail + ".py"); std::filesystem::is_regular_file(file, ec))
+                {
+                    py const spec = module_spec().call({ a[1], py::none() }, { { "origin", S(file.string()) } });
+                    spec.set_attr("_set_fileattr", boolean(true));
+                    return spec;
+                }
+                return py::none();
+            }));
+            return builtin("type")(S("FileFinder"), py_tuple({ builtin("object") }), ns);
+        }
+
         bool importlib_machinery_module(std::vector<std::pair<std::string, object*>>& aAttributes)
         {
             auto const result = py_guarded([&]()
@@ -394,6 +445,7 @@ namespace neos::python_runtime::detail
                 auto const add = [&](char const* aName, py const& aValue) { aAttributes.emplace_back(aName, aValue.reference()); };
                 add("__doc__", S("The machinery of importlib: finders, loaders, hooks, etc."));
                 add("ModuleSpec", module_spec());
+                add("FileFinder", make_file_finder());
                 add("SOURCE_SUFFIXES", py_list({ S(".py") }));
                 add("BYTECODE_SUFFIXES", py_list({ S(".pyc") }));
                 add("EXTENSION_SUFFIXES", py_list());

@@ -1,0 +1,22 @@
+{
+    "dark": {
+        "comment": "#57A64A",
+        "keyword": "#569CD6",
+        "string": "#D69D85",
+        "number": "#B5CEA8",
+        "constant": "#569CD6",
+        "type": "#4EC9B0",
+        "function": "#DCDCAA",
+        "parameter": "#9A9A9A"
+    },
+    "light": {
+        "comment": "#008000",
+        "keyword": "#0000FF",
+        "string": "#A31515",
+        "number": "#000000",
+        "constant": "#0000FF",
+        "type": "#2B91AF",
+        "function": "#74531F",
+        "parameter": "#808080"
+    }
+}

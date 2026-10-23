@@ -54,6 +54,7 @@ namespace neos::python_runtime::detail::quopri_module
     {
         using pyclass::S;
         using pyclass::I;
+        using pyclass::BigI;
         using pyclass::F;
         using pyclass::B;
         using pyclass::Mod;
@@ -84,6 +85,7 @@ namespace neos::python_runtime::detail::quopri_module
         using pyclass::yield_from;
         using pyclass::truth_of;
         using pyclass::module_of;
+        using pyclass::handled_exception;
         // (the module's objects (made once, and never destroyed: they outlive the program's objects))
         struct state
         {
@@ -136,6 +138,17 @@ namespace neos::python_runtime::detail::quopri_module
             if (modules_imported(aModule))
                 py{ fn_import(aModule) }.set_attr(aName, aValue);
         }
+        // (globals(): the module's namespace (its __dict__ once it has been imported; while it is being made, its attributes so far))
+        [[maybe_unused]] py module_globals()
+        {
+            if (modules_imported("quopri"))
+                return py{ fn_import("quopri") }.attr("__dict__");
+            py const d = py_dict();
+            d.set_item(py{ std::string{ "__name__" } }, py{ std::string{ "quopri" } });
+            for (auto const& a : the_state().attributes)
+                d.set_item(py{ a.first }, a.second);
+            return d;
+        }
         module_writer const& writer(char const* aModule)
         {
             static module_writer const sWriter{ "quopri", quopri_docs::doc };
@@ -154,8 +167,6 @@ namespace neos::python_runtime::detail::quopri_module
             define("quopri", "MAXLINESIZE", I<76>());
             define("quopri", "HEX", py{ make_bytes(std::string{ "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x41\x42\x43\x44\x45\x46", 16 }) });
             define("quopri", "EMPTYSTRING", py{ make_bytes(std::string{ "", 0 }) });
-            define("quopri", "a2b_qp", none());
-            define("quopri", "b2a_qp", none());
             define("quopri", "needsquoting", w.function("needsquoting", "needsquoting", { py_positional("c"), py_positional("quotetabs"), py_positional("header") }, [](arguments a) -> py
                 {
                     py c = a[0];
@@ -199,10 +210,10 @@ namespace neos::python_runtime::detail::quopri_module
                     py stripped;
                     py thisline;
                     py write;
-                    if (!(G<"quopri.b2a_qp">()).is_none())
+                    if (!(Mod<"binascii">().attr("b2a_qp")).is_none())
                     {
                         data = input.method("read");
-                        odata = (G<"quopri.b2a_qp">()).call({ data }, { { "quotetabs", quotetabs }, { "header", header } });
+                        odata = (Mod<"binascii">().attr("b2a_qp")).call({ data }, { { "quotetabs", quotetabs }, { "header", header } });
                         output.method("write", { odata });
                         return none();
                     }
@@ -288,9 +299,9 @@ namespace neos::python_runtime::detail::quopri_module
                     py BytesIO;
                     py infp;
                     py outfp;
-                    if (!(G<"quopri.b2a_qp">()).is_none())
+                    if (!(Mod<"binascii">().attr("b2a_qp")).is_none())
                     {
-                        return (G<"quopri.b2a_qp">()).call({ s }, { { "quotetabs", quotetabs }, { "header", header } });
+                        return (Mod<"binascii">().attr("b2a_qp")).call({ s }, { { "quotetabs", quotetabs }, { "header", header } });
                     }
                     BytesIO = M("io", "BytesIO");
                     infp = BytesIO(s);
@@ -312,10 +323,10 @@ namespace neos::python_runtime::detail::quopri_module
                     py new_;
                     py odata;
                     py partial;
-                    if (!(G<"quopri.a2b_qp">()).is_none())
+                    if (!(Mod<"binascii">().attr("a2b_qp")).is_none())
                     {
                         data = input.method("read");
-                        odata = (G<"quopri.a2b_qp">()).call({ data }, { { "header", header } });
+                        odata = (Mod<"binascii">().attr("a2b_qp")).call({ data }, { { "header", header } });
                         output.method("write", { odata });
                         return none();
                     }
@@ -393,9 +404,9 @@ namespace neos::python_runtime::detail::quopri_module
                     py BytesIO;
                     py infp;
                     py outfp;
-                    if (!(G<"quopri.a2b_qp">()).is_none())
+                    if (!(Mod<"binascii">().attr("a2b_qp")).is_none())
                     {
-                        return (G<"quopri.a2b_qp">()).call({ s }, { { "header", header } });
+                        return (Mod<"binascii">().attr("a2b_qp")).call({ s }, { { "header", header } });
                     }
                     BytesIO = M("io", "BytesIO");
                     infp = BytesIO(s);

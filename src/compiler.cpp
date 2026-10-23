@@ -775,15 +775,17 @@ namespace neos::language
         neolib::string const name{ aName };
         for (i_scope const* scope = &aScope;; scope = &scope->parent())
         {
-            auto const symbols = state().program->symbolTable.find(scope);
-            if (symbols != state().program->symbolTable.end())
+            // (the scope's symbols of the name (by its hash))
+            auto& table = state().program->symbolTable.as_std_map();
+            auto const symbols = table.find(scope);
+            if (symbols != table.end())
             {
                 i_symbol_table_entry* best = nullptr;
                 std::uint64_t bestSequence = 0u;
-                for (auto& symbol : symbols->second())
+                auto const range = symbols->second.second().as_std_map().equal_range(name);
+                for (auto entry = range.first; entry != range.second; ++entry)
                 {
-                    if (symbol.first() != name)
-                        continue;
+                    auto& symbol = entry->second;
                     auto const info = iSymbolInfo.find(&symbol.second());
                     if (info != iSymbolInfo.end() && info->second.retired)
                         continue;

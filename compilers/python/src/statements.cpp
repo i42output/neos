@@ -1487,8 +1487,9 @@ namespace neos::compilers::python
                     continue;
                 auto const begin = line.tokens[2u].begin;
                 auto const end = line.tokens.back().end;
-                edits.push_back({ end, end, ")" });
-                edits.push_back({ begin, begin, "__ns_bind('" + std::string{ target } + "', " });
+                // (the value parenthesized: a tuple's display without parentheses ("x = 1, 2") is one argument)
+                edits.push_back({ end, end, "))" });
+                edits.push_back({ begin, begin, "__ns_bind('" + std::string{ target } + "', (" });
             }
         }
         if (edits.empty())

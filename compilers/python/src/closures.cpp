@@ -126,7 +126,8 @@ namespace neos::compilers::python
         {
         public:
             using annotations_t = std::map<std::string, std::vector<std::pair<std::string, std::string>>>;
-            rewriter(std::string const& aText, annotations_t* aAnnotations = nullptr) : iText{ aText }, iLines{ tokenize(aText) }, iAnnotations{ aAnnotations }
+            rewriter(std::string const& aText, annotations_t* aAnnotations = nullptr, bool aStubReturnTypes = false) : 
+                iText{ aText }, iLines{ tokenize(aText) }, iAnnotations{ aAnnotations }, iStubReturnTypes{ aStubReturnTypes }
             {
                 // (from __future__ import annotations: annotations are their sources)
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
@@ -443,7 +444,7 @@ namespace neos::compilers::python
                         result.emplace_back(p.annotation->first - 1u, p.annotation->second);
                 // (a def whose body is "pass" (or "...") returns None: its return annotation is not its type (a stub's, e.g. an overload's or 
                 // a protocol's, "def f(x: int) -> int: ..."))
-                if (aFunction.returnAnnotation && (!grammar_annotation(aFunction.header, *aFunction.returnAnnotation) || body_is(aFunction, "pass")))
+                if (aFunction.returnAnnotation && (!grammar_annotation(aFunction.header, *aFunction.returnAnnotation) || (body_is(aFunction, "pass") && !iStubReturnTypes)))
                     result.emplace_back(aFunction.returnAnnotation->first - 1u, aFunction.returnAnnotation->second);
                 return result;
             }
@@ -1900,6 +1901,7 @@ namespace neos::compilers::python
             annotations_t* iAnnotations = nullptr;
             bool iAnnotating = false;
             bool iStringAnnotations = false;    ///< (from __future__ import annotations)
+            bool iStubReturnTypes = false;      ///< (a stub's return annotation that is the grammar's type is kept (e.g. for a syntax highlighter))
             std::set<std::string> iRebound;     ///< (the names that the module's statements (not its defs) bind or delete)           ///< (an annotations dict is being rendered: its tokens are not removed)
             std::map<std::size_t, std::vector<std::pair<std::size_t, std::size_t>>> iStripped;  ///< (by line: tokens of annotations removed)
             std::vector<std::pair<std::pair<std::size_t, std::size_t>, std::string>> iClosers; ///< (yield expressions' closing brackets: before a line's token)
@@ -1907,9 +1909,9 @@ namespace neos::compilers::python
     }
 
     std::string rewrite_nested_functions(std::string const& aText, bool& aChanged, std::map<std::string, std::vector<std::pair<std::string, std::string>>>* aAnnotations,
-        std::vector<std::size_t>* aLines)
+        std::vector<std::size_t>* aLines, bool aStubReturnTypes)
     {
-        rewriter r{ aText, aAnnotations };
+        rewriter r{ aText, aAnnotations, aStubReturnTypes };
         return r.rewrite(aChanged, aLines);
     }
 

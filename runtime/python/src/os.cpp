@@ -796,8 +796,36 @@ namespace neos::python_runtime
                         std::string p;
                         if (!path_argument(a[0], p, "realpath", "filename"))
                             return nullptr;
+                        // (strict: the path must exist (OSError); os.path.ALLOW_MISSING: its missing parts are kept, but other errors raise)
+                        bool allowMissing = false;
+                        bool strict = false;
+                        if (a[1] != nullptr)
+                        {
+                            ref const generic{ fn_import("genericpath") };
+                            ref const allow{ generic ? getattr(generic.get(), "ALLOW_MISSING") : nullptr };
+                            if (!allow)
+                                return nullptr;
+                            allowMissing = a[1] == allow.get();
+                            if (!allowMissing)
+                            {
+                                auto const t = truth(a[1]);
+                                if (t < 0)
+                                    return nullptr;
+                                strict = t == 1;
+                            }
+                        }
                         std::error_code ec;
-                        auto const resolved = std::filesystem::weakly_canonical(std::filesystem::path{ abspath(r, p) }, ec);
+                        auto const absolute = std::filesystem::path{ abspath(r, p) };
+                        if (strict)
+                        {
+                            auto const resolved = std::filesystem::canonical(absolute, ec);
+                            if (ec)
+                                return raise_os_error(ec.value(), a[0]);
+                            return path_result(aArgs, normpath(r, resolved.string()));
+                        }
+                        auto const resolved = std::filesystem::weakly_canonical(absolute, ec);
+                        if (ec && allowMissing && ec != std::errc::no_such_file_or_directory)
+                            return raise_os_error(ec.value(), a[0]);
                         return path_result(aArgs, ec ? abspath(r, p) : normpath(r, resolved.string()));
                     } },
                 { "relpath", [](path_rules const& r, std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -1170,7 +1198,19 @@ namespace neos::python_runtime
                 return true;
             }
 
-            bool posixpath_module(std::vector<std::pair<std::string, object*>>& aAttributes) { return path_module(aAttributes, sPosix); }
+            // (posixpath's and ntpath's: genericpath's ALLOW_MISSING)
+            bool allow_missing(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                ref const generic{ fn_import("genericpath") };
+                if (!generic)
+                    return false;
+                auto const value = getattr(generic.get(), "ALLOW_MISSING");
+                if (value == nullptr)
+                    return false;
+                aAttributes.emplace_back("ALLOW_MISSING", value);
+                return true;
+            }
+            bool posixpath_module(std::vector<std::pair<std::string, object*>>& aAttributes) { return path_module(aAttributes, sPosix) && allow_missing(aAttributes); }
 
             // (genericpath: the functions that posixpath and ntpath share)
             bool genericpath_module(std::vector<std::pair<std::string, object*>>& aAttributes)
@@ -1198,7 +1238,7 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("ALLOW_MISSING", invoke(cls.get(), {}));
                 return true;
             }
-            bool ntpath_module(std::vector<std::pair<std::string, object*>>& aAttributes) { return path_module(aAttributes, sWindows); }
+            bool ntpath_module(std::vector<std::pair<std::string, object*>>& aAttributes) { return path_module(aAttributes, sWindows) && allow_missing(aAttributes); }
 
 #if defined(_WIN32)
             path_rules const& sPlatform = sWindows;
@@ -2298,6 +2338,34 @@ namespace neos::python_runtime
 #endif
                         return make_tuple({ make_int(fds[0]), make_int(fds[1]) });
                     } },
+#if !defined(_WIN32)
+                // (Modules/posixmodule.c's os_openpty_impl: by posix_openpt, grantpt, unlockpt and ptsname; both ends not inheritable)
+                { "openpty", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!no_keywords(aKwargs, "openpty") || !aArgs.empty())
+                            return error("TypeError", "openpty() takes no arguments");
+                        int const master = ::posix_openpt(O_RDWR | O_NOCTTY);
+                        if (master < 0)
+                            return raise_os_error(errno);
+                        char const* name = nullptr;
+                        if (::grantpt(master) != 0 || ::unlockpt(master) != 0 || (name = ::ptsname(master)) == nullptr)
+                        {
+                            int const e = errno;
+                            ::close(master);
+                            return raise_os_error(e);
+                        }
+                        int const slave = ::open(name, O_RDWR | O_NOCTTY);
+                        if (slave < 0)
+                        {
+                            int const e = errno;
+                            ::close(master);
+                            return raise_os_error(e);
+                        }
+                        ::fcntl(master, F_SETFD, FD_CLOEXEC);
+                        ::fcntl(slave, F_SETFD, FD_CLOEXEC);
+                        return make_tuple({ make_int(master), make_int(slave) });
+                    } },
+#endif
                 { "fsync", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;

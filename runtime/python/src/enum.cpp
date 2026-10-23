@@ -2563,6 +2563,56 @@ namespace neos::python_runtime
             }
 
             // (verify(*checks): a decorator)
+            // (_simple_enum(etype=Enum, *, boundary=None, use_args=None): a decorator that makes a plain class (its body's names) an 
+            // enumeration of etype (made, as a class statement's is, by etype's metaclass from the namespace it prepares))
+            builtin_entry const sSimpleEnumMethods[] =
+            {
+                { "__init__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::vector<object*> const args(aArgs.begin() + 1, aArgs.end());
+                        if (!parse_arguments("_simple_enum", args, aKwargs, { "etype", "boundary", "use_args" }, 0u, 0u, a))
+                            return nullptr;
+                        if (setattr(aArgs[0], "etype", a[0] != nullptr ? a[0] : s.enumClass) < 0 ||
+                            setattr(aArgs[0], "boundary", a[1] != nullptr ? a[1] : none()) < 0)
+                            return nullptr;
+                        return new_reference(none());
+                    } },
+                { "__call__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 2u)
+                            return raise("TypeError", "_simple_enum() expected a class");
+                        auto const cls = aArgs[1];
+                        ref const etype{ attribute(aArgs[0], "etype") };
+                        ref const boundary{ attribute(aArgs[0], "boundary") };
+                        ref const name{ attribute(cls, "__name__") };
+                        ref const body{ attribute(cls, "__dict__") };
+                        if (!etype || !boundary || !name || !body)
+                            return nullptr;
+                        ref const metaclass{ class_of(etype.get()) };
+                        ref const bases{ make_tuple({ new_reference(etype.get()) }) };
+                        ref const prepare{ attribute(metaclass.get(), "__prepare__") };
+                        ref const ns{ prepare ? invoke(prepare.get(), { new_reference(name.get()), new_reference(bases.get()) }) : nullptr };
+                        ref const items{ ns ? call_method_named(body.get(), "items", {}) : nullptr };
+                        ref const it{ items ? iter(items.get()) : nullptr };
+                        if (!it)
+                            return nullptr;
+                        while (ref const item{ next(it.get()) })
+                        {
+                            auto const& pair = as<tuple_object>(item.get())->items;
+                            auto const key = text_of(pair[0]);
+                            if (key == "__dict__" || key == "__weakref__")
+                                continue;
+                            if (!ref{ call_method_named(ns.get(), "__setitem__", { new_reference(pair[0]), new_reference(pair[1]) }) })
+                                return nullptr;
+                        }
+                        if (failed())
+                            return nullptr;
+                        ref const kw{ keywords({ { "boundary", boundary.get() == none() ? nullptr : boundary.get() } }) };
+                        return call(metaclass.get(), ref{ make_tuple({ new_reference(name.get()), new_reference(bases.get()), new_reference(ns.get()) }) }.get(), kw.get());
+                    } }
+            };
+
             builtin_entry const sVerifyMethods[] =
             {
                 { "__init__", [](std::vector<object*> const& aArgs, object*) -> object*
@@ -3036,6 +3086,10 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("nonmember", new_reference(s.nonmemberClass));
                 aAttributes.emplace_back("property", new_reference(s.propertyClass));
                 aAttributes.emplace_back("verify", new_reference(verify.get()));
+                ref const simpleEnum{ make_class_of("enum", "_simple_enum", {}, sSimpleEnumMethods) };
+                if (!simpleEnum)
+                    return false;
+                aAttributes.emplace_back("_simple_enum", new_reference(simpleEnum.get()));
                 aAttributes.emplace_back("_not_given", new_reference(s.notGiven));
                 aAttributes.emplace_back("_auto_null", new_reference(s.autoNull));
                 for (auto const& f : sEnumFunctions)

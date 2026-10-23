@@ -49,6 +49,7 @@
 #include <vector>
 #include "sockets.hpp"
 #include <io.h>
+#include <conio.h>
 #include <fcntl.h>
 #include "objects.hpp"
 #include "values.hpp"
@@ -412,6 +413,80 @@ namespace neos::python_runtime::detail
                         throw raised{};
                     }
                     return py{ static_cast<long long>(h) };
+                }, "msvcrt"));
+                // (the console's keys: kbhit, getch, getwch, getche, getwche, putch and putwch (PC/msvcrtmodule.c's))
+                add("kbhit", native("kbhit", "Returns a nonzero value if a keypress is waiting to be read. Otherwise, return 0.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py_bind("kbhit", {}, aArgs, aKwargs);
+                    return py{ static_cast<long long>(::_kbhit()) };
+                }, "msvcrt"));
+                add("getch", native("getch", "Read a keypress and return the resulting character as a byte string.\n\nNothing is echoed to the console. This call will block if a keypress is\nnot already available, but will not wait for Enter to be pressed. If the\npressed key was a special function key, this will return '\\000' or\n'\\xe0'; the next call will return the keycode. The Control-C keypress\ncannot be read with this function.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py_bind("getch", {}, aArgs, aKwargs);
+                    gil_release();
+                    int const c = ::_getch();
+                    gil_acquire();
+                    return py{ make_bytes(std::string(1u, static_cast<char>(c))) };
+                }, "msvcrt"));
+                add("getwch", native("getwch", "Wide char variant of getch(), returning a Unicode value.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py_bind("getwch", {}, aArgs, aKwargs);
+                    gil_release();
+                    wint_t const c = ::_getwch();
+                    gil_acquire();
+                    return builtin("chr")(py{ static_cast<long long>(c) });
+                }, "msvcrt"));
+                add("getche", native("getche", "Similar to getch(), but the keypress will be echoed if possible.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py_bind("getche", {}, aArgs, aKwargs);
+                    gil_release();
+                    int const c = ::_getche();
+                    gil_acquire();
+                    return py{ make_bytes(std::string(1u, static_cast<char>(c))) };
+                }, "msvcrt"));
+                add("getwche", native("getwche", "Wide char variant of getche(), returning a Unicode value.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py_bind("getwche", {}, aArgs, aKwargs);
+                    gil_release();
+                    wint_t const c = ::_getwche();
+                    gil_acquire();
+                    return builtin("chr")(py{ static_cast<long long>(c) });
+                }, "msvcrt"));
+                add("putch", native("putch", "Print the byte string char to the console without buffering.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("putch", { py_positional_only("char") }, aArgs, aKwargs);
+                    std::string_view b;
+                    if (!isinstance(a[0], builtin("bytes")) || !bytes_like(a[0].get(), b) || b.size() != 1u)
+                        py_raise("TypeError", "putch() argument must be a byte string of length 1");
+                    ::_putch(static_cast<unsigned char>(b[0]));
+                    return py::none();
+                }, "msvcrt"));
+                add("putwch", native("putwch", "Wide char variant of putch(), accepting a Unicode value.",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("putwch", { py_positional_only("unicode_char") }, aArgs, aKwargs);
+                    long long length = 0;
+                    if (!isinstance(a[0], builtin("str")) || !to_signed(builtin("len")(a[0]), length) || length != 1)
+                        py_raise("TypeError", "putwch() argument must be a unicode character");
+                    long long ordinal = 0;
+                    if (!to_signed(builtin("ord")(a[0]), ordinal))
+                        throw raised{};
+                    auto const code = static_cast<std::uint32_t>(ordinal);
+                    // (a character beyond the BMP: its UTF-16 surrogates)
+                    if (code > 0xFFFFu)
+                    {
+                        ::_putwch(static_cast<wchar_t>(0xD800u + ((code - 0x10000u) >> 10u)));
+                        ::_putwch(static_cast<wchar_t>(0xDC00u + ((code - 0x10000u) & 0x3FFu)));
+                    }
+                    else
+                        ::_putwch(static_cast<wchar_t>(code));
+                    return py::none();
                 }, "msvcrt"));
                 for (auto const& c : { std::pair<char const*, long long>{ "LK_UNLCK", 0 }, { "LK_LOCK", 1 }, { "LK_NBLCK", 2 }, { "LK_RLCK", 3 }, { "LK_NBRLCK", 4 } })
                     add(c.first, py{ c.second });

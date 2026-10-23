@@ -299,6 +299,14 @@ namespace neos::python_runtime::detail::pyclass
         handler_scope(handler_scope const&) = delete;
         handler_scope& operator=(handler_scope const&) = delete;
     };
+    // (the exception being handled (sys.exception()): a bare raise's outside an except clause; RuntimeError if there is none)
+    inline py handled_exception()
+    {
+        py const current = py{ fn_import("sys") }.method("exception", {});
+        if (current.is_none())
+            py_raise(builtin("RuntimeError")(py{ std::string{ "No active exception to reraise" } }));
+        return current;
+    }
     // (except aClass: whether the exception matches it (a class or a tuple of classes))
     inline bool matches(py const& aException, py const& aClass) { return fn_exception_matches(aException.get(), aClass.get()); }
 

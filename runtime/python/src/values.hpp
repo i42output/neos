@@ -240,7 +240,28 @@ namespace neos::python_runtime
         inline bool operator!=(py const& a, py const& b) { return py_compare(NEOS_PY_NE, a, b).truthy(); }
 
         inline py builtin(char const* aName) { return py{ fn_builtin(aName) }; }
-        inline py import_attribute(char const* aModule, char const* aName) { return py{ module_attribute(aModule, aName) }; }
+        // (from module import name: the module's attribute; a package's submodule (imported) if it has no such attribute)
+        inline py import_attribute(char const* aModule, char const* aName)
+        {
+            object* value = module_attribute(aModule, aName);
+            if (value == nullptr)
+            {
+                ref const e{ take_exception() };
+                if (exception_is(e.get(), "AttributeError"))
+                {
+                    std::string const submodule = std::string{ aModule } + "." + aName;
+                    value = fn_import(submodule.c_str());
+                    if (value == nullptr)
+                        clear_error();
+                }
+                if (value == nullptr)
+                {
+                    fn_raise(e.get());
+                    throw raised{};
+                }
+            }
+            return py{ value };
+        }
         inline py py_list(std::vector<py> const& aItems = {})
         {
             std::vector<object*> items;

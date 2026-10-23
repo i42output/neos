@@ -42,3 +42,15 @@ try:
     re.sub('(a)', r'\2', 'a')
 except re.error as e:
     print('error', e)
+
+# Empty iterations (sre's semantics: an empty iteration is the repetition's last, its captures kept), possessive repetitions
+# (each iteration's first match), quantified assertions
+for pattern, text in [(r'($)?', 'ab'), (r'(a|)*b', 'aab'), (r'((x)|)+?y', 'xxy'), (r'(( )??)++', ' '), (r'(a+)*+a', 'aaa'),
+                      (r'(?:(a)|b)*+', 'abba'), (r'(a?)++', 'aa'), (r'((?=b))*+b', 'b')]:
+    print(pattern, [(m.span(), m.groups()) for m in re.finditer(pattern, text)])
+for pattern in (r'a^*', r'x\b{2}', r'$?', r'\A+', r'(?=a)*'):
+    try:
+        re.compile(pattern)
+        print(pattern, 'compiles')
+    except re.error as e:
+        print(pattern, e)

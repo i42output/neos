@@ -80,6 +80,9 @@ namespace neos::python_runtime
                 bool negative = false;
                 std::size_t width = 0u;             ///< (Look behind: its width)
                 int flags = 0;                      ///< (the flags in effect)
+                std::uint64_t ascii[2] = { 0u, 0u };    ///< (Literal, Any and Set: the ASCII characters it matches (made once it is parsed))
+                std::uint64_t first[2] = { 0u, 0u };    ///< (the ASCII characters that a match of it can begin with (if it is not nullable))
+                bool nullable = true;               ///< (it can match without consuming a character (then first is not a test))
             };
 
             struct program
@@ -88,6 +91,8 @@ namespace neos::python_runtime
                 std::size_t groups = 0u;
                 std::vector<std::pair<std::string, int>> names;     ///< (in order of definition)
                 int flags = 0;
+                bool bytes = false;     ///< (a bytes pattern: its text's code points are its bytes; its classes are ASCII's)
+                bool implicitAscii = false;     ///< (ASCII as a bytes pattern's (not one of its flags))
             };
 
             // --- errors
@@ -171,6 +176,7 @@ namespace neos::python_runtime
                     }
                     result->flags = iFlags;
                     result->groups = iGroups;
+                    tabulate(*result->root);
                     return result;
                 }
                 int flags() const { return iFlags; }
@@ -192,6 +198,67 @@ namespace neos::python_runtime
                                 ++iPosition;
                             continue;
                         }
+                        break;
+                    }
+                }
+                // (the single characters' nodes: the ASCII characters each matches, as a table (its test, then, one bit's))
+                static void tabulate(node& n)
+                {
+                    if (n.kind == node::Literal || n.kind == node::Any || n.kind == node::Set)
+                        for (char32_t c = 0u; c < 0x80u; ++c)
+                        {
+                            bool matches = false;
+                            if (n.kind == node::Literal)
+                                matches = (n.flags & FlagIgnoreCase) != 0 ? fold(c, n.flags) == fold(n.character, n.flags) : c == n.character;
+                            else if (n.kind == node::Any)
+                                matches = (n.flags & FlagDotAll) != 0 || c != U'\n';
+                            else
+                                matches = set_contains(n.set, c, n.flags);
+                            if (matches)
+                                n.ascii[c >> 6u] |= std::uint64_t{ 1u } << (c & 63u);
+                        }
+                    for (auto& child : n.children)
+                        tabulate(*child);
+                    // (what a match can begin with: a test that rules out the node at a position before it is tried)
+                    auto const add = [&](node const& c) { n.first[0] |= c.first[0]; n.first[1] |= c.first[1]; };
+                    switch (n.kind)
+                    {
+                    case node::Literal: case node::Any: case node::Set:
+                        n.first[0] = n.ascii[0];
+                        n.first[1] = n.ascii[1];
+                        n.nullable = false;
+                        break;
+                    case node::Group: case node::Atomic:
+                        add(*n.children[0]);
+                        n.nullable = n.children[0]->nullable;
+                        break;
+                    case node::Repeat:
+                        add(*n.children[0]);
+                        n.nullable = n.minimum == 0u || n.children[0]->nullable;
+                        break;
+                    case node::Sequence:
+                        n.nullable = true;
+                        for (auto const& c : n.children)
+                        {
+                            add(*c);
+                            if (!c->nullable)
+                            {
+                                n.nullable = false;
+                                break;
+                            }
+                        }
+                        break;
+                    case node::Alternation:
+                        n.nullable = n.children.empty();
+                        for (auto const& c : n.children)
+                        {
+                            add(*c);
+                            n.nullable = n.nullable || c->nullable;
+                        }
+                        break;
+                    default:
+                        // (zero width assertions, backreferences, conditionals: no test)
+                        n.nullable = true;
                         break;
                     }
                 }
@@ -271,9 +338,11 @@ namespace neos::python_runtime
                     std::size_t min = 0u, max = 0u, length = 0u;
                     if (!quantifier_at(min, max, length))
                         return aItem;
+                    // (an assertion of a position (sre's AT codes; not a lookaround): nothing to repeat)
+                    (void)aStart;
                     if (aItem->kind == node::Bol || aItem->kind == node::Eol || aItem->kind == node::StringStart || aItem->kind == node::StringEnd ||
-                        aItem->kind == node::Boundary || aItem->kind == node::NonBoundary || (aItem->kind == node::Look))
-                        (void)aStart;
+                        aItem->kind == node::Boundary || aItem->kind == node::NonBoundary)
+                        throw pattern_error{ "nothing to repeat", iPosition };
                     iPosition += length;
                     auto rep = make(node::Repeat, aFlags);
                     rep->minimum = min;
@@ -794,6 +863,12 @@ namespace neos::python_runtime
                 return continuation{ [](void const* aContext, std::size_t aPosition) { return (*static_cast<F const*>(aContext))(aPosition); }, &aFunction };
             }
 
+#ifdef _MSC_VER
+#define RE_NOINLINE __declspec(noinline)
+#else
+#define RE_NOINLINE __attribute__((noinline))
+#endif
+            // (the matcher's rarer nodes (lookarounds, atomic groups, ...) are its functions out of line: match's frame stays small)
             struct matcher
             {
                 std::u32string const& text;
@@ -807,6 +882,8 @@ namespace neos::python_runtime
                     if (aPosition >= end)
                         return false;
                     auto const c = text[aPosition];
+                    if (c < 0x80u)
+                        return ((n.ascii[c >> 6u] >> (c & 63u)) & 1u) != 0u;
                     switch (n.kind)
                     {
                     case node::Literal:
@@ -824,6 +901,18 @@ namespace neos::python_runtime
 
                 bool sequence(node const& n, std::size_t aIndex, std::size_t aPosition, continuation const& k)
                 {
+                    // (its single characters: tested in turn (they do not backtrack))
+                    while (aIndex < n.children.size())
+                    {
+                        auto const kind = n.children[aIndex]->kind;
+                        if (kind != node::Literal && kind != node::Any && kind != node::Set)
+                            break;
+                        ++steps;
+                        if (!single(*n.children[aIndex], aPosition))
+                            return false;
+                        ++aIndex;
+                        ++aPosition;
+                    }
                     if (aIndex == n.children.size())
                         return k(aPosition);
                     auto const next = [&](std::size_t p) { return sequence(n, aIndex + 1u, p, k); };
@@ -835,9 +924,10 @@ namespace neos::python_runtime
                     auto const& child = *n.children[0];
                     auto const more = [&](std::size_t p)
                     {
-                        // (an empty iteration once the minimum is met ends the repetition)
-                        if (p == aPosition && aCount >= n.minimum)
-                            return false;
+                        // (an empty iteration once the minimum is met: the repetition's last (as sre's MAX_UNTIL and MIN_UNTIL: 
+                        // its captures kept, then what follows))
+                        if (p == aPosition && aCount + 1u >= n.minimum)
+                            return k(p);
                         return repeat(n, aCount + 1u, p, k);
                     };
                     if (n.mode == 1)
@@ -851,9 +941,123 @@ namespace neos::python_runtime
                     return aCount >= n.minimum && k(aPosition);
                 }
 
+                RE_NOINLINE bool possessive(node const& n, std::size_t aPosition, continuation const& k)
+                {
+                    // (possessive (as sre's POSSESSIVE_REPEAT): each iteration its child's first match (not backtracked into); the 
+                    // minimum's, then more until one fails or is empty)
+                    auto const& child = *n.children[0];
+                    auto const saved = marks;
+                    auto const savedLast = lastindex;
+                    std::size_t found = 0u;
+                    auto const take = [&](std::size_t p) { found = p; return true; };
+                    auto position = aPosition;
+                    std::size_t count = 0u;
+                    for (; count < n.minimum; ++count)
+                    {
+                        if (!match(child, position, make_continuation(take)))
+                        {
+                            marks = saved;
+                            lastindex = savedLast;
+                            return false;
+                        }
+                        position = found;
+                    }
+                    std::optional<std::size_t> last;
+                    while (count < n.maximum && (!last || position != *last))
+                    {
+                        last = position;
+                        if (!match(child, position, make_continuation(take)))
+                            break;
+                        position = found;
+                        ++count;
+                    }
+                    if (k(position))
+                        return true;
+                    marks = saved;
+                    lastindex = savedLast;
+                    return false;
+                }
+                RE_NOINLINE bool backref(node const& n, std::size_t aPosition, continuation const& k)
+                {
+                    auto const g = static_cast<std::size_t>(n.group);
+                    if (marks[2u * g] < 0 || marks[2u * g + 1u] < 0)
+                        return false;
+                    auto const start = static_cast<std::size_t>(marks[2u * g]);
+                    auto const length = static_cast<std::size_t>(marks[2u * g + 1u]) - start;
+                    if (aPosition + length > end)
+                        return false;
+                    for (std::size_t i = 0u; i < length; ++i)
+                    {
+                        auto const a = text[start + i];
+                        auto const b = text[aPosition + i];
+                        if ((n.flags & FlagIgnoreCase) != 0 ? fold(a, n.flags) != fold(b, n.flags) : a != b)
+                            return false;
+                    }
+                    return k(aPosition + length);
+                }
+                RE_NOINLINE bool look(node const& n, std::size_t aPosition, continuation const& k)
+                {
+                    auto const saved = marks;
+                    auto const savedLast = lastindex;
+                    bool found = false;
+                    if (n.behind)
+                    {
+                        if (aPosition >= n.width)
+                        {
+                            auto const target = aPosition;
+                            auto const check = [&](std::size_t p) { return p == target; };
+                            found = match(*n.children[0], aPosition - n.width, make_continuation(check));
+                        }
+                    }
+                    else
+                    {
+                        auto const accept = [](std::size_t) { return true; };
+                        found = match(*n.children[0], aPosition, make_continuation(accept));
+                    }
+                    if (found == n.negative)
+                    {
+                        marks = saved;
+                        lastindex = savedLast;
+                        return false;
+                    }
+                    if (n.negative)
+                    {
+                        marks = saved;
+                        lastindex = savedLast;
+                    }
+                    if (k(aPosition))
+                        return true;
+                    marks = saved;
+                    lastindex = savedLast;
+                    return false;
+                }
+                RE_NOINLINE bool atomic(node const& n, std::size_t aPosition, continuation const& k)
+                {
+                    auto const saved = marks;
+                    auto const savedLast = lastindex;
+                    std::size_t found = 0u;
+                    auto const take = [&](std::size_t p) { found = p; return true; };
+                    if (!match(*n.children[0], aPosition, make_continuation(take)))
+                        return false;
+                    if (k(found))
+                        return true;
+                    marks = saved;
+                    lastindex = savedLast;
+                    return false;
+                }
+
                 bool match(node const& n, std::size_t aPosition, continuation const& k)
                 {
                     ++steps;
+                    // (a node that must begin with a character it cannot begin with here: no match)
+                    if (!n.nullable)
+                    {
+                        if (aPosition >= end)
+                            return false;
+                        auto const c = text[aPosition];
+                        if (c < 0x80u && ((n.first[c >> 6u] >> (c & 63u)) & 1u) == 0u)
+                            return false;
+                    }
                     switch (n.kind)
                     {
                     case node::Literal: case node::Any: case node::Set:
@@ -929,102 +1133,15 @@ namespace neos::python_runtime
                                 return false;
                             }
                             if (n.mode == 2)
-                            {
-                                // (possessive: the greedy match, without backtracking into it)
-                                std::size_t found = 0u;
-                                bool matched = false;
-                                node greedy;
-                                auto const take = [&](std::size_t p) { found = p; matched = true; return true; };
-                                auto const saved = marks;
-                                auto const savedLast = lastindex;
-                                struct greedy_view { node const* n; };
-                                // (a greedy repeat of the same child)
-                                auto const greedyRepeat = [&](auto&& self, std::size_t aCount, std::size_t aPos) -> bool
-                                {
-                                    auto const more = [&](std::size_t p) { return !(p == aPos && aCount >= n.minimum) && self(self, aCount + 1u, p); };
-                                    if (aCount < n.maximum && match(child, aPos, make_continuation(more)))
-                                        return true;
-                                    return aCount >= n.minimum && take(aPos);
-                                };
-                                greedyRepeat(greedyRepeat, 0u, aPosition);
-                                if (!matched)
-                                    return false;
-                                if (k(found))
-                                    return true;
-                                marks = saved;
-                                lastindex = savedLast;
-                                return false;
-                            }
+                                return possessive(n, aPosition, k);
                             return repeat(n, 0u, aPosition, k);
                         }
                     case node::Backref:
-                        {
-                            auto const g = static_cast<std::size_t>(n.group);
-                            if (marks[2u * g] < 0 || marks[2u * g + 1u] < 0)
-                                return false;
-                            auto const start = static_cast<std::size_t>(marks[2u * g]);
-                            auto const length = static_cast<std::size_t>(marks[2u * g + 1u]) - start;
-                            if (aPosition + length > end)
-                                return false;
-                            for (std::size_t i = 0u; i < length; ++i)
-                            {
-                                auto const a = text[start + i];
-                                auto const b = text[aPosition + i];
-                                if ((n.flags & FlagIgnoreCase) != 0 ? fold(a, n.flags) != fold(b, n.flags) : a != b)
-                                    return false;
-                            }
-                            return k(aPosition + length);
-                        }
+                        return backref(n, aPosition, k);
                     case node::Look:
-                        {
-                            auto const saved = marks;
-                            auto const savedLast = lastindex;
-                            bool found = false;
-                            if (n.behind)
-                            {
-                                if (aPosition >= n.width)
-                                {
-                                    auto const target = aPosition;
-                                    auto const check = [&](std::size_t p) { return p == target; };
-                                    found = match(*n.children[0], aPosition - n.width, make_continuation(check));
-                                }
-                            }
-                            else
-                            {
-                                auto const accept = [](std::size_t) { return true; };
-                                found = match(*n.children[0], aPosition, make_continuation(accept));
-                            }
-                            if (found == n.negative)
-                            {
-                                marks = saved;
-                                lastindex = savedLast;
-                                return false;
-                            }
-                            if (n.negative)
-                            {
-                                marks = saved;
-                                lastindex = savedLast;
-                            }
-                            if (k(aPosition))
-                                return true;
-                            marks = saved;
-                            lastindex = savedLast;
-                            return false;
-                        }
+                        return look(n, aPosition, k);
                     case node::Atomic:
-                        {
-                            auto const saved = marks;
-                            auto const savedLast = lastindex;
-                            std::size_t found = 0u;
-                            auto const take = [&](std::size_t p) { found = p; return true; };
-                            if (!match(*n.children[0], aPosition, make_continuation(take)))
-                                return false;
-                            if (k(found))
-                                return true;
-                            marks = saved;
-                            lastindex = savedLast;
-                            return false;
-                        }
+                        return atomic(n, aPosition, k);
                     case node::Conditional:
                         {
                             auto const g = static_cast<std::size_t>(n.group);
@@ -1097,6 +1214,31 @@ namespace neos::python_runtime
 
             object* borrowed(object* aObject) { retain(aObject); return aObject; }
 
+            // (a bytes pattern's text (and its subjects', templates' and results'): their bytes as code points (0-255))
+            std::u32string bytes_code_points(std::string_view aBytes)
+            {
+                std::u32string result;
+                result.reserve(aBytes.size());
+                for (char c : aBytes)
+                    result.push_back(static_cast<char32_t>(static_cast<unsigned char>(c)));
+                return result;
+            }
+            // (a piece of a subject: str, or (a bytes pattern's) bytes)
+            void append_piece(std::string& aResult, std::u32string_view aText, bool aBytes)
+            {
+                if (aBytes)
+                    for (auto c : aText)
+                        aResult += static_cast<char>(c);
+                else
+                    aResult += from_code_points(aText);
+            }
+            object* make_piece(std::u32string_view aText, bool aBytes)
+            {
+                std::string result;
+                append_piece(result, aText, aBytes);
+                return aBytes ? make_bytes(result) : make_str(result);
+            }
+
             object* raise_pattern_error(pattern_error const& e, object* aPattern)
             {
                 // (re.error(msg, pattern, pos): its str is "msg at position pos")
@@ -1119,31 +1261,39 @@ namespace neos::python_runtime
                         return error("ValueError", "cannot process flags argument with a compiled pattern");
                     return borrowed(aPattern);
                 }
-                std::string_view bytes;
-                if (bytes_like(aPattern, bytes))
-                    return error("TypeError", "bytes patterns are not supported");
-                if (kind_of(aPattern) != NEOS_PY_STR && kind_of(builtin_value(aPattern)) == NEOS_PY_STR)
+                // (a bytes pattern (bytes-like): its bytes)
+                std::string_view bytesPattern;
+                bool const isBytes = kind_of(aPattern) != NEOS_PY_STR && kind_of(builtin_value(aPattern)) != NEOS_PY_STR && bytes_like(aPattern, bytesPattern);
+                if (!isBytes && kind_of(aPattern) != NEOS_PY_STR && kind_of(builtin_value(aPattern)) == NEOS_PY_STR)
                     aPattern = builtin_value(aPattern);     // (an instance of a subclass of str: its value)
-                if (kind_of(aPattern) != NEOS_PY_STR)
+                if (!isBytes && kind_of(aPattern) != NEOS_PY_STR)
                     return error("TypeError", "first argument must be string or compiled pattern");
-                // (a cache of the compiled patterns)
-                static std::map<std::pair<std::string, int>, object*> sCache;
-                auto const key = std::make_pair(as<str_object>(aPattern)->value, aFlags);
+                // (a cache of the compiled patterns (a bytes pattern's: by its bytes, apart from str patterns'))
+                static std::map<std::tuple<std::string, int, bool>, object*> sCache;
+                auto const key = std::make_tuple(isBytes ? std::string{ bytesPattern } : as<str_object>(aPattern)->value, aFlags, isBytes);
                 if (auto const cached = sCache.find(key); cached != sCache.end())
                     return borrowed(cached->second);
                 if ((aFlags & FlagAscii) != 0 && (aFlags & FlagUnicode) != 0)
                     return error("ValueError", "ASCII and UNICODE flags are incompatible");
-                auto const text = to_code_points(as<str_object>(aPattern)->value);
+                if (isBytes && (aFlags & FlagUnicode) != 0)
+                    return error("ValueError", "cannot use UNICODE flag with a bytes pattern");
+                if (!isBytes && (aFlags & FlagLocale) != 0)
+                    return error("ValueError", "cannot use LOCALE flag with a str pattern");
+                auto const text = isBytes ? bytes_code_points(bytesPattern) : to_code_points(as<str_object>(aPattern)->value);
+                // (a bytes pattern's classes and case: ASCII's)
+                bool const implicitAscii = isBytes && (aFlags & FlagAscii) == 0;
                 std::shared_ptr<program> compiled;
                 try
                 {
-                    parser p{ text, aFlags };
+                    parser p{ text, implicitAscii ? (aFlags | FlagAscii) : aFlags };
                     compiled = p.parse();
                 }
                 catch (pattern_error const& e)
                 {
                     return raise_pattern_error(e, aPattern);
                 }
+                compiled->bytes = isBytes;
+                compiled->implicitAscii = implicitAscii && (compiled->flags & FlagAscii) != 0;
                 if ((compiled->flags & FlagAscii) == 0)
                     compiled->flags |= FlagUnicode;
                 auto const result = new pattern_object{ { { &sPatternType.base } }, borrowed(aPattern), compiled };
@@ -1214,13 +1364,22 @@ namespace neos::python_runtime
                 auto const end = m.marks[2u * static_cast<std::size_t>(aIndex) + 1u];
                 if (start < 0 || end < 0)
                     return borrowed(aDefault != nullptr ? aDefault : none());
-                return make_str(from_code_points(std::u32string_view{ *m.text }.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start))));
+                return make_piece(std::u32string_view{ *m.text }.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start)),
+                    as_pattern(m.pattern).compiled->bytes);
             }
 
             // (a replacement template's expansion: \1, \g<name>, \g<1>, and escapes)
             bool expand_template(match_object const& m, std::u32string const& aTemplate, std::string& aResult)
             {
                 auto const& p = *as_pattern(m.pattern).compiled;
+                // (a bytes pattern's: bytes)
+                auto const append_code_point = [&](std::string& aText, char32_t aCode)
+                {
+                    if (p.bytes)
+                        aText += static_cast<char>(aCode);
+                    else
+                        detail::append_code_point(aText, aCode);
+                };
                 auto const append_group = [&](long long g, std::size_t aAt) -> bool
                 {
                     if (g < 0 || static_cast<std::size_t>(g) > p.groups)
@@ -1231,7 +1390,7 @@ namespace neos::python_runtime
                     auto const start = m.marks[2u * static_cast<std::size_t>(g)];
                     auto const end = m.marks[2u * static_cast<std::size_t>(g) + 1u];
                     if (start >= 0 && end >= 0)
-                        aResult += from_code_points(std::u32string_view{ *m.text }.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start)));
+                        append_piece(aResult, std::u32string_view{ *m.text }.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(end - start)), p.bytes);
                     return true;
                 };
                 for (std::size_t i = 0u; i < aTemplate.size(); ++i)
@@ -1338,6 +1497,8 @@ namespace neos::python_runtime
                         text += (text.empty() ? "" : "|") + std::string{ n.second };
                 return text;
             }
+
+            bool template_argument(object* aPattern, object* aTemplate, std::u32string& aResult);
 
             neos_py_type make_match_type()
             {
@@ -1455,12 +1616,13 @@ namespace neos::python_runtime
                                     }
                                 case 6:     // (expand(template))
                                     {
-                                        if (rest.size() != 1u || kind_of(rest[0]) != NEOS_PY_STR)
-                                            return error("TypeError", "expand() argument must be str");
-                                        std::string result;
-                                        if (!expand_template(m, to_code_points(as<str_object>(rest[0])->value), result))
+                                        std::u32string templateText;
+                                        if (!template_argument(m.pattern, rest.size() == 1u ? rest[0] : nullptr, templateText))
                                             return nullptr;
-                                        return make_str(result);
+                                        std::string result;
+                                        if (!expand_template(m, templateText, result))
+                                            return nullptr;
+                                        return p.bytes ? make_bytes(result) : make_str(result);
                                     }
                                 default:
                                     {
@@ -1476,22 +1638,77 @@ namespace neos::python_runtime
                 return type;
             }
 
-            // (the string argument: str (a pattern's searches))
-            bool text_argument(object* aString, std::shared_ptr<std::u32string>& aText)
+            // (the string argument: str (a pattern's searches), or (a bytes pattern's) bytes-like)
+            bool text_argument(object* aPattern, object* aString, std::shared_ptr<std::u32string>& aText)
             {
                 // (an instance of a subclass of str: its value)
                 auto const value = kind_of(aString) == NEOS_PY_STR ? aString : builtin_value(aString);
+                std::string_view bytes;
+                bool const isBytes = kind_of(value) != NEOS_PY_STR && bytes_like(aString, bytes);
+                if (as_pattern(aPattern).compiled->bytes)
+                {
+                    if (!isBytes)
+                    {
+                        if (kind_of(value) == NEOS_PY_STR)
+                            error("TypeError", "cannot use a bytes pattern on a string-like object");
+                        else
+                            error("TypeError", std::string{ "expected string or bytes-like object, got '" } + type_name(aString) + "'");
+                        return false;
+                    }
+                    aText = std::make_shared<std::u32string>(bytes_code_points(bytes));
+                    return true;
+                }
                 if (kind_of(value) != NEOS_PY_STR)
                 {
-                    std::string_view bytes;
-                    if (bytes_like(aString, bytes))
+                    if (isBytes)
                         error("TypeError", "cannot use a string pattern on a bytes-like object");
                     else
                         error("TypeError", std::string{ "expected string or bytes-like object, got '" } + type_name(aString) + "'");
                     return false;
                 }
-                aText = std::make_shared<std::u32string>(to_code_points(as<str_object>(value)->value));
+                // (the last text's code points, again (a scanner matches one string at successive positions))
+                struct last_text
+                {
+                    std::string value;
+                    std::shared_ptr<std::u32string> text;
+                };
+                thread_local last_text tLast;
+                auto const& text = as<str_object>(value)->value;
+                if (tLast.text && tLast.value == text)
+                {
+                    aText = tLast.text;
+                    return true;
+                }
+                aText = std::make_shared<std::u32string>(to_code_points(text));
+                if (text.size() <= 0x10000u)
+                {
+                    tLast.value = text;
+                    tLast.text = aText;
+                }
                 return true;
+            }
+
+            // (a replacement template: str, or (a bytes pattern's) bytes-like)
+            bool template_argument(object* aPattern, object* aTemplate, std::u32string& aResult)
+            {
+                bool const isBytes = as_pattern(aPattern).compiled->bytes;
+                auto const value = aTemplate == nullptr ? nullptr : kind_of(aTemplate) == NEOS_PY_STR ? aTemplate : builtin_value(aTemplate);
+                std::string_view bytes;
+                if (isBytes && aTemplate != nullptr && kind_of(value) != NEOS_PY_STR && bytes_like(aTemplate, bytes))
+                {
+                    aResult = bytes_code_points(bytes);
+                    return true;
+                }
+                if (!isBytes && aTemplate != nullptr && kind_of(value) == NEOS_PY_STR)
+                {
+                    aResult = to_code_points(as<str_object>(value)->value);
+                    return true;
+                }
+                if (aTemplate == nullptr)
+                    error("TypeError", "expand() takes exactly one argument");
+                else
+                    error("TypeError", std::string{ "expected " } + (isBytes ? "a bytes-like object" : "str instance") + ", " + type_name(aTemplate) + " found");
+                return false;
             }
 
             // (a pattern's matches (findall, finditer, sub and split): CPython's rules for empty matches)
@@ -1535,7 +1752,7 @@ namespace neos::python_runtime
                     return false;
                 aResult.pattern = aSelf;
                 aResult.string = a[0];
-                if (!text_argument(a[0], aResult.text))
+                if (!text_argument(aSelf, a[0], aResult.text))
                     return false;
                 auto const n = static_cast<long long>(aResult.text->size());
                 aResult.endpos = n;
@@ -1551,6 +1768,7 @@ namespace neos::python_runtime
             object* findall(object* aPattern, object* aString, std::shared_ptr<std::u32string> const& aText, long long aPos, long long aEndpos)
             {
                 auto const groups = as_pattern(aPattern).compiled->groups;
+                bool const isBytes = as_pattern(aPattern).compiled->bytes;
                 ref result{ make_list() };
                 bool const ok = each_match(aPattern, aString, aText, aPos, aEndpos, 0, [&](object* m) -> bool
                 {
@@ -1560,12 +1778,12 @@ namespace neos::python_runtime
                         item = group_value(mm, 0, nullptr);
                     else if (groups == 1u)
                     {
-                        ref const empty{ make_str("") };
+                        ref const empty{ isBytes ? make_bytes("") : make_str("") };
                         item = group_value(mm, 1, empty.get());
                     }
                     else
                     {
-                        ref const empty{ make_str("") };
+                        ref const empty{ isBytes ? make_bytes("") : make_str("") };
                         std::vector<object*> values;
                         for (std::size_t g = 1u; g <= groups; ++g)
                             values.push_back(group_value(mm, static_cast<long long>(g), empty.get()));
@@ -1591,46 +1809,58 @@ namespace neos::python_runtime
             object* subn(object* aPattern, object* aRepl, object* aString, long long aCount, bool aWithCount)
             {
                 std::shared_ptr<std::u32string> text;
-                if (!text_argument(aString, text))
+                if (!text_argument(aPattern, aString, text))
                     return nullptr;
+                bool const isBytes = as_pattern(aPattern).compiled->bytes;
                 std::u32string templateText;
                 bool literal = false;
-                // (an instance of a subclass of str: its value)
+                // (an instance of a subclass of str: its value; a bytes pattern's: bytes-like)
                 auto const repl = kind_of(aRepl) == NEOS_PY_STR ? aRepl : builtin_value(aRepl);
-                bool const callable = kind_of(repl) != NEOS_PY_STR;
+                std::string_view replBytes;
+                bool const callable = isBytes ? !(kind_of(repl) != NEOS_PY_STR && bytes_like(aRepl, replBytes)) : kind_of(repl) != NEOS_PY_STR;
+                std::string literalText;
                 if (!callable)
                 {
-                    templateText = to_code_points(as<str_object>(repl)->value);
+                    if (!template_argument(aPattern, aRepl, templateText))
+                        return nullptr;
                     literal = templateText.find(U'\\') == std::u32string::npos;
+                    if (literal)
+                        literalText = isBytes ? std::string{ replBytes } : as<str_object>(repl)->value;
                 }
-                else
+                else if (!isBytes)
                 {
                     std::string_view bytes;
                     if (bytes_like(aRepl, bytes))
                         return error("TypeError", "expected str instance, bytes found");
                 }
+                else if (kind_of(repl) == NEOS_PY_STR)
+                    return error("TypeError", "sequence item 0: expected a bytes-like object, str found");
                 std::string result;
                 std::size_t last = 0u;
                 long long n = 0;
                 bool const ok = each_match(aPattern, aString, text, 0, static_cast<long long>(text->size()), aCount, [&](object* m) -> bool
                 {
                     auto const& mm = as_match(m);
-                    result += from_code_points(std::u32string_view{ *text }.substr(last, static_cast<std::size_t>(mm.marks[0]) - last));
+                    append_piece(result, std::u32string_view{ *text }.substr(last, static_cast<std::size_t>(mm.marks[0]) - last), isBytes);
                     if (callable)
                     {
                         ref const args{ make_tuple({ borrowed(m) }) };
                         ref const replacement{ call(aRepl, args.get(), nullptr) };
                         if (!replacement)
                             return false;
-                        if (kind_of(replacement.get()) != NEOS_PY_STR)
+                        std::string_view b;
+                        if (isBytes && kind_of(replacement.get()) != NEOS_PY_STR && bytes_like(replacement.get(), b))
+                            result += b;
+                        else if (!isBytes && kind_of(replacement.get()) == NEOS_PY_STR)
+                            result += as<str_object>(replacement.get())->value;
+                        else
                         {
-                            error("TypeError", std::string{ "expected str instance, " } + type_name(replacement.get()) + " found");
+                            error("TypeError", std::string{ "expected " } + (isBytes ? "a bytes-like object" : "str instance") + ", " + type_name(replacement.get()) + " found");
                             return false;
                         }
-                        result += as<str_object>(replacement.get())->value;
                     }
                     else if (literal)
-                        result += as<str_object>(aRepl)->value;
+                        result += literalText;
                     else if (!expand_template(mm, templateText, result))
                         return false;
                     last = static_cast<std::size_t>(mm.marks[1]);
@@ -1639,25 +1869,26 @@ namespace neos::python_runtime
                 });
                 if (!ok)
                     return nullptr;
-                result += from_code_points(std::u32string_view{ *text }.substr(last));
+                append_piece(result, std::u32string_view{ *text }.substr(last), isBytes);
                 if (aWithCount)
-                    return make_tuple({ make_str(result), make_int(n) });
-                return make_str(result);
+                    return make_tuple({ isBytes ? make_bytes(result) : make_str(result), make_int(n) });
+                return isBytes ? make_bytes(result) : make_str(result);
             }
 
             object* split(object* aPattern, object* aString, long long aMaxsplit)
             {
                 std::shared_ptr<std::u32string> text;
-                if (!text_argument(aString, text))
+                if (!text_argument(aPattern, aString, text))
                     return nullptr;
                 auto const groups = as_pattern(aPattern).compiled->groups;
+                bool const isBytes = as_pattern(aPattern).compiled->bytes;
                 ref result{ make_list() };
                 auto& items = as<list_object>(result.get())->items;
                 std::size_t last = 0u;
                 bool const ok = each_match(aPattern, aString, text, 0, static_cast<long long>(text->size()), aMaxsplit, [&](object* m) -> bool
                 {
                     auto const& mm = as_match(m);
-                    items.push_back(make_str(from_code_points(std::u32string_view{ *text }.substr(last, static_cast<std::size_t>(mm.marks[0]) - last))));
+                    items.push_back(make_piece(std::u32string_view{ *text }.substr(last, static_cast<std::size_t>(mm.marks[0]) - last), isBytes));
                     for (std::size_t g = 1u; g <= groups; ++g)
                         items.push_back(group_value(mm, static_cast<long long>(g), nullptr));
                     last = static_cast<std::size_t>(mm.marks[1]);
@@ -1665,7 +1896,7 @@ namespace neos::python_runtime
                 });
                 if (!ok)
                     return nullptr;
-                items.push_back(make_str(from_code_points(std::u32string_view{ *text }.substr(last))));
+                items.push_back(make_piece(std::u32string_view{ *text }.substr(last), isBytes));
                 return result.release_ownership();
             }
 
@@ -1678,7 +1909,7 @@ namespace neos::python_runtime
                     std::string text;
                     if (!repr_of(p.source, text))
                         return nullptr;
-                    auto const flags = p.compiled->flags & ~FlagUnicode;
+                    auto const flags = p.compiled->flags & ~FlagUnicode & ~(p.compiled->implicitAscii ? FlagAscii : 0);
                     if (flags == 0)
                         return make_str("re.compile(" + text + ")");
                     return make_str("re.compile(" + text + ", " + flags_text(flags) + ")");
@@ -1704,7 +1935,7 @@ namespace neos::python_runtime
                     if (name == "pattern")
                         return borrowed(p.source);
                     if (name == "flags")
-                        return make_int(p.compiled->flags);
+                        return make_int(p.compiled->flags & ~(p.compiled->implicitAscii ? FlagAscii : 0));
                     if (name == "groups")
                         return make_int(static_cast<long long>(p.compiled->groups));
                     if (name == "groupindex")
@@ -1789,7 +2020,7 @@ namespace neos::python_runtime
                 if (!pattern)
                     return nullptr;
                 std::shared_ptr<std::u32string> text;
-                if (!text_argument(a[1], text))
+                if (!text_argument(pattern.get(), a[1], text))
                     return nullptr;
                 auto const n = static_cast<long long>(text->size());
                 if (aMode == 3)
@@ -1856,17 +2087,20 @@ namespace neos::python_runtime
                         std::vector<object*> a;
                         if (!parse_arguments("escape", aArgs, aKwargs, { "pattern" }, 1u, 0u, a))
                             return nullptr;
-                        if (kind_of(a[0]) != NEOS_PY_STR)
-                            return error("TypeError", "escape() argument must be str");
+                        // (str, or bytes-like (its escape: bytes))
+                        std::string_view bytes;
+                        bool const isBytes = kind_of(a[0]) != NEOS_PY_STR && bytes_like(a[0], bytes);
+                        if (!isBytes && kind_of(a[0]) != NEOS_PY_STR)
+                            return error("TypeError", "escape() argument must be str or bytes");
                         static std::string const sSpecial = "()[]{}?*+-|^$\\.&~# \t\n\r\v\f";
                         std::string result;
-                        for (char c : as<str_object>(a[0])->value)
+                        for (char c : isBytes ? bytes : std::string_view{ as<str_object>(a[0])->value })
                         {
                             if (sSpecial.find(c) != std::string::npos)
                                 result += '\\';
                             result += c;
                         }
-                        return make_str(result);
+                        return isBytes ? make_bytes(result) : make_str(result);
                     } },
                 { "purge", [](std::vector<object*> const&, object*) -> object* { return borrowed(none()); } }
             };

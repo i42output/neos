@@ -4218,6 +4218,19 @@ namespace neos::python_runtime
             return sCommon.contains(aName) ? object_attribute(aObject, aName) : nullptr;
         }
 
+        // (an object's __doc__ that it does not have itself: its class's (None if its class has none))
+        object* class_doc(object* aObject)
+        {
+            ref const cls{ class_of(aObject) };
+            if (cls && cls.get() != aObject)
+            {
+                if (auto const doc = getattr(cls.get(), "__doc__"))
+                    return doc;
+                clear_error();
+            }
+            return new_reference(none());
+        }
+
         object* getattr(object* aObject, char const* aName)
         {
             // (an instance's own attribute, found before)
@@ -4249,6 +4262,12 @@ namespace neos::python_runtime
                         {
                             clear_error();
                             return method;
+                        }
+                        // (its class's docstring)
+                        if (std::strcmp(aName, "__doc__") == 0)
+                        {
+                            clear_error();
+                            return class_doc(aObject);
                         }
                     }
                     return result;
@@ -4449,6 +4468,12 @@ namespace neos::python_runtime
             {
                 clear_error();
                 return a;
+            }
+            // (an object's docstring: its class's)
+            if (std::strcmp(aName, "__doc__") == 0)
+            {
+                clear_error();
+                return class_doc(aObject);
             }
             return error("AttributeError", std::string{ "'" } + type_name(aObject) + "' object has no attribute '" + aName + "'");
         }
@@ -8043,7 +8068,7 @@ namespace neos::python_runtime
                 { "ConnectionRefusedError", { "ConnectionError" } }, { "ConnectionResetError", { "ConnectionError" } }, { "FileExistsError", { "OSError" } },
                 { "InterruptedError", { "OSError" } }, { "IsADirectoryError", { "OSError" } }, { "NotADirectoryError", { "OSError" } },
                 { "PermissionError", { "OSError" } }, { "ProcessLookupError", { "OSError" } }, { "TimeoutError", { "OSError" } },
-                { "StopAsyncIteration", { "Exception" } }, { "SyntaxError", { "Exception" } }, { "IndentationError", { "SyntaxError" } },
+                { "StopAsyncIteration", { "Exception" } }, { "SyntaxError", { "Exception" } }, { "IndentationError", { "SyntaxError" } }, { "_IncompleteInputError", { "SyntaxError" } },
                 { "TabError", { "IndentationError" } }, { "ReferenceError", { "Exception" } },
                 { "BaseExceptionGroup", { "BaseException" } }, { "ExceptionGroup", { "BaseExceptionGroup", "Exception" } },
                 { "PendingDeprecationWarning", { "Warning" } }, { "SyntaxWarning", { "Warning" } }, { "FutureWarning", { "Warning" } },
@@ -10634,6 +10659,8 @@ namespace neos::python_runtime
 
         // --- classes (class statements: __class(name, bases, namespace)) and their instances
 
+        inline std::uint64_t sClassVersions = 0u;     ///< (the classes' versions: every class's is new (see class_object::version))
+
         struct class_object
         {
             header h;
@@ -10656,10 +10683,12 @@ namespace neos::python_runtime
             std::size_t builtinPosition = std::numeric_limits<std::size_t>::max();
             std::optional<std::size_t> builtinBaseIndex;
             // (class_lookup's: names found (the class that has each, and its position in its attributes (null: none has it)), while no 
-            // class's attributes or bases change (see sClassGeneration))
+            // class's attributes or bases change (see version))
             struct lookup_hash { using is_transparent = void; std::size_t operator()(std::string_view aName) const { return std::hash<std::string_view>{}(aName); } };
             mutable std::unordered_map<std::string, std::pair<object*, std::size_t>, lookup_hash, std::equal_to<>> lookups;
             mutable std::uint64_t lookupsGeneration = 0u;
+            std::uint64_t version = ++sClassVersions;   ///< (its version: a new one when it (or a class of its MRO) changes (as CPython's 
+                                                        ///< types' version tags): the caches of its attributes are for one version)
             // (class_hook's: its __getattribute__, __setattr__, __delattr__, __init__, __new__, __del__ and __abstractmethods__ (class_lookup's), 
             // while no class changes)
             mutable object* hooks[7] = {};
@@ -10744,12 +10773,8 @@ namespace neos::python_runtime
             return is_class(aObject) ? as<class_object>(aObject)->metaclass : nullptr;
         }
 
-        void classes_changed();
-
         class_object::~class_object()
         {
-            // (class_lookup's cache (of classes by address) is stale)
-            classes_changed();
             for (auto b : bases)
                 if (b->type == &sClassType.base)
                     std::erase(reinterpret_cast<class_object*>(b)->subclasses, &h.base);
@@ -10820,11 +10845,17 @@ namespace neos::python_runtime
         }
 
         // (an attribute of a class: in its MRO; borrowed; null if none)
-        // (classes' attributes or bases changed: class_lookup's caches are stale)
-        std::uint64_t sClassGeneration = 1u;
-        void classes_changed()
+        // (a class's attributes or bases changed: its and its subclasses' versions are new (the caches of their attributes are stale))
+        void class_changed(object* aClass)
         {
-            ++sClassGeneration;
+            auto& cls = *as<class_object>(aClass);
+            cls.version = ++sClassVersions;
+            for (auto s : cls.subclasses)
+                class_changed(s);
+        }
+        std::uint64_t class_version(object const* aClass)
+        {
+            return reinterpret_cast<class_object const*>(aClass)->version;
         }
 
         object* class_lookup_uncached(object* aClass, std::string_view aName, object** aOwner);
@@ -10883,7 +10914,7 @@ namespace neos::python_runtime
                 return nullptr;
             lookup_key const key{ aName };
             auto& entry = sLookupCache[key.hash(aClass) % LookupCacheSize];
-            if (entry.cls == aClass && entry.generation == sClassGeneration && entry.key == key && (key.size <= 16u || entry.middle == middle_of(aName))) [[likely]]
+            if (entry.cls == aClass && entry.generation == class_version(aClass) && entry.key == key && (key.size <= 16u || entry.middle == middle_of(aName))) [[likely]]
             {
                 if (entry.owner == nullptr)
                     return nullptr;
@@ -10907,16 +10938,16 @@ namespace neos::python_runtime
             auto const remember = [&](object* aFound, std::size_t aPosition)
             {
                 entry.cls = aClass;
-                entry.generation = sClassGeneration;
+                entry.generation = cls.version;
                 entry.key = key;
                 entry.owner = aFound;
                 entry.position = aPosition;
                 entry.middle.assign(middle_of(aName));
             };
-            if (cls.lookupsGeneration != sClassGeneration)
+            if (cls.lookupsGeneration != cls.version)
             {
                 cls.lookups.clear();
-                cls.lookupsGeneration = sClassGeneration;
+                cls.lookupsGeneration = cls.version;
             }
             if (auto const found = cls.lookups.find(aName); found != cls.lookups.end())
             {
@@ -10956,11 +10987,11 @@ namespace neos::python_runtime
             if (aClass == nullptr)
                 return nullptr;
             auto const& cls = *as<class_object>(aClass);
-            if (cls.hooksGeneration != sClassGeneration)
+            if (cls.hooksGeneration != cls.version)
             {
                 for (std::size_t i = 0u; i < std::size(sNames); ++i)
                     cls.hooks[i] = class_lookup(aClass, sNames[i]);
-                cls.hooksGeneration = sClassGeneration;
+                cls.hooksGeneration = cls.version;
             }
             return cls.hooks[aHook];
         }
@@ -11104,14 +11135,14 @@ namespace neos::python_runtime
             struct entry { object const* cls = nullptr; std::uint64_t generation = 0u; bool reducible = false; };
             static entry sCache[64];
             auto& cached = sCache[(reinterpret_cast<std::uintptr_t>(cls) >> 4u) % 64u];
-            if (cached.cls != cls || cached.generation != sClassGeneration)
+            if (cached.cls != cls || cached.generation != class_version(cls))
             {
                 auto const& c = *as<class_object>(cls);
                 bool reducible = c.nativeBase == nullptr && c.builtinBase.empty() && c.exceptionBase.empty() && class_metaclass(cls) == nullptr &&
                     class_hook(cls, GetAttributeHook) == nullptr;
                 for (auto name : { "__reduce_ex__", "__reduce__", "__getstate__", "__getnewargs_ex__", "__getnewargs__", "__slots__" })
                     reducible = reducible && class_lookup(cls, name) == nullptr;
-                cached = entry{ cls, sClassGeneration, reducible };
+                cached = entry{ cls, class_version(cls), reducible };
             }
             if (!cached.reducible || instance.attributes.find("__reduce_ex__") != nullptr)
                 return false;
@@ -11257,7 +11288,7 @@ namespace neos::python_runtime
         // (the item of an instance's attributes that a cache entry is for: null if it is not for it (or no longer))
         std::pair<object*, object*>* cached_item(attribute_cache_entry const& aEntry, instance_object& aInstance, char const* aName)
         {
-            if (aEntry.cls != aInstance.cls || aEntry.name != aName || aEntry.generation != sClassGeneration || aInstance.attributes.dict == nullptr)
+            if (aEntry.cls != aInstance.cls || aEntry.name != aName || aEntry.generation != class_version(aInstance.cls) || aInstance.attributes.dict == nullptr)
                 return nullptr;
             auto& items = as<dict_object>(aInstance.attributes.dict)->items;
             if (aEntry.position >= items.size() || !key_named(items[aEntry.position].first, aName))
@@ -11276,7 +11307,7 @@ namespace neos::python_runtime
                 {
                     auto& entry = attribute_cache_replaced(aCache, aInstance.cls, aName);
                     auto const previous = entry.key;
-                    entry = { aInstance.cls, aName, sClassGeneration, i, (retain(items[i].first), items[i].first) };
+                    entry = { aInstance.cls, aName, class_version(aInstance.cls), i, (retain(items[i].first), items[i].first) };
                     release(previous);
                     return;
                 }
@@ -11331,7 +11362,7 @@ namespace neos::python_runtime
             {
                 auto& instance = *as<instance_object>(aObject);
                 auto const& entry = attribute_cache(sReadCache, instance.cls, text);
-                if (entry.cls == instance.cls && entry.name == text && entry.generation == sClassGeneration && instance.attributes.dict != nullptr)
+                if (entry.cls == instance.cls && entry.name == text && entry.generation == class_version(instance.cls) && instance.attributes.dict != nullptr)
                     if (auto const& items = as<dict_object>(instance.attributes.dict)->items; entry.position < items.size() && items[entry.position].first == aName)
                         return (retain(items[entry.position].second), items[entry.position].second);
             }
@@ -11350,7 +11381,7 @@ namespace neos::python_runtime
         {
             auto& instance = *as<instance_object>(aObject);
             auto& entry = attribute_cache(sWriteCache, instance.cls, aName);
-            if (aNameObject != nullptr && entry.cls == instance.cls && entry.name == aName && entry.generation == sClassGeneration && instance.attributes.dict != nullptr)
+            if (aNameObject != nullptr && entry.cls == instance.cls && entry.name == aName && entry.generation == class_version(instance.cls) && instance.attributes.dict != nullptr)
                 if (auto& items = as<dict_object>(instance.attributes.dict)->items; entry.position < items.size() && items[entry.position].first == aNameObject)
                 {
                     retain(aValue);
@@ -11367,7 +11398,7 @@ namespace neos::python_runtime
             }
             // (an attribute that its class's instances are given (e.g. by __init__: one that its class does not have, with no __setattr__ (see 
             // user_setattr_default)), new to this instance: added (as dict_set adds it, to a small dict))
-            if (entry.key != nullptr && entry.cls == instance.cls && entry.name == aName && entry.generation == sClassGeneration && 
+            if (entry.key != nullptr && entry.cls == instance.cls && entry.name == aName && entry.generation == class_version(instance.cls) && 
                 (entry.key == aNameObject || key_named(entry.key, aName)))
             {
                 auto& d = *as<dict_object>(instance.attributes.get_dict());
@@ -11781,7 +11812,7 @@ namespace neos::python_runtime
                 auto* const set = sMethodCache + ((((reinterpret_cast<std::uintptr_t>(cls) >> 4u) * 0x9E3779B97F4A7C15ull ^ reinterpret_cast<std::uintptr_t>(aName) * 0xC2B2AE3D27D4EB4Full) >> 40u) % 128u) * 2u;
                 bool const second = set[1].cls == cls && set[1].name.name == aName;
                 auto& cached = second ? set[1] : set[0];
-                if (cached.cls == cls && cached.generation == sClassGeneration && cached.name.matches(aName))
+                if (cached.cls == cls && cached.generation == class_version(cls) && cached.name.matches(aName))
                 {
                     if (as<instance_object>(aObject)->attributes.find(cached.name.view()) != nullptr)
                         return false;
@@ -11802,7 +11833,7 @@ namespace neos::python_runtime
                         if (cached.name.set(aName))
                         {
                             cached.cls = cls;
-                            cached.generation = sClassGeneration;
+                            cached.generation = class_version(cls);
                             cached.function = attribute;
                         }
                         else
@@ -13242,7 +13273,7 @@ namespace neos::python_runtime
             for (auto m : cls.mro)
                 release(m);
             cls.mro = std::move(mro);
-            classes_changed();
+            class_changed(aClass);
             for (auto s : std::vector<object*>{ cls.subclasses })
                 if (!relinearize(s))
                     return false;
@@ -13292,7 +13323,7 @@ namespace neos::python_runtime
             for (auto b : bases)
                 retain(b);
             cls.bases = bases;
-            classes_changed();
+            class_changed(aSelf);
             for (auto m : previousMro)
                 retain(m);
             if (!relinearize(aSelf))
@@ -13304,7 +13335,7 @@ namespace neos::python_runtime
                 for (auto m : cls.mro)
                     release(m);
                 cls.mro = previousMro;
-                classes_changed();
+                class_changed(aSelf);
                 for (auto b : previous)
                     as<class_object>(b)->subclasses.push_back(aSelf);
                 return -1;
@@ -13352,7 +13383,7 @@ namespace neos::python_runtime
                     {
                         release(a->second);
                         attributes.erase(a);
-                        classes_changed();
+                        class_changed(aSelf);
                         return 0;
                     }
                     retain(aValue);
@@ -13367,7 +13398,7 @@ namespace neos::python_runtime
             }
             retain(aValue);
             attributes.emplace_back(aName, aValue);
-            classes_changed();
+            class_changed(aSelf);
             return 0;
         }
 
@@ -13812,7 +13843,7 @@ namespace neos::python_runtime
                 return nullptr;
             for (auto m : mro)
                 cls->mro.push_back((retain(m), m));
-            classes_changed();
+            class_changed(&cls->h.base);
             for (auto b : cls->bases)
                 as<class_object>(b)->subclasses.push_back(&cls->h.base);
             // (its bases' metaclass)
@@ -13865,12 +13896,12 @@ namespace neos::python_runtime
                 {
                     retain(item.second);
                     cls->attributes.emplace_back(key, &(new wrapper_object{ { { &sWrapperType.base } }, ClassMethod, item.second, nullptr })->h.base);
-                    classes_changed();
+                    class_changed(&cls->h.base);
                     continue;
                 }
                 retain(item.second);
                 cls->attributes.emplace_back(key, item.second);
-                classes_changed();
+                class_changed(&cls->h.base);
                 // (a method's function (_cN_Class_method): its name is the method's)
                 auto function = item.second;
                 if (function->type == &sWrapperType.base)
@@ -13896,7 +13927,7 @@ namespace neos::python_runtime
             if (std::none_of(cls->attributes.begin(), cls->attributes.end(), [](auto const& a) { return a.first == "__doc__"; }))
             {
                 cls->attributes.emplace_back("__doc__", (retain(none()), none()));
-                classes_changed();
+                class_changed(&cls->h.base);
             }
             return result.release_ownership();
         }
@@ -15687,13 +15718,18 @@ namespace neos::python_runtime
 
         builtin_entry const* find_builtin(std::string_view aName)
         {
-            for (auto const& entry : sBuiltinFunctions)
-                if (aName == entry.name)
-                    return &entry;
-            for (auto const& entry : sBuiltinClasses)
-                if (aName == entry.name)
-                    return &entry;
-            return nullptr;
+            // (by name: the functions first, then the classes)
+            static auto const sEntries = []()
+            {
+                std::unordered_map<std::string_view, builtin_entry const*> entries;
+                for (auto const& entry : sBuiltinFunctions)
+                    entries.try_emplace(entry.name, &entry);
+                for (auto const& entry : sBuiltinClasses)
+                    entries.try_emplace(entry.name, &entry);
+                return entries;
+            }();
+            auto const e = sEntries.find(aName);
+            return e != sEntries.end() ? e->second : nullptr;
         }
 
         // --- hash() and id() (CPython's hash values: numbers, str, tuples, range, None; an object without a value's hash: its identity)
@@ -16086,6 +16122,8 @@ namespace neos::python_runtime
             return result.get() == &sTrue.base ? 1 : 0;
         }
 
+        std::atomic<bool> sBuiltinsSet = false;    ///< (a name of the builtins module has been set (see fn_builtin))
+
         neos_py_type make_module_type()
         {
             auto type = make_type("python.module", "module", retain_object, release_object<module_object>);
@@ -16181,12 +16219,30 @@ namespace neos::python_runtime
                 }
                 // (a module's __getattr__ (PEP 562): of the name)
                 if (std::strcmp(aName, "__getattr__") != 0)
+                {
                     for (auto const& a : m.attributes)
                         if (a.first == "__getattr__")
                         {
                             ref const args{ make_tuple({ make_str(aName) }) };
                             return call(a.second, args.get(), nullptr);
                         }
+                    // (a source module's (one of its names))
+                    for (std::size_t i = 0u; m.getter != nullptr && i < m.names.size(); ++i)
+                        if (m.names[i] == "__getattr__")
+                        {
+                            bool unbound = false;
+                            ref const hook{ module_value(m, i, unbound) };
+                            if (!hook)
+                            {
+                                if (!unbound)
+                                    return nullptr;
+                                clear_error();
+                                break;
+                            }
+                            ref const args{ make_tuple({ make_str(aName) }) };
+                            return call(hook.get(), args.get(), nullptr);
+                        }
+                }
                 if (m.initializing)
                     return error("AttributeError", "partially initialized module '" + m.name + "' has no attribute '" + aName + 
                         "' (most likely due to a circular import)");
@@ -16195,6 +16251,9 @@ namespace neos::python_runtime
             type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
             {
                 auto& m = *as<module_object>(aSelf);
+                // (the builtins module's names set (e.g. unittest.mock's patch("builtins.open")): builtin lookups find them)
+                if (m.name == "builtins")
+                    sBuiltinsSet.store(true, std::memory_order_relaxed);
                 if (m.main)
                 {
                     ref const ns{ fn_module_namespace("__main__", nullptr) };
@@ -18357,6 +18416,23 @@ namespace neos::python_runtime
         // python::import(name)
         object* fn_import(char const* aName)
         {
+            // (os.path: os's path module (posixpath or ntpath), as sys.modules['os.path'])
+            if (std::strcmp(aName, "os.path") == 0)
+            {
+                ref const os{ fn_import("os") };
+                if (!os)
+                    return nullptr;
+                ref path{ getattr(os.get(), "path") };
+                if (!path)
+                    return nullptr;
+                if (ref const modules{ imported_modules() }; modules && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
+                {
+                    ref const key{ make_str(aName) };
+                    if (dict_find(builtin_value(modules.get()), key.get()) == -1 && dict_set(builtin_value(modules.get()), key.get(), path.get()) != 0)
+                        return nullptr;
+                }
+                return path.release_ownership();
+            }
             // (a submodule (e.g. logging.handlers): its package first (unless it is being made: then it makes the submodule its attribute 
             // itself), then the submodule is its attribute (as CPython's _find_and_load_unlocked makes it))
             std::string_view const name{ aName };
@@ -18522,6 +18598,12 @@ namespace neos::python_runtime
         object* fn_builtin(char const* aName)
         {
             std::string_view const name{ aName };
+            // (a name that the program has set in the builtins module: its value there)
+            if (sBuiltinsSet.load(std::memory_order_relaxed))
+                if (auto const builtins = imported().find("builtins"); builtins != imported().end() && builtins->second != nullptr)
+                    for (auto const& a : as<module_object>(builtins->second)->attributes)
+                        if (a.first == name)
+                            return new_reference(a.second);
             for (auto const& entry : sBuiltinClasses)
                 if (name == entry.name)
                     return type_object_for(entry.name, entry.name);
@@ -18542,6 +18624,8 @@ namespace neos::python_runtime
                 return not_implemented();
             if (name == "Ellipsis")
                 return &sEllipsis.base;
+            if (name == "__debug__")
+                return make_bool(true);
             if (is_exception_class(name))
                 return exception_class(std::string{ name });
             return error("NameError", "name '" + std::string{ name } + "' is not defined");
@@ -18613,6 +18697,7 @@ namespace neos::python_runtime
                 { "range", "__bool__ __class__ __contains__ __delattr__ __dir__ __doc__ __eq__ __format__ __ge__ __getattribute__ __getitem__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __iter__ __le__ __len__ __lt__ __ne__ __new__ __reduce__ __reduce_ex__ __repr__ __reversed__ __setattr__ __sizeof__ __str__ __subclasshook__ count index start step stop" },
                 { "NoneType", "__bool__ __class__ __delattr__ __dir__ __doc__ __eq__ __format__ __ge__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __le__ __lt__ __ne__ __new__ __reduce__ __reduce_ex__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__" },
                 { "async_generator_asend", "__await__ __class__ __del__ __delattr__ __dir__ __doc__ __eq__ __format__ __ge__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __iter__ __le__ __lt__ __ne__ __new__ __next__ __reduce__ __reduce_ex__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__ close send throw" },
+                { "code", "__class__ __delattr__ __dir__ __doc__ __eq__ __format__ __ge__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __le__ __lt__ __ne__ __new__ __reduce__ __reduce_ex__ __replace__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__ _co_code_adaptive _varname_from_oparg co_argcount co_cellvars co_code co_consts co_exceptiontable co_filename co_firstlineno co_flags co_freevars co_kwonlyargcount co_lines co_linetable co_lnotab co_name co_names co_nlocals co_positions co_posonlyargcount co_qualname co_stacksize co_varnames replace" },
                 { "function", "__annotations__ __builtins__ __call__ __class__ __closure__ __code__ __defaults__ __delattr__ __dict__ __dir__ __doc__ __eq__ __format__ __ge__ __get__ __getattribute__ __getstate__ __globals__ __gt__ __hash__ __init__ __init_subclass__ __kwdefaults__ __le__ __lt__ __module__ __name__ __ne__ __new__ __qualname__ __reduce__ __reduce_ex__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__ __type_params__" },
                 { "property", "__class__ __delattr__ __delete__ __dir__ __doc__ __eq__ __format__ __ge__ __get__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __isabstractmethod__ __le__ __lt__ __name__ __ne__ __new__ __reduce__ __reduce_ex__ __repr__ __set__ __set_name__ __setattr__ __sizeof__ __str__ __subclasshook__ deleter fdel fget fset getter setter" },
                 { "staticmethod", "__call__ __class__ __delattr__ __dict__ __dir__ __doc__ __eq__ __format__ __func__ __ge__ __get__ __getattribute__ __getstate__ __gt__ __hash__ __init__ __init_subclass__ __isabstractmethod__ __le__ __lt__ __ne__ __new__ __reduce__ __reduce_ex__ __repr__ __setattr__ __sizeof__ __str__ __subclasshook__ __wrapped__" },
@@ -18676,6 +18761,17 @@ namespace neos::python_runtime
                 for (auto const& a : as<module_object>(target)->attributes)
                     names.insert(a.first);
                 names.insert({ "__doc__", "__loader__", "__name__", "__package__", "__spec__" });
+                // (a source module's names (those bound), or __main__'s namespace's)
+                if (auto const& m = *as<module_object>(target); m.getter != nullptr || m.main)
+                {
+                    ref const d{ getattr(target, "__dict__") };
+                    if (!d)
+                        return nullptr;
+                    if (kind_of(d.get()) == NEOS_PY_DICT)
+                        for (auto const& item : as<dict_object>(d.get())->items)
+                            if (item.first != nullptr && kind_of(item.first) == NEOS_PY_STR)
+                                names.insert(as<str_object>(item.first)->value);
+                }
             }
             else
             {

@@ -38,6 +38,8 @@ names the CPython sources it is derived from.
                        Lib/encodings
   collections_abc.cpp  Lib/_collections_abc.py and Lib/collections/abc.py
   cmd.cpp              Lib/cmd.py
+  code.cpp             Lib/code.py
+  codeop.cpp           Lib/codeop.py
   collections.cpp      Lib/collections/__init__.py and Modules/_collectionsmodule.c
                        (deque's and defaultdict's reductions)
   compression.cpp      Lib/_compression.py
@@ -62,11 +64,14 @@ names the CPython sources it is derived from.
   datetime.cpp         Modules/_datetimemodule.c and Lib/_strptime.py
   decimal.cpp          Lib/_pydecimal.py
   difflib.cpp          Lib/difflib.py
+  email*.cpp           Lib/email/*.py and Lib/email/mime/*.py (Copyright (C)
+                       2001-2010 Python Software Foundation)
   enum.cpp             Lib/enum.py
   exec.cpp             Python/bltinmodule.c and Python/import.c (__import__:
                        PyImport_ImportModuleLevelObject and resolve_name)
                        and Lib/importlib/_bootstrap.py (_handle_fromlist)
   fileinput.cpp        Lib/fileinput.py
+  filecmp.cpp          Lib/filecmp.py
   files.cpp            Lib/fnmatch.py, Lib/glob.py, Lib/shutil.py and
                        Lib/tempfile.py
   fractions.cpp        Lib/fractions.py
@@ -76,11 +81,21 @@ names the CPython sources it is derived from.
   graphlib.cpp         Lib/graphlib.py
   gzip.cpp             Lib/gzip.py
   hmac.cpp             Lib/hmac.py
+  http.cpp, http_client.cpp, http_cookiejar.cpp and http_server.cpp
+                       Lib/http/__init__.py, Lib/http/client.py,
+                       Lib/http/cookiejar.py and Lib/http/server.py
+  http_cookies.cpp     Lib/http/cookies.py (Copyright 2000 by Timothy
+                       O'Malley: his permission notice is below)
+  http_*_docs.hpp      Lib/http (its docstrings, generated)
   html.cpp             Lib/html/__init__.py
   html_entities.cpp    Lib/html/entities.py
   html_parser.cpp      Lib/html/parser.py
+  getpass.cpp          Lib/getpass.py
+  gettext.cpp          Lib/gettext.py
+  ftplib.cpp           Lib/ftplib.py
   generators.cpp       Objects/genobject.c (the asynchronous generators' hooks and
                        finalization, the warning of a coroutine never awaited)
+  imaplib.cpp          Lib/imaplib.py (by Piers Lauder and its contributors)
   importlib.cpp        Lib/importlib/__init__.py, Lib/importlib/util.py and
                        Lib/importlib/_bootstrap.py (import_module and its
                        checks, reload's checks, find_spec, resolve_name and
@@ -105,8 +120,12 @@ names the CPython sources it is derived from.
   logging_handlers_docs.hpp
                        Lib/logging/handlers.py (its docstrings, generated)
   markupbase.cpp       Lib/_markupbase.py
+  mailbox.cpp          Lib/mailbox.py
   mimetypes.cpp        Lib/mimetypes.py
   netrc.cpp            Lib/netrc.py
+  nturl2path.cpp       Lib/nturl2path.py
+  optparse.cpp         Lib/optparse.py (Copyright (c) 2001-2006 Gregory P. Ward;
+                       BSD license: see below)
   objects.cpp          Objects/floatobject.c, Objects/complexobject.c,
                        Objects/longobject.c, Objects/rangeobject.c,
                        Objects/sliceobject.c, Objects/tupleobject.c,
@@ -129,8 +148,11 @@ names the CPython sources it is derived from.
                        Lib/_compat_pickle.py
   pickle_docs.hpp      Modules/_pickle.c, Modules/clinic/_pickle.c.h and
                        Lib/pickle.py (their docstrings, generated)
+  pkgutil.cpp          Lib/pkgutil.py
+  poplib.cpp           Lib/poplib.py (by David Ascher)
   posixsubprocess.cpp  Modules/_posixsubprocess.c
   pprint.cpp           Lib/pprint.py
+  pty.cpp              Lib/pty.py
   pyio.cpp             Lib/_pyio.py (the io module's classes), with the
                        behaviour and messages of Modules/_io/iobase.c,
                        Modules/_io/bufferedio.c, Modules/_io/textio.c and
@@ -145,6 +167,7 @@ names the CPython sources it is derived from.
   queue.cpp            Lib/queue.py
   quopri.cpp           Lib/quopri.py
   random.cpp           Modules/_randommodule.c and Lib/random.py
+  rlcompleter.cpp      Lib/rlcompleter.py
   sched.cpp            Lib/sched.py
   select.cpp           Modules/selectmodule.c and Objects/fileobject.c
                        (PyObject_AsFileDescriptor)
@@ -152,8 +175,10 @@ names the CPython sources it is derived from.
   services.cpp         Lib/platform.py, Lib/keyword.py, Lib/copyreg.py,
                        Lib/secrets.py, Lib/timeit.py and
                        Modules/signalmodule.c (signal_install_handlers)
+  shelve.cpp           Lib/shelve.py
   set.cpp              Objects/setobject.c
   shlex.cpp            Lib/shlex.py
+  smtplib.cpp          Lib/smtplib.py (by The Dragon De Monsyne)
   socket.cpp           Modules/socketmodule.c, Python/fileutils.c
                        (set_inheritable) and Lib/encodings/idna.py (its
                        ASCII path)
@@ -168,6 +193,7 @@ names the CPython sources it is derived from.
   sockets.hpp          Python/errors.c, PC/errmap.h and Objects/exceptions.c
                        (Windows errors)
   statistics.cpp       Lib/statistics.py and Modules/_statisticsmodule.c
+  stringprep.cpp       Lib/stringprep.py
   str.cpp              Objects/unicodeobject.c
   string_formatter.cpp Lib/string.py (Formatter) and
                        Objects/stringlib/unicode_format.h
@@ -183,8 +209,11 @@ names the CPython sources it is derived from.
   sys.cpp              Python/stdlib_module_names.h (sys.stdlib_module_names),
                        Python/sysmodule.c (the asynchronous generators' hooks)
                        and Python/errors.c (the default unraisable hook)
+  tarfile.cpp          Lib/tarfile.py (Copyright (C) 2002 Lars Gustaebel; MIT
+                       license: see below)
   text.cpp             Lib/textwrap.py
-  textmodules.cpp      Lib/string.py (Template's pattern)
+  textmodules.cpp      Lib/string.py (Template's pattern) and Modules/binascii.c
+                       (a2b_qp and b2a_qp)
   threads.cpp          Lib/threading.py, Lib/_threading_local.py and
                        Modules/_threadmodule.c
   time.cpp             Modules/timemodule.c
@@ -193,25 +222,61 @@ names the CPython sources it is derived from.
                        _types.py: SPDX-License-Identifier: MIT;
                        SPDX-FileCopyrightText: 2021 Taneli Hukkinen;
                        Licensed to PSF under a Contributor Agreement.)
+  token.cpp            Lib/token.py
+  tokenize.cpp         Lib/tokenize.py
+  _tokenize.cpp        CPython 3.11's Lib/tokenize.py (its regular expressions and
+                       its tokenizer), adapted to give CPython 3.13's C
+                       tokenizer's tokens
   traceback.cpp        Lib/linecache.py, Lib/traceback.py, Lib/_colorize.py and
                        Python/suggestions.c
+  tty.cpp              Lib/tty.py
   typemodules.cpp      Lib/_py_abc.py, Lib/abc.py, Lib/types.py and
                        Lib/numbers.py
   typing.cpp           Lib/typing.py and Objects/typevarobject.c
   typing_docs.hpp      Lib/typing.py (its docstrings, generated)
-  unixmodules.cpp      Modules/pwdmodule.c, Modules/grpmodule.c and
-                       Modules/fcntlmodule.c
+  unittest.cpp         Lib/unittest/__init__.py
+  unittest_async_case.cpp
+                       Lib/unittest/async_case.py
+  unittest_case.cpp    Lib/unittest/case.py
+  unittest_loader.cpp  Lib/unittest/loader.py
+  unittest_log.cpp     Lib/unittest/_log.py
+  unittest_main.cpp    Lib/unittest/main.py
+  unittest_result.cpp  Lib/unittest/result.py
+  unittest_mock.cpp    Lib/unittest/mock.py
+  unittest_runner.cpp  Lib/unittest/runner.py
+  unittest_signals.cpp Lib/unittest/signals.py
+  unittest_suite.cpp   Lib/unittest/suite.py
+  unittest_util.cpp    Lib/unittest/util.py
+  unixmodules.cpp      Modules/pwdmodule.c, Modules/grpmodule.c,
+                       Modules/fcntlmodule.c and Modules/termios.c
   unicode_tables.hpp   Modules/unicodedata.c and str's methods: the Unicode
                        Character Database as they have it
   unicodedata.cpp      Modules/unicodedata.c
   uuid.cpp             Lib/uuid.py
   urllib.cpp and urllib_parse.cpp
                        Lib/urllib/__init__.py and Lib/urllib/parse.py
+  urllib_error.cpp, urllib_request.cpp, urllib_response.cpp and
+  urllib_robotparser.cpp
+                       Lib/urllib/error.py, Lib/urllib/request.py,
+                       Lib/urllib/response.py and Lib/urllib/robotparser.py
+  urllib_*_docs.hpp    Lib/urllib (its docstrings, generated)
   values.cpp           Python/ceval.c (argument binding)
   warnings.cpp         Lib/warnings.py and Python/_warnings.c
   weakref.cpp          Objects/weakrefobject.c
+  wave.cpp             Lib/wave.py
+  webbrowser.cpp       Lib/webbrowser.py
   winapi.cpp           Modules/_winapi.c and PC/msvcrtmodule.c (the
                        functions and constants that subprocess uses)
+  wsgiref.cpp, wsgiref_handlers.cpp, wsgiref_headers.cpp,
+  wsgiref_simple_server.cpp, wsgiref_types.cpp and wsgiref_util.cpp
+                       Lib/wsgiref (its modules: __init__, handlers, headers
+                       (portions Copyright (C) 2001,2002 Python Software
+                       Foundation, written by Barry Warsaw), simple_server,
+                       types and util)
+  wsgiref_validate.cpp Lib/wsgiref/validate.py ((c) 2005 Ian Bicking and
+                       contributors: MIT licence, see below; licensed to PSF
+                       under a Contributor Agreement)
+  wsgiref_*_docs.hpp   Lib/wsgiref (its docstrings, generated)
   zipfile.cpp          Lib/zipfile/__init__.py
   zipfile_path.cpp     Lib/zipfile/_path/__init__.py
   zipfile_path_glob.cpp
@@ -384,7 +449,145 @@ collections.abc (src/collections_abc.cpp)
 -----------------------------------------
 
 Copyright 2007 Google, Inc. All Rights Reserved.
+
 Licensed to PSF under a Contributor Agreement.
+
+
+unittest (src/unittest*.cpp, src/unittest*_docs.hpp)
+----------------------------------------------------
+
+Copyright (c) 1999-2003 Steve Purcell
+Copyright (c) 2003-2010 Python Software Foundation
+This module is free software, and you may redistribute it and/or modify
+it under the same terms as Python itself, so long as this copyright message
+and disclaimer are retained in their original form.
+
+IN NO EVENT SHALL THE AUTHOR BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT,
+SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OF
+THIS CODE, EVEN IF THE AUTHOR HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+THE AUTHOR SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE.  THE CODE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS,
+AND THERE IS NO OBLIGATION WHATSOEVER TO PROVIDE MAINTENANCE,
+SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+
+optparse (src/optparse.cpp)
+---------------------------
+
+Copyright (c) 2001-2006 Gregory P. Ward.  All rights reserved.
+Copyright (c) 2002-2006 Python Software Foundation.  All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+  * Neither the name of the author nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+tarfile (src/tarfile.cpp)
+-------------------------
+
+Copyright (C) 2002 Lars Gustaebel <lars@gustaebel.de>
+All rights reserved.
+
+Permission  is  hereby granted,  free  of charge,  to  any person
+obtaining a  copy of  this software  and associated documentation
+files  (the  "Software"),  to   deal  in  the  Software   without
+restriction,  including  without limitation  the  rights to  use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies  of  the  Software,  and to  permit  persons  to  whom the
+Software  is  furnished  to  do  so,  subject  to  the  following
+conditions:
+
+The above copyright  notice and this  permission notice shall  be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS  IS", WITHOUT WARRANTY OF ANY  KIND,
+EXPRESS OR IMPLIED, INCLUDING  BUT NOT LIMITED TO  THE WARRANTIES
+OF  MERCHANTABILITY,  FITNESS   FOR  A  PARTICULAR   PURPOSE  AND
+NONINFRINGEMENT.  IN  NO  EVENT SHALL  THE  AUTHORS  OR COPYRIGHT
+HOLDERS  BE LIABLE  FOR ANY  CLAIM, DAMAGES  OR OTHER  LIABILITY,
+WHETHER  IN AN  ACTION OF  CONTRACT, TORT  OR OTHERWISE,  ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+
+http.cookies (src/http_cookies.cpp)
+-----------------------------------
+
+Copyright 2000 by Timothy O'Malley <timo@alum.mit.edu>
+
+               All Rights Reserved
+
+Permission to use, copy, modify, and distribute this software
+and its documentation for any purpose and without fee is hereby
+granted, provided that the above copyright notice appear in all
+copies and that both that copyright notice and this permission
+notice appear in supporting documentation, and that the name of
+Timothy O'Malley  not be used in advertising or publicity
+pertaining to distribution of the software without specific, written
+prior permission.
+
+Timothy O'Malley DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS, IN NO EVENT SHALL Timothy O'Malley BE LIABLE FOR
+ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+
+wsgiref.validate (src/wsgiref_validate.cpp)
+-------------------------------------------
+
+(c) 2005 Ian Bicking and contributors; written for Paste
+(http://pythonpaste.org). Licensed under the MIT license; also licenced
+under the Apache License, 2.0; licensed to PSF under a Contributor
+Agreement.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 Unicode Character Database (src/unicode_tables.hpp, src/unicodedata.cpp)

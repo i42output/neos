@@ -32,6 +32,7 @@
 */
 
 #include <neos/neos.hpp>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -75,32 +76,31 @@ namespace neos
             return result;
         }
 
-        // a source syntax highlighted (see context::highlight) for a terminal: its runs in colours (ANSI escape sequences: 24-bit) as Visual 
-        // Studio Code's dark theme's
+        // a source syntax highlighted (see context::highlight) for a terminal: its runs in colours (ANSI escape sequences: 24-bit): the 
+        // syntax highlighting configuration's dark theme's (see context::highlight_colours)
         std::string highlighted(neos::context& aContext, std::string_view aSource)
         {
             std::vector<std::optional<neos::context::highlight_category>> categories(aSource.size());
             for (auto const& span : aContext.highlight(aContext.schema().path(), aSource))
                 for (auto i = span.first; i < span.last && i < aSource.size(); ++i)
                     categories[i] = span.category;
-            static char const* const sColours[] =
+            // (a category's colour: its escape sequence (none: the terminal's))
+            std::vector<std::string> colours;
+            for (auto const& colour : neos::context::highlight_colours(aContext.schema().path(), "dark"))
             {
-                "\x1b[38;2;106;153;85m",   // Comment
-                "\x1b[38;2;86;156;214m",   // Keyword
-                "\x1b[38;2;206;145;120m",  // String
-                "\x1b[38;2;181;206;168m",  // Number
-                "\x1b[38;2;86;156;214m",   // Constant
-                "\x1b[38;2;78;201;176m",   // Type
-                "\x1b[38;2;220;220;170m"   // Function
-            };
+                unsigned red = 0u, green = 0u, blue = 0u;
+                colours.push_back(colour.size() == 7u && colour[0] == '#' && std::sscanf(colour.c_str() + 1, "%2x%2x%2x", &red, &green, &blue) == 3 ?
+                    "\x1b[38;2;" + std::to_string(red) + ";" + std::to_string(green) + ";" + std::to_string(blue) + "m" : std::string{});
+            }
             std::string result;
             for (std::size_t first = 0u; first < aSource.size();)
             {
                 auto last = first + 1u;
                 while (last < aSource.size() && categories[last] == categories[first])
                     ++last;
-                if (categories[first])
-                    result.append(sColours[static_cast<std::size_t>(*categories[first])]).append(aSource.substr(first, last - first)).append("\x1b[0m");
+                auto const colour = categories[first] ? static_cast<std::size_t>(*categories[first]) : colours.size();
+                if (colour < colours.size() && !colours[colour].empty())
+                    result.append(colours[colour]).append(aSource.substr(first, last - first)).append("\x1b[0m");
                 else
                     result.append(aSource.substr(first, last - first));
                 first = last;

@@ -49,7 +49,8 @@ namespace neos::compilers::python
 {
     // (nested functions, closures and decorated functions: the module's source rewritten (closures.cpp))
     std::string rewrite_nested_functions(std::string const& aText, bool& aChanged, std::map<std::string, std::vector<std::pair<std::string, std::string>>>* aAnnotations = nullptr,
-        std::vector<std::size_t>* aLines = nullptr);   ///< (aLines: the line of aText (0-based) that each line of the result is)
+        std::vector<std::size_t>* aLines = nullptr, bool aStubReturnTypes = false);   ///< (aLines: the line of aText (0-based) that each line of the result 
+                                                        ///< is; aStubReturnTypes: a stub's return annotation (its type: None) is kept if it is the grammar's)
     std::string rewrite_module_names(std::string const& aText, std::string const& aPrefix, std::string const& aGetter, std::vector<std::string>& aNames,
         std::optional<std::vector<std::string>>& aAll, std::set<std::string> const& aBuiltins);
     // (compound statements that are compiled as others (e.g. a loop's else clause): the module's source rewritten (statements.cpp))
@@ -66,7 +67,8 @@ namespace neos::compilers::python
     // ends the rewrites (it does not return); aImports: called with the text whose import statements import the modules of source files)
     std::string rewrite_source(std::string_view aSource, std::string const& aOriginal, bool aExecMode, bool aPackage, bool& aChanged, 
         bool& aCompilesAtRunTime, std::vector<std::uint32_t>& aLines, std::map<std::string, std::vector<std::pair<std::string, std::string>>>& aAnnotations,
-        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports);
+        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports, 
+        bool aStubReturnTypes = false); ///< (aStubReturnTypes: see rewrite_nested_functions)
 
     // (a syntax error as CPython reports it (syntax.cpp): its stage (the first error of a stage is reported: the tokenizer's and parser's (in 
     // source order), then the symbol table's, then the compiler's), type, message and location (a line and a character offset, 1-based))
@@ -206,6 +208,8 @@ namespace neos::compilers::python
             std::map<std::string, std::map<std::string, type>> pyLocals;  ///< function -> variables declared at its start (variables
                                                                     ///< that hold objects or whose type changes)
             std::set<std::string> pyFree;                           ///< names that functions use but do not bind
+            std::set<std::string> pyFreeThisPass;                   ///< (this pass) names that functions read before the module bound
+                                                                    ///< them (read as builtins')
             std::set<std::string> pyModuleNames;                    ///< names that top-level statements bind
             std::map<std::string, std::set<std::string>> pyGlobals; ///< function -> names it declares global
             std::map<std::string, std::set<std::string>> pyBound;   ///< function -> the names it binds (its local variables)

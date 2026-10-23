@@ -45,6 +45,24 @@ namespace neos::concepts::javascript
 
     namespace
     {
+        // (the generic concept (neos.core's) that a construct's concept derives from, if any: e.g. for a syntax highlighter (see 
+        // neos::context::highlight))
+        neolib::string_view generic_concept(construct aConstruct)
+        {
+            switch (aConstruct)
+            {
+            case construct::Parameters:
+                return neolib::string_view{ "language.function.parameters" };
+            case construct::Identifier:
+            case construct::Binding:
+                return neolib::string_view{ "language.identifier" };
+            case construct::Initializer:
+                return neolib::string_view{ "language.initialize" };
+            default:
+                return {};
+            }
+        }
+
         class javascript_construct : public semantic_concept<javascript_construct>
         {
             // concept
@@ -53,7 +71,7 @@ namespace neos::concepts::javascript
             // construction
         public:
             javascript_construct(language::javascript::construct_info const& aInfo) :
-                semantic_concept<javascript_construct>{ neolib::string_view{ aInfo.conceptName }, neos::language::emit_type::Infix },
+                semantic_concept<javascript_construct>{ neolib::string_view{ aInfo.conceptName }, neos::language::emit_type::Infix, generic_concept(aInfo.id) },
                 iConstruct{ aInfo.id }
             {
             }

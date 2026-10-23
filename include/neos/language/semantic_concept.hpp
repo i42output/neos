@@ -203,12 +203,13 @@ namespace neos::language
             iName{ concept_type::Name }, iEmitAs { aEmitAs }
         {
         }
-        semantic_concept(neolib::string_view const& aName, emit_type aEmitAs = emit_type::Postfix) :
-            iName{ aName }, iEmitAs{ aEmitAs }
+        // (aBase: a concept that a concept named at run time (aName) derives from (see is), e.g. a generic one (neos.core's))
+        semantic_concept(neolib::string_view const& aName, emit_type aEmitAs = emit_type::Postfix, neolib::string_view const& aBase = {}) :
+            iName{ aName }, iBase{ aBase }, iEmitAs{ aEmitAs }
         {
         }
         semantic_concept(semantic_concept const& aOther) :
-            iName{ aOther.iName }, iEmitAs{ aOther.iEmitAs }
+            iName{ aOther.iName }, iBase{ aOther.iBase }, iEmitAs{ aOther.iEmitAs }
         {
         }
         // folding support
@@ -227,7 +228,7 @@ namespace neos::language
         }
         virtual bool is(neolib::i_string_view const& aName) const final
         {
-            bool found = (aName == name());
+            bool found = (aName == name()) || (!iBase.empty() && aName == iBase);
             ((found = found || ConceptHierarchy::Name == aName), ...);
             return found;
         }
@@ -311,6 +312,7 @@ namespace neos::language
         // attributes
     private:
         neolib::string_view iName;
+        neolib::string_view iBase;
         emit_type iEmitAs;
         neolib::ref_ptr<i_semantic_concept> iInstance;
     };

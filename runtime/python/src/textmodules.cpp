@@ -30,10 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/string.py (string.Template's pattern)), Copyright (c) 2001-2024
-  Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2
-  (see runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the neos Python runtime plugin and adapted
-  to its object model (see runtime/python/NOTICE).
+  Portions of this file are derived from CPython 3.13 (Lib/string.py (string.Template's pattern) and Modules/binascii.c
+  (a2b_qp and b2a_qp)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
+  Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python (and C) to
+  C++ for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
 
 // The modules string, struct, binascii and base64 (CPython 3.13's behaviour and messages)
@@ -1317,6 +1317,135 @@ namespace neos::python_runtime
                         if (!base64_decode(text, result, strict))
                             return nullptr;
                         return make_bytes(result);
+                    } },
+                // (Modules/binascii.c's binascii_a2b_qp_impl: quoted-printable (header: _ is a space))
+                { "a2b_qp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string data;
+                        if (!parse_arguments("a2b_qp", aArgs, aKwargs, { "data", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, true))
+                            return nullptr;
+                        int header = 0;
+                        if (a[1] != nullptr && (header = truth(a[1])) < 0)
+                            return nullptr;
+                        auto const hex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'); };
+                        auto const value = [](char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; };
+                        std::string out;
+                        out.reserve(data.size());
+                        std::size_t in = 0u;
+                        while (in < data.size())
+                        {
+                            if (data[in] == '=')
+                            {
+                                ++in;
+                                if (in >= data.size())
+                                    break;
+                                // (a soft line break)
+                                if (data[in] == '\n' || data[in] == '\r')
+                                {
+                                    if (data[in] != '\n')
+                                        while (in < data.size() && data[in] != '\n')
+                                            ++in;
+                                    if (in < data.size())
+                                        ++in;
+                                }
+                                else if (data[in] == '=')
+                                {
+                                    // (broken case from broken python qp)
+                                    out += '=';
+                                    ++in;
+                                }
+                                else if (in + 1u < data.size() && hex(data[in]) && hex(data[in + 1u]))
+                                {
+                                    out += static_cast<char>((value(data[in]) << 4) | value(data[in + 1u]));
+                                    in += 2u;
+                                }
+                                else
+                                    out += '=';
+                            }
+                            else if (header != 0 && data[in] == '_')
+                            {
+                                out += ' ';
+                                ++in;
+                            }
+                            else
+                                out += data[in++];
+                        }
+                        return make_bytes(out);
+                    } },
+                // (Modules/binascii.c's binascii_b2a_qp_impl: lines of at most 76 characters (soft line breaks), CRLF if the data's lines
+                // end with it)
+                { "b2a_qp", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        std::string data;
+                        if (!parse_arguments("b2a_qp", aArgs, aKwargs, { "data", "quotetabs", "istext", "header" }, 1u, 0u, a) || !binary_argument(a[0], data, false))
+                            return nullptr;
+                        int quotetabs = 0, istext = 1, header = 0;
+                        if ((a[1] != nullptr && (quotetabs = truth(a[1])) < 0) || (a[2] != nullptr && (istext = truth(a[2])) < 0) || 
+                            (a[3] != nullptr && (header = truth(a[3])) < 0))
+                            return nullptr;
+                        std::size_t constexpr MaxLineSize = 76u;
+                        static char const sHex[] = "0123456789ABCDEF";
+                        auto const n = data.size();
+                        auto const newline = data.find('\n');
+                        bool const crlf = newline != std::string::npos && newline > 0u && data[newline - 1u] == '\r';
+                        auto const at = [&](std::size_t i) -> unsigned char { return static_cast<unsigned char>(data[i]); };
+                        std::string out;
+                        std::size_t in = 0u, linelen = 0u;
+                        auto const soft_break = [&]()
+                        {
+                            out += '=';
+                            if (crlf)
+                                out += '\r';
+                            out += '\n';
+                            linelen = 0u;
+                        };
+                        while (in < n)
+                        {
+                            auto const c = at(in);
+                            if (c > 126u || c == '=' || (header != 0 && c == '_') ||
+                                (c == '.' && linelen == 0u && (in + 1u == n || at(in + 1u) == '\n' || at(in + 1u) == '\r' || at(in + 1u) == 0u)) ||
+                                (istext == 0 && (c == '\r' || c == '\n')) || ((c == '\t' || c == ' ') && in + 1u == n) ||
+                                (c < 33u && c != '\r' && c != '\n' && (quotetabs != 0 || (c != '\t' && c != ' '))))
+                            {
+                                if (linelen + 3u >= MaxLineSize)
+                                    soft_break();
+                                out += '=';
+                                out += sHex[c >> 4u];
+                                out += sHex[c & 15u];
+                                ++in;
+                                linelen += 3u;
+                            }
+                            else if (istext != 0 && (c == '\n' || (in + 1u < n && c == '\r' && at(in + 1u) == '\n')))
+                            {
+                                linelen = 0u;
+                                // (whitespace at the end of a line: quoted)
+                                if (!out.empty() && (out.back() == ' ' || out.back() == '\t'))
+                                {
+                                    auto const last = static_cast<unsigned char>(out.back());
+                                    out.back() = '=';
+                                    out += sHex[last >> 4u];
+                                    out += sHex[last & 15u];
+                                }
+                                if (crlf)
+                                    out += '\r';
+                                out += '\n';
+                                in += c == '\r' ? 2u : 1u;
+                            }
+                            else
+                            {
+                                if (in + 1u != n && at(in + 1u) != '\n' && linelen + 1u >= MaxLineSize)
+                                    soft_break();
+                                ++linelen;
+                                if (header != 0 && c == ' ')
+                                    out += '_';
+                                else
+                                    out += static_cast<char>(c);
+                                ++in;
+                            }
+                        }
+                        return make_bytes(out);
                     } },
                 { "crc32", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {

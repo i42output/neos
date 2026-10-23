@@ -127,7 +127,8 @@ namespace neos::compilers::python
         // (\b(globals|vars|dir|exec|eval)\b|\bsys\.modules\b|\bimport\s+__main__\b|\b_?pickle\b)
         bool introspective(std::string_view aText)
         {
-            if (has_word(aText, { "globals", "vars", "dir", "exec", "eval", "sys.modules", "pickle", "_pickle" }))
+            // (or that unittest finds its tests in (unittest.main(): by their names in __main__))
+            if (has_word(aText, { "globals", "vars", "dir", "exec", "eval", "sys.modules", "pickle", "_pickle", "unittest" }))
                 return true;
             for (auto p = aText.find("import"); p != std::string_view::npos; p = aText.find("import", p + 1u))
             {
@@ -258,7 +259,9 @@ namespace neos::compilers::python
                 "ntpath", "genericpath", "stat", "__future__", "builtins", "posix", "nt", "copyreg", "_string", "copy", "_codecs", "encodings", "_csv", 
                 "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket", "configparser", "socketserver", "pickle", "_pickle", "_compat_pickle", "_operator", "_heapq", "_bisect", "_functools", "_struct", "_io", "contextvars", "_contextvars", "concurrent", "asyncio", "_asyncio", "subprocess", "_posixsubprocess", "_winapi", "msvcrt", "shlex", "getopt", "colorsys", "graphlib", 
                 "hmac", "difflib", "ipaddress", "fileinput", "html", "_markupbase", "urllib", "tomllib", "importlib", "pwd", "grp", "fcntl", "_compression", "gzip", "sched", "cmd", "quopri", 
-                "mimetypes", "netrc", "zipfile" };
+                "mimetypes", "netrc", "zipfile", "unittest", "pkgutil", "termios",
+                "optparse", "gettext", "filecmp", "getpass", "token", "tokenize", "tarfile", "stringprep", "tty", "pty", "shelve", "wave", "webbrowser", "_tokenize", "email", "http",
+                "smtplib", "poplib", "imaplib", "ftplib", "mailbox", "nturl2path", "code", "codeop", "rlcompleter", "wsgiref" };
             return sStandard;
         }
         // (the submodules of the standard library's packages that the runtime implements as modules of their own (imported by their 
@@ -271,7 +274,11 @@ namespace neos::compilers::python
                 "asyncio.log", "asyncio.mixins", "asyncio.protocols", "asyncio.queues", "asyncio.runners", "asyncio.selector_events", "asyncio.staggered", "asyncio.streams", "asyncio.subprocess", "asyncio.taskgroups",
                 "asyncio.tasks", "asyncio.threads", "asyncio.timeouts", "asyncio.transports", "asyncio.trsock", "asyncio.unix_events", "asyncio.windows_events",
                 "html.entities", "html.parser", "urllib.parse", "tomllib._parser", "tomllib._re", "tomllib._types", "importlib.util", "importlib.machinery",
-                "zipfile._path", "zipfile._path.glob" };
+                "zipfile._path", "zipfile._path.glob", "unittest.util", "unittest.result", "unittest.case", "unittest.suite", "unittest.loader",
+                "unittest.main", "unittest.runner", "unittest.signals", "unittest.async_case", "unittest._log", "unittest.mock",
+                "email._encoded_words", "email._header_value_parser", "email._parseaddr", "email._policybase", "email.base64mime", "email.charset", "email.contentmanager", "email.encoders", "email.errors", "email.feedparser", "email.generator", "email.header", "email.headerregistry", "email.iterators", "email.message", "email.parser", "email.policy", "email.quoprimime", "email.utils", "email.mime", "email.mime.application", "email.mime.audio", "email.mime.base", "email.mime.image", "email.mime.message", "email.mime.multipart", "email.mime.nonmultipart", "email.mime.text",
+                "http.client", "http.cookiejar", "http.cookies", "http.server", "urllib.error", "urllib.request", "urllib.response", "urllib.robotparser",
+                "wsgiref.handlers", "wsgiref.headers", "wsgiref.simple_server", "wsgiref.util", "wsgiref.validate", "wsgiref.types" };
             return sSubmodules;
         }
 
@@ -1822,7 +1829,8 @@ namespace neos::compilers::python
     // py_join_lines's rewrites of a source that need no compilation (see compiler.hpp)
     std::string rewrite_source(std::string_view aSource, std::string const& aOriginal, bool aExecMode, bool aPackage, bool& aChanged, 
         bool& aCompilesAtRunTime, std::vector<std::uint32_t>& aLines, std::map<std::string, std::vector<std::pair<std::string, std::string>>>& aAnnotations,
-        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports)
+        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports, 
+        bool aStubReturnTypes)
     {
         std::string text = rewrite_fstrings(aOriginal, aChanged);
         std::string const unjoined = text;
@@ -2108,7 +2116,7 @@ namespace neos::compilers::python
             bool nestedChanged = false;
             track_lines();
             std::vector<std::size_t> nestedLines;
-            text = rewrite_nested_functions(text, nestedChanged, &aAnnotations, &nestedLines);
+            text = rewrite_nested_functions(text, nestedChanged, &aAnnotations, &nestedLines, aStubReturnTypes);
             if (nestedChanged)
             {
                 std::vector<std::uint32_t> rewritten;
@@ -4504,7 +4512,14 @@ namespace neos::compilers::python
             value.valueType = type::Object;
             return py_owned(value);
         }
-        if (symbol == nullptr && inFunction && !builtin_names().contains(aName) &&
+        if (symbol == nullptr && inFunction && !builtin_names().contains(aName) && !iInference.pyFree.contains(aName) && !iInference.pyModuleNames.contains(aName))
+        {
+            // (a name that the module has not bound (yet): a builtin's, unless the module binds it (then another pass declares it 
+            // a global: see py_variable))
+            iInference.pyFree.insert(aName);
+            iInference.pyFreeThisPass.insert(aName);
+        }
+        else if (symbol == nullptr && inFunction && !builtin_names().contains(aName) &&
             (!iInference.pyFree.contains(aName) || iInference.pyModuleNames.contains(aName)))
         {
             // (a global: the next compilation pass declares it)
@@ -4521,6 +4536,9 @@ namespace neos::compilers::python
         // (a module whose namespace (globals()) can bind names: one of those, or a builtin)
         if (iPyIntrospective.contains(py_module_name()))
             return py_owned(py_runtime_call("python::global_lookup", { type::String, type::String }, type::Object, { py_string(py_module_name()), py_string(aName) }));
+        // (the builtins that programs' tests replace (e.g. unittest.mock's patch("builtins.open")): found each time they are used)
+        if (aName == "open" || aName == "input")
+            return py_owned(py_runtime_call("python::builtin", { type::String }, type::Object, { py_string(aName) }));
         // a builtin (as an object; NameError if there is no such builtin): found once (the runtime's builtins do not change)
         return py_made_once("__neos_py_builtin_" + aName, py_runtime_call("python::builtin", { type::String }, type::Object, { py_string(aName) }));
     }
@@ -4563,6 +4581,9 @@ namespace neos::compilers::python
             }
             if (iInference.pyFree.contains(aName))
             {
+                // (functions that this pass compiled read it as a builtin's: the next pass declares it a global)
+                if (iInference.pyFreeThisPass.erase(aName) != 0u)
+                    { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
                 generator().function_global(neolib::string{ aName });
                 for (std::size_t g = 0u; g < generator().global_count(); ++g)
                     if (generator().global_name(g).to_std_string_view() == aName)
@@ -7417,7 +7438,8 @@ namespace neos::compilers::python
 
     bool compiler::parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const
     {
-        // (a program's source as py_join_lines rewrites it, as much of it as needs no compilation (see rewrite_source))
+        // (a program's source as py_join_lines rewrites it, as much of it as needs no compilation (see rewrite_source); a stub's return type 
+        // is kept (it is the source's))
         std::string const source{ aSource.to_std_string_view() };
         bool changed = false;
         bool compilesAtRunTime = false;
@@ -7427,7 +7449,7 @@ namespace neos::compilers::python
         try
         {
             text = rewrite_source(source, source, false, false, changed, compilesAtRunTime, lines, annotations,
-                [](std::size_t, std::string const& aMessage) { throw std::runtime_error{ aMessage }; }, {});
+                [](std::size_t, std::string const& aMessage) { throw std::runtime_error{ aMessage }; }, {}, true);
         }
         catch (...)
         {
@@ -7449,11 +7471,13 @@ namespace neos::compilers::python
         }
         // (the position in the source of each byte of a line of the text from the source that it is (the line's own and those joined to it): 
         // the bytes of the tokens of their common prefix and suffix, then of the longest common subsequence of the rest's tokens (if it is not 
-        // too long); a function that a rewrite hoisted (_nN_name, _dN_name or _gN_name: see closures.cpp) is its name's)
+        // too long); a function that a rewrite hoisted (_nN_name, _dN_name or _gN_name) or a variable's cell (_k_name) is its name's (see 
+        // closures.cpp))
         static constexpr std::size_t MaxAlignment = 1u << 22u;
         auto const tokens_of = [](std::string_view aText)
         {
-            // (names and numbers, and the other characters but whitespace)
+            // (names and numbers, string literals (their contents are not names: e.g. a rewrite's 'name'), and the other characters but 
+            // whitespace)
             auto const name_byte = [](char aCharacter) { return name_character(aCharacter) || static_cast<unsigned char>(aCharacter) >= 0x80u; };
             std::vector<std::string_view> result;
             for (std::size_t i = 0u; i < aText.size();)
@@ -7464,7 +7488,15 @@ namespace neos::compilers::python
                     continue;
                 }
                 auto end = i + 1u;
-                if (name_byte(aText[i]))
+                if (aText[i] == '\'' || aText[i] == '\"')
+                {
+                    auto const delimiter = aText.compare(i, 3u, std::string(3u, aText[i])) == 0 ? aText.substr(i, 3u) : aText.substr(i, 1u);
+                    end = i + delimiter.size();
+                    while (end < aText.size() && aText.compare(end, delimiter.size(), delimiter) != 0)
+                        end += aText[end] == '\\' ? 2u : 1u;
+                    end = std::min(end + delimiter.size(), aText.size());
+                }
+                else if (name_byte(aText[i]))
                     while (end < aText.size() && name_byte(aText[end]))
                         ++end;
                 result.push_back(aText.substr(i, end - i));
@@ -7480,7 +7512,7 @@ namespace neos::compilers::python
             if (aToken.size() <= aSourceToken.size() || !aToken.ends_with(aSourceToken) || !name_character(aSourceToken.front()))
                 return std::string_view::npos;
             auto const prefix = aToken.substr(0u, aToken.size() - aSourceToken.size());
-            return numbered_name(prefix, 'n', false) || numbered_name(prefix, 'd', false) || numbered_name(prefix, 'g', false) ? 
+            return numbered_name(prefix, 'n', false) || numbered_name(prefix, 'd', false) || numbered_name(prefix, 'g', false) || prefix == "_k_" ? 
                 prefix.size() : std::string_view::npos;
         };
         auto const align = [&](std::string_view aLine, std::size_t aOffset, std::string_view aSegment)
@@ -7553,6 +7585,7 @@ namespace neos::compilers::python
     void compiler::begin_pass()
     {
         iInference.pyCounterBindings.clear();
+        iInference.pyFreeThisPass.clear();
         iFunctions.clear();
     }
 
@@ -7982,8 +8015,16 @@ namespace neos::compilers::python
     std::string compiler::py_global_name(std::string const& aName) const
     {
         auto const m = py_current_module();
-        if (!m || (in_function() && !implicit_entry()))
+        if (!m)
             return aName;
+        // (a function's: a local, unless it declares the module's name global (global name: see rewrite_module_names))
+        if (in_function() && !implicit_entry())
+        {
+            auto const prefixed = iPyModules[*m].prefix() + aName;
+            if (auto const declared = iInference.pyGlobals.find(current_function_name()); declared != iInference.pyGlobals.end() && declared->second.contains(prefixed))
+                return prefixed;
+            return aName;
+        }
         return iPyModules[*m].prefix() + aName;
     }
 

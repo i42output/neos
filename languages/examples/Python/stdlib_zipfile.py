@@ -19,7 +19,7 @@ with zipfile.ZipFile(p) as z:
     print(z.extract("s/src.txt", os.path.join(d, "x")).endswith(os.path.join("x", "s", "src.txt")))
     try: z.getinfo("missing")
     except KeyError as e: print("KeyError", e)
-    print(z.printdir() is None)
+    out = io.StringIO(); z.printdir(out); print(out.getvalue().split()[:3], len(out.getvalue().splitlines()))
 zp = zipfile.Path(p)
 print(sorted(str(x).replace(d, "<dir>") for x in zp.glob("**/*.txt")), zp.joinpath("s").is_dir(), (zp / "s" / "src.txt").exists(), zp.name)
 print((zp / "s/src.txt").read_bytes()[:6], (zp / "s/src.txt").suffix, (zp / "s/src.txt").stem)
