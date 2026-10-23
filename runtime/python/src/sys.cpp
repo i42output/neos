@@ -30,10 +30,11 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Python/stdlib_module_names.h), Copyright (c) 2001-2024 Python
-  Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
-  runtime/python/LICENSE.PSF). Changes: its list of the standard library's module names reproduced as a C++ table for
-  the neos Python runtime plugin (see runtime/python/NOTICE).
+  Portions of this file are derived from CPython 3.13 (Python/stdlib_module_names.h, Python/sysmodule.c (the asynchronous
+  generator hooks and the coroutine origin tracking depth) and Python/errors.c (the default unraisable hook)), Copyright (c)
+  2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License
+  Version 2 (see runtime/python/LICENSE.PSF). Changes: its list of the standard library's module names reproduced as a C++
+  table, and translated from C to C++, for the neos Python runtime plugin (see runtime/python/NOTICE).
 */
 
 // The sys module (CPython 3.13's: its attributes other than those of objects.cpp's sys)
@@ -148,6 +149,9 @@ namespace neos::python_runtime
                 return 56;
             }
 
+            // (sys.set_coroutine_origin_tracking_depth's (coroutines' origins are not tracked: cr_origin is None))
+            thread_local long long sCoroutineOriginTrackingDepth = 0;
+
             builtin_entry const sSysFunctions[] =
             {
                 { "exit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -225,6 +229,59 @@ namespace neos::python_runtime
                         return aArgs[0];
                     } },
                 { "is_finalizing", [](std::vector<object*> const&, object*) -> object* { return make_bool(false); } },
+                // (asynchronous generators' hooks (this thread's): firstiter is called when one begins its first iteration; finalizer when one that
+                // has not finished is destroyed)
+                { "get_asyncgen_hooks", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("get_asyncgen_hooks", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        static auto const& sDescriptor = structseq_type("asyncgen_hooks", { "firstiter", "finalizer" }, 2u);
+                        auto const firstiter = asyncgen_firstiter();
+                        auto const finalizer = asyncgen_finalizer();
+                        return make_structseq(sDescriptor, { new_reference(firstiter != nullptr ? firstiter : none()), 
+                            new_reference(finalizer != nullptr ? finalizer : none()) });
+                    } },
+                { "set_asyncgen_hooks", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("set_asyncgen_hooks", aArgs, aKwargs, { "firstiter", "finalizer" }, 0u, 0u, a))
+                            return nullptr;
+                        for (std::size_t i = 0u; i < 2u; ++i)
+                            if (a[i] != nullptr && kind_of(a[i]) != NEOS_PY_NONE && !is_callable(a[i]))
+                                return error("TypeError", std::string{ "callable " } + (i == 0u ? "firstiter" : "finalizer") + " expected, got " + type_name(a[i]));
+                        auto const assign = [](object*& aHook, object* aValue)
+                        {
+                            if (aValue == nullptr)
+                                return;
+                            auto const old = aHook;
+                            aHook = kind_of(aValue) == NEOS_PY_NONE ? nullptr : new_reference(aValue);
+                            release(old);
+                        };
+                        assign(asyncgen_finalizer(), a[1]);
+                        assign(asyncgen_firstiter(), a[0]);
+                        return new_reference(none());
+                    } },
+                { "get_coroutine_origin_tracking_depth", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("get_coroutine_origin_tracking_depth", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        return make_int(sCoroutineOriginTrackingDepth);
+                    } },
+                { "set_coroutine_origin_tracking_depth", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("set_coroutine_origin_tracking_depth", aArgs, aKwargs, { "depth" }, 1u, 0u, a))
+                            return nullptr;
+                        long long depth = 0;
+                        if (!to_index(a[0], depth))
+                            return nullptr;
+                        if (depth < 0)
+                            return error("ValueError", "depth must be >= 0");
+                        sCoroutineOriginTrackingDepth = depth;
+                        return new_reference(none());
+                    } },
                 { "exc_info", [](std::vector<object*> const&, object*) -> object*
                     {
                         auto const e = handled_exception();
@@ -278,6 +335,20 @@ namespace neos::python_runtime
                         }
                         return none();
                     } },
+                { "unraisablehook", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        // (the default: an UnraisableHookArgs's exception reported on stderr)
+                        std::vector<object*> a;
+                        if (!parse_arguments("unraisablehook", aArgs, aKwargs, { "unraisable" }, 1u, 1u, a))
+                            return nullptr;
+                        ref const value{ getattr(a[0], "exc_value") };
+                        ref const message{ value ? getattr(a[0], "err_msg") : nullptr };
+                        ref const object{ message ? getattr(a[0], "object") : nullptr };
+                        if (!object)
+                            return nullptr;
+                        unraisable_report(value.get(), message.get(), object.get());
+                        return new_reference(none());
+                    } },
                 { "excepthook", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         // (the exception's report (as the module traceback formats it) on sys.stderr)
@@ -320,9 +391,31 @@ namespace neos::python_runtime
                 // (sys.__excepthook__: the original sys.excepthook)
                 if (std::strcmp(f.name, "excepthook") == 0)
                     aAttributes.emplace_back("__excepthook__", new_reference(aAttributes.back().second));
+                if (std::strcmp(f.name, "unraisablehook") == 0)
+                    aAttributes.emplace_back("__unraisablehook__", new_reference(aAttributes.back().second));
             }
             aAttributes.emplace_back("version_info", version_info());
             aAttributes.emplace_back("hexversion", make_int(0x030D00F0));
+            // (sys.implementation: the implementation's name (as platform.python_implementation()), the version of Python it implements;
+            // no cache tag (no bytecode caching))
+            if (ref const ns{ module_attribute("types", "SimpleNamespace") })
+            {
+                ref const kw{ make_dict() };
+                for (auto const& [key, value] : { std::pair<char const*, object*>{ "name", make_str("neos") }, std::pair<char const*, object*>{ "cache_tag", (retain(none()), none()) },
+                    std::pair<char const*, object*>{ "version", version_info() }, std::pair<char const*, object*>{ "hexversion", make_int(0x030D00F0) } })
+                {
+                    ref const k{ make_str(key) };
+                    ref const v{ value };
+                    dict_set(kw.get(), k.get(), v.get());
+                }
+                ref const args{ make_tuple() };
+                if (object* const implementation = call(ns.get(), args.get(), kw.get()))
+                    aAttributes.emplace_back("implementation", implementation);
+                else
+                    clear_error();
+            }
+            else
+                clear_error();
             aAttributes.emplace_back("api_version", make_int(1013));
             aAttributes.emplace_back("maxunicode", make_int(1114111));
             aAttributes.emplace_back("copyright", make_str("Copyright (c) 2001-2024 Python Software Foundation.\nAll Rights Reserved."));

@@ -29,6 +29,12 @@
   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  Portions of this file are derived from CPython 3.13 (Objects/genobject.c (the asynchronous generators' hooks and
+  finalization, and the warning of a coroutine that was never awaited)), Copyright (c) 2001-2024 Python Software
+  Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
+  runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted to its
+  object model (see runtime/python/NOTICE).
 */
 
 // Generators: a generator function returns __generator(body, name, qualname, arguments...) (see the Python compiler's
@@ -76,10 +82,25 @@ namespace neos::python_runtime
                 bool awaiting = false;                  ///< (suspended by an await (not by an asynchronous generator's yield))
                 bool asyncRunning = false;              ///< (an asynchronous generator: an asend, athrow or aclose is being awaited)
                 bool hooked = false;                    ///< (an asynchronous generator: its first iteration has begun)
+                object* finalizer = nullptr;            ///< (an asynchronous generator: sys.set_asyncgen_hooks's finalizer when its first iteration began)
+                bool finalized = false;                 ///< (its finalizer has been called)
+                neos_rt_frame suspendedAt{};            ///< (suspended: its body's frame where it suspended (its line); source null: not known)
                 ~generator_object();
             };
 
             thread_local generator_object* tCurrent = nullptr;
+
+            // (a coroutine that suspends (awaiting): its body's frame (the innermost) remembered, for its frame's line (cr_frame.f_lineno, e.g. 
+            // in a task's repr); a body that is native has none (a generator's yield does not: it costs a host call each time))
+            void suspending(generator_object& g)
+            {
+                g.suspendedAt = neos_rt_frame{};
+                if (kind_of(g.function) == NEOS_PY_FUNCTION)
+                    return;
+                auto const* h = host();
+                if (h != nullptr && h->version >= NEOS_RUNTIME_PLUGIN_VERSION && h->frames != nullptr && h->frames(&g.suspendedAt, 1u) != 1u)
+                    g.suspendedAt = neos_rt_frame{};
+            }
             bool sProgramEnded = false;
 
             neos_py_type make_generator_type(generator_object::kind_t aKind);
@@ -217,6 +238,94 @@ namespace neos::python_runtime
                 return none();
             }
 
+            // (sys.set_asyncgen_hooks's: each thread's)
+            thread_local object* tAsyncgenFirstiter = nullptr;
+            thread_local object* tAsyncgenFinalizer = nullptr;
+
+            // (an asynchronous generator's first iteration (as CPython's async_gen_init_hooks): the finalizer kept, and firstiter called with it)
+            bool async_gen_init_hooks(object* aSelf)
+            {
+                auto& g = *reinterpret_cast<generator_object*>(aSelf);
+                if (g.hooked)
+                    return true;
+                g.hooked = true;
+                if (tAsyncgenFinalizer != nullptr)
+                {
+                    retain(tAsyncgenFinalizer);
+                    g.finalizer = tAsyncgenFinalizer;
+                }
+                if (tAsyncgenFirstiter != nullptr)
+                {
+                    ref const firstiter{ new_reference(tAsyncgenFirstiter) };
+                    ref const r{ invoke(firstiter.get(), { new_reference(aSelf) }) };
+                    if (!r)
+                        return false;
+                }
+                return true;
+            }
+
+            // (an asynchronous generator that is destroyed before it has finished: its finalizer (if it has one) called with it (it may 
+            // resurrect it: e.g. asyncio's loop schedules its aclose()))
+            void release_async_generator(neos_rt_object* aObject)
+            {
+                auto& g = *reinterpret_cast<generator_object*>(aObject);
+                if (remove_reference(g.h) != 0)
+                    return;
+                if (g.finalizer != nullptr && !g.finalized && g.state != generator_object::Finished && !sProgramEnded)
+                {
+                    g.finalized = true;
+                    g.h.references.store(1, std::memory_order_relaxed);
+                    {
+                        ref const pending{ failed() ? take_exception() : ref{} };
+                        ref const r{ invoke(g.finalizer, { new_reference(aObject) }) };
+                        if (!r)
+                            write_unraisable(g.finalizer);
+                        if (pending)
+                            fn_raise(pending.get());
+                    }
+                    if (remove_reference(g.h) != 0)
+                        return;
+                }
+                if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
+                    clear_weak_references(reinterpret_cast<neos_py_object*>(aObject));
+                delete &g;
+            }
+
+            // (a coroutine that is destroyed before it has started: RuntimeWarning (as CPython's _PyErr_WarnUnawaitedCoroutine: its source the
+            // coroutine))
+            void release_coroutine(neos_rt_object* aObject)
+            {
+                auto& g = *reinterpret_cast<generator_object*>(aObject);
+                if (remove_reference(g.h) != 0)
+                    return;
+                if (g.state == generator_object::Created && !sProgramEnded)
+                {
+                    g.h.references.store(1, std::memory_order_relaxed);
+                    {
+                        ref const pending{ failed() ? take_exception() : ref{} };
+                        ref const warn{ module_attribute("warnings", "warn") };
+                        ref r;
+                        if (warn)
+                        {
+                            ref const kwargs{ make_dict() };
+                            ref const key{ make_str("source") };
+                            dict_set(kwargs.get(), key.get(), aObject);
+                            r = ref{ invoke(warn.get(), { make_str("coroutine '" + g.qualname + "' was never awaited"), exception_class("RuntimeWarning") },
+                                kwargs.get()) };
+                        }
+                        if (!r)
+                            write_unraisable(aObject);
+                        if (pending)
+                            fn_raise(pending.get());
+                    }
+                    if (remove_reference(g.h) != 0)
+                        return;
+                }
+                if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
+                    clear_weak_references(reinterpret_cast<neos_py_object*>(aObject));
+                delete &g;
+            }
+
             generator_object::~generator_object()
             {
                 // (a suspended generator is closed: its finally clauses run)
@@ -229,6 +338,7 @@ namespace neos::python_runtime
                 }
                 if (coroutine != nullptr)
                     host()->coroutine_delete(coroutine);
+                release(finalizer);
                 release(function);
                 release(arguments);
                 release(keywords);
@@ -299,7 +409,8 @@ namespace neos::python_runtime
             neos_py_type make_generator_type(generator_object::kind_t aKind)
             {
                 char const* const name = aKind == generator_object::Coroutine ? "coroutine" : aKind == generator_object::AsyncGenerator ? "async_generator" : "generator";
-                auto type = make_type(name, name, retain_object, release_object<generator_object>);
+                auto type = make_type(name, name, retain_object, aKind == generator_object::AsyncGenerator ? release_async_generator :
+                    aKind == generator_object::Coroutine ? release_coroutine : release_object<generator_object>);
                 type.repr = [](neos_py_context*, object* aSelf) -> object*
                 {
                     char address[32];
@@ -347,7 +458,25 @@ namespace neos::python_runtime
                             static std::set<std::string> sNames;
                             std::lock_guard<std::mutex> lock{ sMutex };
                             auto const& name = *sNames.insert(g.name).first;
-                            neos_rt_frame const frame{ name.c_str(), "", 0u, 0u, nullptr, 0u };
+                            neos_rt_frame frame{ name.c_str(), "", 0u, 0u, nullptr, 0u };
+                            // (suspended: where its body suspended)
+                            if (g.state == generator_object::Suspended && g.suspendedAt.source != nullptr)
+                                return make_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, g.suspendedAt), 0u);
+                            // (not started: its function's first line)
+                            if (g.state == generator_object::Created)
+                                if (ref const code{ getattr(g.function, "__code__") })
+                                {
+                                    ref const file{ getattr(code.get(), "co_filename") };
+                                    ref const line{ getattr(code.get(), "co_firstlineno") };
+                                    long long first = 0;
+                                    if (file && line && kind_of(file.get()) == NEOS_PY_STR && to_index(line.get(), first))
+                                    {
+                                        frame.source = sNames.insert(as<str_object>(file.get())->value).first->c_str();
+                                        frame.line = static_cast<unsigned>(first);
+                                        frame.firstLine = static_cast<unsigned>(first);
+                                    }
+                                }
+                            clear_error();
                             return make_frame(std::make_shared<std::vector<neos_rt_frame> const>(1u, frame), 0u);
                         }
                         // (its code: its body's)
@@ -551,6 +680,9 @@ namespace neos::python_runtime
 
             // (a step of awaiting an awaitable's iterator (aSent: the value sent to it; or aThrown: an exception thrown into
             // it): 1 it yielded (aValue), 0 it finished (aValue: its result), -1 an exception)
+            thread_local bool tAwaitingValue = false;           ///< (await_step is calling a native iterator's next)
+            thread_local object* tFinishedValue = nullptr;      ///< (the value that it finished with (a new reference))
+
             int await_step(object* aIterator, object* aSent, object* aThrown, ref& aValue)
             {
                 if (is_asend(aIterator))
@@ -596,10 +728,20 @@ namespace neos::python_runtime
                     r = ref{ call_method_named(aIterator, "__next__", {}) };
                 else
                 {
+                    // (a native iterator can finish with its value without raising StopIteration (see finish_with_value))
+                    auto const wanted = tAwaitingValue;
+                    tAwaitingValue = true;
                     r = ref{ next(aIterator) };
+                    tAwaitingValue = wanted;
                     if (!r && !failed())
                     {
-                        aValue = ref::borrowed(none());
+                        if (tFinishedValue != nullptr)
+                        {
+                            aValue = ref{ tFinishedValue };
+                            tFinishedValue = nullptr;
+                        }
+                        else
+                            aValue = ref::borrowed(none());
                         return 0;
                     }
                 }
@@ -707,6 +849,7 @@ namespace neos::python_runtime
                     release(g->transfer);
                     g->transfer = value.get();
                     g->awaiting = true;
+                    suspending(*g);
                     host()->coroutine_suspend();
                     g->awaiting = false;
                     if (g->thrown != nullptr)
@@ -749,6 +892,8 @@ namespace neos::python_runtime
                     return error("TypeError", std::string{ "async_generator." } + std::string{ name } + "() takes no keyword arguments");
                 if (name == "__aiter__")
                     return (retain(self), self);
+                if ((name == "__anext__" || name == "asend" || name == "athrow" || name == "aclose") && !async_gen_init_hooks(self))
+                    return nullptr;
                 if (name == "__anext__")
                     return make_asend(self, asend_object::Send, nullptr, nullptr);
                 if (name == "asend")
@@ -1048,6 +1193,21 @@ namespace neos::python_runtime
             auto const r = await_step(aIterator, aSent, aThrown, value);
             aValue = value.release_ownership();
             return r;
+        }
+
+        object*& asyncgen_firstiter() { return tAsyncgenFirstiter; }
+        object*& asyncgen_finalizer() { return tAsyncgenFinalizer; }
+
+        bool awaiting_value()
+        {
+            auto const awaiting = tAwaitingValue;
+            tAwaitingValue = false;     // (taken: the native iterators that its next calls are not stepped by the await)
+            return awaiting;
+        }
+        void finish_with_value(object* aValue)
+        {
+            release(tFinishedValue);
+            tFinishedValue = aValue;
         }
 
         bool fn_is_coroutine(object* aObject)

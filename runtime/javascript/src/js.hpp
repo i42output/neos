@@ -833,6 +833,9 @@ namespace neos::javascript_runtime
     neos_rt_host const* host();
     void* current_program();
     void program_ended();                   ///< (the running program has ended: see neos_runtime_plugin_end)
+    void program_ended(void* aProgram);     ///< (the program has ended (it no longer runs, e.g. eval code that is unloaded))
+    void retain_program(void* aProgram);    ///< (something refers to the program's code (e.g. a function it made): it is not unloaded)
+    bool program_retained(void* aProgram);
     // the standard streams (aStream: 1 (output) or 2 (error)): the running program's, as its host gives them (they may be redirected, 
     // e.g. to a window: see neos_rt_host::std_write), else the process's (stdout and stderr)
     void write_standard(int aStream, std::string_view aText);

@@ -522,6 +522,7 @@ namespace neos::numpy
             auto const result = array_value(v);
             bool const increasing = arg(args, 2, false).truth();
             auto* const xa = x.array();
+            std::vector<unsigned char> xv(v->itemsize()); // (scratch kept for reuse (each element is fully written by cast_element))
             for (std::int64_t i = 0; i < x.len(); ++i)
             {
                 auto const* xp = xa->pointer() + i * xa->strides[0];
@@ -540,7 +541,6 @@ namespace neos::numpy
                     else
                     {
                         auto* const previous = v->pointer() + i * v->strides[0] + (increasing ? j - 1 : N - j) * v->strides[1];
-                        std::vector<unsigned char> xv(v->itemsize());
                         cast_element(xp, xa->type, xv.data(), t);
                         dispatch(t, [&](auto tag)
                         {

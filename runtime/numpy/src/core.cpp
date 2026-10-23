@@ -1078,7 +1078,8 @@ namespace neos::numpy
         iValues(aNames.size(), nullptr)
     {
         std::vector<std::string> names;
-        std::vector<bool> keywordOnly;
+        thread_local std::vector<bool> tKeywordOnly; // (scratch kept for reuse (per call))
+        tKeywordOnly.clear();
         bool varargs = false;
         for (auto name : aNames)
         {
@@ -1095,14 +1096,14 @@ namespace neos::numpy
                 n.clear();
             }
             names.push_back(n);
-            keywordOnly.push_back(k);
+            tKeywordOnly.push_back(k);
         }
         auto const args = aArgs != nullptr ? sequence_items(aArgs) : std::vector<object*>{};
         iPositional = args.size();
         std::size_t p = 0u;
         for (auto a : args)
         {
-            while (p < names.size() && (keywordOnly[p] || names[p].empty()))
+            while (p < names.size() && (tKeywordOnly[p] || names[p].empty()))
                 ++p;
             if (p >= names.size())
             {
@@ -1113,7 +1114,7 @@ namespace neos::numpy
                 }
                 std::size_t positional = 0u;
                 for (std::size_t i = 0u; i < names.size(); ++i)
-                    if (!keywordOnly[i] && !names[i].empty())
+                    if (!tKeywordOnly[i] && !names[i].empty())
                         ++positional;
                 error("TypeError", std::string{ aFunction } + "() takes at most " + std::to_string(positional) + " positional argument" +
                     (positional == 1u ? "" : "s") + " (" + std::to_string(args.size()) + " given)");

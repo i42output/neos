@@ -77,19 +77,20 @@ namespace neos::javascript_runtime
         // (a rope: its leaves in order (iteratively: a rope made by repeated concatenation is deep))
         std::u16string result;
         result.reserve(length);
-        std::vector<value> pending;
-        pending.push_back(right);
-        pending.push_back(left);
-        while (!pending.empty())
+        thread_local std::vector<value> tPending;
+        tPending.clear();
+        tPending.push_back(right);
+        tPending.push_back(left);
+        while (!tPending.empty())
         {
-            auto& s = cell_of<string>(pending.back());
-            pending.pop_back();
+            auto& s = cell_of<string>(tPending.back());
+            tPending.pop_back();
             if (s.left == 0u)
                 result.append(s.smallText ? std::u16string_view{ s.small, s.length } : std::u16string_view{ s.text });
             else
             {
-                pending.push_back(s.right);
-                pending.push_back(s.left);
+                tPending.push_back(s.right);
+                tPending.push_back(s.left);
             }
         }
         text = std::move(result);

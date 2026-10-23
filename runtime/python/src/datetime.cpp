@@ -1681,6 +1681,51 @@ namespace neos::python_runtime
 
             object* timedelta_hash_tuple(td const& d) { return make_tuple({ make_int(d.days), make_int(d.seconds), make_int(d.us) }); }
 
+            // (pickling (CPython's): a date's, time's or datetime's state (its fields' bytes; a fold (protocols beyond 3): its hour's or month's
+            // high bit), and (type, (state[, tzinfo])))
+            object* temporal_reduce(object* aSelf, long long aProto)
+            {
+                auto const& f = fields_of(aSelf);
+                std::string state;
+                auto const push = [&](int aByte) { state.push_back(static_cast<char>(aByte & 0xff)); };
+                bool const fold = aProto > 3 && f.fold != 0;
+                if (!is_time(aSelf))
+                {
+                    push(f.year >> 8);
+                    push(f.year);
+                    push(f.month | (fold && is_datetime(aSelf) ? 128 : 0));
+                    push(f.day);
+                }
+                if (!is_date(aSelf))
+                {
+                    push(f.hour | (fold && is_time(aSelf) ? 128 : 0));
+                    push(f.minute);
+                    push(f.second);
+                    push(f.us >> 16);
+                    push(f.us >> 8);
+                    push(f.us);
+                }
+                ref const cls{ class_of(aSelf) };
+                auto const tz = tz_of(aSelf);
+                return make_tuple({ borrowed(cls.get()), tz != nullptr && !is_date(aSelf) ? make_tuple({ make_bytes(std::move(state)), borrowed(tz) }) :
+                    make_tuple({ make_bytes(std::move(state)) }) });
+            }
+            object* temporal_reduce_ex(object* aSelf, std::vector<object*> const& aArgs, object* aKwargs)
+            {
+                if ((aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()) || aArgs.size() != 1u)
+                    return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
+                long long proto = 0;
+                if (!to_index(aArgs[0], proto))
+                    return nullptr;
+                return temporal_reduce(aSelf, proto);
+            }
+            // (__reduce_ex__: __reduce__'s)
+            object* reduce_ex_of_reduce(object* aSelf, std::vector<object*> const&, object*)
+            {
+                ref const reduce{ getattr(aSelf, "__reduce__") };
+                return reduce ? invoke(reduce.get(), {}) : nullptr;
+            }
+
             method_entry const sTimedeltaMethods[] =
             {
                 { "total_seconds", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -1694,6 +1739,7 @@ namespace neos::python_runtime
                         auto const& d = delta(aSelf);
                         return make_tuple({ type_object_for("timedelta", "datetime.timedelta"), make_tuple({ make_int(d.days), make_int(d.seconds), make_int(d.us) }) });
                     } },
+                { "__reduce_ex__", reduce_ex_of_reduce },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
@@ -1816,11 +1862,8 @@ namespace neos::python_runtime
                     { return no_arguments("isocalendar", aArgs, aKwargs) ? iso_calendar_of(fields_of(aSelf)) : nullptr; } },
                 { "replace", date_replace },
                 { "__replace__", date_replace },
-                { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object*
-                    {
-                        auto const& f = fields_of(aSelf);
-                        return make_tuple({ type_object_for("date", "datetime.date"), make_tuple({ make_int(f.year), make_int(f.month), make_int(f.day) }) });
-                    } },
+                { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return temporal_reduce(aSelf, 2); } },
+                { "__reduce_ex__", reduce_ex_of_reduce },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
@@ -1961,6 +2004,8 @@ namespace neos::python_runtime
                 { "tzname", [](object* aSelf, std::vector<object*> const& aArgs, object* aKwargs) -> object* { return tz_method(aSelf, aArgs, aKwargs, "tzname"); } },
                 { "replace", time_replace },
                 { "__replace__", time_replace },
+                { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return temporal_reduce(aSelf, 2); } },
+                { "__reduce_ex__", temporal_reduce_ex },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
@@ -2239,6 +2284,8 @@ namespace neos::python_runtime
                     { return no_arguments("isocalendar", aArgs, aKwargs) ? iso_calendar_of(fields_of(aSelf)) : nullptr; } },
                 { "replace", datetime_replace },
                 { "__replace__", datetime_replace },
+                { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return temporal_reduce(aSelf, 2); } },
+                { "__reduce_ex__", temporal_reduce_ex },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
@@ -2404,6 +2451,15 @@ namespace neos::python_runtime
                             return make_tuple({ make_timedelta(z.offset), make_str(*z.name) });
                         return make_tuple({ make_timedelta(z.offset) });
                     } },
+                { "__reduce__", [](object* aSelf, std::vector<object*> const&, object*) -> object*
+                    {
+                        // (tzinfo's: (type, __getinitargs__(), its state))
+                        ref const cls{ class_of(aSelf) };
+                        auto const& z = zone(aSelf);
+                        return make_tuple({ borrowed(cls.get()), z.name ? make_tuple({ make_timedelta(z.offset), make_str(*z.name) }) : make_tuple({ make_timedelta(z.offset) }),
+                            borrowed(none()) });
+                    } },
+                { "__reduce_ex__", reduce_ex_of_reduce },
                 { "__copy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } },
                 { "__deepcopy__", [](object* aSelf, std::vector<object*> const&, object*) -> object* { return borrowed(aSelf); } }
             };
@@ -2524,18 +2580,89 @@ namespace neos::python_runtime
                 return aDate ? make_datetime(f, tz) : make_time(f, tz);
             }
 
+            // (unpickling: a date's, time's or datetime's state (bytes, or Python 2's str of Latin-1 characters) of its size (aSize), if aArgs
+            // are a state (and, for a time or datetime, a tzinfo: at most aMaxArgs))
+            bool pickle_state(std::vector<object*> const& aArgs, object* aKwargs, std::size_t aSize, std::size_t aMaxArgs, std::string& aState)
+            {
+                if ((aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()) || aArgs.empty() || aArgs.size() > aMaxArgs)
+                    return false;
+                std::string_view data;
+                std::string latin1;
+                if (kind_of(aArgs[0]) == NEOS_PY_STR)
+                {
+                    for (auto c : to_code_points(as<str_object>(aArgs[0])->value))
+                    {
+                        if (c > 0xffu)
+                            return false;
+                        latin1.push_back(static_cast<char>(c));
+                    }
+                    data = latin1;
+                }
+                else if (kind_of(aArgs[0]) != NEOS_PY_OTHER || std::strcmp(type_name(aArgs[0]), "bytes") != 0 || !bytes_like(aArgs[0], data))
+                    return false;
+                if (data.size() != aSize)
+                    return false;
+                aState.assign(data);
+                return true;
+            }
+            fields fields_of_state(std::string const& aState, bool aDate, bool aTime)
+            {
+                auto const b = [&](std::size_t i) { return static_cast<int>(static_cast<unsigned char>(aState[i])); };
+                fields f;
+                std::size_t i = 0u;
+                if (aDate)
+                {
+                    f.year = b(0) * 256 + b(1);
+                    f.month = b(2) & 0x7f;
+                    f.fold = (b(2) & 0x80) != 0 ? 1 : 0;
+                    f.day = b(3);
+                    i = 4u;
+                }
+                if (aTime)
+                {
+                    f.hour = b(i) & 0x7f;
+                    if ((b(i) & 0x80) != 0)
+                        f.fold = 1;
+                    f.minute = b(i + 1u);
+                    f.second = b(i + 2u);
+                    f.us = (b(i + 3u) << 16) | (b(i + 4u) << 8) | b(i + 5u);
+                }
+                return f;
+            }
+
             object* new_date(neos_py_context*, void*, object* aArgs, object* aKwargs)
             {
+                if (std::string state; pickle_state(as<tuple_object>(aArgs)->items, aKwargs, 4u, 1u, state) && (state[2] & 0x7f) >= 1 && (state[2] & 0x7f) <= 12)
+                {
+                    auto const f = fields_of_state(state, true, false);
+                    return make_date(f.year, f.month, f.day);
+                }
                 return fields_constructor("date", as<tuple_object>(aArgs)->items, aKwargs, { "year", "month", "day" }, 3u, true, false);
             }
 
             object* new_time(neos_py_context*, void*, object* aArgs, object* aKwargs)
             {
+                auto const& args = as<tuple_object>(aArgs)->items;
+                if (std::string state; pickle_state(args, aKwargs, 6u, 2u, state) && (state[0] & 0x7f) < 24)
+                {
+                    object* tz = args.size() > 1u ? args[1] : nullptr;
+                    if (tz != nullptr && kind_of(tz) != NEOS_PY_NONE && !is_tzinfo(tz))
+                        return error("TypeError", "bad tzinfo state arg");
+                    return make_time(fields_of_state(state, false, true), tz);
+                }
                 return fields_constructor("time", as<tuple_object>(aArgs)->items, aKwargs, { "hour", "minute", "second", "microsecond", "tzinfo", "fold" }, 0u, false, true);
             }
 
             object* new_datetime(neos_py_context*, void*, object* aArgs, object* aKwargs)
             {
+                auto const& args = as<tuple_object>(aArgs)->items;
+                if (std::string state; pickle_state(args, aKwargs, 10u, 2u, state) && (state[2] & 0x7f) >= 1 && (state[2] & 0x7f) <= 12)
+                {
+                    object* tz = args.size() > 1u ? args[1] : nullptr;
+                    if (tz != nullptr && kind_of(tz) != NEOS_PY_NONE && !is_tzinfo(tz))
+                        return error("TypeError", "bad tzinfo state arg");
+                    return make_datetime(fields_of_state(state, true, true), tz);
+                }
                 return fields_constructor("datetime", as<tuple_object>(aArgs)->items, aKwargs,
                     { "year", "month", "day", "hour", "minute", "second", "microsecond", "tzinfo", "fold" }, 3u, true, true);
             }

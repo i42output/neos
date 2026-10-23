@@ -111,12 +111,12 @@ namespace neos
 
         std::string stub_path()
         {
-            return (std::filesystem::path{ neolib::program_directory() } / (std::string{ "neos.stub" } + ExecutableExtension)).string();
+            return (std::filesystem::path{ neos::home() } / (std::string{ "neos.stub" } + ExecutableExtension)).string();
         }
 
         std::string compiler_stub_path(std::string const& aLanguage)
         {
-            return (std::filesystem::path{ neolib::program_directory() } / ("neos." + aLanguage + ".compiler.stub" + ExecutableExtension)).string();
+            return (std::filesystem::path{ neos::home() } / ("neos." + aLanguage + ".compiler.stub" + ExecutableExtension)).string();
         }
 
         std::string write(std::string const& aImagePath, text const& aText, bool aRestricted, std::string const& aStubPath)

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <map>
 #include <sstream>
 #include <cstring>
 #include <cmath>
@@ -399,16 +400,22 @@ namespace neos
                     }
                     ~machine()
                     {
-                        // (objects that the program did not release)
-                        for (auto& slot : iObjects)
-                            if (slot.count != 0u)
+                        release_objects();
+                    }
+                public:
+                    // (objects that the program did not release: released while it can still be called (their finalizers can call 
+                    // its functions), the last made first (those made before them, e.g. the functions and modules that finalizers use, 
+                    // stay valid while they run); any that finalizers make, when it ends)
+                    void release_objects()
+                    {
+                        for (std::size_t i = iObjects.size(); i-- > 1u;)
+                            if (i < iObjects.size() && iObjects[i].count != 0u)
                             {
-                                auto* const object = static_cast<neos_rt_object*>(slot.object);
-                                slot = {};
+                                auto* const object = static_cast<neos_rt_object*>(iObjects[i].object);
+                                iObjects[i] = {};
                                 object->type->release(object);
                             }
                     }
-                public:
                     std::optional<std::uint32_t> export_function(std::string const& aName) const
                     {
                         auto existing = iFunctionExports.find(aName);
@@ -599,9 +606,8 @@ namespace neos
                         {
                             auto const& returning = frames.back();
                             auto const arity = type_of(returning.function).results.size();
-                            std::vector<value> r{ stack.end() - static_cast<std::ptrdiff_t>(arity), stack.end() };
-                            stack.resize(returning.base);
-                            stack.insert(stack.end(), r.begin(), r.end());
+                            std::copy(stack.end() - static_cast<std::ptrdiff_t>(arity), stack.end(), stack.begin() + static_cast<std::ptrdiff_t>(returning.base));
+                            stack.resize(returning.base + arity);
                             frames.pop_back();
                             if (frames.empty())
                                 return true;
@@ -1482,11 +1488,26 @@ namespace neos
                     char const* call_from_plugin(jit::compiled_module* aNative, unsigned aFunction, unsigned aCount, neos_rt_type const* aParameters,
                         neos_rt_value const* aArguments, neos_rt_type aResult, neos_rt_value* aResultValue)
                     {
-                        thread_local std::string tMessage;
-                        thread_local std::string tString;
                         // (a call's arguments and their handles: on the stack (a call of a few arguments allocates none))
-                        boost::container::small_vector<value, 8u> arguments;
-                        boost::container::small_vector<std::uint32_t, 8u> handles;
+                        constexpr unsigned Few = 8u;
+                        value fewArguments[Few];
+                        std::uint32_t fewHandles[Few];
+                        std::vector<value> manyArguments;
+                        std::vector<std::uint32_t> manyHandles;
+                        if (aCount > Few)
+                        {
+                            manyArguments.resize(aCount);
+                            manyHandles.resize(aCount);
+                        }
+                        value* const arguments = aCount > Few ? manyArguments.data() : fewArguments;
+                        std::uint32_t* const handles = aCount > Few ? manyHandles.data() : fewHandles;
+                        std::size_t handleCount = 0u;
+                        auto const release_handles = [&]()
+                        {
+                            for (std::size_t h = 0u; h < handleCount; ++h)
+                                release_object(handles[h]);
+                            handleCount = 0u;
+                        };
                         try
                         {
                             for (unsigned i = 0u; i < aCount; ++i)
@@ -1494,22 +1515,22 @@ namespace neos
                                 auto const& a = aArguments[i];
                                 switch (aParameters[i])
                                 {
-                                case NEOS_RT_BOOL: arguments.push_back(of_bool(a.b != 0)); break;
+                                case NEOS_RT_BOOL: arguments[i] = of_bool(a.b != 0); break;
                                 case NEOS_RT_CHAR:
-                                case NEOS_RT_I32: arguments.push_back(of_i32(a.i32)); break;
-                                case NEOS_RT_U32: arguments.push_back(of_u32(a.u32)); break;
-                                case NEOS_RT_I64: arguments.push_back(of_i64(a.i64)); break;
+                                case NEOS_RT_I32: arguments[i] = of_i32(a.i32); break;
+                                case NEOS_RT_U32: arguments[i] = of_u32(a.u32); break;
+                                case NEOS_RT_I64: arguments[i] = of_i64(a.i64); break;
                                 case NEOS_RT_U64:
-                                case NEOS_RT_SIZE: arguments.push_back(a.u64); break;
-                                case NEOS_RT_F32: arguments.push_back(of_f32(a.f32)); break;
-                                case NEOS_RT_F64: arguments.push_back(of_f64(a.f64)); break;
-                                case NEOS_RT_STRING: arguments.push_back(of_u32(allocate_string(a.string != nullptr ? std::string_view{ a.string } : std::string_view{}))); break;
+                                case NEOS_RT_SIZE: arguments[i] = a.u64; break;
+                                case NEOS_RT_F32: arguments[i] = of_f32(a.f32); break;
+                                case NEOS_RT_F64: arguments[i] = of_f64(a.f64); break;
+                                case NEOS_RT_STRING: arguments[i] = of_u32(allocate_string(a.string != nullptr ? std::string_view{ a.string } : std::string_view{})); break;
                                 case NEOS_RT_OBJECT:
                                     // (a handle of its own for the call)
                                     if (a.object != nullptr)
                                         a.object->type->retain(a.object);
-                                    handles.push_back(object_handle(a.object));
-                                    arguments.push_back(of_u32(handles.back()));
+                                    handles[handleCount] = object_handle(a.object);
+                                    arguments[i] = of_u32(handles[handleCount++]);
                                     break;
                                 case NEOS_RT_INTEGER:
                                     if ((a.u64 & 1u) != 0u)
@@ -1517,42 +1538,58 @@ namespace neos
                                         // (an object (its address with the low bit set): a handle of its own for the call)
                                         auto* const object = reinterpret_cast<neos_rt_object*>(static_cast<std::uintptr_t>(a.u64 & ~std::uint64_t{ 1u }));
                                         object->type->retain(object);
-                                        handles.push_back(object_handle(object));
-                                        arguments.push_back((static_cast<value>(handles.back()) << 1u) | 1u);
+                                        handles[handleCount] = object_handle(object);
+                                        arguments[i] = (static_cast<value>(handles[handleCount++]) << 1u) | 1u;
                                     }
                                     else
-                                        arguments.push_back(a.u64);
+                                        arguments[i] = a.u64;
                                     break;
                                 default:
                                     throw trap{ "invalid argument type" };
                                 }
                             }
-                            if (aFunction >= iFunctions.size() || type_of(aFunction).parameters.size() != arguments.size())
+                            if (aFunction >= iFunctions.size())
                                 throw trap{ "invalid callback" };
-                            // (native code's results: on the stack)
-                            boost::container::small_vector<value, 4u> results;
-                            if (aNative != nullptr && type_of(aFunction).results.size() <= 4u)
+                            auto const& type = type_of(aFunction);
+                            if (type.parameters.size() != aCount)
+                                throw trap{ "invalid callback" };
+                            // (an error of the program's that is pending (e.g. while the program releases objects as it handles it, which a 
+                            // plugin's release of one calls the program for): not the call's; the call runs without it, and it is pending 
+                            // again afterwards)
+                            auto const errorGlobal = error_global();
+                            value pendingError = 0u;
+                            if (errorGlobal)
+                                std::swap(pendingError, iGlobals[*errorGlobal]);
+                            struct pending_restore
                             {
-                                results.resize(type_of(aFunction).results.size());
-                                invoke_into(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }, results.data());
-                            }
+                                std::vector<value>& globals;
+                                std::optional<std::uint32_t> global;
+                                value error;
+                                ~pending_restore() { if (global && error != 0u) globals[*global] = error; }
+                            } const restore{ iGlobals, errorGlobal, pendingError };
+                            // (native code's results: on the stack)
+                            value fewResults[4] = {};
+                            std::vector<value> manyResults;
+                            std::size_t resultCount = 0u;
+                            if (aNative != nullptr && type.results.size() <= 4u)
+                                resultCount = invoke_into(*aNative, aFunction, std::span<value const>{ arguments, aCount }, fewResults);
                             else
                             {
-                                auto const r = aNative != nullptr ? invoke(*aNative, aFunction, std::span<value const>{ arguments.data(), arguments.size() }) :
-                                    invoke(aFunction, std::vector<value>{ arguments.begin(), arguments.end() });
-                                results.assign(r.begin(), r.end());
+                                manyResults = aNative != nullptr ? invoke(*aNative, aFunction, std::span<value const>{ arguments, aCount }) :
+                                    invoke(aFunction, std::vector<value>{ arguments, arguments + aCount });
+                                resultCount = manyResults.size();
                             }
-                            for (auto const h : handles)
-                                release_object(h);
-                            handles.clear();
+                            value const* const results = manyResults.empty() ? fewResults : manyResults.data();
+                            release_handles();
                             // (an error that the program did not handle is the call's)
-                            if (auto const g = error_global(); g && as_u32(iGlobals[*g]) != 0u)
+                            if (auto const g = errorGlobal; g && as_u32(iGlobals[*g]) != 0u)
                             {
-                                tMessage = read_string(as_u32(iGlobals[*g]));
+                                auto& message = call_message();
+                                message = read_string(as_u32(iGlobals[*g]));
                                 iGlobals[*g] = 0u;
-                                return tMessage.c_str();
+                                return message.c_str();
                             }
-                            value const r = results.empty() ? 0u : results[0];
+                            value const r = resultCount == 0u ? 0u : results[0];
                             switch (aResult)
                             {
                             case NEOS_RT_VOID: break;
@@ -1565,7 +1602,13 @@ namespace neos
                             case NEOS_RT_SIZE: aResultValue->u64 = r; break;
                             case NEOS_RT_F32: aResultValue->f32 = as_f32(r); break;
                             case NEOS_RT_F64: aResultValue->f64 = as_f64(r); break;
-                            case NEOS_RT_STRING: tString = read_string(as_u32(r)); aResultValue->string = tString.c_str(); break;
+                            case NEOS_RT_STRING:
+                                {
+                                    thread_local std::string tString;
+                                    tString = read_string(as_u32(r));
+                                    aResultValue->string = tString.c_str();
+                                }
+                                break;
                             case NEOS_RT_OBJECT:
                                 {
                                     // (the program's new reference becomes the plugin's)
@@ -1594,11 +1637,17 @@ namespace neos
                         }
                         catch (std::exception const& e)
                         {
-                            for (auto const h : handles)
-                                release_object(h);
-                            tMessage = e.what();
-                            return tMessage.c_str();
+                            release_handles();
+                            auto& message = call_message();
+                            message = e.what();
+                            return message.c_str();
                         }
+                    }
+                    // (the message of the error of a call from a plugin (its thread's): found only when there is one)
+                    static std::string& call_message()
+                    {
+                        thread_local std::string tMessage;
+                        return tMessage;
                     }
                 private:
                     // the imported functions the VM provides (any other import is a runtime plugin's)
@@ -2173,21 +2222,34 @@ namespace neos
 
                 // --- threads
 
+                // (one context for each program and its native code (keyed, not searched: a program that compiles source (e.g. each eval)
+                // adds one for each program it compiles); a program's is removed when it is unloaded)
+                struct thread_contexts
+                {
+                    std::mutex mutex;
+                    std::map<std::pair<machine*, jit::compiled_module*>, running> contexts;
+                    std::atomic<std::uint64_t> generation = 0u; // (changed when one is removed)
+                };
+
+                thread_contexts& the_thread_contexts()
+                {
+                    static thread_contexts sContexts;
+                    return sContexts;
+                }
+
                 void* host_thread_context()
                 {
-                    // (one context for each program and its native code (the contexts are never removed: the thread's last one is
-                    // remembered, so that a runtime plugin that asks again (e.g. for each call) does not take the lock))
-                    static std::mutex sMutex;
-                    static std::list<running> sContexts;
+                    // (the thread's last one is remembered, so that a runtime plugin that asks again (e.g. for each call) does not take the
+                    // lock)
+                    auto& all = the_thread_contexts();
                     thread_local running* tLast = nullptr;
-                    if (tLast != nullptr && tLast->program == tRunning.program && tLast->native == tRunning.native)
+                    thread_local std::uint64_t tLastGeneration = 0u;
+                    if (tLast != nullptr && tLast->program == tRunning.program && tLast->native == tRunning.native &&
+                        tLastGeneration == all.generation.load(std::memory_order_acquire))
                         return tLast;
-                    std::lock_guard<std::mutex> lock{ sMutex };
-                    for (auto& r : sContexts)
-                        if (r.program == tRunning.program && r.native == tRunning.native)
-                            return tLast = &r;
-                    sContexts.push_back(tRunning);
-                    return tLast = &sContexts.back();
+                    std::lock_guard<std::mutex> lock{ all.mutex };
+                    tLastGeneration = all.generation.load(std::memory_order_relaxed);
+                    return tLast = &all.contexts.try_emplace(std::make_pair(tRunning.program, tRunning.native), tRunning).first->second;
                 }
 
                 void host_thread_attach(void* aContext)
@@ -2295,9 +2357,13 @@ namespace neos
                     std::optional<std::uint32_t> entry;
                     {
                         std::lock_guard<std::mutex> lock{ loaded_mutex() };
-                        for (auto const& p : loaded_programs())
-                            if (p.program.get() == context.program)
-                                entry = p.entry;
+                        // (the latest first: a program that compiles source usually runs it at once)
+                        for (auto p = loaded_programs().rbegin(); p != loaded_programs().rend(); ++p)
+                            if (p->program.get() == context.program)
+                            {
+                                entry = p->entry;
+                                break;
+                            }
                     }
                     if (!entry)
                         return "the program has no entry point";
@@ -2330,6 +2396,40 @@ namespace neos
                         return tError.c_str();
                     }
                     return nullptr;
+                }
+
+                void host_unload(void* aContext)
+                {
+                    // (a program that load compiled, that is no longer needed: nothing refers to its code (its context is then no longer
+                    // valid); not while it runs)
+                    if (aContext == nullptr)
+                        return;
+                    auto const context = *static_cast<running*>(aContext);
+                    if (context.program == tRunning.program)
+                        return;
+                    for (auto* a = tActivation; a != nullptr; a = a->previous)
+                        if (a->program == context.program)
+                            return;
+                    std::unique_ptr<machine> program;
+                    jit::compiled_module_ptr native;
+                    {
+                        std::lock_guard<std::mutex> lock{ loaded_mutex() };
+                        auto& programs = loaded_programs();
+                        auto p = std::find_if(programs.rbegin(), programs.rend(), [&](loaded_program const& l) { return l.program.get() == context.program; });
+                        if (p == programs.rend())
+                            return;
+                        program = std::move(p->program);
+                        native = std::move(p->native);
+                        programs.erase(std::next(p).base());
+                    }
+                    {
+                        auto& all = the_thread_contexts();
+                        std::lock_guard<std::mutex> lock{ all.mutex };
+                        std::erase_if(all.contexts, [&](auto const& c) { return c.first.first == context.program; });
+                        all.generation.fetch_add(1u, std::memory_order_release);
+                    }
+                    native.reset();
+                    program.reset();
                 }
 
                 int host_restricted()
@@ -2538,7 +2638,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global };
+                    host_std_flush, host_global, host_unload };
             }
 
             void const* runtime::host()
@@ -2595,6 +2695,8 @@ namespace neos
                     auto const previous = tRunning;
                     tRunning = running{ &m, native.get() };
                     struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };
+                    // (then the objects it did not release (it is still running))
+                    struct release { machine& m; ~release() { m.release_objects(); } } const releasing{ m };
                     // (when it returns, the plugins finish their work (e.g. threads) while the program's state exists)
                     struct end { ~end() { runtime::program_end(); } } const ending;
                     auto const results = native ? m.invoke(*native, *entry, {}) : m.invoke(*entry, {});

@@ -36,6 +36,7 @@
 // entry point that top-level statements form
 
 #include <neolib/neolib.hpp>
+#include <neolib/core/vector.hpp>
 #include <neos/bytecode/bytecode.hpp>
 #include <neos/i_context.hpp>
 #include <neos/language/compiler.hpp>
@@ -81,6 +82,18 @@ namespace neos::language
     {
         auto const* const languageCompiler = language(aLanguage);
         return languageCompiler != nullptr && languageCompiler->compiles_at_run_time();
+    }
+
+    bool compiler::parsable_source(std::string const& aLanguage, std::string_view aSource, std::string& aResult, std::vector<std::uint32_t>& aPositions) const
+    {
+        auto const* const languageCompiler = language(aLanguage);
+        neolib::string result;
+        neolib::vector<std::uint32_t> positions;
+        if (languageCompiler == nullptr || !languageCompiler->parsable_source(neolib::string_view{ aSource }, result, positions))
+            return false;
+        aResult = result.to_std_string();
+        aPositions = positions.to_std_vector();
+        return true;
     }
 
     i_language_compiler* compiler::language(std::string const& aLanguage) const

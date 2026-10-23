@@ -4403,7 +4403,12 @@ namespace neos::python_runtime
             {
                 if (!make_codecs_classes())
                     return false;
+                // (the functions that CPython's codecs imports from _codecs are _codecs's (their __module__))
+                auto const first = aAttributes.size();
                 add_codecs_functions(aAttributes);
+                for (auto i = first; i < aAttributes.size(); ++i)
+                    if (kind_of(aAttributes[i].second) == NEOS_PY_FUNCTION)
+                        as<function_object>(aAttributes[i].second)->module = "_codecs";
                 for (auto const& f : sCodecsPyFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
                 for (auto const& [name, value] : { std::pair{ "CodecInfo", sCodecInfo }, std::pair{ "Codec", sCodec }, std::pair{ "IncrementalEncoder", sIncrementalEncoder },

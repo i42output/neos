@@ -34,12 +34,20 @@
 #pragma once
 
 #include <neolib/neolib.hpp>
+#include <string>
 #include <vector>
 #include <neolib/app/version.hpp>
 
 namespace neos
 {
     const neolib::version NEOS_VERSION = { 0u, 1u, 0u, 0u, "ED-209" };
+
+    // neos's home: the folder of the neos executable and of its concept libraries (.ncl), compiler plugins (.ncp), runtime plugins 
+    // ("plugins") and stubs, with its languages' schemas in "../share/neos/languages". By default the running program's folder; a 
+    // host program that is not neos (e.g. an IDE) sets it (e.g. to installed_home(): where neos is installed)
+    std::string home();
+    void set_home(std::string const& aHome);
+    std::string installed_home();   ///< (the folder that the build installs neos to (CMAKE_INSTALL_BINDIR))
 
     using text = std::vector<std::byte>;
 }

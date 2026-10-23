@@ -345,13 +345,16 @@ namespace neos::python_runtime::detail
         std::vector<py> clinic(char const* aFunction, std::vector<py> const& aArgs, object* aKwargs, std::vector<char const*> const& aNames,
             std::size_t aRequired, std::size_t aPositionalOnly, std::size_t aSkip = 0u)
         {
-            std::vector<object*> raw;
+            // (scratch kept for reuse (a parse is made per call of recv_into(), etc.))
+            thread_local std::vector<object*> tRaw;
+            tRaw.clear();
             for (std::size_t i = aSkip; i < aArgs.size(); ++i)
-                raw.push_back(aArgs[i].get());
-            std::vector<object*> parsed;
-            py_checked(parse_arguments(aFunction, raw, aKwargs, aNames, aRequired, aPositionalOnly, parsed));
+                tRaw.push_back(aArgs[i].get());
+            thread_local std::vector<object*> tParsed;
+            tParsed.clear();
+            py_checked(parse_arguments(aFunction, tRaw, aKwargs, aNames, aRequired, aPositionalOnly, tParsed));
             std::vector<py> result;
-            for (auto p : parsed)
+            for (auto p : tParsed)
                 result.push_back(p != nullptr ? py::borrowed(p) : py{});
             return result;
         }

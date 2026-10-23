@@ -59,6 +59,7 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 #include <neos/language/unicode_names.hpp>
 #include "compiler.hpp"
 #include "tokens.hpp"
@@ -101,6 +102,82 @@ namespace neos::compilers::python
         bool name_character(char aCharacter)
         {
             return std::isalnum(static_cast<unsigned char>(aCharacter)) || aCharacter == '_';
+        }
+
+        // (searches of a source's text (as these regular expressions would find them, without one): \bword\b (aNotAttribute: 
+        // (^|[^.\w])word\b); aWords: the words)
+        bool word_at(std::string_view aText, std::size_t aPosition, std::size_t aLength, bool aNotAttribute = false)
+        {
+            if (aPosition > 0u && (name_character(aText[aPosition - 1u]) || (aNotAttribute && aText[aPosition - 1u] == '.')))
+                return false;
+            return aPosition + aLength == aText.size() || !name_character(aText[aPosition + aLength]);
+        }
+        bool has_word(std::string_view aText, std::initializer_list<std::string_view> aWords, bool aNotAttribute = false)
+        {
+            for (auto const word : aWords)
+                for (auto p = aText.find(word); p != std::string_view::npos; p = aText.find(word, p + 1u))
+                    if (word_at(aText, p, word.size(), aNotAttribute))
+                        return true;
+            return false;
+        }
+        bool space_character(char aCharacter)
+        {
+            return aCharacter == ' ' || aCharacter == '\t' || aCharacter == '\n' || aCharacter == '\r' || aCharacter == '\f' || aCharacter == '\v';
+        }
+        // (\b(globals|vars|dir|exec|eval)\b|\bsys\.modules\b|\bimport\s+__main__\b|\b_?pickle\b)
+        bool introspective(std::string_view aText)
+        {
+            if (has_word(aText, { "globals", "vars", "dir", "exec", "eval", "sys.modules", "pickle", "_pickle" }))
+                return true;
+            for (auto p = aText.find("import"); p != std::string_view::npos; p = aText.find("import", p + 1u))
+            {
+                if (p > 0u && name_character(aText[p - 1u]))
+                    continue;
+                auto q = p + 6u;
+                if (q >= aText.size() || !space_character(aText[q]))
+                    continue;
+                while (q < aText.size() && space_character(aText[q]))
+                    ++q;
+                if (aText.substr(q, 8u) == "__main__" && word_at(aText, q, 8u))
+                    return true;
+            }
+            return false;
+        }
+        // (__annotations__\['[^']*'\] = \(['"])
+        bool string_annotation(std::string_view aText)
+        {
+            for (auto p = aText.find("__annotations__['"); p != std::string_view::npos; p = aText.find("__annotations__['", p + 1u))
+            {
+                auto const close = aText.find('\'', p + 17u);
+                if (close == std::string_view::npos)
+                    return false;
+                if (aText.substr(close, 6u) == "'] = (" && close + 6u < aText.size() && (aText[close + 6u] == '\'' || aText[close + 6u] == '"'))
+                    return true;
+            }
+            return false;
+        }
+        // (the modules of (^|\n)[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import[ \t]+\*)
+        std::vector<std::string> star_imports(std::string_view aText)
+        {
+            std::vector<std::string> result;
+            for (std::size_t line = 0u; line < aText.size();)
+            {
+                auto const end = std::min(aText.find('\n', line), aText.size());
+                auto p = line;
+                auto const blanks = [&]() { auto const start = p; while (p < end && (aText[p] == ' ' || aText[p] == '\t')) ++p; return p > start; };
+                blanks();
+                if (aText.substr(p, 4u) == "from" && (p += 4u, blanks()) && p < end && (std::isalpha(static_cast<unsigned char>(aText[p])) || aText[p] == '_'))
+                {
+                    auto const name = p;
+                    while (p < end && (name_character(aText[p]) || aText[p] == '.'))
+                        ++p;
+                    auto const module = aText.substr(name, p - name);
+                    if (blanks() && aText.substr(p, 6u) == "import" && (p += 6u, blanks()) && p < end && aText[p] == '*')
+                        result.emplace_back(module);
+                }
+                line = end + 1u;
+            }
+            return result;
         }
 
         // (a name of an imported module (_MN_name: see closures.cpp's rewrite_module_names): name)
@@ -179,14 +256,22 @@ namespace neos::compilers::python
                 "fnmatch", "atexit", "gc", "weakref", "traceback", "inspect", "pprint", "reprlib", "array", "calendar", "zlib", "secrets", 
                 "uuid", "locale", "codecs", "unicodedata", "signal", "argparse", "csv", "logging", "timeit", "_collections_abc", "posixpath", 
                 "ntpath", "genericpath", "stat", "__future__", "builtins", "posix", "nt", "copyreg", "_string", "copy", "_codecs", "encodings", "_csv", 
-                "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket" };
+                "linecache", "_colorize", "_suggestions", "select", "selectors", "_socket", "socket", "configparser", "socketserver", "pickle", "_pickle", "_compat_pickle", "_operator", "_heapq", "_bisect", "_functools", "_struct", "_io", "contextvars", "_contextvars", "concurrent", "asyncio", "_asyncio", "subprocess", "_posixsubprocess", "_winapi", "msvcrt", "shlex", "getopt", "colorsys", "graphlib", 
+                "hmac", "difflib", "ipaddress", "fileinput", "html", "_markupbase", "urllib", "tomllib", "importlib", "pwd", "grp", "fcntl", "_compression", "gzip", "sched", "cmd", "quopri", 
+                "mimetypes", "netrc", "zipfile" };
             return sStandard;
         }
         // (the submodules of the standard library's packages that the runtime implements as modules of their own (imported by their 
         // names, as a package's submodules are: the runtime makes each its package's attribute))
         std::set<std::string> const& standard_submodules()
         {
-            static std::set<std::string> const sSubmodules = { "collections.abc", "encodings.aliases", "logging.handlers", "logging.config" };
+            static std::set<std::string> const sSubmodules = { "collections.abc", "encodings.aliases", "logging.handlers", "logging.config",
+                "concurrent.futures", "concurrent.futures._base", "concurrent.futures.thread",
+                "asyncio.base_events", "asyncio.base_futures", "asyncio.base_subprocess", "asyncio.base_tasks", "asyncio.constants", "asyncio.coroutines", "asyncio.events", "asyncio.exceptions", "asyncio.format_helpers", "asyncio.futures", "asyncio.locks",
+                "asyncio.log", "asyncio.mixins", "asyncio.protocols", "asyncio.queues", "asyncio.runners", "asyncio.selector_events", "asyncio.staggered", "asyncio.streams", "asyncio.subprocess", "asyncio.taskgroups",
+                "asyncio.tasks", "asyncio.threads", "asyncio.timeouts", "asyncio.transports", "asyncio.trsock", "asyncio.unix_events", "asyncio.windows_events",
+                "html.entities", "html.parser", "urllib.parse", "tomllib._parser", "tomllib._re", "tomllib._types", "importlib.util", "importlib.machinery",
+                "zipfile._path", "zipfile._path.glob" };
             return sSubmodules;
         }
 
@@ -260,6 +345,47 @@ namespace neos::compilers::python
             }
             result.push_back(aText.substr(start));
             return result;
+        }
+
+        // whether a comprehension's clause ("for name in iterable") is over a call of range() (range is a keyword: python.neos)
+        bool over_range(std::string_view aClause)
+        {
+            auto text = trimmed(aClause);
+            if (!text.starts_with("for"))
+                return false;
+            text = trimmed(text.substr(3u));
+            std::size_t i = 0u;
+            while (i < text.size() && name_character(text[i]))
+                ++i;
+            if (i == 0u)
+                return false;
+            text = trimmed(text.substr(i));
+            if (!text.starts_with("in") || text.size() < 3u || !std::isspace(static_cast<unsigned char>(text[2])))
+                return false;
+            text = trimmed(text.substr(2u));
+            if (!text.starts_with("range"))
+                return false;
+            text = trimmed(text.substr(5u));
+            if (text.empty() || text.front() != '(' || text.back() != ')')
+                return false;
+            // (the call's parenthesis closes at the end)
+            int depth = 0;
+            for (std::size_t j = 0u; j < text.size(); ++j)
+            {
+                char const c = text[j];
+                if (c == '\'' || c == '\"')
+                {
+                    for (++j; j < text.size() && text[j] != c; ++j)
+                        if (text[j] == '\\')
+                            ++j;
+                    continue;
+                }
+                if (c == '(' || c == '[' || c == '{')
+                    ++depth;
+                else if ((c == ')' || c == ']' || c == '}') && --depth == 0)
+                    return j + 1u == text.size();
+            }
+            return false;
         }
 
         // the keyword of a keyword argument ("name = value")
@@ -353,7 +479,7 @@ namespace neos::compilers::python
 
         // (the roles of scratch locals (see py_scratch))
         enum scratch_role : std::uint32_t { ScratchPark, ScratchCoerce, ScratchCoerceI64, ScratchBind, ScratchReturn, ScratchResult, ScratchX, ScratchY, ScratchQ, ScratchM, ScratchN,
-            ScratchZ, ScratchReturnValue, ScratchOwned = 0x100u /* + 2 * height + operand: an operand of a slow version (see py_integer_operation) */ };
+            ScratchZ, ScratchReturnValue, ScratchPrevious, ScratchOwned = 0x100u /* + 2 * height + operand: an operand of a slow version (see py_integer_operation) */ };
 
         // (small integers: the integers that an integer value holds shifted left one bit)
         constexpr std::int64_t SmallLow = -(std::int64_t{ 1 } << 62);
@@ -668,6 +794,17 @@ namespace neos::compilers::python
             operands().pop_back();
         }
         iPyParameters[name] = parameters;
+        // (the globals that hold them are declared by the declaration pass: a call that precedes the definition uses them)
+        if (declaration_pass())
+            for (std::size_t i = 0u; i < defaults.size(); ++i)
+            {
+                type t = type::Object;
+                if (aSignature.parameters().has_value())
+                    for (auto const& p : aSignature.parameters().value())
+                        if (p.parameter_name().to_std_string() == parameters[defaults[i]].name)
+                            t = p.parameter_type();
+                define_global(name + "." + parameters[defaults[i]].name, t);
+            }
         if (!defaults.empty() && !declaration_pass())
         {
             ensure_function();
@@ -1282,7 +1419,11 @@ namespace neos::compilers::python
                 // (its expression's own literals (e.g. f-strings))
                 bool nested = false;
                 auto const rewritten = rewrite_fstrings(expression, nested);
-                parts.push_back("__fstring((" + rewritten + "), " + std::to_string(static_cast<int>(conversion)) + ", " + specExpression + ")");
+                // (no conversion and no format specification: format(x, ""), which the call of a typed int or str compiles inline)
+                if (conversion == 0 && spec.empty())
+                    parts.push_back("__fstring((" + rewritten + "))");
+                else
+                    parts.push_back("__fstring((" + rewritten + "), " + std::to_string(static_cast<int>(conversion)) + ", " + specExpression + ")");
                 i = j + 1u;
             }
             flush();
@@ -1678,34 +1819,22 @@ namespace neos::compilers::python
         }
     }
 
-    void compiler::py_join_lines(i_source_fragment& aFragment)
+    // py_join_lines's rewrites of a source that need no compilation (see compiler.hpp)
+    std::string rewrite_source(std::string_view aSource, std::string const& aOriginal, bool aExecMode, bool aPackage, bool& aChanged, 
+        bool& aCompilesAtRunTime, std::vector<std::uint32_t>& aLines, std::map<std::string, std::vector<std::pair<std::string, std::string>>>& aAnnotations,
+        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports)
     {
-        // lines are joined within brackets: line breaks (and comments) there are whitespace (replaced by spaces, so that 
-        // source positions are unchanged)
-        auto const source = aFragment.source().to_std_string_view();
-        // (a source that preparse has made (a later compilation pass): already rewritten)
-        if (iPyPreparsed.contains(std::string{ source }))
-            return;
-        bool changed = false;
-        std::string original{ source };
-        // (eval: the value of the expression is its result)
-        if (iPyMode == "eval" && !aFragment.imported())
-        {
-            auto const first = original.find_first_not_of(" \t");
-            original = "__exec_result((" + (first == std::string::npos ? std::string{} : original.substr(first)) + "\n))\n";
-            changed = true;
-        }
-        std::string text = rewrite_fstrings(original, changed);
+        std::string text = rewrite_fstrings(aOriginal, aChanged);
         std::string const unjoined = text;
         int depth = 0;
         // (the open brackets (and their positions): a bracket that is never closed, or a closing bracket that does not match,
         // is a syntax error (CPython's messages))
         std::vector<std::size_t> open;
         // (the line of a position: in the source (line breaks within brackets become spaces in the text))
-        auto const line_of = [&](std::size_t aPosition) { return 1 + std::count(source.begin(), source.begin() + static_cast<std::ptrdiff_t>(std::min(aPosition, source.size())), '\n'); };
+        auto const line_of = [&](std::size_t aPosition) { return 1 + std::count(aSource.begin(), aSource.begin() + static_cast<std::ptrdiff_t>(std::min(aPosition, aSource.size())), '\n'); };
         auto const syntax_error = [&](std::size_t aPosition, std::string const& aMessage)
         {
-            generator().throw_error(aFragment.source().begin() + static_cast<std::ptrdiff_t>(aPosition), neolib::string{ aMessage }, "syntax error"_s);
+            aSyntaxError(aPosition, aMessage);
         };
         for (std::size_t i = 0u; i < text.size(); ++i)
         {
@@ -1732,7 +1861,7 @@ namespace neos::compilers::python
                     if (depth > 0)
                     {
                         text[i] = ' ';
-                        changed = true;
+                        aChanged = true;
                     }
                 --i;
                 continue;
@@ -1756,20 +1885,21 @@ namespace neos::compilers::python
             else if (depth > 0 && (c == '\n' || c == '\r'))
             {
                 text[i] = ' ';
-                changed = true;
+                aChanged = true;
             }
             else if (depth > 0 && c == '\\' && i + 1u < text.size() && (text[i + 1u] == '\n' || text[i + 1u] == '\r'))
             {
                 // (a line continuation within brackets: whitespace)
                 text[i] = ' ';
-                changed = true;
+                aChanged = true;
             }
         }
         if (!open.empty())
             syntax_error(open.back(), std::string{ "'" } + text[open.back()] + "' was never closed");
         // (the line of the source as written (1-based; 0: none) that each line of the text is (see source_line): the rewrites below keep 
         // the lines of the text (they add lines at its end) except where they say; lines joined within brackets are the first's)
-        std::vector<std::uint32_t> lines{ 1u };
+        auto& lines = aLines;
+        lines.assign(1u, 1u);
         for (std::size_t i = 0u, line = 1u; i < unjoined.size() && i < text.size(); ++i)
             if (unjoined[i] == '\n' && (++line, text[i] == '\n'))
                 lines.push_back(static_cast<std::uint32_t>(line));
@@ -1788,6 +1918,13 @@ namespace neos::compilers::python
                 if (lineEnd == std::string::npos)
                     lineEnd = text.size();
                 std::string line = text.substr(lineStart, lineEnd - lineStart);
+                // (a comment that ends the line (no quote or ';' before it): set apart, and put back after the statement)
+                std::string comment;
+                if (auto const hash = line.find('#'); hash != std::string::npos && line.find_first_of("'\";") > hash)
+                {
+                    comment = line.substr(hash);
+                    line.erase(hash);
+                }
                 auto const first = line.find_first_not_of(" \t");
                 if (first != std::string::npos && (line.compare(first, 7u, "import ") == 0 || line.compare(first, 5u, "from ") == 0) &&
                     line.find_first_of("'\"#;") == std::string::npos)
@@ -1818,13 +1955,13 @@ namespace neos::compilers::python
                         {
                             std::string replaced;
                             for (char c : names)
-                                replaced += c == ',' ? std::string{ "; import" } : std::string(1u, c);
+                                replaced += c == ',' ? std::string{ "; import " } : std::string(1u, c);
                             line = line.substr(0u, namesAt) + replaced + ending;
                             importsChanged = true;
                         }
                     }
                 }
-                rewritten += line;
+                rewritten += line + comment;
                 if (lineEnd < text.size())
                     rewritten += '\n';
                 lineStart = lineEnd + 1u;
@@ -1832,21 +1969,19 @@ namespace neos::compilers::python
             if (importsChanged)
             {
                 text = rewritten;
-                changed = true;
+                aChanged = true;
             }
         }
         // (a program (its fragments other than packages') that calls exec, eval or compile (a name that is not an attribute, e.g. not 
         // re.compile) compiles source while it runs: an image of it needs the compiler)
-        if (auto const& path = aFragment.source_file_path(); !py_exec_mode() && (path == std::nullopt || 
-            std::filesystem::path{ path.value().to_std_string() }.parent_path().parent_path().filename() != "packages"))
+        if (!aExecMode && !aPackage)
         {
-            static std::regex const sCompiles{ "(^|[^.\\w])(exec|eval|compile)\\b" };
-            if (std::regex_search(text, sCompiles))
-                iPyCompilesAtRunTime = true;
+            if (has_word(text, { "exec", "eval", "compile" }, true))
+                aCompilesAtRunTime = true;
         }
         // the body "..." of a program's def or class (not of a package's def (e.g. builtins.py's), which is a stub: the runtime plugin's 
         // function) is an empty statement ("pass")
-        if (auto const& path = aFragment.source_file_path(); path == std::nullopt || std::filesystem::path{ path.value().to_std_string() }.parent_path().parent_path().filename() != "packages")
+        if (!aPackage)
         {
             bool stubsChanged = false;
             std::size_t lineStart = 0u;
@@ -1927,26 +2062,25 @@ namespace neos::compilers::python
                 lineStart = (lineEnd == std::string::npos ? text.size() : text.find('\n', lineStart)) ;
                 lineStart = lineStart == std::string::npos ? text.size() : lineStart + 1u;
             }
-            changed = changed || stubsChanged;
+            aChanged = aChanged || stubsChanged;
         }
         // the modules of source files that its import statements import
-        py_find_imports(text);
-        // (the annotations of the module's functions)
-        std::map<std::string, std::vector<std::pair<std::string, std::string>>> annotations;
+        if (aImports)
+            aImports(text);
         // compound statements compiled as others (see statements.cpp)
         {
             bool statementsChanged = false;
             text = rewrite_statements(text, statementsChanged);
-            changed = changed || statementsChanged;
+            aChanged = aChanged || statementsChanged;
         }
         // class statements (see statements.cpp)
         {
             bool classesChanged = false;
             text = rewrite_classes(text, classesChanged);
-            changed = changed || classesChanged;
+            aChanged = aChanged || classesChanged;
         }
         // loops over lists and tuples of ints (see statements.cpp: lines are added)
-        if (!py_exec_mode() && !std::getenv("NEOS_PY_NO_INT_LOOPS"))
+        if (!aExecMode && !std::getenv("NEOS_PY_NO_INT_LOOPS"))
         {
             bool intLoopsChanged = false;
             track_lines();
@@ -1961,20 +2095,20 @@ namespace neos::compilers::python
                 if (std::getenv("NEOS_PY_INT_LOOPS_DEBUG"))
                     std::fprintf(stderr, "%s\n", text.c_str());
             }
-            changed = changed || intLoopsChanged;
+            aChanged = aChanged || intLoopsChanged;
         }
         // comprehensions' variables (see statements.cpp)
         {
             bool comprehensionsChanged = false;
-            text = rewrite_comprehensions(text, comprehensionsChanged, !py_exec_mode());
-            changed = changed || comprehensionsChanged;
+            text = rewrite_comprehensions(text, comprehensionsChanged, !aExecMode);
+            aChanged = aChanged || comprehensionsChanged;
         }
         // nested functions (closures) and decorated functions (see closures.cpp)
         {
             bool nestedChanged = false;
             track_lines();
             std::vector<std::size_t> nestedLines;
-            text = rewrite_nested_functions(text, nestedChanged, &annotations, &nestedLines);
+            text = rewrite_nested_functions(text, nestedChanged, &aAnnotations, &nestedLines);
             if (nestedChanged)
             {
                 std::vector<std::uint32_t> rewritten;
@@ -1982,7 +2116,7 @@ namespace neos::compilers::python
                     rewritten.push_back(l < lines.size() ? lines[l] : 0u);
                 lines = std::move(rewritten);
             }
-            changed = changed || nestedChanged;
+            aChanged = aChanged || nestedChanged;
         }
         // lambda expressions are functions: "lambda params: expression" becomes the name of a function (_lN_, padded with
         // spaces: source positions are unchanged) defined at the end of the module ("def _lN_(params): return expression")
@@ -2067,14 +2201,54 @@ namespace neos::compilers::python
                 lines.pop_back();
             text += "def " + name + "(" + std::string{ trimmed(parameters) } + "):\n    return " + std::string{ trimmed(body) } + "\n";
             lines.insert(lines.end(), { lambdaLine, lambdaLine, 0u });
-            changed = true;
+            aChanged = true;
         }
         // the assignments of classes' bodies: through their namespaces (see statements.cpp)
         {
             bool namespacesChanged = false;
             text = rewrite_class_namespaces(text, namespacesChanged);
-            changed = changed || namespacesChanged;
+            aChanged = aChanged || namespacesChanged;
         }
+        return text;
+    }
+
+    void compiler::py_join_lines(i_source_fragment& aFragment)
+    {
+        // lines are joined within brackets: line breaks (and comments) there are whitespace (replaced by spaces, so that 
+        // source positions are unchanged)
+        auto const source = aFragment.source().to_std_string_view();
+        // (a source that preparse has made (a later compilation pass): already rewritten)
+        if (iPyPreparsed.contains(std::string{ source }))
+            return;
+        bool changed = false;
+        std::string original{ source };
+        // (eval: the value of the expression is its result)
+        if (iPyMode == "eval" && !aFragment.imported())
+        {
+            auto const first = original.find_first_not_of(" \t");
+            original = "__exec_result((" + (first == std::string::npos ? std::string{} : original.substr(first)) + "\n))\n";
+            changed = true;
+        }
+        // (the annotations of the module's functions)
+        std::map<std::string, std::vector<std::pair<std::string, std::string>>> annotations;
+        std::vector<std::uint32_t> lines;
+        bool compilesAtRunTime = false;
+        auto const& path = aFragment.source_file_path();
+        bool const package = path != std::nullopt && std::filesystem::path{ path.value().to_std_string() }.parent_path().parent_path().filename() == "packages";
+        std::string text = rewrite_source(source, original, py_exec_mode(), package, changed, compilesAtRunTime, lines, annotations,
+            [&](std::size_t aPosition, std::string const& aMessage)
+            {
+                generator().throw_error(aFragment.source().begin() + static_cast<std::ptrdiff_t>(aPosition), neolib::string{ aMessage }, "syntax error"_s);
+            },
+            [&](std::string const& aText) { py_find_imports(aText); });
+        // (a program (its fragments other than packages') that calls exec, eval or compile compiles source while it runs: an image of it 
+        // needs the compiler)
+        if (compilesAtRunTime)
+            iPyCompilesAtRunTime = true;
+        auto const track_lines = [&]()
+        {
+            lines.resize(static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n')) + 1u, 0u);
+        };
         // (exec: the functions that its top level defines (its namespace's))
         if (py_exec_mode() && !aFragment.imported())
         {
@@ -2099,21 +2273,19 @@ namespace neos::compilers::python
         // (a module that imports a runtime module's names (from m import *: they are bound in its namespace (see python::import_star)))
         auto const importsStar = [&]()
         {
-            static std::regex const sStar{ "(^|\n)[ \t]*from[ \t]+([A-Za-z_][\\w.]*)[ \t]+import[ \t]+\\*" };
-            for (auto i = std::sregex_iterator(text.begin(), text.end(), sStar); i != std::sregex_iterator(); ++i)
-                if (!py_module_of((*i)[2].str()))
+            for (auto const& m : star_imports(text))
+                if (!py_module_of(m))
                     return true;
             return false;
         };
         // (a program that uses its namespace (globals()): its names are read by its getter (as an imported module's))
         if (!py_exec_mode() && !aFragment.imported())
         {
-            // (or that reads its module object (sys.modules['__main__'], import __main__))
-            static std::regex const sIntrospection{ "\\b(globals|vars|dir|exec|eval)\\b|\\bsys\\.modules\\b|\\bimport\\s+__main__\\b" };
+            // (or that reads its module object (sys.modules['__main__'], import __main__), or pickles (pickle finds its classes and
+            // functions by their names in it))
             // (its functions' annotations are evaluated in its namespace; its classes' string annotations are resolved in it (e.g. by
             // dataclasses: "x: 'ClassVar[int]'", or any under "from __future__ import annotations"))
-            static std::regex const sStringAnnotation{ "__annotations__\\['[^']*'\\] = \\(['\"]" };
-            if (std::regex_search(text, sIntrospection) || !annotations.empty() || std::regex_search(text, sStringAnnotation) || importsStar())
+            if (introspective(text) || !annotations.empty() || string_annotation(text) || importsStar())
             {
                 iPyIntrospective.insert("__main__");
                 std::vector<std::string> names;
@@ -2128,7 +2300,7 @@ namespace neos::compilers::python
             auto& m = iPyModules[*module];
             m.names.clear();
             m.all = std::nullopt;
-            if (std::regex_search(text, std::regex{ "\\b(globals|vars|dir|exec|eval)\\b" }) || importsStar())
+            if (has_word(text, { "globals", "vars", "dir", "exec", "eval" }) || importsStar())
                 iPyIntrospective.insert(m.name);
             text = rewrite_module_names(text, m.prefix(), m.getter(), m.names, m.all, builtin_names());
             changed = true;
@@ -2260,9 +2432,39 @@ namespace neos::compilers::python
         // (the names of the functions that the rewrites made, as their closures, generators, coroutines and classes name them: their 
         // frames' names)
         {
-            static std::regex const sNamed{ "\\b__(?:closure|generator|coroutine|async_generator)\\(\\s*(\\w+)\\s*,\\s*'([^']*)'" };
-            for (auto m = std::sregex_iterator{ text.begin(), text.end(), sNamed }; m != std::sregex_iterator{}; ++m)
-                iPyFrameNames[(*m)[1].str()] = (*m)[2].str();
+            // (\b__(?:closure|generator|coroutine|async_generator)\(\s*(\w+)\s*,\s*'([^']*)')
+            std::string_view const whole{ text };
+            for (auto const maker : { "__closure(", "__generator(", "__coroutine(", "__async_generator(" })
+            {
+                std::string_view const call{ maker };
+                for (auto p = whole.find(call); p != std::string_view::npos; p = whole.find(call, p + 1u))
+                {
+                    if (p > 0u && name_character(whole[p - 1u]))
+                        continue;
+                    auto q = p + call.size();
+                    while (q < whole.size() && space_character(whole[q]))
+                        ++q;
+                    auto const name = q;
+                    while (q < whole.size() && name_character(whole[q]))
+                        ++q;
+                    if (q == name)
+                        continue;
+                    auto const function = whole.substr(name, q - name);
+                    while (q < whole.size() && space_character(whole[q]))
+                        ++q;
+                    if (q >= whole.size() || whole[q] != ',')
+                        continue;
+                    ++q;
+                    while (q < whole.size() && space_character(whole[q]))
+                        ++q;
+                    if (q >= whole.size() || whole[q] != '\'')
+                        continue;
+                    auto const close = whole.find('\'', q + 1u);
+                    if (close == std::string_view::npos)
+                        continue;
+                    iPyFrameNames[std::string{ function }] = std::string{ whole.substr(q + 1u, close - q - 1u) };
+                }
+            }
         }
         if (changed && std::getenv("NEOS_PY_SOURCE") != nullptr)
             std::fprintf(stderr, "%s\n", text.c_str());
@@ -2405,11 +2607,14 @@ namespace neos::compilers::python
         return aValue;
     }
 
-    // (a call's outcome (python::call_method's or python::call_direct's: an integer (see NEOS_RT_INTEGER)): its result (an object: its 
-    // handle shifted left one bit with the low bit set), or a function of the program for the program to call (call_indirect: see the 
-    // runtime's direct_code): (((its index << 2) | 2 if it returns nothing | 1 if aReceiver is its first argument) + 1) shifted left one 
-    // bit, with aArguments)
-    fragment compiler::py_call_outcome(fragment aCall, std::optional<std::uint32_t> aReceiver, std::vector<std::uint32_t> const& aArguments)
+    // (a call's outcome (python::call_method's, python::call_super's or python::call_direct's: an integer (see NEOS_RT_INTEGER)): its 
+    // result (an object: its handle shifted left one bit with the low bit set), or a function of the program for the program to call 
+    // (call_indirect: see the runtime's direct_code): (((its index << 4) | 8 if it is a class's __init__ | 4 if its first argument is 
+    // python::leading's | 2 if it returns nothing | 1 if aReceiver is its first argument (or its second, after python::leading's)) + 1) 
+    // shifted left one bit, with aArguments (a class's __init__: with the instance that python::leading gives first, which is the 
+    // outcome; else a closure's cell); aLeading: 1 (python::call_direct's: a class's __init__, or a closure without aReceiver), 2 
+    // (python::call_method's and python::call_super's: a closure with aReceiver), or 0 (none)
+    fragment compiler::py_call_outcome(fragment aCall, std::optional<std::uint32_t> aReceiver, std::vector<std::uint32_t> const& aArguments, int aLeading)
     {
         auto const outcome = temporary(type::I64);
         auto const direct = temporary(type::I32);
@@ -2438,10 +2643,97 @@ namespace neos::compilers::python
             for (auto const a : aArguments)
                 put_local(result, opcode::LocalGet, a);
             put_local(result, opcode::LocalGet, direct);
-            put_i32(result, 2);
+            put_i32(result, 4);
             put(result, opcode::I32ShrU);
             emit_call_indirect(result, indirect_signature(std::vector<type>(aArguments.size() + (aWithReceiver ? 1u : 0u), type::Object), aResult));
         };
+        // (a first argument that python::leading gives (held by an object temporary while the call runs, so that an exception releases 
+        // it): a class's __init__ (which returns nothing) is called with the instance, which is the outcome; a closure with its cell)
+        if (aLeading == 2 && aReceiver)
+        {
+            auto const leading = temporary(type::Object);
+            py_function().objectTemporaries.insert(leading);
+            auto const leading_call = [&](type aResult)
+            {
+                put_local(result, opcode::LocalGet, leading);
+                put_local(result, opcode::LocalGet, *aReceiver);
+                for (auto const a : aArguments)
+                    put_local(result, opcode::LocalGet, a);
+                put_local(result, opcode::LocalGet, direct);
+                put_i32(result, 4);
+                put(result, opcode::I32ShrU);
+                emit_call_indirect(result, indirect_signature(std::vector<type>(aArguments.size() + 2u, type::Object), aResult));
+            };
+            put_local(result, opcode::LocalGet, direct);
+            put_i32(result, 4);
+            put(result, opcode::I32And);
+            put_block(result, opcode::If, type::Object);
+            append(result, py_runtime_call("python::leading", {}, type::Object, {}));
+            put_local(result, opcode::LocalSet, leading);
+            put_local(result, opcode::LocalGet, direct);
+            put_i32(result, 2);
+            put(result, opcode::I32And);
+            put_block(result, opcode::If, type::Object);
+            leading_call(type::Void);
+            append(result, py_none(true));
+            put(result, opcode::Else);
+            leading_call(type::Object);
+            put(result, opcode::End);
+            put_local(result, opcode::LocalGet, leading);
+            emit_call_to(result, runtime_function("neos::object_release", { type::Object }, type::Void));
+            put_i32(result, 0);
+            put_local(result, opcode::LocalSet, leading);
+            put(result, opcode::Else);
+        }
+        else if (aLeading == 1)
+        {
+            auto const leading = temporary(type::Object);
+            py_function().objectTemporaries.insert(leading);
+            auto const leading_call = [&](type aResult)
+            {
+                put_local(result, opcode::LocalGet, leading);
+                for (auto const a : aArguments)
+                    put_local(result, opcode::LocalGet, a);
+                put_local(result, opcode::LocalGet, direct);
+                put_i32(result, 4);
+                put(result, opcode::I32ShrU);
+                emit_call_indirect(result, indirect_signature(std::vector<type>(aArguments.size() + 1u, type::Object), aResult));
+            };
+            put_local(result, opcode::LocalGet, direct);
+            put_i32(result, 4);
+            put(result, opcode::I32And);
+            put_block(result, opcode::If, type::Object);
+            append(result, py_runtime_call("python::leading", {}, type::Object, {}));
+            put_local(result, opcode::LocalSet, leading);
+            put_local(result, opcode::LocalGet, direct);
+            put_i32(result, 8);
+            put(result, opcode::I32And);
+            put_block(result, opcode::If, type::Object);
+            {
+                leading_call(type::Void);
+                put_local(result, opcode::LocalGet, leading);
+                put_i32(result, 0);
+                put_local(result, opcode::LocalSet, leading);
+            }
+            put(result, opcode::Else);
+            {
+                put_local(result, opcode::LocalGet, direct);
+                put_i32(result, 2);
+                put(result, opcode::I32And);
+                put_block(result, opcode::If, type::Object);
+                leading_call(type::Void);
+                append(result, py_none(true));
+                put(result, opcode::Else);
+                leading_call(type::Object);
+                put(result, opcode::End);
+                put_local(result, opcode::LocalGet, leading);
+                emit_call_to(result, runtime_function("neos::object_release", { type::Object }, type::Void));
+                put_i32(result, 0);
+                put_local(result, opcode::LocalSet, leading);
+            }
+            put(result, opcode::End);
+            put(result, opcode::Else);
+        }
         auto const variants = [&](bool aWithReceiver)
         {
             put_local(result, opcode::LocalGet, direct);
@@ -2467,6 +2759,8 @@ namespace neos::compilers::python
         }
         else
             variants(false);
+        if (aLeading == 1 || (aLeading == 2 && aReceiver))
+            put(result, opcode::End);
         put(result, opcode::End);
         result.valueType = type::Object;
         result.fragmentKind = fragment_kind::Value;
@@ -2481,7 +2775,7 @@ namespace neos::compilers::python
         // which is only seen if finding it also raises, or has an effect; a global variable's value is read before the method is found, 
         // which is only seen if finding it binds the variable)
         static std::set<std::string> const sPure = { "python::from_int", "python::from_integer", "python::from_float", "python::from_bool", 
-            "python::from_str", "python::none", "python::unbound" };
+            "python::from_str", "python::none", "python::unbound", "python::name" };
         auto const& code = aValue.fragmentCode.as_std_vector();
         auto const relocated = [&](std::size_t aPosition) -> std::optional<std::uint32_t>
         {
@@ -2821,7 +3115,19 @@ namespace neos::compilers::python
                 append(aValue, none);
             }
             else if (from == type::Boolean)
+            {
+                if (auto const& code = aValue.fragmentCode.as_std_vector(); aValue.fragmentRelocations.empty() && code.size() == 2u && 
+                    code[0] == static_cast<std::uint8_t>(opcode::I32Const) && (code[1] == 0u || code[1] == 1u))
+                {
+                    // (True or False: made once (a borrowed reference, held by a global))
+                    auto const truth = code[1] == 1u;
+                    aValue = py_made_once(truth ? "__neos_py_true" : "__neos_py_false", py_runtime_call("python::from_bool", { type::Boolean }, type::Object, { aValue }));
+                    aValue.fragmentKind = kind;
+                    aValue.fragmentSource = source;
+                    return;
+                }
                 aValue = py_runtime_call("python::from_bool", { type::Boolean }, type::Object, { aValue });
+            }
             else if (from == type::String)
             {
                 if (auto constant = py_constant_str(aValue))
@@ -2835,9 +3141,29 @@ namespace neos::compilers::python
                 aValue = py_runtime_call("python::from_str", { type::String }, type::Object, { aValue });
             }
             else if (is_float(from))
+            {
+                if (auto constant = from == type::F64 ? py_constant_float(aValue) : std::nullopt)
+                {
+                    // (a literal's float is made once: a borrowed reference, held by a global)
+                    aValue = std::move(*constant);
+                    aValue.fragmentKind = kind;
+                    aValue.fragmentSource = source;
+                    return;
+                }
                 aValue = py_runtime_call("python::from_float", { type::F64 }, type::Object, { aValue });
+            }
             else if (is_numeric(from))
+            {
+                if (auto constant = from == type::I64 || from == type::I32 ? py_constant_int(aValue) : std::nullopt)
+                {
+                    // (a literal's int is made once: a borrowed reference, held by a global)
+                    aValue = std::move(*constant);
+                    aValue.fragmentKind = kind;
+                    aValue.fragmentSource = source;
+                    return;
+                }
                 aValue = py_runtime_call("python::from_int", { type::I64 }, type::Object, { aValue });
+            }
             else
                 throw std::runtime_error("cannot convert " + type_name(from) + " to an object");
             aValue = py_owned(aValue);
@@ -2898,7 +3224,13 @@ namespace neos::compilers::python
                 finish(aValue, type::Boolean);
             }
             else if (aTarget == type::Object)
-                finish(py_owned(py_runtime_call("python::from_integer", { type::Integer }, type::Object, { aValue })), type::Object);
+            {
+                // (a literal's int is made once: a borrowed reference, held by a global)
+                if (auto constant = py_constant_int(aValue, true))
+                    finish(std::move(*constant), type::Object);
+                else
+                    finish(py_owned(py_runtime_call("python::from_integer", { type::Integer }, type::Object, { aValue })), type::Object);
+            }
             else if (aTarget == type::String)
             {
                 // (a small integer: decimal (the VM's neos::string_from_i64); an integer object: by the runtime plugin)
@@ -4124,26 +4456,32 @@ namespace neos::compilers::python
                         generator().deferred_call(neolib::string{ aName }, neolib::vector<type>{ parameterTypes.begin(), parameterTypes.end() }) });
                     code.resize(code.size() + 5u);
                     index.valueType = type::I32;
-                    // (the default values: a tuple)
-                    fragment count;
-                    put_i64(count, static_cast<std::int64_t>(defaults.size()));
-                    count.valueType = type::I64;
-                    auto tuple = py_owned(py_runtime_call("python::tuple", { type::I64 }, type::Object, { count }));
-                    auto const local = temporary(type::I32);
-                    fragment defaultsValue = tuple;
-                    put_local(defaultsValue, opcode::LocalSet, local);
-                    for (std::size_t i = 0u; i < defaults.size(); ++i)
+                    // (the default values: a tuple (none: null))
+                    fragment defaultsValue;
+                    if (defaults.empty())
+                        put_i32(defaultsValue, 0);
+                    else
                     {
-                        fragment position;
-                        put_i64(position, static_cast<std::int64_t>(i));
-                        position.valueType = type::I64;
-                        auto value = defaults[i];
-                        if (value.valueType != type::Object)
-                            coerce(value, type::Object);
-                        append(defaultsValue, py_runtime_call("python::tuple_set", { type::Object, type::I64, type::Object }, type::Void,
-                            { local_value(local, type::Object), position, value }));
+                        fragment count;
+                        put_i64(count, static_cast<std::int64_t>(defaults.size()));
+                        count.valueType = type::I64;
+                        auto tuple = py_owned(py_runtime_call("python::tuple", { type::I64 }, type::Object, { count }));
+                        auto const local = temporary(type::I32);
+                        defaultsValue = tuple;
+                        put_local(defaultsValue, opcode::LocalSet, local);
+                        for (std::size_t i = 0u; i < defaults.size(); ++i)
+                        {
+                            fragment position;
+                            put_i64(position, static_cast<std::int64_t>(i));
+                            position.valueType = type::I64;
+                            auto value = defaults[i];
+                            if (value.valueType != type::Object)
+                                coerce(value, type::Object);
+                            append(defaultsValue, py_runtime_call("python::tuple_set", { type::Object, type::I64, type::Object }, type::Void,
+                                { local_value(local, type::Object), position, value }));
+                        }
+                        put_local(defaultsValue, opcode::LocalGet, local);
                     }
-                    put_local(defaultsValue, opcode::LocalGet, local);
                     defaultsValue.valueType = type::Object;
                     auto const shown = unprefixed(aName);
                     bool const lambda = shown.size() > 3u && shown.starts_with("_l") && shown.ends_with("_") &&
@@ -4391,9 +4729,14 @@ namespace neos::compilers::python
                 emit_call_to(aStatement, runtime_function("neos::object_retain", { type::Object }, type::Void));
                 put_local(aStatement, opcode::LocalGet, scratch);
             }
+            // (the variable's previous value is released after the variable holds the new one: its release can run code (e.g. a 
+            // __del__) that reads the variable)
+            auto const previous = py_scratch(ScratchPrevious, type::I32);
             put_local(aStatement, global ? opcode::GlobalGet : opcode::LocalGet, index);
-            emit_call_to(aStatement, runtime_function("neos::object_release", { type::Object }, type::Void));
+            put_local(aStatement, opcode::LocalSet, previous);
             put_local(aStatement, global ? opcode::GlobalSet : opcode::LocalSet, index);
+            put_local(aStatement, opcode::LocalGet, previous);
+            emit_call_to(aStatement, runtime_function("neos::object_release", { type::Object }, type::Void));
             if (holder)
             {
                 // (the temporary no longer holds a reference: it can be reused)
@@ -4502,8 +4845,8 @@ namespace neos::compilers::python
                 { *aTarget.receiver, *aTarget.key, py_object(aValue) }));
             break;
         case fragment_state::py_target::kind_t::Attribute:
-            append(aStatement, py_runtime_call("python::setattr", { type::Object, type::String, type::Object }, type::Void,
-                { *aTarget.receiver, py_string(aTarget.name), py_object(aValue) }));
+            append(aStatement, py_runtime_call("python::setattr_name", { type::Object, type::Object, type::Object }, type::Void,
+                { *aTarget.receiver, py_attribute_name(aTarget.name), py_object(aValue) }));
             break;
         case fragment_state::py_target::kind_t::Group:
             py_bind_targets(aTarget.children, aValue, aStatement);
@@ -4662,6 +5005,82 @@ namespace neos::compilers::python
                 coerce(l, type::Object);
             if (r.valueType != type::Object)
                 coerce(r, type::Object);
+            // (arithmetic (+, -, *, /, //, %, **) of operands that are variables' or constants', or arithmetic of them: fused (python::arith 
+            // computes it without objects for its intermediate values, if they are ints and floats; else it is computed as written))
+            using py_arith = function_state::py_arith;
+            auto const arith = [&](fragment const& aOperand) -> std::optional<py_arith>
+            {
+                if (auto const a = py_function().pyArith.find(aOperand.fragmentCode.as_std_vector()); a != py_function().pyArith.end())
+                    return a->second;
+                if (py_arith_leaf(aOperand))
+                {
+                    // (a number's constant: arithmetic of numbers, likely)
+                    bool number = false;
+                    for (auto const& relocation : aOperand.fragmentRelocations)
+                        if (relocation.second() < generator().function_count())
+                        {
+                            auto const name = generator().function_name(relocation.second()).to_std_string();
+                            number = number || name.starts_with("python::from_int") || name.starts_with("python::from_float");
+                        }
+                    return py_arith{ "A", { aOperand }, aOperand, true, number };
+                }
+                return std::nullopt;
+            };
+            std::optional<py_arith> left, right;
+            if (!aInplace && aOperator >= PyAdd && aOperator <= PyPower && (left = arith(l)) && (right = arith(r)) && 
+                left->leaves.size() + right->leaves.size() <= 8u)
+            {
+                py_arith node;
+                node.leaves = left->leaves;
+                node.leaves.insert(node.leaves.end(), right->leaves.begin(), right->leaves.end());
+                node.code = left->code;
+                for (auto const c : right->code)
+                    node.code += c >= 'A' && c <= 'H' ? static_cast<char>(c + static_cast<char>(left->leaves.size())) : c;
+                node.code += static_cast<char>('0' + aOperator);
+                node.numeric = left->numeric || right->numeric || (aOperator != PyAdd && aOperator != PySubtract);
+                // (its unfused value: a new reference (its operands' (unless they are leaves) held by temporaries); held by a temporary 
+                // (if it is not fused), or (fused) the value that python::arith's is if it is null)
+                auto const operand = [&](py_arith const& aOperand) { return aOperand.leaf ? aOperand.unfused : py_owned(aOperand.unfused); };
+                node.unfused = py_runtime_call("python::binary", { type::I32, type::Object, type::Object }, type::Object, { op, operand(*left), operand(*right) });
+                mark_position(node.unfused, operation_position());
+                auto result = py_owned(node.unfused);
+                if (node.leaves.size() > 2u && node.numeric)
+                {
+                    // (python::arith's value, else (null: not numbers) the unfused value)
+                    std::vector<fragment> arguments{ py_string(node.code) };
+                    for (std::size_t i = 0u; i < 8u; ++i)
+                    {
+                        if (i < node.leaves.size())
+                            arguments.push_back(node.leaves[i]);
+                        else
+                        {
+                            fragment absent;
+                            put_i32(absent, 0);
+                            absent.valueType = type::Object;
+                            arguments.push_back(absent);
+                        }
+                    }
+                    std::vector<type> parameters{ type::String };
+                    parameters.insert(parameters.end(), 8u, type::Object);
+                    auto fused = py_runtime_call("python::arith", parameters, type::Object, arguments);
+                    mark_position(fused, operation_position());
+                    auto const scratch = temporary(type::I32);
+                    fragment combined;
+                    append(combined, fused);
+                    put_local(combined, opcode::LocalTee, scratch);
+                    put(combined, opcode::I32Eqz);
+                    put_block(combined, opcode::If, type::Object);
+                    append(combined, node.unfused);
+                    put(combined, opcode::Else);
+                    put_local(combined, opcode::LocalGet, scratch);
+                    put(combined, opcode::End);
+                    combined.valueType = type::Object;
+                    result = py_owned(combined);
+                }
+                py_function().pyArith[result.fragmentCode.as_std_vector()] = node;
+                value(result);
+                return;
+            }
             auto call = py_runtime_call(aInplace ? "python::inplace" : "python::binary", { type::I32, type::Object, type::Object }, type::Object, { op, l, r });
             mark_position(call, operation_position());
             value(py_owned(call));
@@ -5105,6 +5524,31 @@ namespace neos::compilers::python
                     stars.push_back(0);
                 }
             }
+            // (the compiler's __closure(function, name, qualname, defaults, cells...) of up to three cells, and __cell(name[, value]): made with
+            // no tuple of their arguments)
+            if (symbol == nullptr && !declared && !anyKeyword && ((name == "__closure" && arguments.size() >= 4u && arguments.size() <= 7u) ||
+                (name == "__cell" && arguments.size() >= 1u && arguments.size() <= 2u)))
+            {
+                std::vector<fragment> passed;
+                for (auto const& argument : arguments)
+                    passed.push_back(py_object(operand_type{ argument }));
+                while (passed.size() < (name == "__cell" ? 2u : 7u))
+                {
+                    fragment absent;
+                    put_i32(absent, 0);
+                    absent.valueType = type::Object;
+                    passed.push_back(absent);
+                }
+                auto value = name == "__cell" ?
+                    py_owned(py_runtime_call("python::cell", { type::Object, type::Object }, type::Object, passed)) :
+                    py_owned(py_runtime_call("python::closure", std::vector<type>(7u, type::Object), type::Object, passed));
+                push_operand(operand_type{ value });
+                return;
+            }
+            // (the builtin super(cls, self) (as the compiler writes super() in a method): its arguments, for a call of its method (see 
+            // python::call_super))
+            if (symbol == nullptr && !declared && !anyKeyword && !py_exec_mode() && name == "super" && arguments.size() == 2u)
+                state().pySupers[aSource.to_std_string_view().data()] = { py_object(operand_type{ arguments[0] }), py_object(operand_type{ arguments[1] }) };
             if (py_exec_mode() && builtin_names().contains(name) && std::find(iPyExecDefs.begin(), iPyExecDefs.end(), name) == iPyExecDefs.end() &&
                 (symbol == nullptr || symbol->type() == type::Function))
                 execBuiltin = name;
@@ -5118,6 +5562,33 @@ namespace neos::compilers::python
                     convert(value.fragmentCode.as_std_vector(), value.valueType, type::I64);
                 emit_call_to(value, runtime_function("neos::string_from_i64", { type::I64 }, type::String));
                 value.valueType = type::String;
+                value.fragmentKind = fragment_kind::Value;
+                value.fragmentSource = make_fragment(fragment_kind::Value, type::String, aSource).fragmentSource;
+                push_operand(operand_type{ value });
+                return;
+            }
+            // (an f-string's replacement field with neither a conversion nor a format specification: an int's decimal text (as str()); a str 
+            // itself)
+            if (!execBuiltin && name == "__fstring" && arguments.size() == 1u && !anyKeyword && declared && declared->stub && arguments[0].valueType == type::String)
+            {
+                fragment value = arguments[0];
+                value.fragmentKind = fragment_kind::Value;
+                push_operand(operand_type{ value });
+                return;
+            }
+            if (!execBuiltin && name == "__fstring" && arguments.size() == 1u && !anyKeyword && declared && declared->stub && is_integer(arguments[0].valueType) &&
+                (arguments[0].valueType == type::Integer || !py_big_integers()))
+            {
+                fragment value = arguments[0];
+                if (value.valueType == type::Integer)
+                    coerce(value, type::String);
+                else
+                {
+                    if (value.valueType != type::I64)
+                        convert(value.fragmentCode.as_std_vector(), value.valueType, type::I64);
+                    emit_call_to(value, runtime_function("neos::string_from_i64", { type::I64 }, type::String));
+                    value.valueType = type::String;
+                }
                 value.fragmentKind = fragment_kind::Value;
                 value.fragmentSource = make_fragment(fragment_kind::Value, type::String, aSource).fragmentSource;
                 push_operand(operand_type{ value });
@@ -5255,8 +5726,18 @@ namespace neos::compilers::python
                 values->push_back(py_object(operand_type{ argument }));
             if (std::all_of(values->begin(), values->end(), [&](fragment const& aValue) { return py_pure(aValue); }))
             {
+                // (super(cls, self).name(a0, a1): python::call_super (no super object is made), with self as the receiver)
+                std::optional<std::uint32_t> superClass;
                 auto const receiver = temporary(type::I32);
-                append(statement, py_object(operand_type{ method->receiver }));
+                if (method->super)
+                {
+                    superClass = temporary(type::I32);
+                    append(statement, method->super->first);
+                    put_local(statement, opcode::LocalSet, *superClass);
+                    append(statement, method->super->second);
+                }
+                else
+                    append(statement, py_object(operand_type{ method->receiver }));
                 put_local(statement, opcode::LocalSet, receiver);
                 std::vector<std::uint32_t> held;
                 std::vector<fragment> passed;
@@ -5274,8 +5755,11 @@ namespace neos::compilers::python
                     absent.valueType = type::Object;
                     passed.push_back(absent);
                 }
-                auto choice = py_call_outcome(py_runtime_call("python::call_method", { type::Object, type::String, type::Object, type::Object }, type::Integer, 
-                    { local_value(receiver, type::Object), py_string(method->attribute), passed[0], passed[1] }), receiver, held);
+                auto choice = superClass ?
+                    py_call_outcome(py_runtime_call("python::call_super", { type::Object, type::Object, type::String, type::Object, type::Object }, type::Integer, 
+                        { local_value(*superClass, type::Object), local_value(receiver, type::Object), py_string(method->attribute), passed[0], passed[1] }), receiver, held, 2) :
+                    py_call_outcome(py_runtime_call("python::call_method", { type::Object, type::String, type::Object, type::Object }, type::Integer, 
+                        { local_value(receiver, type::Object), py_string(method->attribute), passed[0], passed[1] }), receiver, held, 2);
                 mark_position(choice, position, true);
                 choice.valueType = type::Object;
                 choice.fragmentKind = fragment_kind::Value;
@@ -5340,7 +5824,7 @@ namespace neos::compilers::python
             for (std::size_t i = 0u; i < held.size(); ++i)
                 passed[i] = local_value(held[i], type::Object);
             auto choice = py_call_outcome(py_runtime_call("python::call_direct", { type::Object, type::Object, type::Object, type::Object }, type::Integer,
-                { local_value(callable, type::Object), passed[0], passed[1], passed[2] }), receiverTemporary, held);
+                { local_value(callable, type::Object), passed[0], passed[1], passed[2] }), receiverTemporary, held, 1);
             mark_position(choice, position, true);
             choice.valueType = type::Object;
             choice.fragmentKind = fragment_kind::Value;
@@ -5488,7 +5972,7 @@ namespace neos::compilers::python
                         current = operand_type{ py_owned(py_runtime_call("python::getitem", { type::Object, type::Object }, type::Object, { *target.receiver, *target.key })) };
                     }
                     else
-                        current = operand_type{ py_owned(py_runtime_call("python::getattr", { type::Object, type::String }, type::Object, { *target.receiver, py_string(target.name) })) };
+                        current = operand_type{ py_owned(py_runtime_call("python::getattr_name", { type::Object, type::Object }, type::Object, { *target.receiver, py_attribute_name(target.name) })) };
                 }
                 break;
             }
@@ -5645,6 +6129,9 @@ namespace neos::compilers::python
                 }
                 return result;
             }
+            // (__main__: the program's module (sys.modules['__main__']))
+            if (aName == "__main__")
+                return py_owned(py_runtime_call("python::import", { type::String }, type::Object, { py_string(aName) }));
             if (aName.find('.') == std::string::npos && generator().runtime_plugin_available(neolib::string{ aName }))
             {
                 auto context = py_owned(py_runtime_call("python::context", {}, type::Object, {}));
@@ -6616,7 +7103,13 @@ namespace neos::compilers::python
                     put_u32(code.fragmentCode.as_std_vector(), 3u);
                     put(code, opcode::End);
                     auto assignment = make_fragment(fragment_kind::Statement, type::Void, neolib::string_view{});
-                    py_bind(clause.targets[0], operand_type{ local_value(item, type::Object) }, assignment);
+                    // (an int variable (a clause over a range: see ComprehensionFor): the item's integer)
+                    neolib::string const name{ clause.targets[0].name };
+                    auto const* const variable = find_symbol(current_scope(), neolib::string_view{ name });
+                    if (variable != nullptr && variable->type() == type::Integer)
+                        py_bind(clause.targets[0], operand_type{ py_runtime_call("python::to_integer", { type::Object }, type::Integer, { local_value(item, type::Object) }) }, assignment);
+                    else
+                        py_bind(clause.targets[0], operand_type{ local_value(item, type::Object) }, assignment);
                     append(code, assignment);
                     put_local(code, opcode::LocalGet, item);
                     emit_call_to(code, release);
@@ -6922,6 +7415,141 @@ namespace neos::compilers::python
         return iPyCompilesAtRunTime;
     }
 
+    bool compiler::parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const
+    {
+        // (a program's source as py_join_lines rewrites it, as much of it as needs no compilation (see rewrite_source))
+        std::string const source{ aSource.to_std_string_view() };
+        bool changed = false;
+        bool compilesAtRunTime = false;
+        std::vector<std::uint32_t> lines;
+        std::map<std::string, std::vector<std::pair<std::string, std::string>>> annotations;
+        std::string text;
+        try
+        {
+            text = rewrite_source(source, source, false, false, changed, compilesAtRunTime, lines, annotations,
+                [](std::size_t, std::string const& aMessage) { throw std::runtime_error{ aMessage }; }, {});
+        }
+        catch (...)
+        {
+            return false; // (e.g. a syntax error)
+        }
+        if (!changed || text == source)
+            return false;
+        // (the start of each line of the source; the end of the source that each line is, with the lines joined to it within brackets)
+        std::vector<std::size_t> starts{ 0u };
+        for (std::size_t i = 0u; i < source.size(); ++i)
+            if (source[i] == '\n')
+                starts.push_back(i + 1u);
+        std::string const joined = join_bracketed_lines(source);
+        std::vector<std::size_t> ends(starts.size());
+        for (auto line = starts.size(); line-- > 0u;)
+        {
+            auto const end = line + 1u < starts.size() ? starts[line + 1u] - 1u : source.size();
+            ends[line] = end < source.size() && joined[end] != '\n' && line + 1u < starts.size() ? ends[line + 1u] : end;
+        }
+        // (the position in the source of each byte of a line of the text from the source that it is (the line's own and those joined to it): 
+        // the bytes of the tokens of their common prefix and suffix, then of the longest common subsequence of the rest's tokens (if it is not 
+        // too long); a function that a rewrite hoisted (_nN_name, _dN_name or _gN_name: see closures.cpp) is its name's)
+        static constexpr std::size_t MaxAlignment = 1u << 22u;
+        auto const tokens_of = [](std::string_view aText)
+        {
+            // (names and numbers, and the other characters but whitespace)
+            auto const name_byte = [](char aCharacter) { return name_character(aCharacter) || static_cast<unsigned char>(aCharacter) >= 0x80u; };
+            std::vector<std::string_view> result;
+            for (std::size_t i = 0u; i < aText.size();)
+            {
+                if (aText[i] == ' ' || aText[i] == '\t' || aText[i] == '\r')
+                {
+                    ++i;
+                    continue;
+                }
+                auto end = i + 1u;
+                if (name_byte(aText[i]))
+                    while (end < aText.size() && name_byte(aText[end]))
+                        ++end;
+                result.push_back(aText.substr(i, end - i));
+                i = end;
+            }
+            return result;
+        };
+        // (where in a token of the text a token of the source is: npos, not it)
+        auto const match = [](std::string_view aToken, std::string_view aSourceToken) -> std::size_t
+        {
+            if (aToken == aSourceToken)
+                return 0u;
+            if (aToken.size() <= aSourceToken.size() || !aToken.ends_with(aSourceToken) || !name_character(aSourceToken.front()))
+                return std::string_view::npos;
+            auto const prefix = aToken.substr(0u, aToken.size() - aSourceToken.size());
+            return numbered_name(prefix, 'n', false) || numbered_name(prefix, 'd', false) || numbered_name(prefix, 'g', false) ? 
+                prefix.size() : std::string_view::npos;
+        };
+        auto const align = [&](std::string_view aLine, std::size_t aOffset, std::string_view aSegment)
+        {
+            auto const first = aPositions.size();
+            for (std::size_t i = 0u; i < aLine.size(); ++i)
+                aPositions.push_back(NoPosition);
+            auto const line = tokens_of(aLine);
+            auto const segment = tokens_of(aSegment);
+            auto const map = [&](std::size_t aToken, std::size_t aSourceToken, std::size_t aAt)
+            {
+                auto const at = static_cast<std::size_t>(line[aToken].data() - aLine.data());
+                auto const sourceAt = aOffset + static_cast<std::size_t>(segment[aSourceToken].data() - aSegment.data());
+                for (std::size_t i = aAt; i < line[aToken].size(); ++i)
+                    aPositions[first + at + i] = static_cast<std::uint32_t>(sourceAt + i - aAt);
+            };
+            std::size_t prefix = 0u;
+            for (std::size_t at; prefix < line.size() && prefix < segment.size() && (at = match(line[prefix], segment[prefix])) != std::string_view::npos; ++prefix)
+                map(prefix, prefix, at);
+            std::size_t suffix = 0u;
+            for (std::size_t at; suffix < line.size() - prefix && suffix < segment.size() - prefix && 
+                (at = match(line[line.size() - 1u - suffix], segment[segment.size() - 1u - suffix])) != std::string_view::npos; ++suffix)
+                map(line.size() - 1u - suffix, segment.size() - 1u - suffix, at);
+            auto const lineTokens = line.size() - prefix - suffix;
+            auto const segmentTokens = segment.size() - prefix - suffix;
+            if (lineTokens == 0u || segmentTokens == 0u || lineTokens * segmentTokens > MaxAlignment)
+                return;
+            // (the length of the longest common subsequence of the rests' tokens from each of their positions)
+            std::vector<std::uint16_t> lengths((lineTokens + 1u) * (segmentTokens + 1u), 0u);
+            auto const length = [&](std::size_t aLineToken, std::size_t aSegmentToken) -> std::uint16_t&
+            {
+                return lengths[aLineToken * (segmentTokens + 1u) + aSegmentToken];
+            };
+            for (auto i = lineTokens; i-- > 0u;)
+                for (auto j = segmentTokens; j-- > 0u;)
+                    length(i, j) = match(line[prefix + i], segment[prefix + j]) != std::string_view::npos ? 
+                        static_cast<std::uint16_t>(length(i + 1u, j + 1u) + 1u) : std::max(length(i + 1u, j), length(i, j + 1u));
+            for (std::size_t i = 0u, j = 0u; i < lineTokens && j < segmentTokens;)
+            {
+                if (auto const at = match(line[prefix + i], segment[prefix + j]); at != std::string_view::npos)
+                    map(prefix + i++, prefix + j++, at);
+                else if (length(i + 1u, j) >= length(i, j + 1u))
+                    ++i;
+                else
+                    ++j;
+            }
+        };
+        aPositions.clear();
+        aPositions.reserve(text.size());
+        for (std::size_t lineStart = 0u, line = 0u; lineStart <= text.size(); ++line)
+        {
+            auto const lineEnd = std::min(text.find('\n', lineStart), text.size());
+            std::string_view const textLine{ text.data() + lineStart, lineEnd - lineStart };
+            // (the line of the source that it is (1-based; 0: none, e.g. a function that a rewrite added))
+            auto const sourceLine = line < lines.size() ? lines[line] : 0u;
+            if (sourceLine != 0u && sourceLine <= starts.size())
+                align(textLine, starts[sourceLine - 1u], std::string_view{ source }.substr(starts[sourceLine - 1u], ends[sourceLine - 1u] - starts[sourceLine - 1u]));
+            else
+                for (std::size_t i = 0u; i < textLine.size(); ++i)
+                    aPositions.push_back(NoPosition);
+            if (lineEnd == text.size())
+                break;
+            aPositions.push_back(NoPosition); // (its line break)
+            lineStart = lineEnd + 1u;
+        }
+        aResult = neolib::string{ text };
+        return true;
+    }
+
     void compiler::begin_pass()
     {
         iInference.pyCounterBindings.clear();
@@ -7158,12 +7786,37 @@ namespace neos::compilers::python
             auto const line = static_cast<std::uint32_t>(std::count(written.begin(), written.begin() + static_cast<std::ptrdiff_t>(aOffset), '\n') + 1);
             return std::make_pair(line, static_cast<std::uint32_t>(column));
         };
+        // (the text as written (aWritten) of the text as rewritten (aRewritten, of the same length): their characters, but for a 
+        // lambda's (as rewritten: its name (_lN_), padded with spaces to the lambda's length) and line breaks within brackets (spaces 
+        // as rewritten))
+        auto const written_as = [](std::string_view aWritten, std::string_view aRewritten)
+        {
+            if (aWritten.size() != aRewritten.size())
+                return false;
+            for (std::size_t i = 0u; i < aRewritten.size(); ++i)
+            {
+                if (aRewritten.compare(i, 2u, "_l") == 0 && aWritten.compare(i, 6u, "lambda") == 0)
+                {
+                    auto j = i + 2u;
+                    while (j < aRewritten.size() && std::isdigit(static_cast<unsigned char>(aRewritten[j])))
+                        ++j;
+                    if (j > i + 2u && j < aRewritten.size() && aRewritten[j] == '_')
+                    {
+                        i = j;
+                        while (i + 1u < aRewritten.size() && aRewritten[i + 1u] == ' ')
+                            ++i;
+                        continue;
+                    }
+                }
+                if (aWritten[i] != aRewritten[i] && !((aWritten[i] == '\n' || aWritten[i] == '\r') && aRewritten[i] == ' '))
+                    return false;
+            }
+            return true;
+        };
         // (where it is: the source as written has its text there (its line breaks within brackets are spaces in the source as rewritten))
         if (end <= written.size())
         {
-            bool same = true;
-            for (std::size_t i = start; i < end && same; ++i)
-                same = written[i] == text[i] || ((written[i] == '\n' || written[i] == '\r') && text[i] == ' ');
+            bool const same = written_as(written.substr(start, end - start), text.substr(start, end - start));
             if (same)
             {
                 auto const [line, column] = line_and_column(start);
@@ -7203,8 +7856,21 @@ namespace neos::compilers::python
             return 0u;
         auto const lineEnd = written.find('\n', lineStart);
         auto const lineText = written.substr(lineStart, lineEnd == std::string_view::npos ? std::string_view::npos : lineEnd - lineStart);
-        auto const at = lineText.find(expression);
-        if (at == std::string_view::npos || lineText.find(expression, at + 1u) != std::string_view::npos)
+        auto at = lineText.find(expression);
+        if (at != std::string_view::npos && lineText.find(expression, at + 1u) != std::string_view::npos)
+            return 0u;
+        if (at == std::string_view::npos && expression.find("_l") != std::string_view::npos)
+        {
+            // (a lambda in it (as rewritten): where the line has it as written, once)
+            for (std::size_t p = 0u; p + expression.size() <= lineText.size(); ++p)
+                if (written_as(lineText.substr(p, expression.size()), expression))
+                {
+                    if (at != std::string_view::npos)
+                        return 0u;
+                    at = p;
+                }
+        }
+        if (at == std::string_view::npos)
             return 0u;
         return bytecode::position(line, line, static_cast<std::uint32_t>(at), static_cast<std::uint32_t>(at + expression.size()));
     }
@@ -7249,7 +7915,7 @@ namespace neos::compilers::python
         };
         // (top-level statements: the module's, as are an imported module's (_NN_init); the module's other functions (e.g. its getter): 
         // the compiler's)
-        if (generator().function_implicit_entry(aFunction) || name == "__main__")
+        if (generator().function_implicit_entry(aFunction) || name == "__neos_main__")
         {
             aName = neolib::string{ "<module>" };
             return true;
@@ -7802,8 +8468,15 @@ namespace neos::compilers::python
         bool const deleted = module ? iInference.pyDeletedGlobals.contains(name) :
             (iInference.pyDeleted.contains(current_function_name()) && iInference.pyDeleted.at(current_function_name()).contains(name));
         auto const& order = py_function().pyBindingOrder;
-        bool const boundBefore = std::find(order.begin(), order.end(), name) != order.end();
-        if (!deleted && (boundBefore || (global && !implicit_entry())))
+        bool boundBefore = std::find(order.begin(), order.end(), name) != order.end();
+        // (a parameter: bound when the function is called)
+        if (!boundBefore && !global && !module)
+            if (auto const& signature = generator().signature_of(current_function()); signature.parameters().has_value())
+                for (auto const& parameter : signature.parameters().value())
+                    if (parameter.parameter_name().to_std_string_view() == name)
+                        boundBefore = true;
+        // (a global of a function: checked too (the function can be called before the module binds it))
+        if (!deleted && boundBefore)
             return nullptr;
         fragment checked{ aValue };
         auto const scratch = temporary(type::I32);
@@ -8333,15 +9006,28 @@ namespace neos::compilers::python
                     dummy(type::Object);
                     break;
                 }
+                // (a part that is absent: null (the slice's None))
                 std::vector<fragment> arguments;
                 for (auto const& v : values)
-                    arguments.push_back(v ? py_object(*v) : py_owned(py_runtime_call("python::none", {}, type::Object, {})));
+                {
+                    if (v)
+                        arguments.push_back(py_object(*v));
+                    else
+                    {
+                        fragment absent;
+                        put_i32(absent, 0);
+                        absent.valueType = type::Object;
+                        arguments.push_back(absent);
+                    }
+                }
                 push_operand(operand_type{ py_owned(py_runtime_call("python::slice", { type::Object, type::Object, type::Object }, type::Object, arguments)) });
             }
             break;
         case construct::Attribute:
             {
                 // receiver.name
+                bool const cellReceiver = !operands().empty() && operands().back().holds_alternative<i_symbol_reference>() &&
+                    operands().back().get<i_symbol_reference>().name().to_std_string_view().starts_with("_k_");
                 auto const receiver = py_pop();
                 if (declaration_pass())
                 {
@@ -8352,11 +9038,19 @@ namespace neos::compilers::python
                 text.remove_prefix(1u);
                 std::string const name{ trimmed(text) };
                 auto object = py_object(receiver);
-                auto get = py_runtime_call("python::getattr", { type::Object, type::String }, type::Object, { object, py_string(name) });
+                // (a closure's variable (_k_x.v: its cell's value (see closures.cpp)))
+                bool const cell = name == "v" && cellReceiver;
+                // (an attribute of super(cls, self))
+                std::optional<std::pair<fragment, fragment>> super;
+                if (auto const s = state().pySupers.find(receiver.holds_alternative<i_fragment>() ? receiver.get<i_fragment>().source().to_std_string_view().data() : nullptr);
+                    s != state().pySupers.end())
+                    super = s->second;
+                auto get = cell ? py_runtime_call("python::cell_get", { type::Object }, type::Object, { object }) :
+                    py_runtime_call("python::getattr_name", { type::Object, type::Object }, type::Object, { object, py_attribute_name(name) });
                 mark_position(get, py_position(aSource));
                 auto result = py_owned(get);
                 result.fragmentSource = aSource;
-                state().pyAccesses[aSource.to_std_string_view().data()] = fragment_state::py_access{ object, {}, name };
+                state().pyAccesses[aSource.to_std_string_view().data()] = fragment_state::py_access{ object, {}, name, super };
                 push_operand(operand_type{ result });
             }
             break;
@@ -8384,6 +9078,28 @@ namespace neos::compilers::python
                     append(result, py_owned(py_runtime_call("python::list_tuple", { type::Object }, type::Object, { local_value(container, type::Object) })));
                     result.valueType = type::Object;
                     result.fragmentSource = aSource;
+                    push_operand(operand_type{ result });
+                    break;
+                }
+                // (a display of one to four items (none starred): made at once)
+                if (!items.empty() && items.size() <= 4u && std::none_of(items.begin(), items.end(), starred))
+                {
+                    std::vector<fragment> passed;
+                    for (auto const& item : items)
+                        passed.push_back(py_object(operand_type{ item }));
+                    while (passed.size() < 4u)
+                    {
+                        fragment absent;
+                        put_i32(absent, 0);
+                        absent.valueType = type::Object;
+                        passed.push_back(absent);
+                    }
+                    append(result, py_owned(py_runtime_call(aConstruct == construct::List ? "python::list_display" : "python::tuple_display", std::vector<type>(4u, type::Object), 
+                        type::Object, passed)));
+                    result.valueType = type::Object;
+                    result.fragmentSource = aSource;
+                    if (aConstruct == construct::Tuple)
+                        state().pyTuples[aSource.to_std_string_view().data()] = items;
                     push_operand(operand_type{ result });
                     break;
                 }
@@ -8520,6 +9236,10 @@ namespace neos::compilers::python
                                 names.push_back(t);
                     };
                     flatten(clause.targets);
+                    // (the variable of a function's clause over a range (for x in range(...)) is an int (type::Integer))
+                    bool const counted = clause.targets.size() == 1u && clause.targets[0].kind == fragment_state::py_target::kind_t::Name &&
+                        !clause.targets[0].starred && in_function() && !implicit_entry() && !py_exec_mode() && py_big_integers() && over_range(text);
+                    auto const variableType = counted ? type::Integer : type::Object;
                     for (auto const& target : names)
                         if (target.kind == fragment_state::py_target::kind_t::Name)
                         {
@@ -8530,11 +9250,11 @@ namespace neos::compilers::python
                                 auto& locals = iInference.pyLocals[current_function_name()];
                                 if (!locals.contains(target.name))
                                 {
-                                    locals[target.name] = type::Object;
+                                    locals[target.name] = variableType;
                                     { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
                                 }
                             }
-                            if (py_variable(target.name, type::Object).type() != type::Object)
+                            if (auto const t = py_variable(target.name, variableType).type(); t != variableType && t != type::Object)
                                 py_kind_change(target.name);
                         }
                 }
@@ -8940,6 +9660,128 @@ namespace neos::compilers::python
         return py_made_once("__neos_py_str_" + std::to_string(address), py_runtime_call("python::from_str", { type::String }, type::Object, { aValue }));
     }
 
+    std::optional<fragment> compiler::py_constant_int(fragment const& aValue, bool aTagged)
+    {
+        // (aTagged: a type::Integer's (its value shifted left one bit (the low bit clear: not an integer object)))
+        // an integer literal (an i32.const or i64.const (of a small int, which is never an integer object): its value): its int, made 
+        // the first time it is used (a global holds it)
+        auto const& code = aValue.fragmentCode.as_std_vector();
+        if (!aValue.fragmentRelocations.empty() || code.size() < 2u || code.size() > 11u || 
+            (code[0] != static_cast<std::uint8_t>(opcode::I32Const) && code[0] != static_cast<std::uint8_t>(opcode::I64Const)))
+            return {};
+        std::int64_t value = 0;
+        unsigned shift = 0u;
+        std::size_t i = 1u;
+        for (; i < code.size() && shift < 64u; ++i, shift += 7u)
+        {
+            value |= static_cast<std::int64_t>(code[i] & 0x7Fu) << shift;
+            if ((code[i] & 0x80u) == 0u)
+            {
+                if ((code[i] & 0x40u) != 0u && shift + 7u < 64u)
+                    value |= -(static_cast<std::int64_t>(1) << (shift + 7u));
+                break;
+            }
+        }
+        if (i + 1u != code.size())
+            return {};
+        if (code[0] == static_cast<std::uint8_t>(opcode::I32Const))
+            value = static_cast<std::int32_t>(value);
+        if (aTagged)
+        {
+            if ((value & 1) != 0 || code[0] != static_cast<std::uint8_t>(opcode::I64Const))
+                return {};
+            value >>= 1;
+        }
+        // (its global's name: by its value)
+        fragment make;
+        put_i64(make, value);
+        make.valueType = type::I64;
+        auto text = std::to_string(value);
+        if (text[0] == '-')
+            text[0] = 'm';
+        return py_made_once("__neos_py_int_" + text, py_runtime_call("python::from_int", { type::I64 }, type::Object, { make }));
+    }
+
+    std::optional<fragment> compiler::py_constant_float(fragment const& aValue)
+    {
+        // a float literal (an f64.const): its float, made the first time it is used (a global holds it)
+        auto const& code = aValue.fragmentCode.as_std_vector();
+        if (!aValue.fragmentRelocations.empty() || code.size() != 9u || code[0] != static_cast<std::uint8_t>(opcode::F64Const))
+            return {};
+        std::uint64_t bits = 0u;
+        for (std::size_t i = 0u; i < 8u; ++i)
+            bits |= static_cast<std::uint64_t>(code[1u + i]) << (8u * i);
+        char name[40];
+        std::snprintf(name, sizeof(name), "__neos_py_float_%016llx", static_cast<unsigned long long>(bits));
+        return py_made_once(name, py_runtime_call("python::from_float", { type::F64 }, type::Object, { aValue }));
+    }
+
+    bool compiler::py_arith_leaf(fragment const& aValue)
+    {
+        // (a leaf of python::arith (see py_operation): an object's value that can be computed again, with no effect (it is computed 
+        // twice: for python::arith, then as it is written if python::arith's operands are not numbers): a variable's (that cannot be 
+        // unbound) or a constant's (made once))
+        if (aValue.valueType != type::Object || !py_pure(aValue))
+            return false;
+        auto const& code = aValue.fragmentCode.as_std_vector();
+        std::size_t p = 0u;
+        auto const leb = [&]()
+        {
+            while (p < code.size() && (code[p] & 0x80u) != 0u)
+                ++p;
+            ++p;
+        };
+        while (p < code.size())
+        {
+            auto const op = code[p++];
+            switch (op)
+            {
+            case 0x20u: case 0x23u: case 0x24u: case 0x41u: case 0x42u:
+                leb();
+                break;
+            case 0x02u: case 0x03u: case 0x04u:
+                ++p;
+                break;
+            case 0x05u: case 0x0Bu: case 0x1Au: case 0x45u:
+                break;
+            case 0x44u:
+                p += 8u;
+                break;
+            case 0x10u:
+                {
+                    // (only a constant's making (python::from_*: see py_made_once))
+                    std::optional<std::uint32_t> target;
+                    for (auto const& r : aValue.fragmentRelocations)
+                        if (r.first() == p)
+                            target = r.second();
+                    if (!target || *target >= generator().function_count())
+                        return false;
+                    auto name = generator().function_name(*target).to_std_string();
+                    if (generator().function_stub(*target))
+                        name = name.substr(0u, name.find('('));
+                    if (name != "python::from_int" && name != "python::from_float" && name != "python::from_str" && name != "python::from_bool")
+                        return false;
+                    p += 5u;
+                }
+                break;
+            default:
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fragment compiler::py_attribute_name(std::string const& aName)
+    {
+        // an attribute's name (of getattr_name and setattr_name): its interned str (python::name's), made the first time it is used (a 
+        // global holds it); a borrowed reference
+        auto const literal = string_literal(aName);
+        fragment text;
+        put_i32(text, static_cast<std::int32_t>(literal));
+        text.valueType = type::String;
+        return py_made_once("__neos_py_name_" + std::to_string(literal), py_runtime_call("python::name", { type::String }, type::Object, { text }));
+    }
+
     fragment compiler::py_made_once(std::string const& aName, fragment const& aMake)
     {
         // an object that does not change (aMake makes it (a new reference)): made the first time it is used (the global aName 
@@ -9334,27 +10176,39 @@ namespace neos::compilers::python
         // (a call's target can raise: a function of the program, or of a runtime plugin other than the VM's)
         static std::set<std::string> const sCannotRaise = { "python::none", "python::from_int", "python::from_float", "python::from_bool", "python::from_str",
             "python::tuple", "python::tuple_set", "python::list", "python::dict", "python::kwarg", "python::context", "python::caught", "python::list_tuple",
-            "python::ellipsis", "python::exception_matches", "python::handled" };
+            "python::ellipsis", "python::exception_matches", "python::handled", "python::name", "python::arith" };
+        // (found once for each target)
+        std::unordered_map<std::uint32_t, bool> canRaise;
         auto const can_raise = [&](std::uint32_t aTarget)
         {
             if ((aTarget & DeferredCall) != 0u)
                 return true;
             if (aTarget >= generator().function_count())
                 return false;
-            if (generator().function_intrinsic(aTarget))
-                return false;
-            auto name = generator().function_name(aTarget).to_std_string();
-            if (generator().function_stub(aTarget))
-                name = name.substr(0u, name.find('('));
-            if (name.starts_with("neos::") || name.starts_with("__neos"))
-                return false;
-            return !sCannotRaise.contains(name);
+            if (auto const known = canRaise.find(aTarget); known != canRaise.end())
+                return known->second;
+            auto const find = [&]()
+            {
+                if (generator().function_intrinsic(aTarget))
+                    return false;
+                auto name = generator().function_name(aTarget).to_std_string();
+                if (generator().function_stub(aTarget))
+                    name = name.substr(0u, name.find('('));
+                if (name.starts_with("neos::") || name.starts_with("__neos"))
+                    return false;
+                return !sCannotRaise.contains(name);
+            };
+            return canRaise[aTarget] = find();
         };
+        // (the relocations by their positions: the first at or after a position is found by a binary search)
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> sortedRelocations{ aFunction.relocations };
+        std::stable_sort(sortedRelocations.begin(), sortedRelocations.end(), [](auto const& aLhs, auto const& aRhs) { return aLhs.first < aRhs.first; });
         auto const relocationAt = [&](std::size_t aStart, std::size_t aEnd) -> std::optional<std::uint32_t>
         {
-            for (auto const& r : aFunction.relocations)
-                if (r.first >= aStart && r.first < aEnd)
-                    return r.second;
+            auto const r = std::lower_bound(sortedRelocations.begin(), sortedRelocations.end(), aStart, 
+                [](std::pair<std::uint32_t, std::uint32_t> const& aRelocation, std::size_t aPosition) { return aRelocation.first < aPosition; });
+            if (r != sortedRelocations.end() && r->first < aEnd)
+                return r->second;
             return {};
         };
         bytes result;

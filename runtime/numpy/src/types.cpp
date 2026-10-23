@@ -661,13 +661,14 @@ namespace neos::numpy
                 auto const ufuncObject = value::borrow(make_ufunc_object(u));
                 std::vector<value> parts;
                 auto const count = indices.len();
+                std::vector<value> key;
                 for (long long i = 0; i < count; ++i)
                 {
                     auto const start = indices[i].to_int();
                     if (start < 0 || start >= n)
                         raise("IndexError", "index " + std::to_string(start) + " out-of-bounds in " + u.name + ".reduceat [0, " + std::to_string(n) + ")");
                     auto const stop = i + 1 < count ? indices[i + 1].to_int() : n;
-                    std::vector<value> key(static_cast<std::size_t>(axis), all());
+                    key.assign(static_cast<std::size_t>(axis), all());
                     if (stop > start)
                     {
                         key.push_back(slice(start, stop));

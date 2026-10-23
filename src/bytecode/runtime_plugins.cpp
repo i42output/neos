@@ -40,6 +40,7 @@
 #include <stdexcept>
 #include <filesystem>
 #include <optional>
+#include <algorithm>
 #define NEOS_RUNTIME_PLUGIN_HOST
 #include <neos/runtime/plugin.h>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
@@ -225,6 +226,14 @@ namespace neos
                         {
                             result.push_back(*directory);
                             result.push_back(*directory / "plugins");
+                        }
+                        // (then neos's home's, if the running program is not there (e.g. an IDE that uses an installed neos))
+                        std::filesystem::path const home{ neos::home() };
+                        std::error_code ec;
+                        if (std::find_if(result.begin(), result.end(), [&](auto const& aFolder) { return std::filesystem::equivalent(aFolder, home, ec); }) == result.end())
+                        {
+                            result.push_back(home);
+                            result.push_back(home / "plugins");
                         }
                         return result;
                     }
@@ -418,7 +427,7 @@ namespace neos
                                 p.lib = std::move(lib);
                                 return iPlugins.emplace(aNamespace, std::move(p)).first->second;
                             }
-                            throw std::runtime_error("runtime plugin '" + fileName + "' not found (searched NEOS_RUNTIME_PLUGIN_PATH and the executable's directory)");
+                            throw std::runtime_error("runtime plugin '" + fileName + "' not found (searched NEOS_RUNTIME_PLUGIN_PATH, the executable's directory and neos's home)");
 #endif
                         }
                     private:

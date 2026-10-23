@@ -806,12 +806,13 @@ namespace neos::compilers::python
             void except_star()
             {
                 std::size_t groups = 0u;
+                std::vector<std::size_t> clauses;
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                 {
                     if (!is_name(l, 0u, "try"))
                         continue;
                     auto const indent = iLines[l].indent;
-                    std::vector<std::size_t> clauses;
+                    clauses.clear();
                     bool star = false;
                     for (auto c = l + 1u; c < iLines.size() && iLines[c].indent >= indent; ++c)
                     {

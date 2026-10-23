@@ -3794,8 +3794,8 @@ namespace neos::compilers::javascript
         }
         if (aKnown != nullptr)
         {
-            // (the function that the callee probably is (its function object): called directly; what it does not read (new.target,
-            // arguments beyond its parameters) is passed as 0)
+            // (the function that the callee probably is (its function object): called directly; what it does not read (this,
+            // new.target, arguments beyond its parameters) is passed as 0)
             bool const reads = !aKnown->simpleParameters || aKnown->usesArguments || aKnown->directEval;
             get(aCallee);
             op(opcode::GlobalGet);
@@ -3805,7 +3805,10 @@ namespace neos::compilers::javascript
             iCode.push_back(0x7Eu);
             iControls.push_back(control{ control_kind::Block });
             get(aCallee);
-            get(aThis);
+            if (aKnown->usesThis || aKnown->directEval)
+                get(aThis);
+            else
+                i64(0);
             if (reads || aKnown->usesNewTarget)
                 undefined();
             else

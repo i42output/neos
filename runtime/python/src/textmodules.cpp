@@ -1039,6 +1039,7 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sStructFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                set_functions_module(aAttributes, "_struct");
                 aAttributes.emplace_back("Struct", context()->type_new(context(), "Struct", "_struct.Struct", new_struct, nullptr, struct_instancecheck));
                 if (!is_exception_class("struct.error"))
                     user_exception_bases()["struct.error"] = { "Exception" };
@@ -1735,6 +1736,9 @@ namespace neos::python_runtime
 
             inline bool const sString = register_module("string", string_module);
             inline bool const sStruct = register_module("struct", struct_module);
+            // (CPython's C module _struct: struct's functions and Struct)
+            inline bool const sStructC = register_module("_struct", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                { return c_module_attributes("struct", "_struct", { "Struct", "error" }, aAttributes); });
             inline bool const sBinascii = register_module("binascii", binascii_module);
             inline bool const sBase64 = register_module("base64", base64_module);
         }

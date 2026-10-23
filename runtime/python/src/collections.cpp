@@ -30,9 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/collections/__init__.py), Copyright (c) 2001-2024 Python
-  Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
-  runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the neos Python runtime plugin and adapted to
+  Portions of this file are derived from CPython 3.13 (Lib/collections/__init__.py and Modules/_collectionsmodule.c (the
+  reductions of deque and defaultdict)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are
+  used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from
+  Python and C to C++ for the neos Python runtime plugin and adapted to
   its object model (see runtime/python/NOTICE).
 */
 
@@ -434,6 +435,18 @@ namespace neos::python_runtime
                             return nullptr;
                         return make_str(class_name_of(aArgs[0]) + "(" + factoryText + ", " + dictText + ")");
                     } },
+                // (pickling: (type(self), (default_factory,) (() if it is None), None, None, iter(self.items())))
+                { "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        ref const factory{ getattr(aArgs.at(0), "default_factory") };
+                        ref const cls{ class_of(aArgs[0]) };
+                        ref const items{ factory ? call_method_named(builtin_value(aArgs[0]), "items", {}) : nullptr };
+                        ref const it{ items ? iter(items.get()) : nullptr };
+                        if (!it)
+                            return nullptr;
+                        return make_tuple({ (retain(cls.get()), cls.get()), factory.get() == none() ? make_tuple() : make_tuple({ (retain(factory.get()), factory.get()) }),
+                            (retain(none()), none()), (retain(none()), none()), (retain(it.get()), it.get()) });
+                    } },
                 { "copy", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
                         ref const factory{ getattr(aArgs.at(0), "default_factory") };
@@ -448,6 +461,19 @@ namespace neos::python_runtime
 
             builtin_entry const sOrderedDictMethods[] =
             {
+                // (pickling: (type(self), (), its state (None if none), None, iter(self.items())))
+                { "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        ref const cls{ class_of(aArgs.at(0)) };
+                        ref const getstate{ getattr(aArgs[0], "__getstate__") };
+                        ref const state{ getstate ? call_with(getstate.get(), {}) : nullptr };
+                        ref const items{ state ? call_method_named(builtin_value(aArgs[0]), "items", {}) : nullptr };
+                        ref const it{ items ? iter(items.get()) : nullptr };
+                        if (!it)
+                            return nullptr;
+                        return make_tuple({ (retain(cls.get()), cls.get()), make_tuple(), truth(state.get()) == 1 ? (retain(state.get()), state.get()) : (retain(none()), none()),
+                            (retain(none()), none()), (retain(it.get()), it.get()) });
+                    } },
                 { "__repr__", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
                         auto const value = builtin_value(aArgs.at(0));
@@ -845,6 +871,15 @@ namespace neos::python_runtime
             builtin_entry const sCounterMethods[] =
             {
                 { "__init__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return counter_update(aArgs, aKwargs, 1, "__init__"); } },
+                // (pickling: (type(self), (dict(self),)))
+                { "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        ref const cls{ class_of(aArgs.at(0)) };
+                        ref const d{ make_dict() };
+                        if (!dict_update(d.get(), builtin_value(aArgs[0])))
+                            return nullptr;
+                        return make_tuple({ (retain(cls.get()), cls.get()), make_tuple({ (retain(d.get()), d.get()) }) });
+                    } },
                 { "update", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return counter_update(aArgs, aKwargs, 1, "update"); } },
                 { "subtract", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return counter_update(aArgs, aKwargs, -1, "subtract"); } },
                 { "__missing__", [](std::vector<object*> const& aArgs, object*) -> object* { (void)aArgs; return make_int(0); } },
@@ -1372,6 +1407,20 @@ namespace neos::python_runtime
                             return make_function(m.name, call_deque_method, const_cast<deque_method*>(&m), aSelf);
                     if (std::strcmp(aName, "maxlen") == 0)
                         return as_deque(aSelf).maxlen < 0 ? (retain(none()), none()) : make_int(as_deque(aSelf).maxlen);
+                    // (pickling: (deque, () or ((), maxlen), None, iter(self)))
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            auto const self = aArgs.at(0u);
+                            ref const cls{ class_of(self) };
+                            ref const it{ iter(self) };
+                            if (!it)
+                                return nullptr;
+                            auto const maxlen = as_deque(self).maxlen;
+                            return make_tuple({ (retain(cls.get()), cls.get()), maxlen < 0 ? make_tuple() : make_tuple({ make_tuple(), make_int(maxlen) }),
+                                (retain(none()), none()), (retain(it.get()), it.get()) });
+                        } };
+                    if (auto const method = reduce_method(aSelf, aName, sReduce))
+                        return method;
                     return error("AttributeError", std::string{ "'collections.deque' object has no attribute '" } + aName + "'");
                 };
                 type.length = [](neos_py_context*, object* aSelf) -> long long { return static_cast<long long>(as_deque(aSelf).items.size()); };

@@ -355,15 +355,16 @@ namespace neos::javascript_runtime
             char16_t const limit = compatibility ? 0xA0u : 0xC0u;   // (below which nothing decomposes, reorders or composes)
             if (std::all_of(aText.begin(), aText.end(), [limit](char16_t c) { return c < limit; }))
                 return std::u16string{ aText };
-            std::vector<char32_t> codePoints;
-            codePoints.reserve(aText.size());
+            thread_local std::vector<char32_t> tCodePoints;
+            tCodePoints.clear();
+            tCodePoints.reserve(aText.size());
             for (std::size_t i = 0u; i < aText.size();)
-                decompose(next_code_point(aText, i), compatibility, codePoints);
+                decompose(next_code_point(aText, i), compatibility, tCodePoints);
             if (composition)
-                compose(codePoints);
+                compose(tCodePoints);
             std::u16string result;
-            result.reserve(codePoints.size());
-            for (auto c : codePoints)
+            result.reserve(tCodePoints.size());
+            for (auto c : tCodePoints)
                 append(result, c);
             return result;
         }

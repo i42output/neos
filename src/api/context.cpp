@@ -50,7 +50,7 @@ namespace neos
         iCin{ aCin },
         iCout{ aCout },
         iCerr{ aCerr },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neos::home(), {}, {}, ".ncl" }) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -61,7 +61,7 @@ namespace neos
         iCin{ aCin },
         iCout{ aCout },
         iCerr{ aCerr },
-        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neolib::program_directory(), {}, {}, ".ncl" }, aServiceProvider) },
+        iPrivateApplication{ std::make_unique<neolib::application<>>(neolib::application_info{ "neos", "i42 software", {}, "Copyright (c) 2025 Leigh Johnston", neos::home(), {}, {}, ".ncl" }, aServiceProvider) },
         iApplication{ *iPrivateApplication },
         iCompiler{ *this }
     {
@@ -109,10 +109,20 @@ namespace neos
 
     void context::find_concept(neolib::i_string_view const& aSymbol, neolib::i_ref_ptr<language::i_semantic_concept>& aResult) const
     {
+        std::lock_guard<std::mutex> lock{ iConceptCacheMutex };
+        auto const symbol = aSymbol.to_std_string_view();
+        if (auto const existing = iConceptCache.find(symbol); existing != iConceptCache.end())
+        {
+            aResult = existing->second;
+            return;
+        }
         for (auto const& cl : iConceptLibraries)
         {
             if (cl.second()->find_concept(aSymbol, aResult))
+            {
+                iConceptCache.emplace(std::string{ symbol }, neolib::ref_ptr<language::i_semantic_concept>{ aResult });
                 return;
+            }
         }
     }
 
@@ -151,6 +161,10 @@ namespace neos
             return;
         }
         neolib::ref_ptr<language::i_concept_library> library(aPlugin);
+        {
+            std::lock_guard<std::mutex> lock{ iConceptCacheMutex };
+            iConceptCache.clear();
+        }
         iConceptLibraries[library->name()] = library;
         auto add_sublibraries = [this](auto& self, auto& aParentLibrary) -> void
         {
@@ -338,6 +352,13 @@ namespace neos
         auto& extensions = iApplication.plugin_manager().plugin_file_extensions();
         if (std::find(extensions.begin(), extensions.end(), neolib::string{ ".ncp" }) == extensions.end())
             extensions.push_back(neolib::string{ ".ncp" });
+        // (the context's own application: neos's home's (not also the folder of the running program, if that is not neos (e.g. an IDE)))
+        if (iPrivateApplication)
+        {
+            auto& folders = iApplication.plugin_manager().plugin_folders();
+            folders.clear();
+            folders.push_back(neolib::string{ neos::home() });
+        }
         iApplication.plugin_manager().load_plugins();
         for (neolib::ref_ptr<neolib::i_plugin> plugin : iApplication.plugin_manager().plugins())
             add_plugin(*plugin);
@@ -471,5 +492,146 @@ namespace neos
 
         if (!neolib::check_utf8(aFragment.source()))
             throw compiler_error("source file has invalid utf-8");
+    }
+
+    namespace
+    {
+        // (the highlighting category of a semantic concept, by its name, if it is one that is highlighted)
+        std::optional<context::highlight_category> highlight_category_of(std::string_view aConcept)
+        {
+            auto const is = [&](std::string_view aName) { return aConcept == aName || (aConcept.starts_with(aName) && aConcept.size() > aName.size() && aConcept[aName.size()] == '.'); };
+            if (is("language.comment"))
+                return context::highlight_category::Comment;
+            if (is("language.keyword"))
+                return context::highlight_category::Keyword;
+            if (is("language.type")) // (before strings: e.g. language.type.string)
+                return context::highlight_category::Type;
+            if (is("string") || aConcept.ends_with(".string") || aConcept.find(".template.") != std::string_view::npos)
+                return context::highlight_category::String;
+            if (is("math.universal") || aConcept.ends_with(".number"))
+                return context::highlight_category::Number;
+            if (is("language.object.boolean") || aConcept.ends_with(".null") || aConcept.ends_with(".undefined"))
+                return context::highlight_category::Constant;
+            if (is("language.function.name"))
+                return context::highlight_category::Function;
+            return {};
+        }
+
+        bool highlight_parse(language::schema_stage const& aStage, std::string_view aSource)
+        {
+            static std::ostream sQuiet{ nullptr };
+            aStage.parser->set_debug_output(sQuiet, false, false);
+            if (aStage.root)
+                return aStage.parser->parse(aStage.symbolMap->at(aStage.root.value()), aSource);
+            return aStage.parser->parse(aSource);
+        }
+    }
+
+    std::vector<context::highlight_span> context::highlight(std::string const& aSchemaPath, std::string_view aSource)
+    {
+        std::vector<highlight_span> result;
+        try
+        {
+            auto existing = iHighlightSchemas.find(aSchemaPath);
+            if (existing == iHighlightSchemas.end())
+            {
+                // (a schema that cannot be loaded is not tried again)
+                existing = iHighlightSchemas.emplace(aSchemaPath, std::pair<std::shared_ptr<language::schema>, std::shared_ptr<language::schema>>{}).first;
+                auto complete = std::make_shared<language::schema>(aSchemaPath, concept_libraries());
+                for (auto const& stage : complete->pipeline())
+                    for (auto const& discard : *stage->discard)
+                        stage->parser->ignore(stage->symbolMap->at(discard));
+                existing->second = { complete, std::make_shared<language::schema>(aSchemaPath, concept_libraries()) };
+            }
+            auto const& [complete, whole] = existing->second;
+            if (!complete || !whole)
+                return result;
+            // (the parser does not recognize a token at the very end of a source so its last line is terminated (see terminate_last_line))
+            std::string script{ aSource };
+            if (!script.empty() && script.back() != '\n')
+                script += '\n';
+            // (the spans of the nodes of a tree of a text parsed: the script, or the script as the language rewrites it (the position in 
+            // the source of each byte of the text: none, the same))
+            auto add = [&](language::parser::cst_node const& aRoot, std::string_view aText, std::vector<std::uint32_t> const* aPositions)
+            {
+                std::vector<language::parser::cst_node const*> nodes{ &aRoot };
+                while (!nodes.empty())
+                {
+                    auto const& node = *nodes.back();
+                    nodes.pop_back();
+                    if (node.c)
+                        if (auto const category = highlight_category_of(std::string_view{ *node.c }))
+                        {
+                            if (!node.value.empty() && node.value.data() >= aText.data() && node.value.data() + node.value.size() <= aText.data() + aText.size())
+                            {
+                                std::size_t first = static_cast<std::size_t>(node.value.data() - aText.data());
+                                std::string_view value = node.value;
+                                if (aPositions)
+                                {
+                                    // (a span of the rewrite's is not the source's, nor are the bytes that it added at a span's ends (e.g. a 
+                                    // prefix of a name))
+                                    auto const NoPosition = language::i_language_compiler::NoPosition;
+                                    auto begin = first;
+                                    auto end = first + value.size();
+                                    while (begin < end && (*aPositions)[begin] == NoPosition)
+                                        ++begin;
+                                    while (end > begin && (*aPositions)[end - 1u] == NoPosition)
+                                        --end;
+                                    if (begin == end)
+                                        continue;
+                                    value = aText.substr(begin, end - begin);
+                                    first = (*aPositions)[begin];
+                                    auto const last = (*aPositions)[end - 1u];
+                                    if (last == NoPosition || last < first || last - first != value.size() - 1u)
+                                        continue;
+                                }
+                                // (nor is one of text that the rewrite changed)
+                                if (first + value.size() <= aSource.size() && aSource.substr(first, value.size()) == value)
+                                    result.push_back(highlight_span{ first, first + value.size(), *category });
+                            }
+                            continue;
+                        }
+                    for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
+                        nodes.push_back(child->get());
+                }
+            };
+            // (the first stage (e.g. a tokenizer): its tokens and comments (even if the source does not parse as a whole))
+            auto const& first = *whole->pipeline().front();
+            bool const single = whole->pipeline().size() == 1u;
+            if (highlight_parse(first, script))
+            {
+                if (single)
+                {
+                    first.parser->create_ast();
+                    add(first.parser->ast(), script, nullptr);
+                }
+                else
+                    add(first.parser->cst(), script, nullptr);
+            }
+            // (the AST of the last stage (as the compiler parses the source, as the language's own pass over it rewrites it): spans of it 
+            // replace those of the first stage)
+            if (!single)
+            {
+                std::string rewritten;
+                std::vector<std::uint32_t> positions;
+                bool const isRewritten = compiler().parsable_source(complete->meta().language, script, rewritten, positions);
+                std::string_view const text = isRewritten ? std::string_view{ rewritten } : std::string_view{ script };
+                bool parsed = true;
+                for (auto const& stage : complete->pipeline())
+                    if (!(parsed = highlight_parse(*stage, text)))
+                        break;
+                if (parsed)
+                {
+                    auto const& last = *complete->pipeline().back();
+                    last.parser->create_ast();
+                    add(last.parser->ast(), text, isRewritten ? &positions : nullptr);
+                }
+            }
+        }
+        catch (...)
+        {
+            result.clear();
+        }
+        return result;
     }
 }

@@ -111,6 +111,10 @@ target_include_directories(neos PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(neos PUBLIC NEOLIB_HOSTED_ENVIRONMENT)
+# (where the build installs neos (its executable, concept libraries, compiler plugins and runtime plugins): neos::installed_home(), 
+# for a host program that is not neos (e.g. an IDE); absolute (on Windows: with the drive, as "/usr/local" has none))
+get_filename_component(NEOS_INSTALLED_HOME "${CMAKE_INSTALL_FULL_BINDIR}" ABSOLUTE)
+target_compile_definitions(neos PRIVATE "NEOS_INSTALLED_HOME=\"${NEOS_INSTALLED_HOME}\"")
 target_link_libraries(neos PUBLIC ${NEOS_NEOLIB_TARGET} neonumeric::neonumeric PRIVATE ${CMAKE_DL_LIBS})
 set_property(TARGET neos PROPERTY POSITION_INDEPENDENT_CODE ON) # (linked into the concept libraries)
 if(MSVC)

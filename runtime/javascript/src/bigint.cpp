@@ -306,23 +306,24 @@ namespace neos::javascript_runtime
             std::size_t const m = aDividend.size() - n;
             // D1: normalize (the divisor's most significant limb gets its top bit set)
             auto const s = static_cast<unsigned>(std::countl_zero(aDivisor.back()));
-            limbs v(n);
-            limbs u(aDividend.size() + 1u);
+            thread_local limbs tV, tU;  // (scratch kept for reuse (a division is made per BigInt / and %))
+            tV.assign(n, 0u);
+            tU.assign(aDividend.size() + 1u, 0u);
             for (std::size_t i = n; i-- > 0u;)
-                v[i] = static_cast<limb>((static_cast<std::uint64_t>(aDivisor[i]) << s) | (s != 0u && i > 0u ? aDivisor[i - 1u] >> (32u - s) : 0u));
-            u[aDividend.size()] = s != 0u ? aDividend.back() >> (32u - s) : 0u;
+                tV[i] = static_cast<limb>((static_cast<std::uint64_t>(aDivisor[i]) << s) | (s != 0u && i > 0u ? aDivisor[i - 1u] >> (32u - s) : 0u));
+            tU[aDividend.size()] = s != 0u ? aDividend.back() >> (32u - s) : 0u;
             for (std::size_t i = aDividend.size(); i-- > 0u;)
-                u[i] = static_cast<limb>((static_cast<std::uint64_t>(aDividend[i]) << s) | (s != 0u && i > 0u ? aDividend[i - 1u] >> (32u - s) : 0u));
+                tU[i] = static_cast<limb>((static_cast<std::uint64_t>(aDividend[i]) << s) | (s != 0u && i > 0u ? aDividend[i - 1u] >> (32u - s) : 0u));
             limbs q(m + 1u);
-            std::uint64_t const vTop = v[n - 1u];
-            std::uint64_t const vNext = v[n - 2u];
+            std::uint64_t const vTop = tV[n - 1u];
+            std::uint64_t const vNext = tV[n - 2u];
             for (std::size_t j = m + 1u; j-- > 0u;)
             {
                 // D3: estimate the quotient digit
-                std::uint64_t const numerator = (static_cast<std::uint64_t>(u[j + n]) << 32) | u[j + n - 1u];
+                std::uint64_t const numerator = (static_cast<std::uint64_t>(tU[j + n]) << 32) | tU[j + n - 1u];
                 std::uint64_t qhat = numerator / vTop;
                 std::uint64_t rhat = numerator % vTop;
-                while (qhat > 0xFFFFFFFFull || qhat * vNext > ((rhat << 32) | u[j + n - 2u]))
+                while (qhat > 0xFFFFFFFFull || qhat * vNext > ((rhat << 32) | tU[j + n - 2u]))
                 {
                     --qhat;
                     rhat += vTop;
@@ -334,16 +335,16 @@ namespace neos::javascript_runtime
                 std::uint64_t borrow = 0u;
                 for (std::size_t i = 0u; i < n; ++i)
                 {
-                    std::uint64_t const product = qhat * v[i] + carry;
+                    std::uint64_t const product = qhat * tV[i] + carry;
                     carry = product >> 32;
                     std::uint64_t const subtrahend = (product & 0xFFFFFFFFull) + borrow;
-                    std::uint64_t const minuend = u[i + j];
-                    u[i + j] = static_cast<limb>(minuend - subtrahend);
+                    std::uint64_t const minuend = tU[i + j];
+                    tU[i + j] = static_cast<limb>(minuend - subtrahend);
                     borrow = minuend < subtrahend ? 1u : 0u;
                 }
                 std::uint64_t const subtrahend = carry + borrow;
-                std::uint64_t const minuend = u[j + n];
-                u[j + n] = static_cast<limb>(minuend - subtrahend);
+                std::uint64_t const minuend = tU[j + n];
+                tU[j + n] = static_cast<limb>(minuend - subtrahend);
                 // D6: add back (the estimate was one too large)
                 if (minuend < subtrahend)
                 {
@@ -351,11 +352,11 @@ namespace neos::javascript_runtime
                     std::uint64_t sum = 0u;
                     for (std::size_t i = 0u; i < n; ++i)
                     {
-                        sum += static_cast<std::uint64_t>(u[i + j]) + v[i];
-                        u[i + j] = static_cast<limb>(sum);
+                        sum += static_cast<std::uint64_t>(tU[i + j]) + tV[i];
+                        tU[i + j] = static_cast<limb>(sum);
                         sum >>= 32;
                     }
-                    u[j + n] = static_cast<limb>(u[j + n] + sum);
+                    tU[j + n] = static_cast<limb>(tU[j + n] + sum);
                 }
                 q[j] = static_cast<limb>(qhat);
             }
@@ -369,7 +370,7 @@ namespace neos::javascript_runtime
                 // D8: unnormalize
                 limbs r(n);
                 for (std::size_t i = 0u; i < n; ++i)
-                    r[i] = static_cast<limb>((u[i] >> s) | (s != 0u ? static_cast<std::uint64_t>(u[i + 1u]) << (32u - s) : 0u));
+                    r[i] = static_cast<limb>((tU[i] >> s) | (s != 0u ? static_cast<std::uint64_t>(tU[i + 1u]) << (32u - s) : 0u));
                 normalize(r);
                 *aRemainder = std::move(r);
             }
@@ -627,13 +628,14 @@ namespace neos::javascript_runtime
             return std::u16string(buffer, end);
         }
         auto const [chunkDigits, chunkRadix] = chunk(aRadix);
-        limbs m = b.magnitude;
+        thread_local limbs tM;
+        tM.assign(b.magnitude.begin(), b.magnitude.end());
         std::u16string reversed;
-        reversed.reserve(static_cast<std::size_t>(bit_length(m) / std::log2(aRadix)) + 2u);
-        while (!m.empty())
+        reversed.reserve(static_cast<std::size_t>(bit_length(tM) / std::log2(aRadix)) + 2u);
+        while (!tM.empty())
         {
-            auto part = divide_small(m, chunkRadix);
-            for (int k = 0; k < chunkDigits && (part != 0u || !m.empty()); ++k)
+            auto part = divide_small(tM, chunkRadix);
+            for (int k = 0; k < chunkDigits && (part != 0u || !tM.empty()); ++k)
             {
                 reversed.push_back(static_cast<char16_t>("0123456789abcdefghijklmnopqrstuvwxyz"[part % static_cast<limb>(aRadix)]));
                 part /= static_cast<limb>(aRadix);

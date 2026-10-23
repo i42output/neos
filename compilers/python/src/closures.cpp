@@ -184,6 +184,7 @@ namespace neos::compilers::python
                     if (s->kind == scope::Function && s->parent == &iModule && !s->classBody && !conditional(*s))
                         aDefined.insert(s->name);
                 std::vector<std::pair<std::size_t, std::size_t>> renamed;    // (text positions)
+                std::map<std::string, std::size_t> firstModule, firstAny;    // (the names' first positions: in the module's statements, and anywhere)
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                 {
                     auto const& line = iLines[l];
@@ -218,6 +219,9 @@ namespace neos::compilers::python
                                 continue;
                         }
                         renamed.emplace_back(k.begin, k.end);
+                        firstAny.emplace(name, k.begin);
+                        if (iOwners[l][t] == &iModule)
+                            firstModule.emplace(name, k.begin);
                     }
                     // (__all__ = [...] or (...))
                     if (line.indent == 0u && line.tokens.size() >= 3u && is_name(l, 0u, "__all__") && is_op(l, 1u, "="))
@@ -248,6 +252,16 @@ namespace neos::compilers::python
                             aAll = all;
                     }
                 }
+                // (the names in the order the module binds them (as its namespace's, a dict's, are): their first positions)
+                auto const first = [&](std::string const& aName)
+                {
+                    auto const m = firstModule.find(aName);
+                    if (m != firstModule.end())
+                        return m->second;
+                    auto const a = firstAny.find(aName);
+                    return a != firstAny.end() ? a->second : iText.size();
+                };
+                std::stable_sort(aNames.begin(), aNames.end(), [&](std::string const& aLhs, std::string const& aRhs) { return first(aLhs) < first(aRhs); });
                 std::string result;
                 std::size_t position = 0u;
                 for (auto const& r : renamed)

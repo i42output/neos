@@ -906,6 +906,12 @@ namespace neos::python_runtime
             }
         }
 
+        // (an absolute name's module, imported if it is not (its parent's first): importlib's _find_and_load)
+        py import_find_and_load(std::string const& aName)
+        {
+            return find_and_load(aName);
+        }
+
         object* b_import(std::vector<object*> const& aArgs, object* aKwargs)
         {
             return py_guarded([&]() -> py

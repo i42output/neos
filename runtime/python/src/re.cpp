@@ -1040,7 +1040,9 @@ namespace neos::python_runtime
             bool match_at(program const& aProgram, std::u32string const& aText, std::size_t aStart, std::size_t aEnd, bool aFull, bool aMustAdvance,
                 std::vector<long long>& aMarks, int& aLastIndex, std::size_t& aMatchEnd)
             {
-                matcher m{ aText, aEnd, std::vector<long long>(2u * (aProgram.groups + 1u), -1) };
+                // (aMarks' storage reused (a match is tried per start position of a search): given back if there is no match)
+                aMarks.assign(2u * (aProgram.groups + 1u), -1);
+                matcher m{ aText, aEnd, std::move(aMarks) };
                 auto const accept = [&](std::size_t p)
                 {
                     if (aFull && p != aEnd)
@@ -1051,7 +1053,10 @@ namespace neos::python_runtime
                     return true;
                 };
                 if (!m.match(*aProgram.root, aStart, make_continuation(accept)))
+                {
+                    aMarks = std::move(m.marks);
                     return false;
+                }
                 m.marks[0] = static_cast<long long>(aStart);
                 m.marks[1] = static_cast<long long>(aMatchEnd);
                 aMarks = std::move(m.marks);
@@ -1117,6 +1122,8 @@ namespace neos::python_runtime
                 std::string_view bytes;
                 if (bytes_like(aPattern, bytes))
                     return error("TypeError", "bytes patterns are not supported");
+                if (kind_of(aPattern) != NEOS_PY_STR && kind_of(builtin_value(aPattern)) == NEOS_PY_STR)
+                    aPattern = builtin_value(aPattern);     // (an instance of a subclass of str: its value)
                 if (kind_of(aPattern) != NEOS_PY_STR)
                     return error("TypeError", "first argument must be string or compiled pattern");
                 // (a cache of the compiled patterns)
@@ -1472,7 +1479,9 @@ namespace neos::python_runtime
             // (the string argument: str (a pattern's searches))
             bool text_argument(object* aString, std::shared_ptr<std::u32string>& aText)
             {
-                if (kind_of(aString) != NEOS_PY_STR)
+                // (an instance of a subclass of str: its value)
+                auto const value = kind_of(aString) == NEOS_PY_STR ? aString : builtin_value(aString);
+                if (kind_of(value) != NEOS_PY_STR)
                 {
                     std::string_view bytes;
                     if (bytes_like(aString, bytes))
@@ -1481,7 +1490,7 @@ namespace neos::python_runtime
                         error("TypeError", std::string{ "expected string or bytes-like object, got '" } + type_name(aString) + "'");
                     return false;
                 }
-                aText = std::make_shared<std::u32string>(to_code_points(as<str_object>(aString)->value));
+                aText = std::make_shared<std::u32string>(to_code_points(as<str_object>(value)->value));
                 return true;
             }
 
@@ -1586,10 +1595,12 @@ namespace neos::python_runtime
                     return nullptr;
                 std::u32string templateText;
                 bool literal = false;
-                bool const callable = kind_of(aRepl) != NEOS_PY_STR;
+                // (an instance of a subclass of str: its value)
+                auto const repl = kind_of(aRepl) == NEOS_PY_STR ? aRepl : builtin_value(aRepl);
+                bool const callable = kind_of(repl) != NEOS_PY_STR;
                 if (!callable)
                 {
-                    templateText = to_code_points(as<str_object>(aRepl)->value);
+                    templateText = to_code_points(as<str_object>(repl)->value);
                     literal = templateText.find(U'\\') == std::u32string::npos;
                 }
                 else
@@ -1876,8 +1887,35 @@ namespace neos::python_runtime
                     user_exception_bases()["re.PatternError"] = { "Exception" };
                 aAttributes.emplace_back("error", exception_class("re.PatternError"));
                 aAttributes.emplace_back("PatternError", exception_class("re.PatternError"));
-                aAttributes.emplace_back("Pattern", context()->type_new(context(), "Pattern", "re.Pattern",
-                    [](neos_py_context*, void*, object*, object*) -> object* { return error("TypeError", "cannot create 're.Pattern' instances"); }, nullptr, pattern_instancecheck));
+                auto const patternType = context()->type_new(context(), "Pattern", "re.Pattern",
+                    [](neos_py_context*, void*, object*, object*) -> object* { return error("TypeError", "cannot create 're.Pattern' instances"); }, nullptr, pattern_instancecheck);
+                aAttributes.emplace_back("Pattern", patternType);
+                // (pickling a pattern (copyreg.pickle(Pattern, _pickle, _compile)): (_compile, (pattern, flags)))
+                {
+                    static builtin_entry sCompile{ "_compile", nullptr };
+                    for (auto const& f : sReFunctions)
+                        if (std::strcmp(f.name, "compile") == 0)
+                            sCompile.function = f.function;
+                    auto const compileFunction = make_builtin(sCompile);
+                    aAttributes.emplace_back("_compile", compileFunction);
+                    static builtin_entry const sPickle{ "_pickle", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                        {
+                            std::vector<object*> a;
+                            if (!parse_arguments("_pickle", aArgs, aKwargs, { "p" }, 1u, 0u, a))
+                                return nullptr;
+                            ref const compile{ module_attribute("re", "_compile") };
+                            ref const pattern{ getattr(a[0], "pattern") };
+                            ref const flags{ getattr(a[0], "flags") };
+                            if (!compile || !pattern || !flags)
+                                return nullptr;
+                            return make_tuple({ new_reference(compile.get()), make_tuple({ new_reference(pattern.get()), new_reference(flags.get()) }) });
+                        } };
+                    auto const pickleFunction = make_builtin(sPickle);
+                    aAttributes.emplace_back("_pickle", pickleFunction);
+                    ref const table{ module_attribute("copyreg", "dispatch_table") };
+                    if (!table || dict_set(table.get(), patternType, pickleFunction) < 0)
+                        return false;
+                }
                 aAttributes.emplace_back("Match", context()->type_new(context(), "Match", "re.Match",
                     [](neos_py_context*, void*, object*, object*) -> object* { return error("TypeError", "cannot create 're.Match' instances"); },
                     reinterpret_cast<void*>(1), pattern_instancecheck));

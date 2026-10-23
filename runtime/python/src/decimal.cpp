@@ -1857,6 +1857,17 @@ namespace neos::python_runtime
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
+                    // (pickling: (type(self), (str(self),)))
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            ref const cls{ class_of(aArgs.at(0u)) };
+                            std::string text;
+                            if (!str_of(aArgs[0], text))
+                                return nullptr;
+                            return make_tuple({ borrowed(cls.get()), make_tuple({ make_str(std::move(text)) }) });
+                        } };
+                    if (auto const method = reduce_method(aSelf, aName, sReduce))
+                        return method;
                     std::string_view const name{ aName };
                     if (name == "real")
                         return borrowed(aSelf);

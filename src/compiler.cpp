@@ -36,6 +36,7 @@
   neos compiler's generated code (see runtime/python/NOTICE).
 */
 
+#include <unordered_set>
 #include <neolib/neolib.hpp>
 
 #include <iostream>
@@ -379,8 +380,47 @@ namespace neos::language
 
         bool ok = false;
 
+        // (a source that an earlier compilation pass parsed: its AST (its values made to refer to the fragment's text, if that has moved), 
+        // not parsed again)
+        auto const text = aFragment.source().to_std_string_view();
+        parsed_source* cached = nullptr;
+        if (!aUnit.schema->pipeline().empty())
+            for (auto& p : iParsed)
+                if (p.parser == aUnit.schema->pipeline().back()->parser.get() && p.source.size() == text.size() && p.source == text)
+                {
+                    cached = &p;
+                    break;
+                }
+        if (cached != nullptr && cached->base != text.data())
+        {
+            auto const* const oldBase = cached->base;
+            std::unordered_set<neos::language::parser::ast_node*> visited;
+            std::vector<neos::language::parser::ast_node*> nodes{ cached->ast.get() };
+            while (!nodes.empty())
+            {
+                auto* const node = nodes.back();
+                nodes.pop_back();
+                if (!visited.insert(node).second)
+                    continue;
+                if (node->value.data() != nullptr && node->value.data() >= oldBase && node->value.data() <= oldBase + text.size())
+                    node->value = std::string_view{ text.data() + (node->value.data() - oldBase), node->value.size() };
+                for (auto const& child : node->children)
+                    nodes.push_back(child.get());
+            }
+            cached->base = text.data();
+        }
+        if (cached != nullptr)
+        {
+            ok = true;
+            auto& unitRoot = *aUnit.ast.root();
+            unitRoot.children().push_back(neolib::make_ref<ast_node>(std::monostate{}, unitRoot)); // each fragment gets its own root
+            walk_ast(iContext, aUnit.ast, fold_stack(), *cached->ast, *unitRoot.children().back());
+        }
+
         for (auto const& stage : aUnit.schema->pipeline())
         {
+            if (cached != nullptr)
+                break;
             bool const last = (stage == aUnit.schema->pipeline().back());
             auto& parser = *stage->parser;
             for (auto const& discard : *stage->discard)
@@ -390,24 +430,13 @@ namespace neos::language
             std::ostringstream parserOutput;
             parser.set_debug_output(parserOutput, false, false);
             parser.set_debug_timing(iShowParseTimes);
-            // (a source parsed by the previous compilation pass need not be parsed again)
-            auto& parsed = iParsed[&parser];
-            if (std::get<0>(parsed) && std::get<1>(parsed) == aFragment.source().to_std_string_view() &&
-                std::get<2>(parsed) == aFragment.source().to_std_string_view().data())
-                ok = true;
+            if (stage->root)
+                ok = parser.parse(stage->symbolMap->at(stage->root.value()), text);
             else
-            {
-                parsed = {};
-                if (stage->root)
-                    ok = parser.parse(stage->symbolMap->at(stage->root.value()), aFragment.source().to_std_string_view());
-                else
-                    ok = parser.parse(aFragment.source().to_std_string_view());
-                iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
-                if (ok && last)
-                    parser.create_ast();
-                if (ok)
-                    parsed = { true, aFragment.source().to_std_string(), aFragment.source().to_std_string_view().data() };
-            }
+                ok = parser.parse(text);
+            iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
+            if (ok && last)
+                parser.create_ast();
             parser.set_debug_output(sQuiet, false, false);
             if (!ok)
             {
@@ -446,9 +475,14 @@ namespace neos::language
                 iContext.cerr() << parserOutput.str();
             if (last)
             {
+                // (its AST: kept (the most recent sources'), for the passes that follow)
+                std::size_t constexpr MaxParsed = 16u;
+                if (iParsed.size() >= MaxParsed)
+                    iParsed.pop_front();
+                iParsed.push_back(parsed_source{ &parser, std::string{ text }, text.data(), std::make_shared<neos::language::parser::ast_node>(std::move(parser.ast())) });
                 auto& unitRoot = *aUnit.ast.root();
                 unitRoot.children().push_back(neolib::make_ref<ast_node>(std::monostate{}, unitRoot)); // each fragment gets its own root
-                walk_ast(iContext, aUnit.ast, fold_stack(), parser.ast(), *unitRoot.children().back());
+                walk_ast(iContext, aUnit.ast, fold_stack(), *iParsed.back().ast, *unitRoot.children().back());
             }
         }
             
@@ -1653,13 +1687,14 @@ namespace neos::language
             if (bytecode::is_line_marker(value) && p < code.size() && code[p] == static_cast<std::uint8_t>(bytecode::opcode::Drop))
                 return;
         }
-        bytes marker;
-        put_op(marker, bytecode::opcode::I64Const);
-        put_s64(marker, static_cast<std::int64_t>(bytecode::LineMarker | aLine));
-        put_op(marker, bytecode::opcode::Drop);
-        code.insert(code.begin(), marker.begin(), marker.end());
+        thread_local bytes tMarker; // (scratch kept for reuse (one per statement compiled))
+        tMarker.clear();
+        put_op(tMarker, bytecode::opcode::I64Const);
+        put_s64(tMarker, static_cast<std::int64_t>(bytecode::LineMarker | aLine));
+        put_op(tMarker, bytecode::opcode::Drop);
+        code.insert(code.begin(), tMarker.begin(), tMarker.end());
         for (auto& r : aStatement.fragmentRelocations)
-            r.first() = r.first() + static_cast<std::uint32_t>(marker.size());
+            r.first() = r.first() + static_cast<std::uint32_t>(tMarker.size());
     }
 
     void compiler::put_line(fragment& aCode, std::uint32_t aLine)
@@ -1702,11 +1737,18 @@ namespace neos::language
         if (!path.has_value())
             return {};
         auto const name = path.value().to_std_string();
+        // (the last one's is remembered: it is asked for each function (a file system query each time is a cost for code that is
+        // compiled often, e.g. eval's))
+        thread_local std::optional<std::pair<std::string, std::string>> tLast;
+        if (tLast && tLast->first == name)
+            return tLast->second;
+        std::string result = name;
         std::error_code ec;
         if (!name.empty() && std::filesystem::is_regular_file(name, ec))
             if (auto const absolute = std::filesystem::absolute(name, ec); !ec)
-                return absolute.string();
-        return name;
+                result = absolute.string();
+        tLast.emplace(name, result);
+        return result;
     }
 
     void compiler::emit_block(neolib::i_string_view const& aSource)
@@ -2053,7 +2095,8 @@ namespace neos::language
             return {};
         };
         // (line markers (see bytecode::LineMarker) are not inlined: the code is the caller's line's)
-        std::vector<std::pair<std::size_t, std::size_t>> markers;
+        thread_local std::vector<std::pair<std::size_t, std::size_t>> tMarkers; // (scratch kept for reuse (one per call compiled))
+        tMarkers.clear();
         auto const skip_marker = [&]() -> bool
         {
             if (p >= body.size() || body[p] != 0x42u)
@@ -2073,7 +2116,7 @@ namespace neos::language
             if (bytecode::is_line_marker(value) && p < body.size() && body[p] == 0x1Au)
             {
                 ++p;
-                markers.emplace_back(start, p);
+                tMarkers.emplace_back(start, p);
                 return true;
             }
             p = start;
@@ -2086,7 +2129,7 @@ namespace neos::language
                 return false;
         }
         while (skip_marker());
-        markers.clear();
+        tMarkers.clear();
         auto const tail = p;
         std::size_t end = body.size();
         std::size_t calls = 0u;
@@ -2129,13 +2172,13 @@ namespace neos::language
         auto const removed_before = [&](std::size_t aPosition)
         {
             std::size_t removed = 0u;
-            for (auto const& m : markers)
+            for (auto const& m : tMarkers)
                 if (m.second <= aPosition)
                     removed += m.second - m.first;
             return removed;
         };
         std::size_t from = tail;
-        for (auto const& m : markers)
+        for (auto const& m : tMarkers)
         {
             if (m.first >= end)
                 break;
@@ -2752,7 +2795,7 @@ namespace neos::language
             throw std::runtime_error("top-level statements must follow function definitions");
         // top-level statements form an implicit entry point function (an imported fragment's: the function that its language 
         // names, if any (not the entry point))
-        neolib::string name{ "__main__" };
+        neolib::string name{ "__neos_main__" };     // (not a name that a program is likely to bind (e.g. Python's "import __main__"))
         bool entry = true;
         if (current_fragment().imported() && language() != nullptr)
         {
@@ -3270,12 +3313,15 @@ namespace neos::language
         // types
         std::vector<bytes> types;
         std::vector<std::uint32_t> typeOf(iModule.functions.size());
+        bytes functionType;
+        bytes parameters, results;
         for (auto id : order)
         {
             auto const& signature = iModule.functions[id].signature;
-            bytes functionType;
+            functionType.clear();
             functionType.push_back(0x60u);
-            bytes parameters, results;
+            parameters.clear();
+            results.clear();
             std::uint32_t parameterCount = 0u, resultCount = 0u;
             if (auto const r = wasm_type(signature.return_type()))
             {
@@ -3309,7 +3355,7 @@ namespace neos::language
         std::vector<std::uint32_t> indirectTypeOf;
         for (auto const& signature : iModule.indirectSignatures)
         {
-            bytes functionType;
+            functionType.clear();
             functionType.push_back(0x60u);
             put_u32(functionType, signature.first.size());
             for (auto const& p : signature.first)
@@ -3435,11 +3481,13 @@ namespace neos::language
         {
             bytes section;
             put_u32(section, order.size() - importCount);
+            bytes body;
+            std::vector<std::pair<std::uint32_t, std::uint8_t>> runs;
             for (std::uint32_t i = importCount; i < order.size(); ++i)
             {
                 auto const& function = iModule.functions[order[i]];
-                bytes body;
-                std::vector<std::pair<std::uint32_t, std::uint8_t>> runs;
+                body.clear();
+                runs.clear();
                 for (auto const& local : function.locals)
                 {
                     auto const t = *wasm_type(local);
@@ -3589,9 +3637,11 @@ namespace neos::language
                     trace_out("Folding", lhs);
                     auto const result = lhs.fold(iContext);
                     trace_out("Folded", lhs, {}, result);
-                    ilhs = fold_stack().erase(ilhs);
+                    // (the result replaces it (as erasing it and inserting the result would): the stack's items are not moved)
                     if (!result->is_empty())
-                        ilhs = fold_stack().insert(ilhs, result);
+                        *ilhs = result;
+                    else
+                        ilhs = fold_stack().erase(ilhs);
                     didSome = true;
                 }
                 else if (std::next(ilhs) != fold_stack().end())
@@ -3604,9 +3654,10 @@ namespace neos::language
                         trace_out("Folding", rhs);
                         auto const result = rhs.fold(iContext);
                         trace_out("Folded", rhs, {}, result);
-                        irhs = fold_stack().erase(irhs);
                         if (!result->is_empty())
-                            irhs = fold_stack().insert(irhs, result);
+                            *irhs = result;
+                        else
+                            irhs = fold_stack().erase(irhs);
                         didSome = true;
                     }
                     else if (unrelated && !(lhs.unstructured() && rhs.unstructured()))
@@ -3645,10 +3696,17 @@ namespace neos::language
                         trace_out(!unrelated ? "Folding" : "Folding (unstructured)", lhs, rhs);
                         auto const result = lhs.fold(iContext, rhs);
                         trace_out(!unrelated ? "Folded" : "Folded (unstructured)", lhs, rhs, result);
-                        ilhs = fold_stack().erase(ilhs);
-                        ilhs = fold_stack().erase(ilhs);
+                        // (the result replaces the first (as erasing both and inserting the result would))
                         if (!result->is_empty())
-                            ilhs = fold_stack().insert(ilhs, result);
+                        {
+                            *ilhs = result;
+                            fold_stack().erase(std::next(ilhs));
+                        }
+                        else
+                        {
+                            ilhs = fold_stack().erase(ilhs);
+                            ilhs = fold_stack().erase(ilhs);
+                        }
                         didSome = true;
                     }
                     else if (rhs.can_fold(lhs))
@@ -3656,10 +3714,17 @@ namespace neos::language
                         trace_out(!unrelated ? "Folding" : "Folding (unstructured)", rhs, lhs);
                         auto const result = rhs.fold(iContext, lhs);
                         trace_out(!unrelated ? "Folded" : "Folded (unstructured)", rhs, lhs, result);
-                        ilhs = fold_stack().erase(ilhs);
-                        ilhs = fold_stack().erase(ilhs);
+                        // (the result replaces the first (as erasing both and inserting the result would))
                         if (!result->is_empty())
-                            ilhs = fold_stack().insert(ilhs, result);
+                        {
+                            *ilhs = result;
+                            fold_stack().erase(std::next(ilhs));
+                        }
+                        else
+                        {
+                            ilhs = fold_stack().erase(ilhs);
+                            ilhs = fold_stack().erase(ilhs);
+                        }
                         didSome = true;
                     }
                     else if (lhs.has_parent())
@@ -3670,9 +3735,10 @@ namespace neos::language
                             auto const result = lhs.fold(iContext, lhs.parent());
                             trace_out("Folded", lhs, lhs.parent(), result);
                             bool const insert = (!result->is_empty() && result != &lhs.parent());
-                            ilhs = fold_stack().erase(ilhs);
                             if (insert)
-                                ilhs = fold_stack().insert(ilhs, result);
+                                *ilhs = result;
+                            else
+                                ilhs = fold_stack().erase(ilhs);
                             didSome = true;
                         }
                         else if (lhs.parent().can_fold(lhs))
@@ -3681,9 +3747,10 @@ namespace neos::language
                             auto const result = lhs.parent().fold(iContext, lhs);
                             trace_out("Folded", lhs.parent(), lhs, result);
                             bool const insert = (!result->is_empty() && result != &lhs.parent());
-                            ilhs = fold_stack().erase(ilhs);
                             if (insert)
-                                ilhs = fold_stack().insert(ilhs, result);
+                                *ilhs = result;
+                            else
+                                ilhs = fold_stack().erase(ilhs);
                             didSome = true;
                         }
                         else

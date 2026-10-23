@@ -1035,6 +1035,7 @@ namespace neos::numpy
         auto const ta0 = a.array->type;
         auto const tb0 = b.array->type;
         auto const resultType = target->type;
+        std::vector<std::uint64_t> buffer; // (scratch kept for reuse (per inner run))
         iterate(shape, { a.array->pointer(), b.array->pointer(), target->pointer() }, { sa, sb, target->strides },
             [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
             {
@@ -1043,7 +1044,7 @@ namespace neos::numpy
                 else
                 {
                     // (computed as the loop's output type then cast)
-                    std::vector<std::uint64_t> buffer(static_cast<std::size_t>(aCount) * 2u + 2u);
+                    buffer.assign(static_cast<std::size_t>(aCount) * 2u + 2u, 0u);
                     auto* temporary = reinterpret_cast<unsigned char*>(buffer.data());
                     unsigned char* pointers[3] = { aPointers[0], aPointers[1], temporary };
                     std::int64_t const strides[3] = { aStrides[0], aStrides[1], static_cast<std::int64_t>(info(out).itemsize) };
@@ -1099,6 +1100,7 @@ namespace neos::numpy
         auto const sa = broadcast_strides(*a.array, shape);
         auto const t0 = a.array->type;
         auto const resultType = result->type;
+        std::vector<std::uint64_t> buffer; // (scratch kept for reuse (per inner run))
         iterate(shape, { a.array->pointer(), result->pointer() }, { sa, result->strides },
             [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
             {
@@ -1106,7 +1108,7 @@ namespace neos::numpy
                     aUfunc.unary(loop, out, t0, aCount, aPointers, aStrides);
                 else
                 {
-                    std::vector<std::uint64_t> buffer(static_cast<std::size_t>(aCount) * 2u + 2u);
+                    buffer.assign(static_cast<std::size_t>(aCount) * 2u + 2u, 0u);
                     auto* temporary = reinterpret_cast<unsigned char*>(buffer.data());
                     unsigned char* pointers[2] = { aPointers[0], temporary };
                     std::int64_t const strides[2] = { aStrides[0], static_cast<std::int64_t>(info(out).itemsize) };
@@ -1463,6 +1465,7 @@ namespace neos::numpy
             using C = compute_t<T>;
             auto const loopItem = sizeof(T);
             (void)loopItem;
+            std::vector<T> converted; // (scratch kept for reuse (per cast chunk of each run))
             iterate(outerShape, { const_cast<unsigned char*>(base), result->pointer() }, { outerStrides, outerResultStrides },
                 [&](std::int64_t aCount, unsigned char** aPointers, std::int64_t const* aStrides)
                 {
@@ -1515,7 +1518,7 @@ namespace neos::numpy
                                                 using R = typename C::value_type;
                                                 if (casting)
                                                 {
-                                                    std::vector<T> converted;
+                                                    converted.clear();
                                                     for (std::int64_t i = 0; i < n; ++i)
                                                         converted.push_back(read_as<T>(runPointer + (start + i) * runStride, aArray->type));
                                                     sum = pairwise_sum_complex<R>(reinterpret_cast<unsigned char const*>(converted.data()), 2 * n, sizeof(T), loop);
@@ -1525,7 +1528,7 @@ namespace neos::numpy
                                             }
                                             else if (casting)
                                             {
-                                                std::vector<T> converted;
+                                                converted.clear();
                                                 for (std::int64_t i = 0; i < n; ++i)
                                                     converted.push_back(read_as<T>(runPointer + (start + i) * runStride, aArray->type));
                                                 sum = pairwise_sum<C, T>(reinterpret_cast<unsigned char const*>(converted.data()), n, sizeof(T), loop);

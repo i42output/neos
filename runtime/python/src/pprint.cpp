@@ -68,12 +68,15 @@ namespace neos::python_runtime::detail
             if (aArgs.size() > aNames.size())
                 py_raise("TypeError", std::string{ aFunction } + "() takes " + std::to_string(aNames.size()) + " positional argument" + (aNames.size() == 1u ? "" : "s") +
                     " but " + std::to_string(aArgs.size()) + (aArgs.size() == 1u ? " was" : " were") + " given");
-            std::vector<char const*> names = aNames;
-            names.insert(names.end(), aKeywordOnly.begin(), aKeywordOnly.end());
-            std::vector<object*> a;
-            py_checked(parse_arguments(aFunction, aArgs, aKwargs, names, aRequired, aPositionalOnly, a));
+            // (scratch kept for reuse (a parse is made per item that _format(), _safe_repr(), etc. are called for))
+            thread_local std::vector<char const*> tNames;
+            tNames.assign(aNames.begin(), aNames.end());
+            tNames.insert(tNames.end(), aKeywordOnly.begin(), aKeywordOnly.end());
+            thread_local std::vector<object*> tA;
+            tA.clear();
+            py_checked(parse_arguments(aFunction, aArgs, aKwargs, tNames, aRequired, aPositionalOnly, tA));
             std::vector<py> result;
-            for (auto v : a)
+            for (auto v : tA)
                 result.push_back(v != nullptr ? py::borrowed(v) : py{});
             return result;
         }

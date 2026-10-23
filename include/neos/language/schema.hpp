@@ -103,6 +103,7 @@ namespace neos::language
             std::optional<std::string> const& aSource = {});   ///< (aSource: the schema's source (it is not read from aPath), e.g. one built in)
     public:
         static std::optional<std::string> find(std::string const& aSourceFileExtension); ///< (the path of the installed schema whose meta source.file.extension matches)
+        static std::vector<std::pair<std::string, std::string>> installed(); ///< (the installed schemas' meta source.file.extensions and their paths, in the order find searches them)
     public:
         std::string const& path() const;
         std::chrono::steady_clock::duration parse_time() const; ///< (the time parsing the schema's grammars took)

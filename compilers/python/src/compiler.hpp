@@ -36,6 +36,7 @@
 // The Python compiler plugin's language compiler (see compiler.cpp)
 
 #include <neos/neos.hpp>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -59,6 +60,13 @@ namespace neos::compilers::python
     // (comprehensions: their variables are their own (statements.cpp))
     std::string rewrite_comprehensions(std::string const& aText, bool& aChanged, bool aBuiltins = true);
     std::string rewrite_int_loops(std::string const& aText, bool& aChanged, std::vector<std::size_t>& aLines);
+    // (the rewrites of a source (compiler.cpp's py_join_lines's) that need no compilation (also a syntax highlighter's: see 
+    // compiler::parsable_source): aOriginal is the source as written (aSource) or as eval wraps it; aLines: the line of the source as 
+    // written (1-based; 0: none) that each line of the result is; a syntax error (aSyntaxError: its position in the text, its message) 
+    // ends the rewrites (it does not return); aImports: called with the text whose import statements import the modules of source files)
+    std::string rewrite_source(std::string_view aSource, std::string const& aOriginal, bool aExecMode, bool aPackage, bool& aChanged, 
+        bool& aCompilesAtRunTime, std::vector<std::uint32_t>& aLines, std::map<std::string, std::vector<std::pair<std::string, std::string>>>& aAnnotations,
+        std::function<void(std::size_t, std::string const&)> const& aSyntaxError, std::function<void(std::string const&)> const& aImports);
 
     // (a syntax error as CPython reports it (syntax.cpp): its stage (the first error of a stage is reported: the tokenizer's and parser's (in 
     // source order), then the symbol table's, then the compiler's), type, message and location (a line and a character offset, 1-based))
@@ -117,8 +125,10 @@ namespace neos::compilers::python
                 language::fragment receiver;
                 std::optional<language::fragment> key;      ///< (a subscript)
                 std::string attribute;                      ///< (an attribute)
+                std::optional<std::pair<language::fragment, language::fragment>> super; ///< (an attribute of super(cls, self): cls and self)
             };
             std::map<char const*, py_access> pyAccesses;    ///< subscripts and attributes (by their source), which can be targets
+            std::map<char const*, std::pair<language::fragment, language::fragment>> pySupers; ///< (calls of the builtin super(cls, self) (by their source): cls and self)
             std::map<char const*, std::vector<language::fragment>> pyTuples; ///< tuple displays (by their source): their items
             std::vector<std::size_t> pyComprehensions;      ///< comprehensions being compiled: the number of the statement's temporaries before them
             struct py_clause
@@ -170,6 +180,18 @@ namespace neos::compilers::python
             std::vector<std::uint32_t> consumedObjects; ///< object temporaries of int expressions that other code took over
                                                         ///< (reusable after the statement)
             std::map<std::vector<std::uint8_t>, fragment> pyIntegerStrings; ///< str() of an int: the int (by the str's code)
+            // (arithmetic of objects that are variables' or constants' (see py_operation): python::arith's postfix code (its leaves 'A'... 
+            // and its operators '0' + the operator), its leaves, and its value computed as written (its unfused binary operations: a new 
+            // reference that nothing holds, or a leaf's value (borrowed)))
+            struct py_arith
+            {
+                std::string code;
+                std::vector<fragment> leaves;
+                fragment unfused;
+                bool leaf = false;
+                bool numeric = false;                   ///< (it has an operator other than + and -, or a constant)
+            };
+            std::map<std::vector<std::uint8_t>, py_arith> pyArith; ///< (by the code of its value)
             std::map<std::vector<std::uint8_t>, std::array<fragment, 3u>> pyComparisons; ///< comparisons of objects: the operator and 
                                                         ///< the operands (by the comparison's code)
             std::map<std::uint32_t, std::pair<std::int64_t, std::int64_t>> pyCounters; ///< int variables that only for loops over 
@@ -216,6 +238,7 @@ namespace neos::compilers::python
         void begin_fragment(i_source_fragment& aFragment) override;
         void end_fragment() override;
         void preparse(i_source_fragment& aFragment) override;
+        bool parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const override;
         void parsed(i_source_fragment& aFragment) override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, std::uint32_t& aEndColumn,
             neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;
@@ -263,7 +286,7 @@ namespace neos::compilers::python
         std::optional<std::size_t> py_primary_start(std::string_view aText, std::size_t aBefore);
         std::optional<std::size_t> py_operand_start(std::string_view aText, std::size_t aBefore, int aPrecedence);
         std::uint64_t py_position(std::string_view aSource, bool aExtend = true);
-        fragment py_call_outcome(fragment aCall, std::optional<std::uint32_t> aReceiver, std::vector<std::uint32_t> const& aArguments);
+        fragment py_call_outcome(fragment aCall, std::optional<std::uint32_t> aReceiver, std::vector<std::uint32_t> const& aArguments, int aLeading = 0);
         fragment py_flush();
         fragment py_release_temporaries(fragment const& aCode, std::optional<std::uint32_t> aExcept = {});
         fragment py_release_variables(bool aTemporaries, std::optional<std::uint32_t> aExcept = {});
@@ -314,6 +337,10 @@ namespace neos::compilers::python
         std::uint32_t py_error_global();
         std::uint32_t py_depth_global();
         std::optional<fragment> py_constant_str(fragment const& aValue);
+        std::optional<fragment> py_constant_int(fragment const& aValue, bool aTagged = false);
+        std::optional<fragment> py_constant_float(fragment const& aValue);
+        bool py_arith_leaf(fragment const& aValue);
+        fragment py_attribute_name(std::string const& aName);
         fragment py_made_once(std::string const& aName, fragment const& aMake);
     private:
         std::vector<fragment_state> iFragments;

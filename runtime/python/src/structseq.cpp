@@ -43,6 +43,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string_view>
 #include <string>
 #include <vector>
 #include "objects.hpp"
@@ -76,11 +77,26 @@ namespace neos::python_runtime
             bool is_structseq(object* aObject);
         }
 
+        namespace
+        {
+            std::mutex& structseq_mutex() { static std::mutex sMutex; return sMutex; }
+            std::deque<structseq_descriptor>& structseq_descriptors() { static std::deque<structseq_descriptor> sDescriptors; return sDescriptors; }
+        }
+
+        // (the qualified name of a struct sequence's type (a subclass of tuple))
+        bool structseq_type_name(std::string_view aQualifiedName)
+        {
+            std::lock_guard<std::mutex> lock{ structseq_mutex() };
+            for (auto const& d : structseq_descriptors())
+                if (d.qualifiedName == aQualifiedName)
+                    return true;
+            return false;
+        }
+
         structseq_descriptor const& structseq_type(std::string const& aQualifiedName, std::vector<std::string> const& aFields, std::size_t aVisible)
         {
-            static std::mutex sMutex;
-            static std::deque<structseq_descriptor> sDescriptors;
-            std::lock_guard<std::mutex> lock{ sMutex };
+            std::lock_guard<std::mutex> lock{ structseq_mutex() };
+            auto& sDescriptors = structseq_descriptors();
             for (auto const& d : sDescriptors)
                 if (d.qualifiedName == aQualifiedName)
                     return d;

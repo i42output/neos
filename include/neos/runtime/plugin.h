@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 11
+#define NEOS_RUNTIME_PLUGIN_VERSION 12
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -227,8 +227,8 @@ typedef struct neos_rt_host
     void (*thread_attach)(void* aContext);
     /* programs compiled while a program runs (e.g. Python's exec): the program of the source aSource in the language 
        aLanguage (aOptions: the language's options, e.g. a mode) as a context (as thread_context's: it stays until the 
-       process ends; NULL: the error message is stored in *aError (valid until the next call)); run its entry point on the 
-       calling thread (its result: as call's; returns NULL, or the error message if it trapped) */
+       process ends, or until it is unloaded (see unload); NULL: the error message is stored in *aError (valid until the next 
+       call)); run its entry point on the calling thread (its result: as call's; returns NULL, or the error message if it trapped) */
     void* (*load)(char const* aLanguage, char const* aSource, char const* aSourceName, char const* aOptions, char const** aError);
     char const* (*run)(void* aContext, neos_rt_type aResult, neos_rt_value* aResultValue);
     /* restricted mode: nonzero if the running program (as the calling thread runs it) is running in restricted mode (a plugin's 
@@ -278,6 +278,10 @@ typedef struct neos_rt_host
        code reads it there (interpreted or compiled), so a plugin can keep a value there that the code reads without calling it; valid
        while the program is loaded); NULL if there is no such global */
     unsigned long long* (*global)(unsigned aGlobal);
+    /* (version 12) unload a program that load compiled (aContext: as load returned), when nothing refers to its code any longer (e.g.
+       eval code that made no functions): its memory and native code are released, and aContext is no longer valid. A program that
+       is running (on the calling thread) is not unloaded */
+    void (*unload)(void* aContext);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

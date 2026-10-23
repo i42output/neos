@@ -1356,7 +1356,7 @@ namespace neos::python_runtime::detail
                         {
                             import_attribute("warnings", "warn").call({ py{ "Failing to pass a value to the 'type_params' parameter of 'typing.ForwardRef._evaluate' is "
                                 "deprecated, as it leads to incorrect behaviour when calling typing.ForwardRef._evaluate on a stringified annotation that references a "
-                                "PEP 695 type parameter. It will be disallowed in Python 3.15." } }, { { "category", builtin("DeprecationWarning") }, { "stacklevel", py{ 3 } } });
+                                "PEP 695 type parameter. It will be disallowed in Python 3.15." } }, { { "category", builtin("DeprecationWarning") }, { "stacklevel", py{ 1 } } });
                             typeParams = py_tuple();
                         }
                         return forward_ref_evaluate(a[0], a[1], a[2], typeParams, a[4]);
@@ -3267,7 +3267,7 @@ namespace neos::python_runtime::detail
                     {
                         import_attribute("warnings", "warn").call({ py{ "Failing to pass a value to the 'type_params' parameter of 'typing._eval_type' is deprecated, as it "
                             "leads to incorrect behaviour when calling typing._eval_type on a stringified annotation that references a PEP 695 type parameter. It will be "
-                            "disallowed in Python 3.15." } }, { { "category", builtin("DeprecationWarning") }, { "stacklevel", py{ 3 } } });
+                            "disallowed in Python 3.15." } }, { { "category", builtin("DeprecationWarning") }, { "stacklevel", py{ 1 } } });
                         typeParams = py_tuple();
                     }
                     return eval_type(a[0], a[1], a[2], typeParams, a[4]);

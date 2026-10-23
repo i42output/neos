@@ -207,13 +207,14 @@ namespace neos::python_runtime
             {
                 if (aFormat.empty())
                     return {};
-                std::vector<char> buffer(256u + aFormat.size() * 8u);
+                thread_local std::vector<char> tBuffer;
+                tBuffer.assign(256u + aFormat.size() * 8u, '\0');
                 for (;;)
                 {
-                    auto const n = std::strftime(buffer.data(), buffer.size(), aFormat.c_str(), &aTm);
-                    if (n != 0u || buffer.size() > 65536u)
-                        return std::string{ buffer.data(), n };
-                    buffer.resize(buffer.size() * 4u);
+                    auto const n = std::strftime(tBuffer.data(), tBuffer.size(), aFormat.c_str(), &aTm);
+                    if (n != 0u || tBuffer.size() > 65536u)
+                        return std::string{ tBuffer.data(), n };
+                    tBuffer.resize(tBuffer.size() * 4u);
                 }
             }
 
@@ -350,6 +351,51 @@ namespace neos::python_runtime
 
             builtin_entry const sTimeFunctions[] =
             {
+                // (a clock's information: the clock that implements it (the runtime's: std::chrono's clocks and std::clock))
+                { "get_clock_info", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("get_clock_info", aArgs, aKwargs, { "name" }, 1u, 1u, a))
+                            return nullptr;
+                        if (kind_of(a[0]) != NEOS_PY_STR)
+                            return error("TypeError", std::string{ "get_clock_info() argument must be str, not " } + type_name(a[0]));
+                        auto const& name = as<str_object>(a[0])->value;
+                        char const* implementation = nullptr;
+                        bool monotonic = true;
+                        bool adjustable = false;
+                        double resolution = 1e-9;
+#if defined(_WIN32)
+                        if (name == "monotonic" || name == "perf_counter")
+                            implementation = "QueryPerformanceCounter()", resolution = 1e-7;
+                        else if (name == "time")
+                            implementation = "GetSystemTimePreciseAsFileTime()", monotonic = false, adjustable = true, resolution = 1e-7;
+                        else if (name == "process_time" || name == "thread_time")
+                            implementation = "clock()", resolution = 1.0 / CLOCKS_PER_SEC;
+#else
+                        if (name == "monotonic" || name == "perf_counter")
+                            implementation = "clock_gettime(CLOCK_MONOTONIC)";
+                        else if (name == "time")
+                            implementation = "clock_gettime(CLOCK_REALTIME)", monotonic = false, adjustable = true;
+                        else if (name == "process_time" || name == "thread_time")
+                            implementation = "clock()", resolution = 1.0 / CLOCKS_PER_SEC;
+#endif
+                        if (implementation == nullptr)
+                            return error("ValueError", "unknown clock");
+                        ref const ns{ module_attribute("types", "SimpleNamespace") };
+                        if (!ns)
+                            return nullptr;
+                        ref const kw{ make_dict() };
+                        for (auto const& [key, value] : { std::pair<char const*, object*>{ "implementation", make_str(implementation) },
+                            std::pair<char const*, object*>{ "monotonic", make_bool(monotonic) }, std::pair<char const*, object*>{ "adjustable", make_bool(adjustable) },
+                            std::pair<char const*, object*>{ "resolution", make_float(resolution) } })
+                        {
+                            ref const k{ make_str(key) };
+                            ref const v{ value };
+                            dict_set(kw.get(), k.get(), v.get());
+                        }
+                        ref const args{ make_tuple() };
+                        return call(ns.get(), args.get(), kw.get());
+                    } },
                 { "time", [](std::vector<object*> const&, object*) -> object* { return make_float(now()); } },
                 { "time_ns", [](std::vector<object*> const&, object*) -> object* { return make_int(now_ns()); } },
                 { "monotonic", [](std::vector<object*> const&, object*) -> object* { return make_float(static_cast<double>(monotonic_ns()) / 1e9); } },

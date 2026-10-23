@@ -30,8 +30,9 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Modules/_io/_iomodule.c and Objects/exceptions.c), Copyright (c)
-  2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License
+  Portions of this file are derived from CPython 3.13 (Modules/_io/_iomodule.c, Objects/exceptions.c, and Modules/_io/bytesio.c
+  and Modules/_io/stringio.c (BytesIO's and StringIO's __getstate__ and __setstate__)), Copyright (c) 2001-2024 Python Software
+  Foundation; All Rights Reserved. They are used under the Python Software Foundation License
   Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from C to C++ for the neos Python runtime plugin and adapted
   to its object model (see runtime/python/NOTICE).
 */
@@ -45,6 +46,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -839,6 +841,8 @@ namespace neos::python_runtime
                 std::string bytes;              ///< (BytesIO's)
                 std::size_t position = 0u;
                 bool closed = false;
+                std::optional<std::string> newline = "\n";   ///< (StringIO's newline argument (none: None))
+                int seen = 0;                   ///< (StringIO's newlines written, if its newline is None or "": 1: "\n", 2: "\r", 4: "\r\n")
             };
 
             neos_py_type make_memory_file_type(char const* aQualifiedName, char const* aName);
@@ -903,14 +907,59 @@ namespace neos::python_runtime
                 return make_bytes(m.bytes.substr(aBegin, aEnd - aBegin));
             }
 
-            bool memory_open(memory_file_object const& m)
+            // (aInherited: a method that StringIO has from IOBase (its message as IOBase's: "...file."; StringIO's own: "...file"))
+            bool memory_open(memory_file_object const& m, bool aInherited = false)
             {
                 if (m.closed)
                 {
-                    error("ValueError", "I/O operation on closed file.");
+                    error("ValueError", m.text && !aInherited ? "I/O operation on closed file" : "I/O operation on closed file.");
                     return false;
                 }
                 return true;
+            }
+
+            // (StringIO's text written (as CPython's stringio.c's write_str): its newlines recorded and translated to "\n" if its newline is 
+            // None (recorded only, if it is ""), and "\n" translated to its newline if that is "\r" or "\r\n")
+            std::u32string memory_translate(memory_file_object& m, std::u32string aText)
+            {
+                if (!m.newline || m.newline->empty())
+                {
+                    std::u32string translated;
+                    for (std::size_t i = 0u; i < aText.size(); ++i)
+                    {
+                        auto const c = aText[i];
+                        if (c == U'\r' && i + 1u < aText.size() && aText[i + 1u] == U'\n')
+                        {
+                            m.seen |= 4;
+                            translated += m.newline ? U"\r\n" : U"\n";
+                            ++i;
+                        }
+                        else if (c == U'\r')
+                        {
+                            m.seen |= 2;
+                            translated += m.newline ? U'\r' : U'\n';
+                        }
+                        else
+                        {
+                            if (c == U'\n')
+                                m.seen |= 1;
+                            translated += c;
+                        }
+                    }
+                    return translated;
+                }
+                if (*m.newline == "\r" || *m.newline == "\r\n")
+                {
+                    std::u32string const nl = *m.newline == "\r" ? U"\r" : U"\r\n";
+                    std::u32string translated;
+                    for (auto c : aText)
+                        if (c == U'\n')
+                            translated += nl;
+                        else
+                            translated += c;
+                    return translated;
+                }
+                return aText;
             }
 
             object* memory_readline(memory_file_object& m, long long aLimit)
@@ -919,11 +968,27 @@ namespace neos::python_runtime
                     return nullptr;
                 auto const size = memory_size(m);
                 auto end = m.position;
+                // (a line's end (as CPython's _PyIO_find_line_ending): "\n" (a BytesIO's, a StringIO's whose newline is None (its newlines 
+                // are translated) or "\n"); "\r", "\n" or "\r\n" (newline ""); else its newline)
+                bool const universal = m.text && m.newline && m.newline->empty();
+                std::u32string const ending = m.text && m.newline && !m.newline->empty() ? to_u32(*m.newline) : std::u32string{ U"\n" };
                 while (end < size)
                 {
                     auto const c = m.text ? m.characters[end] : static_cast<char32_t>(static_cast<unsigned char>(m.bytes[end]));
                     ++end;
-                    if (c == U'\n')
+                    if (universal)
+                    {
+                        if (c == U'\n')
+                            break;
+                        if (c == U'\r')
+                        {
+                            if (end < size && m.characters[end] == U'\n')
+                                ++end;
+                            break;
+                        }
+                    }
+                    else if (ending.size() == 1u ? c == ending[0] : 
+                        c == U'\n' && end - m.position >= 2u && m.characters[end - 2u] == U'\r')
                         break;
                 }
                 if (aLimit >= 0)
@@ -941,12 +1006,13 @@ namespace neos::python_runtime
                 {
                     if (kind_of(aData) != NEOS_PY_STR)
                         return error("TypeError", std::string{ "string argument expected, got '" } + type_name(aData) + "'");
-                    auto const text = to_u32(as<str_object>(aData)->value);
+                    auto const written = to_u32(as<str_object>(aData)->value);
+                    auto const text = memory_translate(m, written);
                     if (m.position > m.characters.size())
                         m.characters.resize(m.position, U'\0');
                     m.characters.replace(m.position, std::min(text.size(), m.characters.size() - m.position), text);
                     m.position += text.size();
-                    return make_int(static_cast<long long>(text.size()));
+                    return make_int(static_cast<long long>(written.size()));
                 }
                 std::string_view data;
                 if (!bytes_like(aData, data))
@@ -956,6 +1022,24 @@ namespace neos::python_runtime
                 m.bytes.replace(m.position, std::min(data.size(), m.bytes.size() - m.position), data);
                 m.position += data.size();
                 return make_int(static_cast<long long>(data.size()));
+            }
+
+            // (BytesIO's readinto(buffer): its bytes from its position, as many as the buffer has, set as the buffer's first; their number)
+            object* memory_readinto(memory_file_object& m, object* aBuffer)
+            {
+                std::string_view data;
+                if (kind_of(aBuffer) == NEOS_PY_STR || std::string_view{ type_name(aBuffer) } == "bytes" || !bytes_like(aBuffer, data))
+                    return error("TypeError", std::string{ "readinto() argument must be read-write bytes-like object, not " } + type_name(aBuffer));
+                auto const start = std::min(m.position, m.bytes.size());
+                auto const n = std::min(data.size(), m.bytes.size() - start);
+                ref const first{ make_int(0) };
+                ref const last{ make_int(static_cast<long long>(n)) };
+                ref const slice{ make_slice(first.get(), last.get(), nullptr) };
+                ref const value{ make_bytes(m.bytes.substr(start, n)) };
+                if (setitem(aBuffer, slice.get(), value.get()) != 0)
+                    return nullptr;
+                m.position = start + n;
+                return make_int(static_cast<long long>(n));
             }
 
             struct memory_method
@@ -986,6 +1070,35 @@ namespace neos::python_runtime
                         m.position = std::max(m.position, end);
                         return result;
                     } },
+                // (BytesIO's: as read; readinto's: into a writable buffer)
+                { "read1", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("read1", aArgs, aKwargs, { "size" }, 0u, 1u, a))
+                            return nullptr;
+                        auto const n = size_argument(a[0]);
+                        if (n == -2 || !memory_open(m))
+                            return nullptr;
+                        auto const size = memory_size(m);
+                        auto const end = n < 0 ? size : std::min(size, m.position + static_cast<std::size_t>(n));
+                        auto const result = memory_slice(m, m.position, end);
+                        m.position = std::max(m.position, end);
+                        return result;
+                    } },
+                { "readinto", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("readinto", aArgs, aKwargs, { "buffer" }, 1u, 1u, a) || !memory_open(m))
+                            return nullptr;
+                        return memory_readinto(m, a[0]);
+                    } },
+                { "readinto1", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("readinto1", aArgs, aKwargs, { "buffer" }, 1u, 1u, a) || !memory_open(m))
+                            return nullptr;
+                        return memory_readinto(m, a[0]);
+                    } },
                 { "readline", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -996,6 +1109,8 @@ namespace neos::python_runtime
                     } },
                 { "readlines", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object*
                     {
+                        if (!memory_open(m, true))
+                            return nullptr;
                         std::vector<object*> lines;
                         for (;;)
                         {
@@ -1024,7 +1139,7 @@ namespace neos::python_runtime
                 { "writelines", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("writelines", aArgs, aKwargs, { "lines" }, 1u, 1u, a))
+                        if (!parse_arguments("writelines", aArgs, aKwargs, { "lines" }, 1u, 1u, a) || !memory_open(m, true))
                             return nullptr;
                         ref const it{ iter(a[0]) };
                         if (!it)
@@ -1074,20 +1189,93 @@ namespace neos::python_runtime
                         return make_int(size);
                     } },
                 { "close", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { m.closed = true; return none(); } },
-                { "flush", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m) ? none() : nullptr; } },
+                { "flush", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return m.text || memory_open(m) ? none() : nullptr; } },
                 { "readable", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m) ? make_bool(true) : nullptr; } },
                 { "writable", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m) ? make_bool(true) : nullptr; } },
                 { "seekable", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m) ? make_bool(true) : nullptr; } },
-                { "isatty", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m) ? make_bool(false) : nullptr; } },
+                { "isatty", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return memory_open(m, true) ? make_bool(false) : nullptr; } },
+                { "fileno", [](memory_file_object&, object*, std::vector<object*> const&, object*) -> object* { unsupported("fileno"); return nullptr; } },
+                { "detach", [](memory_file_object&, object*, std::vector<object*> const&, object*) -> object* { unsupported("detach"); return nullptr; } },
                 { "__enter__", [](memory_file_object& m, object* aSelf, std::vector<object*> const&, object*) -> object*
                     {
-                        if (!memory_open(m))
+                        if (!memory_open(m, true))
                             return nullptr;
                         retain(aSelf);
                         return aSelf;
                     } },
                 { "__exit__", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { m.closed = true; return none(); } },
-                { "getbuffer", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object* { return make_bytearray(m.bytes); } }
+                { "getbuffer", [](memory_file_object& m, object*, std::vector<object*> const&, object*) -> object*
+                    {
+                        // (a memoryview of its bytes (a copy of them: writes to it are not the BytesIO's))
+                        if (!memory_open(m))
+                            return nullptr;
+                        ref const view{ fn_builtin("memoryview") };
+                        if (!view)
+                            return nullptr;
+                        ref const args{ make_tuple({ make_bytearray(m.bytes) }) };
+                        return call(view.get(), args.get(), nullptr);
+                    } },
+                // (pickling (as CPython's bytesio_getstate and stringio_getstate): BytesIO's (value, position, __dict__), StringIO's (value, newline, 
+                // position, __dict__) (its __dict__: None (it has none)))
+                { "__getstate__", [](memory_file_object& m, object*, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (!aArgs.empty())
+                            return error("TypeError", "__getstate__() takes no arguments (" + std::to_string(aArgs.size()) + " given)");
+                        if (!memory_open(m))
+                            return nullptr;
+                        auto const value = memory_slice(m, 0u, memory_size(m));
+                        auto const position = make_int(static_cast<long long>(m.position));
+                        if (!m.text)
+                            return make_tuple({ value, position, (retain(none()), none()) });
+                        auto const newline = m.newline ? make_str(*m.newline) : (retain(none()), none());
+                        return make_tuple({ value, newline, position, (retain(none()), none()) });
+                    } },
+                { "__setstate__", [](memory_file_object& m, object* aSelf, std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (aArgs.size() != 1u)
+                            return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(aArgs.size()) + " given)");
+                        if (!memory_open(m))
+                            return nullptr;
+                        auto const state = aArgs[0];
+                        std::size_t const n = m.text ? 4u : 3u;
+                        if (kind_of(state) != NEOS_PY_TUPLE || as<tuple_object>(state)->items.size() < n)
+                            return error("TypeError", std::string{ aSelf->type->name } + ".__setstate__ argument should be " + std::to_string(n) + "-tuple, got " + type_name(state));
+                        auto const& items = as<tuple_object>(state)->items;
+                        auto const positionItem = items[m.text ? 2u : 1u];
+                        auto const dictItem = items[m.text ? 3u : 2u];
+                        if (m.text)
+                        {
+                            if (kind_of(items[0]) != NEOS_PY_STR && kind_of(items[0]) != NEOS_PY_NONE)
+                                return error("TypeError", std::string{ "initial_value must be str or None, not " } + type_name(items[0]));
+                            if (kind_of(items[1]) != NEOS_PY_STR && kind_of(items[1]) != NEOS_PY_NONE)
+                                return error("TypeError", std::string{ "newline must be str or None, not " } + type_name(items[1]));
+                        }
+                        else if (std::string_view data; !bytes_like(items[0], data))
+                            return error("TypeError", std::string{ "a bytes-like object is required, not '" } + type_name(items[0]) + "'");
+                        if (!is_int_like(positionItem))
+                            return error("TypeError", std::string{ m.text ? "third item of state must be an integer, got " : "second item of state must be an integer, not " } + 
+                                type_name(positionItem));
+                        long long position = 0;
+                        if (!to_index(positionItem, position))
+                            return nullptr;
+                        if (position < 0)
+                            return error("ValueError", "position value cannot be negative");
+                        if (kind_of(dictItem) != NEOS_PY_NONE && kind_of(dictItem) != NEOS_PY_DICT)
+                            return error("TypeError", std::string{ m.text ? "fourth" : "third" } + " item of state should be a dict, got a " + type_name(dictItem));
+                        if (m.text)
+                        {
+                            m.characters = kind_of(items[0]) == NEOS_PY_STR ? to_u32(as<str_object>(items[0])->value) : std::u32string{};
+                            m.newline = kind_of(items[1]) == NEOS_PY_STR ? std::optional<std::string>{ as<str_object>(items[1])->value } : std::nullopt;
+                        }
+                        else
+                        {
+                            std::string_view data;
+                            bytes_like(items[0], data);
+                            m.bytes = std::string{ data };
+                        }
+                        m.position = static_cast<std::size_t>(position);
+                        return (retain(none()), none());
+                    } }
             };
 
             object* call_memory_method(neos_py_context*, void* aData, object* aArgs, object* aKwargs)
@@ -1109,19 +1297,39 @@ namespace neos::python_runtime
                 {
                     auto& m = as_memory(aSelf);
                     for (auto const& method : sMemoryMethods)
-                        if (std::strcmp(method.name, aName) == 0 && (m.text ? std::strcmp(aName, "getbuffer") != 0 : true))
+                        if (std::strcmp(method.name, aName) == 0 && (m.text ? std::strcmp(aName, "getbuffer") != 0 && std::strcmp(aName, "read1") != 0 && 
+                            std::strncmp(aName, "readinto", 8u) != 0 : true))
                             return make_function(method.name, call_memory_method, const_cast<memory_method*>(&method), aSelf);
                     if (std::strcmp(aName, "closed") == 0)
                         return make_bool(m.closed);
+                    // (StringIO's newlines: those written (if its newline is None or ""), as an IncrementalNewlineDecoder's newlines)
                     if (m.text && std::strcmp(aName, "newlines") == 0)
+                    {
+                        if (m.newline && !m.newline->empty())
+                            return (retain(none()), none());
+                        std::vector<object*> kinds;
+                        if (m.seen & 2)
+                            kinds.push_back(make_str("\r"));
+                        if (m.seen & 1)
+                            kinds.push_back(make_str("\n"));
+                        if (m.seen & 4)
+                            kinds.push_back(make_str("\r\n"));
+                        if (kinds.empty())
+                            return (retain(none()), none());
+                        if (kinds.size() == 1u)
+                            return kinds[0];
+                        return make_tuple(std::move(kinds));
+                    }
+                    if (m.text && (std::strcmp(aName, "encoding") == 0 || std::strcmp(aName, "errors") == 0))
                         return (retain(none()), none());
-                    if (m.text && std::strcmp(aName, "encoding") == 0)
-                        return (retain(none()), none());
+                    if (m.text && std::strcmp(aName, "line_buffering") == 0)
+                        return make_bool(false);
                     return error("AttributeError", std::string{ "'" } + aSelf->type->name + "' object has no attribute '" + aName + "'");
                 };
                 type.iter = [](neos_py_context*, object* aSelf) -> object*
                 {
-                    if (!memory_open(as_memory(aSelf)))
+                    // (StringIO's: IOBase's (checked); BytesIO's: not checked (its next is))
+                    if (as_memory(aSelf).text && !memory_open(as_memory(aSelf), true))
                         return nullptr;
                     retain(aSelf);
                     return aSelf;
@@ -1145,13 +1353,27 @@ namespace neos::python_runtime
                 auto const m = new memory_file_object{ { { aText ? &sStringIOType.base : &sBytesIOType.base } } };
                 ref const result{ &m->h.base };
                 m->text = aText;
+                if (aText && a[1] != nullptr)
+                {
+                    if (kind_of(a[1]) == NEOS_PY_NONE)
+                        m->newline.reset();
+                    else if (kind_of(a[1]) == NEOS_PY_STR)
+                    {
+                        auto const& n = as<str_object>(a[1])->value;
+                        if (n != "" && n != "\n" && n != "\r" && n != "\r\n")
+                            return error("ValueError", "illegal newline value: " + repr_text(a[1]));
+                        m->newline = n;
+                    }
+                    else
+                        return error("TypeError", std::string{ "newline must be str or None, not " } + type_name(a[1]));
+                }
                 if (a[0] != nullptr && kind_of(a[0]) != NEOS_PY_NONE)
                 {
                     if (aText)
                     {
                         if (kind_of(a[0]) != NEOS_PY_STR)
                             return error("TypeError", std::string{ "initial_value must be str or None, not " } + type_name(a[0]));
-                        m->characters = to_u32(as<str_object>(a[0])->value);
+                        m->characters = memory_translate(*m, to_u32(as<str_object>(a[0])->value));
                     }
                     else
                     {
@@ -1240,6 +1462,17 @@ namespace neos::python_runtime
                     if (kind_of(a[3]) != NEOS_PY_STR)
                         return error("TypeError", std::string{ "open() argument 'encoding' must be str or None, not " } + type_name(a[3]));
                     encoding = as<str_object>(a[3])->value;
+                    // ("locale" (PEP 597): the locale's encoding (locale.getencoding()))
+                    if (encoding == "locale")
+                    {
+                        ref const getencoding{ module_attribute("locale", "getencoding") };
+                        ref const empty{ make_tuple() };
+                        ref const e{ getencoding ? call(getencoding.get(), empty.get(), nullptr) : nullptr };
+                        if (!e)
+                            return nullptr;
+                        if (kind_of(e.get()) == NEOS_PY_STR)
+                            encoding = as<str_object>(e.get())->value;
+                    }
                     std::string probe;
                     if (!encode("", encoding, "strict", probe))
                         return nullptr;
@@ -1338,8 +1571,6 @@ namespace neos::python_runtime
             builtin_entry const sIOFunctions[] =
             {
                 { "open", open_file },
-                { "StringIO", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return new_memory_file(true, aArgs, aKwargs); } },
-                { "BytesIO", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return new_memory_file(false, aArgs, aKwargs); } },
                 { "text_encoding", [](std::vector<object*> const& aArgs, object*) -> object*
                     {
                         if (!aArgs.empty() && kind_of(aArgs[0]) != NEOS_PY_NONE)
@@ -1352,6 +1583,20 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sIOFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                // (StringIO and BytesIO: types (so that isinstance, type(f) is io.BytesIO and pickling (_io.BytesIO) work))
+                for (bool const text : { true, false })
+                {
+                    auto const type = context()->type_new(context(), text ? "StringIO" : "BytesIO", text ? "_io.StringIO" : "_io.BytesIO",
+                        [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const& items = as<tuple_object>(aArgs)->items;
+                            return new_memory_file(aData != nullptr, std::vector<object*>{ items.begin(), items.end() }, aKwargs);
+                        }, text ? reinterpret_cast<void*>(1) : nullptr, 
+                        text ? [](neos_py_context*, void*, object* aObject) -> int { return aObject != nullptr && aObject->type == &sStringIOType.base ? 1 : 0; } :
+                            [](neos_py_context*, void*, object* aObject) -> int { return aObject != nullptr && aObject->type == &sBytesIOType.base ? 1 : 0; });
+                    observed_types().try_emplace(text ? "_io.StringIO" : "_io.BytesIO", text ? &sStringIOType : &sBytesIOType);
+                    aAttributes.emplace_back(text ? "StringIO" : "BytesIO", type);
+                }
                 aAttributes.emplace_back("SEEK_SET", make_int(0));
                 aAttributes.emplace_back("SEEK_CUR", make_int(1));
                 aAttributes.emplace_back("SEEK_END", make_int(2));
@@ -1363,6 +1608,13 @@ namespace neos::python_runtime
             }
 
             inline bool const sIO = register_module("io", io_module);
+            // (CPython's C module _io: io's classes and functions (e.g. for pickle's _io.BytesIO))
+            inline bool const sIOC = register_module("_io", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                { 
+                    return c_module_attributes("io", "_io", { "BlockingIOError", "BufferedRWPair", "BufferedRandom", "BufferedReader", "BufferedWriter", "BytesIO", 
+                        "DEFAULT_BUFFER_SIZE", "FileIO", "IncrementalNewlineDecoder", "StringIO", "TextIOWrapper", "UnsupportedOperation", "open", "open_code", 
+                        "text_encoding" }, aAttributes);
+                });
         }
 
         object* b_open(std::vector<object*> const& aArgs, object* aKwargs)

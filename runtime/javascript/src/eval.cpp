@@ -39,6 +39,8 @@
 // such code have their bindings' names (env_names); a with statement's environment has its object; a var scope's environment has the
 // var bindings that sloppy direct evals in it declared (its extension)
 
+#include <algorithm>
+#include <deque>
 #include <map>
 #include "js.hpp"
 #include "api.hpp"
@@ -213,6 +215,7 @@ namespace neos::javascript_runtime
             value result = Undefined;
             bool threw = false;
             bool completed = false;
+            void* program = nullptr;    ///< (the program that runs the code)
         };
 
         thread_local std::vector<eval_context> tContexts;
@@ -242,10 +245,68 @@ namespace neos::javascript_runtime
         } };
 
         // (the programs compiled (the same source with the same options is compiled once))
-        std::map<std::pair<std::string, std::string>, void*>& programs()
+        using program_cache = std::map<std::pair<std::string, std::string>, void*>;
+        program_cache& programs()
         {
-            static std::map<std::pair<std::string, std::string>, void*> sPrograms;
+            static program_cache sPrograms;
             return sPrograms;
+        }
+        // (the cache's entries, by program)
+        std::unordered_map<void*, program_cache::iterator>& cached_programs()
+        {
+            static std::unordered_map<void*, program_cache::iterator> sPrograms;
+            return sPrograms;
+        }
+
+        // (programs compiled for code that made no functions (nothing refers to their code once they have run): the latest (that the
+        // cache keeps) stay loaded, the others are unloaded (so that code that evaluates many sources does not keep them all))
+        std::deque<void*>& transient_programs()
+        {
+            static std::deque<void*> sPrograms;
+            return sPrograms;
+        }
+        std::size_t constexpr TransientPrograms = 64u;
+
+        bool running(void* aProgram)
+        {
+            return std::any_of(tContexts.begin(), tContexts.end(), [&](eval_context const& c) { return c.program == aProgram; });
+        }
+
+        void unload(void* aProgram)
+        {
+            program_ended(aProgram);
+            host()->unload(aProgram);
+        }
+
+        void ran(void* aProgram)
+        {
+            auto const* h = host();
+            if (h == nullptr || h->version < 12u || h->unload == nullptr || program_retained(aProgram) || running(aProgram))
+                return;
+            if (!cached_programs().contains(aProgram))
+            {
+                // (not cached (e.g. source with a tagged template): not run again)
+                unload(aProgram);
+                return;
+            }
+            auto& transient = transient_programs();
+            if (std::find(transient.begin(), transient.end(), aProgram) != transient.end())
+                return;
+            transient.push_back(aProgram);
+            while (transient.size() > TransientPrograms)
+            {
+                auto* const oldest = transient.front();
+                transient.pop_front();
+                // (one that has since made a function, or that runs (e.g. its code evaluates code), stays)
+                if (program_retained(oldest) || running(oldest))
+                    continue;
+                if (auto const c = cached_programs().find(oldest); c != cached_programs().end())
+                {
+                    programs().erase(c->second);
+                    cached_programs().erase(c);
+                }
+                unload(oldest);
+            }
         }
 
         void* compile(std::string const& aSource, std::string const& aOptions)
@@ -272,13 +333,14 @@ namespace neos::javascript_runtime
                 throw_syntax_error(message);
             }
             if (cacheable)
-                cache.emplace(std::pair{ aOptions, aSource }, program);
+                cached_programs().emplace(program, cache.emplace(std::pair{ aOptions, aSource }, program).first);
             return program;
         }
 
         value run(void* aProgram, eval_context const& aContext)
         {
             tContexts.push_back(aContext);
+            tContexts.back().program = aProgram;
             auto& extra = extra_arguments();
             auto const base = extra.size();
             neos_rt_value result{};
@@ -291,6 +353,7 @@ namespace neos::javascript_runtime
             extra.resize(base);
             auto const context = tContexts.back();
             tContexts.pop_back();
+            ran(aProgram);
             if (trap != nullptr && !context.completed)
             {
                 std::string const message{ trap };

@@ -36,6 +36,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <neos/runtime/plugin.h>
 
@@ -54,6 +55,8 @@ namespace neos::python_runtime
     char const* error_text();   // (the exception raised: "type: message")
     // a string result (valid until the next call on this thread)
     char const* result(std::string aValue);
+    // (as result(): a copy of aValue (into the result's storage: no allocation if it fits))
+    char const* result_view(std::string_view aValue);
     // the host (for calls of the program's functions)
     neos_rt_host const*& host();
     // the functions of the object protocol (objects.cpp)

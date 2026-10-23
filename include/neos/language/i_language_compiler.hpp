@@ -89,6 +89,12 @@ namespace neos::language
                                                                 ///< while another is begins and ends within it)
         virtual void end_fragment() = 0;
         virtual void preparse(i_source_fragment& aFragment) = 0; ///< (the language's own pass over a source fragment before it is parsed)
+        virtual bool parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const = 0; ///< (a
+                                                                ///< source as the language's own pass over it (as much of it as needs no compilation) rewrites
+                                                                ///< it for its schema to parse, e.g. for a syntax highlighter (thread safe: it is not compiled);
+                                                                ///< the position in aSource of each byte of aResult (NoPosition: one the rewrite added); false:
+                                                                ///< the source as written)
+        static constexpr std::uint32_t NoPosition = ~std::uint32_t{};
         virtual void parsed(i_source_fragment& aFragment) = 0;  ///< (a source fragment that parsed, before it is compiled: e.g. the language's 
                                                                 ///< errors that only a source that parses can have)
         virtual void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, 

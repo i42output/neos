@@ -1749,12 +1749,14 @@ namespace neos::numpy
             shape[ax] = std::accumulate(repeats.begin(), repeats.end(), std::int64_t{ 0 });
             auto* const r = new_array(a->type, shape);
             std::int64_t position = 0;
+            shape_t sub, fromStrides, toStrides;
             for (std::int64_t i = 0; i < n; ++i)
                 for (std::int64_t k = 0; k < repeats[static_cast<std::size_t>(i)]; ++k, ++position)
                 {
-                    shape_t sub = a->shape;
+                    sub = a->shape;
                     sub.erase(sub.begin() + static_cast<std::ptrdiff_t>(ax));
-                    shape_t fromStrides = a->strides, toStrides = r->strides;
+                    fromStrides = a->strides;
+                    toStrides = r->strides;
                     fromStrides.erase(fromStrides.begin() + static_cast<std::ptrdiff_t>(ax));
                     toStrides.erase(toStrides.begin() + static_cast<std::ptrdiff_t>(ax));
                     iterate(sub, { a->pointer() + i * a->strides[ax], r->pointer() + position * r->strides[ax] }, { fromStrides, toStrides },

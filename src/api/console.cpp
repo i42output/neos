@@ -32,6 +32,7 @@
 */
 
 #include <neos/neos.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -73,6 +74,39 @@ namespace neos
                     }
             return result;
         }
+
+        // a source syntax highlighted (see context::highlight) for a terminal: its runs in colours (ANSI escape sequences: 24-bit) as Visual 
+        // Studio Code's dark theme's
+        std::string highlighted(neos::context& aContext, std::string_view aSource)
+        {
+            std::vector<std::optional<neos::context::highlight_category>> categories(aSource.size());
+            for (auto const& span : aContext.highlight(aContext.schema().path(), aSource))
+                for (auto i = span.first; i < span.last && i < aSource.size(); ++i)
+                    categories[i] = span.category;
+            static char const* const sColours[] =
+            {
+                "\x1b[38;2;106;153;85m",   // Comment
+                "\x1b[38;2;86;156;214m",   // Keyword
+                "\x1b[38;2;206;145;120m",  // String
+                "\x1b[38;2;181;206;168m",  // Number
+                "\x1b[38;2;86;156;214m",   // Constant
+                "\x1b[38;2;78;201;176m",   // Type
+                "\x1b[38;2;220;220;170m"   // Function
+            };
+            std::string result;
+            for (std::size_t first = 0u; first < aSource.size();)
+            {
+                auto last = first + 1u;
+                while (last < aSource.size() && categories[last] == categories[first])
+                    ++last;
+                if (categories[first])
+                    result.append(sColours[static_cast<std::size_t>(*categories[first])]).append(aSource.substr(first, last - first)).append("\x1b[0m");
+                else
+                    result.append(aSource.substr(first, last - first));
+                first = last;
+            }
+            return result;
+        }
     }
 
     // (an image of the program: with the compiler stub of its language (its compiler built in) if the program compiles source while it 
@@ -84,7 +118,7 @@ namespace neos
         return neos::image::write(image_path(aContext, aPath), aContext.text(), aContext.restricted(), stub);
     }
 
-    bool process_command(neos::context& aContext, bool& aInteractive, const std::string& aConsoleInput)
+    bool process_command(neos::context& aContext, bool& aInteractive, const std::string& aConsoleInput, bool aColour)
     {
         auto output_parse_time = [&aContext](std::chrono::steady_clock::duration aParseTime)
         {
@@ -176,7 +210,10 @@ namespace neos
                         if (f.source_file_path() != std::nullopt)
                             aContext.cout() << "File '" << *f.source_file_path() << "':" << std::endl;
                         // (the source's last line is terminated when it is loaded (terminate_last_line): a newline only if it is not)
-                        aContext.cout() << f.source();
+                        if (aColour)
+                            aContext.cout() << highlighted(aContext, f.source().to_std_string_view());
+                        else
+                            aContext.cout() << f.source();
                         if (f.source().empty() || f.source().back() != '\n')
                             aContext.cout() << '\n';
                         aContext.cout() << std::flush;

@@ -303,6 +303,7 @@ namespace neos::python_runtime
                 std::string text;
                 frame_stack frames;
                 bool explicitRaise = false;
+                std::size_t covered = 0u;   ///< (the innermost frames that its traceback has (a with statement's exit caught it: it propagates))
             };
             thread_local raised_frames tRaisedFrames;
             thread_local bool tExplicitRaise = false;
@@ -428,6 +429,16 @@ namespace neos::python_runtime
                 return fn_module_namespace(frame_module(aFrame).c_str(), nullptr);
             }
 
+            // (a frame's line: its line now, if it is running)
+            long long current_line(neos_rt_frame const& aFrame)
+            {
+                auto const current = capture_frames();
+                for (auto const& c : *current)
+                    if (same_frame(c, aFrame))
+                        return frame_line(c);
+                return frame_line(aFrame);
+            }
+
             builtin_entry const sFrameClear{ "clear", [](std::vector<object*> const&, object*) -> object* { return (retain(none()), none()); } };
 
             neos_py_type make_frame_type()
@@ -437,7 +448,7 @@ namespace neos::python_runtime
                 {
                     auto const& f = frame_of(as_frame(aSelf));
                     return make_str("<frame at " + object_address(aSelf) + ", file '" + std::string{ f.source != nullptr ? f.source : "" } + "', line " +
-                        std::to_string(frame_line(f)) + ", code " + std::string{ f.function != nullptr ? f.function : "" } + ">");
+                        std::to_string(current_line(f)) + ", code " + std::string{ f.function != nullptr ? f.function : "" } + ">");
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
@@ -445,14 +456,7 @@ namespace neos::python_runtime
                     auto const& f = frame_of(self);
                     std::string_view const name{ aName };
                     if (name == "f_lineno")
-                    {
-                        // (a frame that is running: its line now)
-                        auto const current = capture_frames();
-                        for (auto const& c : *current)
-                            if (same_frame(c, f))
-                                return make_int(frame_line(c));
-                        return make_int(frame_line(f));
-                    }
+                        return make_int(current_line(f));
                     if (name == "f_lasti")
                         return make_int(-1);
                     if (name == "f_back")
@@ -553,6 +557,11 @@ namespace neos::python_runtime
             return &(new traceback_object{ { { &sTracebackType.base } }, aStack, aIndex, aNext })->h.base;
         }
 
+        bool is_traceback(object* aObject)
+        {
+            return aObject != nullptr && aObject->type == &sTracebackType.base;
+        }
+
         neos_rt_frame const* traceback_frame(object* aTraceback)
         {
             if (aTraceback == nullptr || aTraceback->type != &sTracebackType.base || !as_traceback(aTraceback).stack)
@@ -592,10 +601,18 @@ namespace neos::python_runtime
             tRaisedFrames = raised_frames{ aText, std::move(current), explicitRaise };
         }
 
+        // (an exception's text that is now its message (it was a token: see objects.cpp's raise_exception): the frames it was raised in 
+        // are found by it)
+        void frames_renamed(std::string const& aText, std::string const& aNewText)
+        {
+            if (tRaisedFrames.frames && tRaisedFrames.text == aText)
+                tRaisedFrames.text = aNewText;
+        }
+
         // (a caught exception's traceback: the frames that it passed through (the frames it was raised in, from the frame that 
         // catches it), then the traceback it had (if it was raised again: the frame that raised it again is not repeated if it 
         // was re-raised))
-        object* frames_caught(object* aTraceback, std::string const& aText, bool aPropagates)
+        object* frames_caught(object* aTraceback, std::string const& aText, bool aPropagates, bool aNatively)
         {
             raised_frames raised;
             if (aPropagates)
@@ -605,19 +622,38 @@ namespace neos::python_runtime
             // (the frame that catches it: one of the frames it was raised in (else it was not raised by the program: the frames 
             // now))
             neos_rt_frame catching{};
-            if (!innermost_frame(catching))
-                return nullptr;
             std::size_t catcher = 0u;
-            bool found = false;
-            if (raised.frames && raised.text == aText)
-                for (; catcher < raised.frames->size() && !found; ++catcher)
-                    found = same_frame((*raised.frames)[catcher], catching);
-            if (found)
-                --catcher;
+            if (!innermost_frame(catching))
+            {
+                // (caught by native code that the program did not call (e.g. a thread's native target): all the frames it was raised in)
+                if (!raised.frames || raised.text != aText || raised.frames->empty())
+                    return nullptr;
+                catcher = raised.frames->size() - 1u;
+            }
             else
             {
-                raised = raised_frames{ aText, capture_frames(), false };
-                catcher = 0u;
+                bool found = false;
+                if (raised.frames && raised.text == aText)
+                    for (; catcher < raised.frames->size() && !found; ++catcher)
+                        found = same_frame((*raised.frames)[catcher], catching);
+                if (found)
+                {
+                    --catcher;
+                    // (caught by native code that the frame called: the frames within it (none: it was raised by native code))
+                    if (aNatively)
+                    {
+                        if (catcher == 0u)
+                            return nullptr;
+                        --catcher;
+                    }
+                }
+                else
+                {
+                    if (aNatively)
+                        return nullptr;
+                    raised = raised_frames{ aText, capture_frames(), false };
+                    catcher = 0u;
+                }
             }
             auto const& stack = *raised.frames;
             if (stack.empty())
@@ -627,6 +663,11 @@ namespace neos::python_runtime
             std::size_t first = 0u;
             if (oldHead != nullptr && !raised.explicitRaise && same_frame(stack[0], *oldHead))
                 first = 1u;
+            // (caught before as it propagated (e.g. by a with statement's exit): the frames that its traceback has are not repeated)
+            if (oldHead != nullptr && raised.covered > first && raised.covered <= stack.size() && same_frame(stack[raised.covered - 1u], *oldHead))
+                first = raised.covered;
+            if (aPropagates && tRaisedFrames.frames == raised.frames)
+                tRaisedFrames.covered = std::max(tRaisedFrames.covered, catcher + 1u);
             if (first > catcher)
                 return nullptr;
             ref chain{ old ? old.release_ownership() : nullptr };
@@ -752,6 +793,14 @@ namespace neos::python_runtime
                     }
                     if (std::strcmp(aName, "__class__") == 0)
                         return type_object_for("GenericAlias", "types.GenericAlias");
+                    // (pickling: (GenericAlias, (origin, args)))
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            auto const& alias = *reinterpret_cast<generic_alias_object*>(aArgs.at(0u));
+                            return make_tuple({ type_object_for("GenericAlias", "types.GenericAlias"), make_tuple({ new_reference(alias.origin), new_reference(alias.args) }) });
+                        } };
+                    if (auto const method = reduce_method(aSelf, aName, sReduce))
+                        return method;
                     return getattr(g.origin, aName);
                 };
                 type.call = [](neos_py_context*, object* aSelf, object* aArgs, object* aKwargs) -> object*

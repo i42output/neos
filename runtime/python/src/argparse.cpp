@@ -1707,7 +1707,7 @@ namespace neos::python_runtime::detail
                 { "add_argument_group", method("_ArgumentGroup", "add_argument_group", {}, [](std::vector<py> const& a)
                     {
                         import_attribute("warnings", "warn").call({ S("Nesting argument groups is deprecated.") }, { { "category", builtin("DeprecationWarning") },
-                            { "stacklevel", py{ 2 } } });
+                            { "stacklevel", py{ 1 } } });
                         return call_kw(super_of("_ArgumentGroup", a[0]).attr("add_argument_group"), a[1].items(), a[2]);
                     }, true, true) } });
 
@@ -1737,7 +1737,7 @@ namespace neos::python_runtime::detail
                 { "add_mutually_exclusive_group", method("_MutuallyExclusiveGroup", "add_mutually_exclusive_group", {}, [](std::vector<py> const& a)
                     {
                         import_attribute("warnings", "warn").call({ S("Nesting mutually exclusive groups is deprecated.") }, { { "category",
-                            builtin("DeprecationWarning") }, { "stacklevel", py{ 2 } } });
+                            builtin("DeprecationWarning") }, { "stacklevel", py{ 1 } } });
                         return call_kw(super_of("_MutuallyExclusiveGroup", a[0]).attr("add_mutually_exclusive_group"), a[1].items(), a[2]);
                     }, true, true) } });
         }

@@ -289,7 +289,8 @@ namespace neos::javascript_runtime
                 return Undefined;
             auto const n = aProgram.captureCount;
             auto const groups = make_object(Null);
-            std::vector<std::u16string const*> matchedGroupNames;
+            thread_local std::vector<std::u16string const*> tMatchedGroupNames;
+            tMatchedGroupNames.clear();
             if (aGroupNames != nullptr)
                 aGroupNames->assign(n, Undefined);
             for (std::uint32_t i = 1u; i <= n; ++i)
@@ -297,10 +298,10 @@ namespace neos::javascript_runtime
                 auto const& name = aProgram.groupNames[i];
                 if (name.empty())
                     continue;
-                if (std::find_if(matchedGroupNames.begin(), matchedGroupNames.end(), [&](auto const* m) { return *m == name; }) != matchedGroupNames.end())
+                if (std::find_if(tMatchedGroupNames.begin(), tMatchedGroupNames.end(), [&](auto const* m) { return *m == name; }) != tMatchedGroupNames.end())
                     continue;
                 if (aElements[i] != Undefined)
-                    matchedGroupNames.push_back(&name);
+                    tMatchedGroupNames.push_back(&name);
                 auto const key = intern(std::u16string_view{ name });
                 create_data_property(groups, key, aElements[i]);
                 if (aGroupNames != nullptr)
@@ -738,11 +739,12 @@ namespace neos::javascript_runtime
             {
                 // (%RegExp.prototype.exec%: the matches without their arrays (which are not observable))
                 auto& r = *as_regexp(aThis);
-                std::vector<std::int32_t> captures;
-                while (builtin_match(r, aThis, s, captures))
+                thread_local std::vector<std::int32_t> tCaptures;
+                tCaptures.clear();
+                while (builtin_match(r, aThis, s, tCaptures))
                 {
-                    results.push_back(substring(text, captures[0], captures[1]));
-                    if (captures[1] <= captures[0])
+                    results.push_back(substring(text, tCaptures[0], tCaptures[1]));
+                    if (tCaptures[1] <= tCaptures[0])
                     {
                         auto const thisIndex = to_length(get(aThis, the_names().lastIndex));
                         set(aThis, the_names().lastIndex, number(advance_string_index(text, thisIndex, fullUnicode)), true);
@@ -864,14 +866,15 @@ namespace neos::javascript_runtime
                 auto& r = *as_regexp(aThis);
                 auto const program = r.matcher;
                 std::vector<std::int32_t> matches;
-                std::vector<std::int32_t> slots;
+                thread_local std::vector<std::int32_t> tSlots;
+                tSlots.clear();
                 auto const slotCount = (program->captureCount + 1u) * 2u;
-                while (builtin_match(r, aThis, s, slots))
+                while (builtin_match(r, aThis, s, tSlots))
                 {
-                    matches.insert(matches.end(), slots.begin(), slots.begin() + slotCount);
+                    matches.insert(matches.end(), tSlots.begin(), tSlots.begin() + slotCount);
                     if (!global)
                         break;
-                    if (slots[1] <= slots[0])
+                    if (tSlots[1] <= tSlots[0])
                     {
                         auto const thisIndex = to_length(get(aThis, the_names().lastIndex));
                         set(aThis, the_names().lastIndex, number(advance_string_index(text, thisIndex, fullUnicode)), true);
@@ -979,17 +982,18 @@ namespace neos::javascript_runtime
                 // from q are a search from q)
                 auto& r = *as_regexp(splitter);
                 auto const program = r.matcher;
-                std::vector<std::int32_t> captures;
+                thread_local std::vector<std::int32_t> tCaptures;
+                tCaptures.clear();
                 while (q < size)
                 {
-                    auto const result = regexp::exec(*program, text, static_cast<std::size_t>(q), false, captures);
+                    auto const result = regexp::exec(*program, text, static_cast<std::size_t>(q), false, tCaptures);
                     if (result == regexp::match_result::Overflow)
                         throw_range_error("Maximum regular expression backtracking stack size exceeded");
-                    if (result == regexp::match_result::NoMatch || captures[0] >= static_cast<std::int32_t>(text.size()))
+                    if (result == regexp::match_result::NoMatch || tCaptures[0] >= static_cast<std::int32_t>(text.size()))
                         break;
-                    update_legacy_statics(s, captures, captures[0], program->captureCount);
-                    q = captures[0];
-                    auto const e = std::min(static_cast<double>(captures[1]), size);
+                    update_legacy_statics(s, tCaptures, tCaptures[0], program->captureCount);
+                    q = tCaptures[0];
+                    auto const e = std::min(static_cast<double>(tCaptures[1]), size);
                     if (e == p)
                     {
                         q = advance_string_index(text, q, unicodeMatching);
@@ -1001,7 +1005,7 @@ namespace neos::javascript_runtime
                     p = e;
                     for (std::uint32_t i = 1u; i <= program->captureCount; ++i)
                     {
-                        a.push_back(captures[i * 2u] == -1 ? Undefined : substring(text, captures[i * 2u], captures[i * 2u + 1u]));
+                        a.push_back(tCaptures[i * 2u] == -1 ? Undefined : substring(text, tCaptures[i * 2u], tCaptures[i * 2u + 1u]));
                         if (a.size() == lim)
                             return make_array(std::move(a));
                     }

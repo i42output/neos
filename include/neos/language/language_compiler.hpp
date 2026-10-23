@@ -91,6 +91,7 @@ namespace neos::language
         void begin_fragment(i_source_fragment&) override {}
         void end_fragment() override {}
         void preparse(i_source_fragment&) override {}
+        bool parsable_source(neolib::i_string_view const&, neolib::i_string&, neolib::i_vector<std::uint32_t>&) const override { return false; }
         bool complete_signature(i_function_signature&, neolib::i_string_view const&) override { return false; }
         type inferred_type(i_operand_type const& aOperand) override { return operand_type_of(operand_type{ aOperand }); }
         type parameter_type(neolib::i_string_view const&, std::uint32_t, type aType) override { return aType; }
@@ -192,27 +193,29 @@ namespace neos::language
             if (aPosition == 0u)
                 return;
             auto& code = aCode.fragmentCode.as_std_vector();
-            std::vector<std::uint32_t> calls;
+            thread_local std::vector<std::uint32_t> tCalls; // (scratch kept for reuse (one per call compiled))
+            tCalls.clear();
             for (auto const& r : aCode.fragmentRelocations)
                 if ((r.second() & BranchTarget) == 0u && r.first() >= 1u && code[r.first() - 1u] == static_cast<std::uint8_t>(
                     (r.second() & IndirectSignature) != 0u && (r.second() & DeferredCall) == 0u ? bytecode::opcode::CallIndirect : bytecode::opcode::CallFunction))
-                    calls.push_back(r.first() - 1u);
-            if (calls.empty())
+                    tCalls.push_back(r.first() - 1u);
+            if (tCalls.empty())
                 return;
-            std::sort(calls.begin(), calls.end());
+            std::sort(tCalls.begin(), tCalls.end());
             if (!aAll)
-                calls.erase(calls.begin(), std::prev(calls.end()));
-            emitter::bytes marker;
-            emitter::put_op(marker, bytecode::opcode::I64Const);
-            emitter::put_s64(marker, static_cast<std::int64_t>(bytecode::PositionMarker | aPosition));
-            emitter::put_op(marker, bytecode::opcode::Drop);
+                tCalls.erase(tCalls.begin(), std::prev(tCalls.end()));
+            thread_local emitter::bytes tMarker;
+            tMarker.clear();
+            emitter::put_op(tMarker, bytecode::opcode::I64Const);
+            emitter::put_s64(tMarker, static_cast<std::int64_t>(bytecode::PositionMarker | aPosition));
+            emitter::put_op(tMarker, bytecode::opcode::Drop);
             // (from the last: the earlier ones do not move)
-            for (auto c = calls.rbegin(); c != calls.rend(); ++c)
+            for (auto c = tCalls.rbegin(); c != tCalls.rend(); ++c)
             {
-                code.insert(code.begin() + *c, marker.begin(), marker.end());
+                code.insert(code.begin() + *c, tMarker.begin(), tMarker.end());
                 for (auto& r : aCode.fragmentRelocations)
                     if (r.first() >= *c)
-                        r.first() = r.first() + static_cast<std::uint32_t>(marker.size());
+                        r.first() = r.first() + static_cast<std::uint32_t>(tMarker.size());
             }
         }
         // functions

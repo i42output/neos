@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <unordered_set>
 #include "js.hpp"
 #include "api.hpp"
 #include "gc.hpp"
@@ -1209,6 +1210,7 @@ namespace neos::javascript_runtime
                 obj(aCooked).define_own_property(the_names().raw, property_descriptor::data(aRaw, 0u));
                 set_integrity_level(aCooked, true);
                 templates.emplace(key, aCooked);
+                retain_program(current_program());
                 return aCooked;
             });
         }
@@ -1605,6 +1607,30 @@ namespace neos::javascript_runtime
 #undef NEOS_JS_UNARY
     }
 
+    namespace
+    {
+        // (the programs whose code something refers to (a function they made, or a template object of theirs): they stay loaded)
+        std::unordered_set<void*>& retained_programs()
+        {
+            static std::unordered_set<void*> sPrograms;
+            return sPrograms;
+        }
+        void* sLastRetained = nullptr; // (retained: (one that is retained is never unloaded, so its address is not reused))
+    }
+
+    void retain_program(void* aProgram)
+    {
+        if (aProgram == sLastRetained)
+            return;
+        retained_programs().insert(aProgram);
+        sLastRetained = aProgram;
+    }
+
+    bool program_retained(void* aProgram)
+    {
+        return retained_programs().contains(aProgram);
+    }
+
     std::span<neos_rt_function const> api_functions()
     {
         return api::sFunctions;
@@ -1612,9 +1638,14 @@ namespace neos::javascript_runtime
 
     void program_ended()
     {
-        // (the running program has ended (its globals are about to go): its mirrors are no longer kept (a global lexical binding whose
-        // value was its mirror has its value back) and the values of its words that were kept no longer are)
-        auto* const program = current_program();
+        program_ended(current_program());
+    }
+
+    void program_ended(void* aProgram)
+    {
+        // (the program has ended (its globals are about to go): its mirrors are no longer kept (a global lexical binding whose value was
+        // its mirror has its value back) and the values of its words that were kept no longer are)
+        auto* const program = aProgram;
         auto& words = api::program_words();
         for (auto const& w : words)
         {

@@ -30,3 +30,47 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
+
+#include <neos/neos.hpp>
+#include <mutex>
+#include <optional>
+#include <neolib/file/file.hpp>
+
+namespace neos
+{
+    namespace
+    {
+        std::mutex& home_mutex()
+        {
+            static std::mutex sMutex;
+            return sMutex;
+        }
+
+        std::optional<std::string>& home_set()
+        {
+            static std::optional<std::string> sHome;
+            return sHome;
+        }
+    }
+
+    std::string home()
+    {
+        std::lock_guard<std::mutex> lock{ home_mutex() };
+        return home_set() ? *home_set() : neolib::program_directory();
+    }
+
+    void set_home(std::string const& aHome)
+    {
+        std::lock_guard<std::mutex> lock{ home_mutex() };
+        home_set() = aHome;
+    }
+
+    std::string installed_home()
+    {
+#if defined(NEOS_INSTALLED_HOME)
+        return NEOS_INSTALLED_HOME;
+#else
+        return neolib::program_directory();
+#endif
+    }
+}

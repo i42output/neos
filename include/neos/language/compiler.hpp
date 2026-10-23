@@ -33,6 +33,7 @@
 
 #pragma once
 
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -192,7 +193,8 @@ namespace neos::language
         text text;
     };
 
-    using fold_stack = neolib::vector<neolib::ref_ptr<i_ast_node>>;
+    // (a program's semantic concepts, in the order they are folded: most are folded (and erased) near its start, so it is a deque)
+    using fold_stack = std::deque<neolib::ref_ptr<i_ast_node>>;
 
     class compiler : public i_code_generator
     {
@@ -318,6 +320,8 @@ namespace neos::language
         bool compile(program& aProgram);
         void set_language_options(std::string const& aLanguage, std::string const& aOptions);
         bool compiles_at_run_time(std::string const& aLanguage) const;    ///< (the program compiled last, in the language: see i_language_compiler)
+        bool parsable_source(std::string const& aLanguage, std::string_view aSource, std::string& aResult, std::vector<std::uint32_t>& aPositions) const; ///< (see 
+                                                                        ///< i_language_compiler; false: the source as written)
         void set_quiet(bool aQuiet) { iQuiet = aQuiet; }    ///< (syntax errors are not reported on the standard error stream: only thrown)
         bool compile(program& aProgram, translation_unit& aUnit);
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
@@ -511,7 +515,16 @@ namespace neos::language
         std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
         inference iInference;
         bool iGlobalsDeclared = false;
-        std::map<void const*, std::tuple<bool, std::string, char const*>> iParsed; ///< parser -> source (and its address: the AST refers to it) of its last successful parse
+        // (the sources that compilation passes parsed (a pass parses those of the previous one again: e.g. a prelude's, whose fragment is made 
+        // again): the AST of each (its values refer to the text at base))
+        struct parsed_source
+        {
+            void const* parser = nullptr;   ///< (the last stage's)
+            std::string source;
+            char const* base = nullptr;
+            std::shared_ptr<parser::ast_node> ast;
+        };
+        std::deque<parsed_source> iParsed;
         std::vector<neolib::ref_ptr<i_language_compiler>> iLanguageCompilers;
         fragment iResult;                                       ///< (i_code_generator: the fragment returned)
         struct line_starts

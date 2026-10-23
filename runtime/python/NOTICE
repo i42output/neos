@@ -15,6 +15,21 @@ names the CPython sources it is derived from.
 
   argparse.cpp         Lib/argparse.py
   array.cpp            Modules/arraymodule.c
+  asyncio.cpp, asyncio_core.cpp, asyncio_futures.cpp, asyncio_loop.cpp,
+  asyncio_sync.cpp and asyncio_windows.cpp
+                       Lib/asyncio (its modules: base_events, base_futures,
+                       base_subprocess, base_tasks, constants, coroutines,
+                       events, exceptions, format_helpers, futures, locks, log,
+                       mixins, protocols, queues, runners, selector_events,
+                       staggered, streams, subprocess, taskgroups, tasks,
+                       threads, timeouts, transports, trsock, unix_events and
+                       windows_events)
+                       and Modules/_asynciomodule.c (Future, Task, the running
+                       loop and the current tasks); asyncio_loop.cpp and
+                       asyncio_sync.cpp were translated from Python by a
+                       Python-to-C++ translator (py2neos) (see uvloop below)
+  asyncio_*_docs.hpp   Lib/asyncio and Modules/_asynciomodule.c (their
+                       docstrings, generated)
   bytes.cpp            Objects/bytesobject.c, Objects/bytearrayobject.c and
                        Objects/bytes_methods.c
   calendar.cpp         Lib/calendar.py
@@ -22,23 +37,62 @@ names the CPython sources it is derived from.
   codecs.cpp           Objects/unicodeobject.c, Python/codecs.c and
                        Lib/encodings
   collections_abc.cpp  Lib/_collections_abc.py and Lib/collections/abc.py
-  collections.cpp      Lib/collections/__init__.py
+  cmd.cpp              Lib/cmd.py
+  collections.cpp      Lib/collections/__init__.py and Modules/_collectionsmodule.c
+                       (deque's and defaultdict's reductions)
+  compression.cpp      Lib/_compression.py
+  compat_pickle_tables.hpp
+                       Lib/_compat_pickle.py (its mappings, generated)
+  colorsys.cpp         Lib/colorsys.py
+  concurrent_futures.cpp
+                       Lib/concurrent/__init__.py and Lib/concurrent/futures
+                       (__init__.py, _base.py and thread.py: Copyright 2009
+                       Brian Quinlan. All Rights Reserved. Licensed to PSF under
+                       a Contributor Agreement.)
+  concurrent_futures_*_docs.hpp
+                       Lib/concurrent/futures (its docstrings, generated)
+  configparser.cpp     Lib/configparser.py
+  configparser_docs.hpp
+                       Lib/configparser.py (its docstrings, generated)
   contextlib.cpp       Lib/contextlib.py
+  contextvars.cpp      Python/context.c, Python/clinic/context.c.h and
+                       Modules/_contextvarsmodule.c
   csv.cpp              Modules/_csv.c and Lib/csv.py
   dataclasses.cpp      Lib/dataclasses.py
   datetime.cpp         Modules/_datetimemodule.c and Lib/_strptime.py
   decimal.cpp          Lib/_pydecimal.py
+  difflib.cpp          Lib/difflib.py
   enum.cpp             Lib/enum.py
   exec.cpp             Python/bltinmodule.c and Python/import.c (__import__:
                        PyImport_ImportModuleLevelObject and resolve_name)
                        and Lib/importlib/_bootstrap.py (_handle_fromlist)
+  fileinput.cpp        Lib/fileinput.py
   files.cpp            Lib/fnmatch.py, Lib/glob.py, Lib/shutil.py and
                        Lib/tempfile.py
   fractions.cpp        Lib/fractions.py
-  functools.cpp        Lib/functools.py
+  functools.cpp        Lib/functools.py and Modules/_functoolsmodule.c
+                       (partial's reduction)
+  getopt.cpp           Lib/getopt.py
+  graphlib.cpp         Lib/graphlib.py
+  gzip.cpp             Lib/gzip.py
+  hmac.cpp             Lib/hmac.py
+  html.cpp             Lib/html/__init__.py
+  html_entities.cpp    Lib/html/entities.py
+  html_parser.cpp      Lib/html/parser.py
+  generators.cpp       Objects/genobject.c (the asynchronous generators' hooks and
+                       finalization, the warning of a coroutine never awaited)
+  importlib.cpp        Lib/importlib/__init__.py, Lib/importlib/util.py and
+                       Lib/importlib/_bootstrap.py (import_module and its
+                       checks, reload's checks, find_spec, resolve_name and
+                       ModuleSpec)
   inspect.cpp          Lib/inspect.py
-  io.cpp               Modules/_io/_iomodule.c (open's mode) and
-                       Objects/exceptions.c (OSError's subclasses of errno)
+  io.cpp               Modules/_io/_iomodule.c (open's mode),
+                       Objects/exceptions.c (OSError's subclasses of errno),
+                       Modules/_io/bytesio.c and Modules/_io/stringio.c
+                       (their __getstate__ and __setstate__, StringIO's
+                       newline translation and line endings)
+  ipaddress.cpp        Lib/ipaddress.py (Copyright 2007 Google Inc. Licensed
+                       to PSF under a Contributor Agreement.)
   itertools.cpp        Modules/itertoolsmodule.c
   json.cpp             Modules/_json.c (the decoder's scanner)
   locale.cpp           Lib/locale.py
@@ -50,16 +104,32 @@ names the CPython sources it is derived from.
   logging_handlers.cpp Lib/logging/handlers.py
   logging_handlers_docs.hpp
                        Lib/logging/handlers.py (its docstrings, generated)
+  markupbase.cpp       Lib/_markupbase.py
+  mimetypes.cpp        Lib/mimetypes.py
+  netrc.cpp            Lib/netrc.py
   objects.cpp          Objects/floatobject.c, Objects/complexobject.c,
                        Objects/longobject.c, Objects/rangeobject.c,
                        Objects/sliceobject.c, Objects/tupleobject.c,
                        Objects/exceptions.c (BlockingIOError's
                        characters_written), Python/bltinmodule.c,
                        Python/pyhash.c (including its SipHash-1-3),
-                       Modules/mathmodule.c and Modules/cmathmodule.c
-  operator.cpp         Lib/heapq.py and Lib/copy.py
-  os.cpp               Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py and
-                       Modules/errnomodule.c (errno's Winsock codes)
+                       Modules/mathmodule.c and Modules/cmathmodule.c;
+                       the reductions (pickling) of Objects/listobject.c,
+                       Objects/dictobject.c, Objects/unicodeobject.c,
+                       Objects/methodobject.c and Objects/typeobject.c
+  operator.cpp         Lib/heapq.py, Lib/copy.py and Modules/_operator.c
+                       (itemgetter's, attrgetter's and methodcaller's
+                       reductions)
+  os.cpp               Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py,
+                       Modules/errnomodule.c (errno's Winsock codes) and
+                       Lib/os.py (PathLike, fsencode, fsdecode and
+                       get_exec_path)
+  pickle.cpp           Modules/_pickle.c, Modules/clinic/_pickle.c.h,
+                       Objects/picklebufobject.c, Lib/pickle.py and
+                       Lib/_compat_pickle.py
+  pickle_docs.hpp      Modules/_pickle.c, Modules/clinic/_pickle.c.h and
+                       Lib/pickle.py (their docstrings, generated)
+  posixsubprocess.cpp  Modules/_posixsubprocess.c
   pprint.cpp           Lib/pprint.py
   pyio.cpp             Lib/_pyio.py (the io module's classes), with the
                        behaviour and messages of Modules/_io/iobase.c,
@@ -73,7 +143,9 @@ names the CPython sources it is derived from.
                        docstrings, generated)
   pytime.hpp           Python/pytime.c
   queue.cpp            Lib/queue.py
+  quopri.cpp           Lib/quopri.py
   random.cpp           Modules/_randommodule.c and Lib/random.py
+  sched.cpp            Lib/sched.py
   select.cpp           Modules/selectmodule.c and Objects/fileobject.c
                        (PyObject_AsFileDescriptor)
   selectors.cpp        Lib/selectors.py
@@ -81,6 +153,7 @@ names the CPython sources it is derived from.
                        Lib/secrets.py, Lib/timeit.py and
                        Modules/signalmodule.c (signal_install_handlers)
   set.cpp              Objects/setobject.c
+  shlex.cpp            Lib/shlex.py
   socket.cpp           Modules/socketmodule.c, Python/fileutils.c
                        (set_inheritable) and Lib/encodings/idna.py (its
                        ASCII path)
@@ -88,6 +161,9 @@ names the CPython sources it is derived from.
                        generated)
   socket_docs.hpp      Modules/socketmodule.c and Lib/socket.py (their
                        docstrings, generated)
+  socketserver.cpp     Lib/socketserver.py
+  socketserver_docs.hpp
+                       Lib/socketserver.py (its docstrings, generated)
   socketpy.cpp         Lib/socket.py
   sockets.hpp          Python/errors.c, PC/errmap.h and Objects/exceptions.c
                        (Windows errors)
@@ -96,24 +172,50 @@ names the CPython sources it is derived from.
   string_formatter.cpp Lib/string.py (Formatter) and
                        Objects/stringlib/unicode_format.h
   structseq.cpp        Objects/structseq.c
+  subprocess.cpp       Lib/subprocess.py (Copyright (c) 2003-2005 by Peter
+                       Astrand <astrand@lysator.liu.se>. Licensed to PSF
+                       under a Contributor Agreement.), translated from
+                       Python by a Python-to-C++ translator (py2neos)
+  subprocess_docs.hpp  Lib/subprocess.py (its docstrings, generated)
+  *_docs.hpp of the modules above
+                       their docstrings, generated
   support.cpp          Objects/genericaliasobject.c and Lib/__future__.py
-  sys.cpp              Python/stdlib_module_names.h (sys.stdlib_module_names)
+  sys.cpp              Python/stdlib_module_names.h (sys.stdlib_module_names),
+                       Python/sysmodule.c (the asynchronous generators' hooks)
+                       and Python/errors.c (the default unraisable hook)
   text.cpp             Lib/textwrap.py
   textmodules.cpp      Lib/string.py (Template's pattern)
+  threads.cpp          Lib/threading.py, Lib/_threading_local.py and
+                       Modules/_threadmodule.c
   time.cpp             Modules/timemodule.c
+  tomllib.cpp, tomllib_parser.cpp, tomllib_re.cpp and tomllib_types.cpp
+                       Lib/tomllib (__init__.py, _parser.py, _re.py and
+                       _types.py: SPDX-License-Identifier: MIT;
+                       SPDX-FileCopyrightText: 2021 Taneli Hukkinen;
+                       Licensed to PSF under a Contributor Agreement.)
   traceback.cpp        Lib/linecache.py, Lib/traceback.py, Lib/_colorize.py and
                        Python/suggestions.c
   typemodules.cpp      Lib/_py_abc.py, Lib/abc.py, Lib/types.py and
                        Lib/numbers.py
   typing.cpp           Lib/typing.py and Objects/typevarobject.c
   typing_docs.hpp      Lib/typing.py (its docstrings, generated)
+  unixmodules.cpp      Modules/pwdmodule.c, Modules/grpmodule.c and
+                       Modules/fcntlmodule.c
   unicode_tables.hpp   Modules/unicodedata.c and str's methods: the Unicode
                        Character Database as they have it
   unicodedata.cpp      Modules/unicodedata.c
   uuid.cpp             Lib/uuid.py
+  urllib.cpp and urllib_parse.cpp
+                       Lib/urllib/__init__.py and Lib/urllib/parse.py
   values.cpp           Python/ceval.c (argument binding)
   warnings.cpp         Lib/warnings.py and Python/_warnings.c
   weakref.cpp          Objects/weakrefobject.c
+  winapi.cpp           Modules/_winapi.c and PC/msvcrtmodule.c (the
+                       functions and constants that subprocess uses)
+  zipfile.cpp          Lib/zipfile/__init__.py
+  zipfile_path.cpp     Lib/zipfile/_path/__init__.py
+  zipfile_path_glob.cpp
+                       Lib/zipfile/_path/glob.py
   zlib.cpp             Modules/zlibmodule.c
 
 
@@ -132,6 +234,38 @@ C++ (or, for src/compiler.cpp, to the code the compiler generates):
   include/neos/language/emit.hpp    Objects/floatobject.c (_float_div_mod)
   runtime/numpy/src/index.cpp       Objects/sliceobject.c
                                     (PySlice_AdjustIndices)
+
+
+uvloop (src/asyncio_core.cpp)
+-----------------------------
+
+CPython's Lib/asyncio/constants.py, Lib/asyncio/events.py and
+Lib/asyncio/sslproto.py contain code from uvloop
+(https://github.com/MagicStack/uvloop/tree/v0.16.0)
+(SPDX-License-Identifier: PSF-2.0 AND (MIT OR Apache-2.0)), used here under the
+MIT licence:
+
+The MIT License
+
+Copyright (c) 2015-2021 MagicStack Inc.  http://magic.io
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 
 BLAKE2 (src/hashlib.cpp)

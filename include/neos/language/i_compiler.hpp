@@ -201,13 +201,20 @@ namespace neos::language
         fragment(i_fragment const& aOther) :
             fragmentKind{ aOther.kind() },
             valueType{ aOther.value_type() },
-            fragmentCode{ aOther.code() },
-            fragmentRelocations{ aOther.relocations() },
+            fragmentCode{ aOther.code().data(), aOther.code().data() + aOther.code().size() },     // (contiguous: copied as bytes)
             fragmentSource{ aOther.source() },
             fragmentLvalue{ aOther.lvalue() },
             hasRange{ aOther.has_range() },
             rangeLow{ aOther.range_low() },
-            rangeHigh{ aOther.range_high() } {}
+            rangeHigh{ aOther.range_high() } 
+        {
+            // (by index: no iterators made)
+            auto const& relocations = aOther.relocations();
+            auto& copy = fragmentRelocations.as_std_vector();
+            copy.reserve(relocations.size());
+            for (std::size_t i = 0u; i < relocations.size(); ++i)
+                copy.emplace_back(relocations[i].first(), relocations[i].second());
+        }
 
         fragment_kind kind() const final { return fragmentKind; }
         type value_type() const final { return valueType; }

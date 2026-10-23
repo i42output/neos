@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -103,7 +104,20 @@ namespace neos::python_runtime
         inline void retain_static(neos_rt_object*) {}
         inline void release_static(neos_rt_object*) {}
 
-        inline void retain(object* aObject) { if (aObject != nullptr) aObject->type->retain(aObject); }
+        // (an object of this plugin's whose type's retain is retain_object (the commonest): retained here, without its type's call)
+#if defined(_MSC_VER)
+        __forceinline void retain(object* aObject) 
+#else
+        inline __attribute__((always_inline)) void retain(object* aObject) 
+#endif
+        { 
+            if (aObject == nullptr)
+                return;
+            if (auto const r = aObject->type->retain; r == &retain_object)
+                add_reference(*reinterpret_cast<header*>(aObject));
+            else
+                r(aObject); 
+        }
         inline void release(object* aObject) { if (aObject != nullptr) aObject->type->release(aObject); }
 
         // an owned reference
@@ -198,8 +212,23 @@ namespace neos::python_runtime
             static void* operator new(std::size_t aSize);
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
-        struct list_object { header h; std::vector<object*> items; ~list_object() { for (auto i : items) release(i); } };
-        struct tuple_object { header h; std::vector<object*> items; ~tuple_object() { for (auto i : items) release(i); } };
+        // (lists, tuples and dicts: as int's, their storage is a pool's (see objects.cpp))
+        struct list_object 
+        { 
+            header h; 
+            std::vector<object*> items; 
+            ~list_object() { for (auto i : items) release(i); } 
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
+        };
+        struct tuple_object 
+        { 
+            header h; 
+            std::vector<object*> items; 
+            ~tuple_object() { for (auto i : items) release(i); } 
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
+        };
         struct dict_object 
         { 
             header h; 
@@ -210,6 +239,8 @@ namespace neos::python_runtime
             object* binder = nullptr;                           ///< (a module's namespace (globals()): the getter of the module's 
                                                                 ///< names, which binds those that are set)
             ~dict_object() { for (auto& i : items) { release(i.first); release(i.second); } release(binder); } 
+            static void* operator new(std::size_t aSize);
+            static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
         struct slice_object { header h; object* start; object* stop; object* step; ~slice_object() { release(start); release(stop); release(step); } };
         struct range_object { header h; long long start; long long stop; long long step; };
@@ -222,7 +253,7 @@ namespace neos::python_runtime
             ~iterator_object() { release(sequence); } 
         };
         using native_function = neos_py_object* (*)(neos_py_context*, void*, neos_py_object*, neos_py_object*);
-        struct function_object { header h; std::string name; native_function function; void* data; object* self; bool binds = true; ~function_object() { release(self); } };  // (binds: a class's attribute is a method (CPython's builtins are not))
+        struct function_object { header h; std::string name; native_function function; void* data; object* self; bool binds = true; char const* module = nullptr; char const* doc = nullptr; ~function_object() { release(self); } };  // (binds: a class's attribute is a method (CPython's builtins are not); module: its module's name (null: builtins); doc: its docstring (null: none))
         struct singleton { neos_rt_object base; };
 
         inline neos_py_type sNoneType = make_type("python.NoneType", "NoneType", retain_static, release_static);
@@ -263,6 +294,7 @@ namespace neos::python_runtime
             if (type == &sListType.base) return NEOS_PY_LIST;
             if (type == &sTupleType.base) return NEOS_PY_TUPLE;
             if (type == &sDictType.base) return NEOS_PY_DICT;
+            if (type == &sNoneType.base) return NEOS_PY_NONE;
             return kind_of_other(aObject);
         }
         inline int kind_of_other(object* aObject)
@@ -340,6 +372,18 @@ namespace neos::python_runtime
             std::vector<std::pair<std::string, object*>> const& aNamespace);
         // (a class's isinstance test (e.g. collections.abc.Iterable's): an object is an instance if it is an instance of a subclass, or the test is 1)
         void set_class_instancecheck(object* aClass, int (*aCheck)(object*));
+        // (a type of a module (by its qualified name, e.g. "_contextvars.Token"): the attributes of its type object (e.g. Token.MISSING, 
+        // unbound methods): a new reference, or null (no exception) if it has none of that name)
+        void register_type_attributes(std::string const& aQualifiedName, object* (*aAttributes)(char const* aName));
+        // (a type of a module that cannot be derived from (as CPython's types without Py_TPFLAGS_BASETYPE): "type '...' is not an acceptable base type")
+        void register_final_type(std::string const& aQualifiedName);
+
+        // --- contextvars (contextvars.cpp)
+
+        object* context_copy_current();                 // (PyContext_CopyCurrent: a new context)
+        bool context_is(object* aObject);               // (a contextvars.Context)
+        bool context_run_enter(object* aContext);       // (PyContext_Enter: false if an exception was raised)
+        bool context_run_exit(object* aContext);        // (PyContext_Exit)
         bool is_class(object* aObject);
         bool is_subclass(object* aClass, object* aBase);   // (user classes: aBase is aClass or in its MRO)
         std::vector<object*> class_subclasses(object* aClass);  // (a user class's subclasses (borrowed))
@@ -399,6 +443,8 @@ namespace neos::python_runtime
 
         object* make_bytes(std::string aData);
         object* make_bytearray(std::string aData);
+        object* percent_format(std::string const& aFormat, object* aValues);   // (format % values (str))
+        object* b_ascii(std::vector<object*> const& aArgs, object* aKwargs);   // (ascii(object))
         bool bytes_like(object* aObject, std::string_view& aData);   // (bytes, bytearray, memoryview or a buffer provider's object: its data)
         // (the buffer protocol: an object's buffer (its data, whether it is read-only, and its items' format (a struct format, e.g. "i") and size))
         struct buffer_info
@@ -484,6 +530,7 @@ namespace neos::python_runtime
         };
         std::map<std::string, native_base_hooks, std::less<>>& native_bases();
         void write_unraisable(object* aObject);         // (the pending exception: "Exception ignored in: <aObject>" and its report)
+        void unraisable_report(object* aException, object* aMessage, object* aObject);  // (sys.__unraisablehook__'s report of an exception (aMessage: err_msg (a str, or null: none)))
         object* fn_tuple_of(object* aIterable);
         object* class_of(object* aObject);
         object* type_object_for(std::string const& aName, std::string const& aQualifiedName);
@@ -538,6 +585,12 @@ namespace neos::python_runtime
         // (a special method of a builtin type (e.g. __getitem__): aKind: the kind of aSelf (-1: any, unbound (aSelf null)); null if none)
         object* protocol_method(object* aSelf, int aKind, char const* aName);
         object* builtin_value(object* aObject);     // (an instance of a subclass of a builtin type (e.g. dict): its value (borrowed); else aObject)
+        object* object_attribute(object* aSelf, std::string_view aName);
+        bool constructing_bare();
+        bool small_int(object* aObject, long long& aValue);      // (an int (not a bool, nor a subclass's) of 64 bits: its value; false if not one)
+        bool default_new(object* aClass, object* aArgs, object*& aResult);    // (cls.__new__(cls, *args) if it is object.__new__ (aResult: the instance, or null: an exception); false: it is not)
+        object* optional_attribute(object* aObject, char const* aName);  // (getattr: null if it has no such attribute (no exception), or an exception)
+        bool default_reducible(object* aObject, object*& aDict);  // (an instance pickled as object.__reduce_ex__ does (its __dict__: aDict, borrowed (null: none)))   // (a type of a module is called by its __new__ with no arguments (e.g. copyreg.__newobj__(T)): T.__new__(T))  // (object's attribute aName, bound to aSelf (null: unbound); null if none)
         object* special_method(object* aObject, char const* aName);  // (a user class's method, bound (null if none: no exception))
         bool has_special_method(object* aObject, char const* aName);  // (whether a user class's instance has the method (special_method's))
         bool dict_update(object* aDict, object* aOther);
@@ -562,7 +615,9 @@ namespace neos::python_runtime
         char const* exception_type_name(object* aObject);   // (an exception's class's name: null if it is not an exception)
         std::vector<object*> const& tuple_items(object* aTuple);
         object* fn_caught(char const* aText);           // (the exception being handled, from its text (a new reference): fn_handled ends its handling)
+        object* fn_caught_natively(char const* aText);  // (fn_caught by native code (not by the program's frame: its traceback is the frames it passed through within the frame that called the native code))
         void fn_handled();
+        bool fn_exception_matches(object* aException, object* aClass);  // (except aClass (a class or a tuple of classes))
         object* b_with_items(std::vector<object*> const& aArgs, object* aKwargs);    // (support.cpp)
         object* b_match(std::vector<object*> const& aArgs, object* aKwargs);
         object* make_callable_iterator(object* aCallable, object* aSentinel); // (iter(callable, sentinel))
@@ -622,17 +677,29 @@ namespace neos::python_runtime
         object* make_traceback();                       // (an exception's __traceback__ before it is caught (support.cpp): it has no frame)
         object* make_traceback(frame_stack const& aStack, std::size_t aIndex, object* aNext); // (a frame's (steals aNext))
         neos_rt_frame const* traceback_frame(object* aTraceback); // (a traceback's frame: null if it has none)
+        bool is_traceback(object* aObject);
         object* make_frame(frame_stack const& aStack, std::size_t aIndex); // (a frame object)
         void frames_reported(std::string const& aText);  // (an exception (its text) that the program raised: the frames it is raised in)
-        object* frames_caught(object* aTraceback, std::string const& aText, bool aPropagates = false); // (an exception (its text) that is 
+        void frames_renamed(std::string const& aText, std::string const& aNewText);    // (its text, now another)
+        object* frames_caught(object* aTraceback, std::string const& aText, bool aPropagates = false, bool aNatively = false); // (an exception (its text) that is 
                                                         // caught: its traceback, from the traceback it has (aTraceback: borrowed); null: unchanged; 
                                                         // aPropagates: it propagates once it is handled (e.g. by a with statement's __exit__): the 
-                                                        // frames it was raised in are kept for the code that catches it)
+                                                        // frames it was raised in are kept for the code that catches it; aNatively: native code that 
+                                                        // the innermost frame called catches it (that frame is not one of its traceback's))
         void explicit_raise();                          // (the exception raised next is raised by a raise statement (not re-raised))
         void entering_frame();                          // (the exception raised next is raised as the innermost frame is entered (it is not in its traceback))
         long long recursion_limit();                    // (sys.getrecursionlimit() (sys.cpp))
         void fn_depth_check(std::int32_t aDepth);       // (the depth of calls: RecursionError beyond the limit)
         object* call_method_named(object* aObject, char const* aName, std::vector<object*> aArgs);  // (steals the arguments)
+        // (a native function whose arguments it binds itself (values.cpp's make_bound_function): called with aSelf (non-null: a method's 
+        // instance) first, then aArgs, with no tuple made for them; is_bound_function: whether it is one)
+        // (callable(*aArgs, **aKwargs) with no tuple made for them (unless the callable needs one); receiver.name(*aArgs, **aKwargs) with no 
+        // bound method made for it (as the program's method calls))
+        object* arguments_call(object* aCallable, std::span<object* const> aItems, object* aArgs, object* aKwargs);
+        object* method_call(object* aReceiver, char const* aName, std::span<object* const> aArgs, object* aKwargs);
+        object* interned_name(std::string_view aName);  // (a str of a name (e.g. a keyword argument's), made once: a new reference)
+        bool is_bound_function(object* aFunction);
+        object* bound_function_call(object* aFunction, object* aSelf, std::span<object* const> aArgs, object* aKwargs);
         object* fn_with_enter(object* aManager);    // (with manager: manager.__enter__() (CPython's TypeError if it has no __enter__ or __exit__))
         object* fn_import(char const* aName);
         bool write_out(std::string const& aText);      // (false: an exception (e.g. BrokenPipeError) has been raised)
@@ -666,6 +733,14 @@ namespace neos::python_runtime
         {
             ref const module{ fn_import(aModule) };
             return module ? getattr(module.get(), aName) : nullptr;
+        }
+        // (an attribute of a module, found once (e.g. copyreg.__newobj__): a new reference)
+        inline object* module_attribute_once(object*& aCache, char const* aModule, char const* aName)
+        {
+            if (aCache == nullptr)
+                aCache = module_attribute(aModule, aName);
+            retain(aCache);
+            return aCache;
         }
         // (a class whose methods are builtin functions (aMethods), with other attributes (aExtra: new references, which it steals))
         template <std::size_t N>
@@ -705,7 +780,7 @@ namespace neos::python_runtime
         {
             std::string const text = error_text();
             clear_error();
-            ref e{ fn_caught(text.c_str()) };
+            ref e{ fn_caught_natively(text.c_str()) };
             fn_handled();
             clear_error();
             return e;
@@ -737,6 +812,55 @@ namespace neos::python_runtime
             if (!is_exception_class(aQualifiedName))
                 user_exception_bases()[aQualifiedName] = std::move(aBases);
             return exception_class(aQualifiedName);
+        }
+        // (pickling an object of a builtin type: its __reduce__ (aReduce's function, of the object) and its __reduce_ex__ (object's: its 
+        // __reduce__'s); null if aName is neither)
+        inline object* reduce_ex_call(neos_py_context*, void*, neos_py_object* aArgs, neos_py_object* aKwargs)
+        {
+            auto const& items = tuple_items(aArgs);
+            if ((aKwargs != nullptr && length(aKwargs) > 0) || items.size() != 2u)
+                return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(items.empty() ? 0u : items.size() - 1u) + " given)");
+            ref const reduce{ getattr(items[0], "__reduce__") };
+            return reduce ? invoke(reduce.get(), {}) : nullptr;
+        }
+        inline object* reduce_method(object* aSelf, char const* aName, builtin_entry const& aReduce)
+        {
+            if (std::strcmp(aName, "__reduce__") == 0)
+                return make_function("__reduce__", call_builtin, const_cast<builtin_entry*>(&aReduce), aSelf);
+            if (std::strcmp(aName, "__reduce_ex__") == 0)
+                return make_function("__reduce_ex__", reduce_ex_call, nullptr, aSelf);
+            return nullptr;
+        }
+        // (a module's functions that CPython's module imports from its C module (e.g. operator's, _operator's): their __module__ (aNames: 
+        // those named (none: all)))
+        inline void set_functions_module(std::vector<std::pair<std::string, object*>>& aAttributes, char const* aModule, std::initializer_list<std::string_view> aNames = {})
+        {
+            for (auto& a : aAttributes)
+                if (a.second != nullptr && kind_of(a.second) == NEOS_PY_FUNCTION && as<function_object>(a.second)->self == nullptr &&
+                    (aNames.size() == 0u || std::find(aNames.begin(), aNames.end(), std::string_view{ a.first }) != aNames.end()))
+                    as<function_object>(a.second)->module = aModule;
+        }
+        // (the attributes of a C module of CPython's (e.g. _operator) that the runtime's module (aModule, e.g. operator) implements: its
+        // functions whose __module__ is aCModule (see set_functions_module), and the attributes aNames)
+        inline bool c_module_attributes(char const* aModule, char const* aCModule, std::initializer_list<char const*> aNames,
+            std::vector<std::pair<std::string, object*>>& aAttributes)
+        {
+            ref const m{ fn_import(aModule) };
+            ref const d{ m ? getattr(m.get(), "__dict__") : nullptr };
+            if (!d)
+                return false;
+            for (auto const& [key, value] : as<dict_object>(d.get())->items)
+                if (kind_of(key) == NEOS_PY_STR && kind_of(value) == NEOS_PY_FUNCTION && as<function_object>(value)->module != nullptr &&
+                    std::strcmp(as<function_object>(value)->module, aCModule) == 0)
+                    aAttributes.emplace_back(as<str_object>(key)->value, new_reference(value));
+            for (auto n : aNames)
+            {
+                auto const value = getattr(m.get(), n);
+                if (value == nullptr)
+                    return false;
+                aAttributes.emplace_back(n, value);
+            }
+            return true;
         }
         inline int attribute_truth(object* aObject, char const* aName)  // (-1: an exception)
         {
@@ -783,8 +907,14 @@ namespace neos::python_runtime
         object* b_async_iter(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_async_with(std::vector<object*> const& aArgs, object* aKwargs);
         object* fn_awaitable_iterator(object* aAwaitable);   // (an awaitable's iterator (a new reference))
-        int fn_await_step(object* aIterator, object* aSent, object* aThrown, object*& aValue);  // (1: yielded, 0: finished (its result), -1: an exception)
+        int fn_await_step(object* aIterator, object* aSent, object* aThrown, object*& aValue);
+        // (a native iterator of an awaitable that finishes with a value (e.g. a future's): whether an await is stepping it (taken as its next
+        // begins: the value can then be given with finish_with_value, rather than raised as StopIteration's); finish_with_value steals aValue)
+        bool awaiting_value();
+        void finish_with_value(object* aValue);  // (1: yielded, 0: finished (its result), -1: an exception)
         bool fn_is_coroutine(object* aObject);
+        object*& asyncgen_firstiter();          // (sys.set_asyncgen_hooks's: this thread's (a new reference; null: none))
+        object*& asyncgen_finalizer();
         void generators_end();
         bool generator_stop(object* aIterator);
 

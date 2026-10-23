@@ -51,6 +51,11 @@
 #include "python.hpp"
 #include "objects.hpp"
 
+namespace neos::python_runtime::detail
+{
+    void resolve_raised_text(std::string& aText);
+}
+
 namespace neos::python_runtime
 {
     namespace
@@ -88,8 +93,17 @@ namespace neos::python_runtime
 
     char const* result(std::string aValue)
     {
-        tResult = std::move(aValue);
-        return tResult.c_str();
+        // (a thread_local's address: found once)
+        auto& r = tResult;
+        r = std::move(aValue);
+        return r.c_str();
+    }
+
+    char const* result_view(std::string_view aValue)
+    {
+        auto& r = tResult;
+        r.assign(aValue);
+        return r.c_str();
     }
 
     void raise(std::string const& aType, std::string const& aMessage)
@@ -108,6 +122,9 @@ namespace neos::python_runtime
 
     char const* error_text()
     {
+        // (an exception that the program raised, whose message is a token: its message, now that it is read)
+        if (tError.find('\x01') != std::string::npos)
+            detail::resolve_raised_text(tError);
         return tError.c_str();
     }
 

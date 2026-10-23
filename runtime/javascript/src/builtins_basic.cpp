@@ -363,17 +363,18 @@ namespace neos::javascript_runtime
                 // (a power of two radix: exactly rounded from the bits)
                 std::string hex;
                 int const bits = r == 2 ? 1 : r == 4 ? 2 : r == 8 ? 3 : r == 16 ? 4 : 5;
-                std::vector<int> b;
+                thread_local std::vector<int> tB;
+                tB.clear();
                 for (std::size_t i = 0u; i < end; ++i)
                 {
                     auto const d = es::detail::digit_value(text[i]);
                     for (int k = bits - 1; k >= 0; --k)
-                        b.push_back((d >> k) & 1);
+                        tB.push_back((d >> k) & 1);
                 }
-                while ((b.size() % 4u) != 0u)
-                    b.insert(b.begin(), 0);
-                for (std::size_t i = 0u; i < b.size(); i += 4u)
-                    hex.push_back("0123456789abcdef"[b[i] * 8 + b[i + 1u] * 4 + b[i + 2u] * 2 + b[i + 3u]]);
+                while ((tB.size() % 4u) != 0u)
+                    tB.insert(tB.begin(), 0);
+                for (std::size_t i = 0u; i < tB.size(); i += 4u)
+                    hex.push_back("0123456789abcdef"[tB[i] * 8 + tB[i + 1u] * 4 + tB[i + 2u] * 2 + tB[i + 3u]]);
                 v = std::strtod(("0x" + hex).c_str(), nullptr);
             }
             else

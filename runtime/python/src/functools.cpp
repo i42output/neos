@@ -30,9 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/functools.py), Copyright (c) 2001-2024 Python Software
-  Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
-  runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the neos Python runtime plugin and adapted to
+  Portions of this file are derived from CPython 3.13 (Lib/functools.py and Modules/_functoolsmodule.c (partial's
+  __reduce__ and __setstate__)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used
+  under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from
+  Python and C to C++ for the neos Python runtime plugin and adapted to
   its object model (see runtime/python/NOTICE).
 */
 
@@ -160,6 +161,75 @@ namespace neos::python_runtime
                         }
                         return d.release_ownership();
                     }
+                    // (pickling: (partial, (func,), (func, args, keywords, __dict__ or None)), and __setstate__)
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            auto const& p = as_partial(aArgs.at(0u));
+                            ref const cls{ class_of(aArgs[0]) };
+                            ref dict;
+                            if (p.attributes.empty())
+                                dict = ref{ borrowed(none()) };
+                            else
+                            {
+                                dict = ref{ make_dict() };
+                                for (auto const& a : p.attributes)
+                                {
+                                    ref const key{ make_str(a.first) };
+                                    dict_set(dict.get(), key.get(), a.second);
+                                }
+                            }
+                            return make_tuple({ borrowed(cls.get()), make_tuple({ borrowed(p.function) }), make_tuple({ borrowed(p.function), borrowed(p.args),
+                                borrowed(p.keywords), dict.release_ownership() }) });
+                        } };
+                    static builtin_entry const sReduceEx{ "__reduce_ex__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            if (aArgs.size() != 2u)
+                                return error("TypeError", "__reduce_ex__() takes exactly one argument (" + std::to_string(aArgs.size() - 1u) + " given)");
+                            return sReduce.function({ aArgs[0] }, nullptr);
+                        } };
+                    static builtin_entry const sSetstate{ "__setstate__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            if (aArgs.size() != 2u)
+                                return error("TypeError", "__setstate__() takes exactly one argument (" + std::to_string(aArgs.size() - 1u) + " given)");
+                            auto& p = as_partial(aArgs[0]);
+                            auto const state = aArgs[1];
+                            if (kind_of(state) != NEOS_PY_TUPLE)
+                                return error("TypeError", "argument to __setstate__ must be a tuple");
+                            auto const& items = as<tuple_object>(state)->items;
+                            if (items.size() != 4u)
+                                return error("TypeError", "expected 4 items in state, got " + std::to_string(items.size()));
+                            auto const fn = items[0];
+                            auto const fnargs = items[1];
+                            auto const kw = items[2];
+                            auto const dict = items[3];
+                            ref const callable{ call_with(fn_builtin("callable"), { borrowed(fn) }) };
+                            if (!callable || truth(callable.get()) != 1 || kind_of(builtin_value(fnargs)) != NEOS_PY_TUPLE ||
+                                (kw != none() && kind_of(builtin_value(kw)) != NEOS_PY_DICT))
+                                return error("TypeError", "invalid partial state");
+                            std::vector<object*> args;
+                            for (auto a : as<tuple_object>(builtin_value(fnargs))->items)
+                                args.push_back(borrowed(a));
+                            ref keywords{ make_dict() };
+                            if (kw != none())
+                                dict_update(keywords.get(), kw);
+                            release(p.function);
+                            release(p.args);
+                            release(p.keywords);
+                            p.function = borrowed(fn);
+                            p.args = make_tuple(std::move(args));
+                            p.keywords = keywords.release_ownership();
+                            for (auto& a : p.attributes)
+                                release(a.second);
+                            p.attributes.clear();
+                            if (dict != none() && kind_of(builtin_value(dict)) == NEOS_PY_DICT)
+                                for (auto const& item : as<dict_object>(builtin_value(dict))->items)
+                                    if (kind_of(item.first) == NEOS_PY_STR)
+                                        p.attributes.emplace_back(as<str_object>(item.first)->value, borrowed(item.second));
+                            return borrowed(none());
+                        } };
+                    for (auto e : { &sReduce, &sReduceEx, &sSetstate })
+                        if (std::strcmp(aName, e->name) == 0)
+                            return make_function(e->name, call_builtin, const_cast<builtin_entry*>(e), aSelf);
                     return error("AttributeError", std::string{ "'functools.partial' object has no attribute '" } + aName + "'");
                 };
                 type.setattr = [](neos_py_context*, object* aSelf, char const* aName, object* aValue) -> int
@@ -1159,6 +1229,7 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sFunctoolsFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                set_functions_module(aAttributes, "_functools", { "reduce", "cmp_to_key" });
                 aAttributes.emplace_back("partial", context()->type_new(context(), "partial", "functools.partial", new_partial, nullptr, partial_instancecheck));
                 aAttributes.emplace_back("WRAPPER_ASSIGNMENTS", make_tuple({ make_str("__module__"), make_str("__name__"), make_str("__qualname__"),
                     make_str("__doc__"), make_str("__annotations__"), make_str("__type_params__") }));
@@ -1181,6 +1252,9 @@ namespace neos::python_runtime
             }
 
             inline bool const sFunctools = register_module("functools", functools_module);
+            // (CPython's C module _functools: functools's reduce, cmp_to_key and partial)
+            inline bool const sFunctoolsC = register_module("_functools", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                { return c_module_attributes("functools", "_functools", { "partial" }, aAttributes); });
         }
     }
 }

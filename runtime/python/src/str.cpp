@@ -494,7 +494,8 @@ namespace neos::python_runtime
                     maxsplit = std::numeric_limits<long long>::max();
                 std::u32string storage;
                 auto const& text = points_of(aSelf, storage);
-                std::vector<std::u32string_view> parts;
+                thread_local std::vector<std::u32string_view> tParts;
+                tParts.clear();
                 std::u32string_view const view{ text };
                 if (a[0] == nullptr || kind_of(a[0]) == NEOS_PY_NONE)
                 {
@@ -510,13 +511,13 @@ namespace neos::python_runtime
                             auto j = i;
                             while (j < text.size() && !is_space(text[j]))
                                 ++j;
-                            parts.push_back(view.substr(i, j - i));
+                            tParts.push_back(view.substr(i, j - i));
                             i = j;
                         }
                         while (i < text.size() && is_space(text[i]))
                             ++i;
                         if (i < text.size())
-                            parts.push_back(view.substr(i));
+                            tParts.push_back(view.substr(i));
                     }
                     else
                     {
@@ -530,14 +531,14 @@ namespace neos::python_runtime
                             auto j = i;
                             while (j > 0u && !is_space(text[j - 1u]))
                                 --j;
-                            parts.push_back(view.substr(j, i - j));
+                            tParts.push_back(view.substr(j, i - j));
                             i = j;
                         }
                         while (i > 0u && is_space(text[i - 1u]))
                             --i;
                         if (i > 0u)
-                            parts.push_back(view.substr(0u, i));
-                        std::reverse(parts.begin(), parts.end());
+                            tParts.push_back(view.substr(0u, i));
+                        std::reverse(tParts.begin(), tParts.end());
                     }
                 }
                 else
@@ -555,10 +556,10 @@ namespace neos::python_runtime
                             auto const j = maxsplit > 0 ? view.find(separator, i) : std::u32string_view::npos;
                             if (j == std::u32string_view::npos)
                             {
-                                parts.push_back(view.substr(i));
+                                tParts.push_back(view.substr(i));
                                 break;
                             }
-                            parts.push_back(view.substr(i, j - i));
+                            tParts.push_back(view.substr(i, j - i));
                             i = j + separator.size();
                             --maxsplit;
                         }
@@ -571,18 +572,18 @@ namespace neos::python_runtime
                             auto const j = maxsplit > 0 && end >= separator.size() ? view.substr(0u, end).rfind(separator) : std::u32string_view::npos;
                             if (j == std::u32string_view::npos)
                             {
-                                parts.push_back(view.substr(0u, end));
+                                tParts.push_back(view.substr(0u, end));
                                 break;
                             }
-                            parts.push_back(view.substr(j + separator.size(), end - j - separator.size()));
+                            tParts.push_back(view.substr(j + separator.size(), end - j - separator.size()));
                             end = j;
                             --maxsplit;
                         }
-                        std::reverse(parts.begin(), parts.end());
+                        std::reverse(tParts.begin(), tParts.end());
                     }
                 }
                 std::vector<object*> items;
-                for (auto const& p : parts)
+                for (auto const& p : tParts)
                     items.push_back(make_text(p));
                 return make_list(std::move(items));
             }
@@ -613,13 +614,14 @@ namespace neos::python_runtime
                 if (!slice_index(a[1], 0, start) || !slice_index(a[2], std::numeric_limits<long long>::max(), end))
                     return nullptr;
                 std::string const bare = aStart ? "startswith" : "endswith";
-                std::vector<object*> candidates;
+                thread_local std::vector<object*> tCandidates;
+                tCandidates.clear();
                 if (kind_of(a[0]) == NEOS_PY_TUPLE)
                 {
-                    candidates = as<tuple_object>(a[0])->items;
+                    tCandidates = as<tuple_object>(a[0])->items;
                 }
                 else if (kind_of(a[0]) == NEOS_PY_STR)
-                    candidates.push_back(a[0]);
+                    tCandidates.push_back(a[0]);
                 else
                     return error("TypeError", bare + " first arg must be str or a tuple of str, not " + type_name(a[0]));
                 // (as UTF-8 (its code points are its bytes if it is ASCII; a prefix or suffix of its code points is one of its bytes): if 
@@ -628,7 +630,7 @@ namespace neos::python_runtime
                 if (self.is_ascii() || (start == 0 && end == std::numeric_limits<long long>::max()))
                 {
                     std::string_view const bytes{ self.value };
-                    for (auto c : candidates)
+                    for (auto c : tCandidates)
                     {
                         if (kind_of(c) != NEOS_PY_STR)
                             return error("TypeError", "tuple for " + bare + " must only contain str, not " + type_name(c));
@@ -647,7 +649,7 @@ namespace neos::python_runtime
                 }
                 std::u32string storage;
                 auto const& text = points_of(aSelf, storage);
-                for (auto c : candidates)
+                for (auto c : tCandidates)
                 {
                     if (kind_of(c) != NEOS_PY_STR)
                         return error("TypeError", "tuple for " + bare + " must only contain str, not " + type_name(c));
@@ -748,8 +750,12 @@ namespace neos::python_runtime
                 std::vector<object*> a;
                 if (!parse_arguments("str.join", aArgs, aKwargs, { "iterable" }, 1u, 1u, a))
                     return nullptr;
-                std::vector<object*> items;
-                if (!collect(a[0], items))
+                // (a list's or a tuple's items: as they are (joining them runs no code that could change them); else those of the iterable)
+                std::vector<object*> collected;
+                std::vector<object*> const* sequence = &collected;
+                if (auto const k = kind_of(a[0]); k == NEOS_PY_LIST || k == NEOS_PY_TUPLE)
+                    sequence = k == NEOS_PY_LIST ? &as<list_object>(a[0])->items : &tuple_items(a[0]);
+                else if (!collect(a[0], collected))
                 {
                     if (std::string_view{ error_text() }.starts_with("TypeError: '"))
                     {
@@ -758,20 +764,31 @@ namespace neos::python_runtime
                     }
                     return nullptr;
                 }
+                auto const& items = *sequence;
+                auto const& separator = as<str_object>(aSelf)->value;
                 std::string result;
                 std::string message;
-                for (std::size_t i = 0u; i < items.size() && message.empty(); ++i)
+                std::size_t size = 0u;
+                for (std::size_t i = 0u; i < items.size(); ++i)
                 {
                     if (kind_of(items[i]) != NEOS_PY_STR)
                     {
                         message = "sequence item " + std::to_string(i) + ": expected str instance, " + type_name(items[i]) + " found";
                         break;
                     }
-                    if (i != 0u)
-                        result += as<str_object>(aSelf)->value;
-                    result += as<str_object>(items[i])->value;
+                    size += as<str_object>(items[i])->value.size() + (i != 0u ? separator.size() : 0u);
                 }
-                for (auto item : items)
+                if (message.empty())
+                {
+                    result.reserve(size);
+                    for (std::size_t i = 0u; i < items.size(); ++i)
+                    {
+                        if (i != 0u)
+                            result += separator;
+                        result += as<str_object>(items[i])->value;
+                    }
+                }
+                for (auto item : collected)
                     release(item);
                 if (!message.empty())
                     return error("TypeError", message);

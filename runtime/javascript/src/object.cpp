@@ -490,25 +490,28 @@ namespace neos::javascript_runtime
 
     value_list object::ordinary_own_property_keys()
     {
-        std::vector<std::pair<std::uint32_t, value>> indices;
-        std::vector<value> strings;
-        std::vector<value> symbols;
+        thread_local std::vector<std::pair<std::uint32_t, value>> tIndices;
+        thread_local std::vector<value> tStrings;
+        thread_local std::vector<value> tSymbols;
+        tIndices.clear();
+        tStrings.clear();
+        tSymbols.clear();
         properties.for_each([&](property const& p)
         {
             if (is_symbol(p.key))
-                symbols.push_back(p.key);
+                tSymbols.push_back(p.key);
             else if (auto const index = array_index(p.key))
-                indices.emplace_back(*index, p.key);
+                tIndices.emplace_back(*index, p.key);
             else
-                strings.push_back(p.key);
+                tStrings.push_back(p.key);
         });
-        std::sort(indices.begin(), indices.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
+        std::sort(tIndices.begin(), tIndices.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
         value_list result;
-        result.reserve(indices.size() + strings.size() + symbols.size());
-        for (auto const& i : indices)
+        result.reserve(tIndices.size() + tStrings.size() + tSymbols.size());
+        for (auto const& i : tIndices)
             result.push_back(i.second);
-        result.insert(result.end(), strings.begin(), strings.end());
-        result.insert(result.end(), symbols.begin(), symbols.end());
+        result.insert(result.end(), tStrings.begin(), tStrings.end());
+        result.insert(result.end(), tSymbols.begin(), tSymbols.end());
         return result;
     }
 

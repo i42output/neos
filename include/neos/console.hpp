@@ -41,8 +41,9 @@ namespace neos
 {
     // the neos console's commands (the neos program's, and those of a session that a host (e.g. an IDE) runs): the console
     // input aConsoleInput (a command (see "help"), or in interactive mode an expression to evaluate) on the context aContext,
-    // whose standard streams (see i_context::cin) its output and errors go to; returns false if the command is quit
-    bool process_command(context& aContext, bool& aInteractive, std::string const& aConsoleInput);
+    // whose standard streams (see i_context::cin) its output and errors go to; returns false if the command is quit; aColour: the output 
+    // is to a terminal that colours text (ANSI escape sequences): e.g. "list" syntax highlights the program
+    bool process_command(context& aContext, bool& aInteractive, std::string const& aConsoleInput, bool aColour = false);
     // the console's prompt (as the context is: the language of the schema loaded, and whether a program is running or the
     // console is in interactive mode)
     std::string console_prompt(context const& aContext, bool aInteractive);

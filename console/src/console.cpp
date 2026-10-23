@@ -42,6 +42,17 @@
 #include <neos/context.hpp>
 #include <neos/image.hpp>
 #include <neos/console.hpp>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 using namespace std::literals::string_literals;
 
@@ -73,6 +84,18 @@ namespace
         }
         return {};
     }
+
+    // (the console's output is a terminal that colours text (ANSI escape sequences: on Windows, enabled))
+    bool colour_output()
+    {
+#if defined(_WIN32)
+        auto const output = ::GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        return output != INVALID_HANDLE_VALUE && ::GetConsoleMode(output, &mode) && ::SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#else
+        return ::isatty(STDOUT_FILENO) != 0;
+#endif
+    }
 }
 
 void main_loop(boost::program_options::variables_map& aOptions)
@@ -81,6 +104,7 @@ void main_loop(boost::program_options::variables_map& aOptions)
     neos::context context{ std::cout };
     bool interactive = false;
     bool first = true;
+    bool const colour = colour_output();
     for (;;)
     {
         // todo: non-interactive mode (stdin goes straight to vm stdin)
@@ -124,7 +148,7 @@ void main_loop(boost::program_options::variables_map& aOptions)
             std::cout << std::endl;
             return;
         }
-        if (!process_command(context, interactive, line))
+        if (!process_command(context, interactive, line, colour))
             return;
     }
 }

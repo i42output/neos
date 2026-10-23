@@ -70,13 +70,14 @@ namespace neos::javascript_runtime
                 ++exponent;
             }
             // (a big decimal number (base 10^9 limbs, little endian))
-            std::vector<std::uint32_t> limbs;
+            thread_local std::vector<std::uint32_t> tLimbs;
+            tLimbs.clear();
             for (auto m = mantissa; m != 0u; m /= 1000000000u)
-                limbs.push_back(static_cast<std::uint32_t>(m % 1000000000u));
+                tLimbs.push_back(static_cast<std::uint32_t>(m % 1000000000u));
             auto const multiply = [&](std::uint32_t aFactor)
             {
                 std::uint64_t carry = 0u;
-                for (auto& l : limbs)
+                for (auto& l : tLimbs)
                 {
                     auto const v = static_cast<std::uint64_t>(l) * aFactor + carry;
                     l = static_cast<std::uint32_t>(v % 1000000000u);
@@ -84,7 +85,7 @@ namespace neos::javascript_runtime
                 }
                 while (carry != 0u)
                 {
-                    limbs.push_back(static_cast<std::uint32_t>(carry % 1000000000u));
+                    tLimbs.push_back(static_cast<std::uint32_t>(carry % 1000000000u));
                     carry /= 1000000000u;
                 }
             };
@@ -100,10 +101,10 @@ namespace neos::javascript_runtime
                     --decimalExponent;
                 }
             std::string digits;
-            for (auto l = limbs.rbegin(); l != limbs.rend(); ++l)
+            for (auto l = tLimbs.rbegin(); l != tLimbs.rend(); ++l)
             {
                 char buffer[16];
-                if (l == limbs.rbegin())
+                if (l == tLimbs.rbegin())
                     digits += std::string{ buffer, static_cast<std::size_t>(std::to_chars(buffer, buffer + sizeof(buffer), *l).ptr - buffer) };
                 else
                 {

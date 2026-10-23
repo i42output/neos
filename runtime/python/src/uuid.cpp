@@ -153,6 +153,9 @@ namespace neos::python_runtime
             // (UUID(hex=None, bytes=None, bytes_le=None, fields=None, int=None, version=None, *, is_safe=SafeUUID.unknown))
             object* uuid_new(neos_py_context*, void*, object* aArgs, object* aKwargs)
             {
+                // (UUID.__new__(UUID) (unpickling): a nil UUID, whose state is set next (__setstate__))
+                if (as<tuple_object>(aArgs)->items.empty() && (aKwargs == nullptr || as<dict_object>(aKwargs)->items.empty()) && constructing_bare())
+                    return make_uuid(uuid_bytes{});
                 std::vector<object*> a;
                 if (!parse_arguments("UUID", as<tuple_object>(aArgs)->items, aKwargs, { "hex", "bytes", "bytes_le", "fields", "int", "version", "is_safe" }, 0u, 0u, a))
                     return nullptr;
@@ -331,7 +334,58 @@ namespace neos::python_runtime
                             return make_int(static_cast<long long>(bits_of(u.value, 76u, 4u)));
                         return new_reference(none());
                     }
-                    if (name == "__int__" || name == "__copy__" || name == "__deepcopy__" || name == "__getstate__" || name == "__reduce__")
+                    // (pickling, as object's (__getstate__'s state): (copyreg.__newobj__, (UUID,), state) (protocols 0 and 1: 
+                    // (copyreg._reconstructor, (UUID, object, None), state)), and __setstate__)
+                    if (name == "__reduce_ex__" || name == "__reduce__" || name == "__setstate__")
+                        return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object* aKwargs) -> object*
+                        {
+                            auto const& args = as<tuple_object>(aArgs)->items;
+                            std::string_view const method{ static_cast<char const*>(aData) };
+                            if ((aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()) || args.size() != (method == "__reduce__" ? 1u : 2u))
+                                return error("TypeError", std::string{ method } + "() takes " + (method == "__reduce__" ? "no arguments" : "exactly one argument"));
+                            auto& u = as_uuid(args[0]);
+                            if (method == "__setstate__")
+                            {
+                                if (kind_of(args[1]) != NEOS_PY_DICT)
+                                    return error("TypeError", "state is not a dictionary");
+                                ref const intKey{ make_str("int") };
+                                ref const safeKey{ make_str("is_safe") };
+                                auto const i = dict_find(args[1], intKey.get());
+                                if (i < 0)
+                                    return i == -2 ? nullptr : (raise_key_error(intKey.get()), nullptr);
+                                if (!bytes_of_int(as<dict_object>(args[1])->items[static_cast<std::size_t>(i)].second, u.value))
+                                    return nullptr;
+                                ref safe{ new_reference(sSafeUnknown != nullptr ? sSafeUnknown : none()) };
+                                if (auto const s = dict_find(args[1], safeKey.get()); s >= 0 && sSafeEnum != nullptr)
+                                {
+                                    safe = ref{ invoke(sSafeEnum, { new_reference(as<dict_object>(args[1])->items[static_cast<std::size_t>(s)].second) }) };
+                                    if (!safe)
+                                        return nullptr;
+                                }
+                                release(u.isSafe);
+                                u.isSafe = safe.release_ownership();
+                                return new_reference(none());
+                            }
+                            long long proto = 0;
+                            if (method == "__reduce_ex__" && !to_index(args[1], proto))
+                                return nullptr;
+                            ref const getstate{ getattr(args[0], "__getstate__") };
+                            ref const state{ getstate ? invoke(getstate.get(), {}) : nullptr };
+                            ref const cls{ class_of(args[0]) };
+                            if (!state)
+                                return nullptr;
+                            if (proto >= 2)
+                            {
+                                ref const newobj{ module_attribute("copyreg", "__newobj__") };
+                                return newobj ? make_tuple({ new_reference(newobj.get()), make_tuple({ new_reference(cls.get()) }), new_reference(state.get()),
+                                    new_reference(none()), new_reference(none()) }) : nullptr;
+                            }
+                            ref const reconstructor{ module_attribute("copyreg", "_reconstructor") };
+                            ref const objectType{ fn_builtin("object") };
+                            return reconstructor && objectType ? make_tuple({ new_reference(reconstructor.get()), make_tuple({ new_reference(cls.get()),
+                                new_reference(objectType.get()), new_reference(none()) }), new_reference(state.get()) }) : nullptr;
+                        }, const_cast<char*>(name == "__reduce_ex__" ? "__reduce_ex__" : name == "__reduce__" ? "__reduce__" : "__setstate__"), aSelf);
+                    if (name == "__int__" || name == "__copy__" || name == "__deepcopy__" || name == "__getstate__")
                         return make_function(aName, [](neos_py_context*, void* aData, object* aArgs, object*) -> object*
                         {
                             auto const& args = as<tuple_object>(aArgs)->items;
@@ -350,19 +404,9 @@ namespace neos::python_runtime
                                 clear_error();
                                 return new_reference(d.get());
                             }
-                            if (method == "__reduce__")
-                            {
-                                ref const cls{ module_attribute("uuid", "UUID") };
-                                ref const value{ int_of(as_uuid(self).value) };
-                                ref const kw{ keywords({ { "int", value.get() } }) };
-                                // (UUID(int=value))
-                                ref const functools{ module_attribute("functools", "partial") };
-                                ref const maker{ functools ? call(functools.get(), ref{ make_tuple({ new_reference(cls.get()) }) }.get(), kw.get()) : nullptr };
-                                return maker ? make_tuple({ new_reference(maker.get()), make_tuple() }) : nullptr;
-                            }
                             return new_reference(self);
                         }, const_cast<char*>(std::string_view{ aName } == "__int__" ? "__int__" : std::string_view{ aName } == "__copy__" ? "__copy__" :
-                            std::string_view{ aName } == "__deepcopy__" ? "__deepcopy__" : std::string_view{ aName } == "__getstate__" ? "__getstate__" : "__reduce__"), aSelf);
+                            std::string_view{ aName } == "__deepcopy__" ? "__deepcopy__" : "__getstate__"), aSelf);
                     return error("AttributeError", std::string{ "'UUID' object has no attribute '" } + aName + "'");
                 };
                 type.setattr = [](neos_py_context*, object*, char const*, object*) -> int

@@ -686,7 +686,8 @@ namespace neos
                             }
                             auto const needed = Boundary - aStart % Boundary;
                             // (the instructions before it (latest first) that are not within a jump (nor fused with one))
-                            std::vector<std::pair<std::size_t, std::size_t>> plan; // (run index, prefixes)
+                            thread_local std::vector<std::pair<std::size_t, std::size_t>> tPlan; // (run index, prefixes) (scratch kept for reuse (one per jump compiled))
+                            tPlan.clear();
                             std::size_t planned = 0u;
                             auto jump = iRunJumps.size();
                             for (auto i = iRun.size(); i > 0u && planned < needed; --i)
@@ -701,7 +702,7 @@ namespace neos
                                 if ((jump > 0u && instruction.start < iRunJumps[jump - 1u].second) || instruction.prefixes >= MaxPrefixes)
                                     continue;
                                 auto const count = std::min(MaxPrefixes - instruction.prefixes, needed - planned);
-                                plan.emplace_back(i - 1u, count);
+                                tPlan.emplace_back(i - 1u, count);
                                 planned += count;
                             }
                             if (planned < needed)
@@ -709,12 +710,12 @@ namespace neos
                                 iRunJumps.emplace_back(aStart, end);
                                 return;
                             }
-                            auto const first = iRun[plan.back().first].start;
+                            auto const first = iRun[tPlan.back().first].start;
                             // (the bytes inserted before a position (aStarting: an instruction's start, whose own prefixes are its))
                             auto const shift = [&](std::size_t aPosition, bool aStarting = false)
                             {
                                 std::size_t result = 0u;
-                                for (auto const& p : plan)
+                                for (auto const& p : tPlan)
                                     if (iRun[p.first].start < aPosition || (!aStarting && iRun[p.first].start == aPosition))
                                         result += p.second;
                                 return result;
@@ -727,17 +728,18 @@ namespace neos
                                     return;
                                 }
                             // (the code from the first instruction lengthened, with its prefixes)
-                            bytes moved;
-                            moved.reserve(end - first + needed);
-                            std::size_t next = plan.size();
+                            thread_local bytes tMoved;
+                            tMoved.clear();
+                            tMoved.reserve(end - first + needed);
+                            std::size_t next = tPlan.size();
                             for (auto position = first; position < end; ++position)
                             {
-                                while (next > 0u && iRun[plan[next - 1u].first].start == position)
+                                while (next > 0u && iRun[tPlan[next - 1u].first].start == position)
                                 {
-                                    moved.insert(moved.end(), plan[next - 1u].second, 0x2Eu);
+                                    tMoved.insert(tMoved.end(), tPlan[next - 1u].second, 0x2Eu);
                                     --next;
                                 }
-                                moved.push_back(code[position]);
+                                tMoved.push_back(code[position]);
                             }
                             for (auto f = iRunFixups.size(); f > 0u; --f)
                             {
@@ -763,12 +765,12 @@ namespace neos
                             }
                             if (iFused && iFused->first >= first)
                                 iFused = std::make_pair(iFused->first + shift(iFused->first, true), iFused->second + shift(iFused->second));
-                            for (auto const& p : plan)
+                            for (auto const& p : tPlan)
                                 iRun[p.first].prefixes += p.second;
                             for (auto i = iRun.size(); i > 0u && iRun[i - 1u].start >= first; --i)
                                 iRun[i - 1u].start += shift(iRun[i - 1u].start, true);
                             code.resize(first);
-                            code.insert(code.end(), moved.begin(), moved.end());
+                            code.insert(code.end(), tMoved.begin(), tMoved.end());
                             iRunJumps.emplace_back(aStart + needed, end + needed);
                         }
                     };
@@ -802,7 +804,7 @@ namespace neos
                     constexpr int Locked = -2;
                     constexpr int Unavailable = -3;
 
-                    bool has_sse41()
+                    bool query_sse41()
                     {
 #if defined(NEOS_JIT_NO_SSE41)
                         return false; // (testing: use the helper functions)
@@ -816,6 +818,14 @@ namespace neos
                             return false;
                         return ((c >> 19) & 1u) != 0u;
 #endif
+                    }
+
+                    bool has_sse41()
+                    {
+                        // (asked once: CPUID can be slow (e.g. in a virtual machine, where it exits to the hypervisor), and a program that
+                        // compiles code as it runs (e.g. each eval) compiles many modules)
+                        static bool const sSse41 = query_sse41();
+                        return sSse41;
                     }
 
                     // native helpers (called from generated code)
@@ -1729,7 +1739,8 @@ namespace neos
                         void flush(std::size_t aBody)
                         {
                             materialize_cond();
-                            std::vector<bool> written(iLocals.size(), false);
+                            thread_local std::vector<bool> tWritten; // (scratch kept for reuse (one per block, loop and if compiled))
+                            tWritten.assign(iLocals.size(), false);
                             std::size_t depth = 0u;
                             for (std::size_t p = aBody; p < iFunction->codeEnd;)
                             {
@@ -1742,8 +1753,8 @@ namespace neos
                                         break;
                                     --depth;
                                 }
-                                else if ((op == 0x21 || op == 0x22) && iTokens[p + 1u] < written.size())
-                                    written[static_cast<std::size_t>(iTokens[p + 1u])] = true;
+                                else if ((op == 0x21 || op == 0x22) && iTokens[p + 1u] < tWritten.size())
+                                    tWritten[static_cast<std::size_t>(iTokens[p + 1u])] = true;
                                 p += 1u + immediate_count(op, iTokens, p);
                             }
                             for (std::size_t i = 0u; i < iStack.size(); ++i)
@@ -1751,7 +1762,7 @@ namespace neos
                                 auto& e = iStack[i];
                                 if (e.k == kind::Reg)
                                     spill(i);
-                                else if (e.k == kind::Local && written[e.local])
+                                else if (e.k == kind::Local && tWritten[e.local])
                                     to_slot(i);
                             }
                         }
@@ -1869,43 +1880,46 @@ namespace neos
                         {
                             // (locals by their (static) uses, weighted by loop depth (and less within ifs), outside cold code; registers 
                             // that calls do not preserve only for locals used more than the calls (outside cold code) that would save them)
-                            std::vector<std::uint64_t> score(iLocals.size(), 0u);
+                            thread_local std::vector<std::uint64_t> tScore; // (scratch kept for reuse (one per function compiled))
+                            tScore.assign(iLocals.size(), 0u);
                             std::uint64_t calls = 0u;
-                            std::vector<std::uint8_t> loops; // (0 block, 1 loop, 2 if)
+                            thread_local std::vector<std::uint8_t> tLoops; // (0 block, 1 loop, 2 if)
+                            tLoops.clear();
                             std::size_t loopDepth = 0u;
                             std::size_t ifDepth = 0u;
-                            std::vector<std::pair<std::size_t, std::size_t>> cold; // (cold code: [begin, end))
+                            thread_local std::vector<std::pair<std::size_t, std::size_t>> tCold; // (cold code: [begin, end))
+                            tCold.clear();
                             for (std::size_t p = aBegin; p < aEnd;)
                             {
-                                while (!cold.empty() && p >= cold.back().second)
-                                    cold.pop_back();
-                                bool const isCold = !cold.empty() && p >= cold.back().first;
+                                while (!tCold.empty() && p >= tCold.back().second)
+                                    tCold.pop_back();
+                                bool const isCold = !tCold.empty() && p >= tCold.back().first;
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
                                 auto const weight = (std::uint64_t{ 64 } << (3u * std::min<std::size_t>(loopDepth, 6u))) >> std::min<std::size_t>(ifDepth, 6u);
                                 switch (op)
                                 {
                                 case 0x02:
-                                    loops.push_back(0u);
+                                    tLoops.push_back(0u);
                                     if (!isCold)
                                         if (auto const tail = cold_tail(p))
-                                            cold.emplace_back(*tail, block_end(p + 2u));
+                                            tCold.emplace_back(*tail, block_end(p + 2u));
                                     break;
                                 case 0x04:
-                                    loops.push_back(2u);
+                                    tLoops.push_back(2u);
                                     ++ifDepth;
                                     break;
                                 case 0x03:
-                                    loops.push_back(1u);
+                                    tLoops.push_back(1u);
                                     ++loopDepth;
                                     break;
                                 case 0x0B:
-                                    if (!loops.empty())
+                                    if (!tLoops.empty())
                                     {
-                                        if (loops.back() == 1u)
+                                        if (tLoops.back() == 1u)
                                             --loopDepth;
-                                        else if (loops.back() == 2u)
+                                        else if (tLoops.back() == 2u)
                                             --ifDepth;
-                                        loops.pop_back();
+                                        tLoops.pop_back();
                                     }
                                     break;
                                 case 0x10:
@@ -1915,8 +1929,8 @@ namespace neos
                                 case 0x20: case 0x21: case 0x22:
                                     {
                                         auto const l = static_cast<std::size_t>(iTokens[p + 1u]);
-                                        if (l < score.size() && !isCold)
-                                            score[l] += weight;
+                                        if (l < tScore.size() && !isCold)
+                                            tScore[l] += weight;
                                     }
                                     break;
                                 default:
@@ -1924,15 +1938,16 @@ namespace neos
                                 }
                                 p += 1u + immediate_count(op, iTokens, p);
                             }
-                            std::vector<std::size_t> order(iLocals.size());
-                            for (std::size_t i = 0u; i < order.size(); ++i)
-                                order[i] = i;
-                            std::stable_sort(order.begin(), order.end(), [&](std::size_t l, std::size_t r) { return score[l] > score[r]; });
+                            thread_local std::vector<std::size_t> tOrder;
+                            tOrder.assign(iLocals.size(), 0u);
+                            for (std::size_t i = 0u; i < tOrder.size(); ++i)
+                                tOrder[i] = i;
+                            std::stable_sort(tOrder.begin(), tOrder.end(), [&](std::size_t l, std::size_t r) { return tScore[l] > tScore[r]; });
                             std::size_t gprs = 0u;
                             std::size_t xmms = 0u;
-                            for (auto l : order)
+                            for (auto l : tOrder)
                             {
-                                if (score[l] == 0u)
+                                if (tScore[l] == 0u)
                                     break;
                                 auto& local = iLocals[l];
                                 if (is_float(local.type))
@@ -1944,7 +1959,7 @@ namespace neos
                                         iUsedPinnedXmms.push_back(local.reg);
                                     }
                                 }
-                                else if (gprs < std::size(PinnedGprs) && (!native_volatile(PinnedGprs[gprs]) || score[l] > 2u * calls))
+                                else if (gprs < std::size(PinnedGprs) && (!native_volatile(PinnedGprs[gprs]) || tScore[l] > 2u * calls))
                                 {
                                     local.pinned = true;
                                     local.reg = PinnedGprs[gprs++];
@@ -1962,31 +1977,34 @@ namespace neos
                         {
                             std::vector<bool> zero(iLocals.size(), false);
                             constexpr std::size_t None = ~std::size_t{};
-                            std::vector<std::size_t> region(iLocals.size(), None); // (the region of a local's first use, which set it)
-                            std::vector<bool> open{ true };                         // (regions: open or closed)
-                            std::vector<std::size_t> stack{ 0u };
+                            thread_local std::vector<std::size_t> tRegion; // (the region of a local's first use, which set it) (scratch kept for reuse (one per function compiled))
+                            thread_local std::vector<bool> tOpen;          // (regions: open or closed)
+                            thread_local std::vector<std::size_t> tStack;
+                            tRegion.assign(iLocals.size(), None);
+                            tOpen.assign(1u, true);
+                            tStack.assign(1u, 0u);
                             for (std::size_t p = aBegin; p < aEnd;)
                             {
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
                                 switch (op)
                                 {
                                 case 0x02: case 0x03: case 0x04:
-                                    stack.push_back(open.size());
-                                    open.push_back(true);
+                                    tStack.push_back(tOpen.size());
+                                    tOpen.push_back(true);
                                     break;
                                 case 0x05:
-                                    if (stack.size() > 1u)
+                                    if (tStack.size() > 1u)
                                     {
-                                        open[stack.back()] = false;
-                                        stack.back() = open.size();
-                                        open.push_back(true);
+                                        tOpen[tStack.back()] = false;
+                                        tStack.back() = tOpen.size();
+                                        tOpen.push_back(true);
                                     }
                                     break;
                                 case 0x0B:
-                                    if (stack.size() > 1u)
+                                    if (tStack.size() > 1u)
                                     {
-                                        open[stack.back()] = false;
-                                        stack.pop_back();
+                                        tOpen[tStack.back()] = false;
+                                        tStack.pop_back();
                                     }
                                     break;
                                 case 0x20: case 0x21: case 0x22:
@@ -1994,14 +2012,14 @@ namespace neos
                                         auto const l = static_cast<std::size_t>(iTokens[p + 1u]);
                                         if (l < aParameters || l >= iLocals.size() || zero[l])
                                             break;
-                                        if (region[l] == None)
+                                        if (tRegion[l] == None)
                                         {
                                             if (op == 0x20)
                                                 zero[l] = true;
                                             else
-                                                region[l] = stack.back();
+                                                tRegion[l] = tStack.back();
                                         }
-                                        else if (!open[region[l]])
+                                        else if (!tOpen[tRegion[l]])
                                             zero[l] = true;
                                     }
                                     break;
@@ -2987,22 +3005,24 @@ namespace neos
                         void helper(void const* aFunction, std::size_t aCount, std::uint8_t aOperandType, std::uint8_t aResultType, bool aWithContext)
                         {
                             materialize_cond();
-                            std::vector<native_argument> arguments;
-                            std::vector<entry> operands(aCount);
+                            thread_local std::vector<native_argument> tArguments; // (scratch kept for reuse (one per helper call compiled))
+                            thread_local std::vector<entry> tOperands;
+                            tArguments.clear();
+                            tOperands.assign(aCount, entry{});
                             for (std::size_t i = aCount; i-- > 0u;)
-                                operands[i] = pop();
+                                tOperands[i] = pop();
                             for (std::size_t i = 0u; i < aCount; ++i)
                             {
-                                store_entry(operands[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
-                                release(operands[i]);
-                                arguments.push_back(native_argument{ is_float(aOperandType), aOperandType == F64 });
+                                store_entry(tOperands[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
+                                release(tOperands[i]);
+                                tArguments.push_back(native_argument{ is_float(aOperandType), aOperandType == F64 });
                             }
                             if (aWithContext)
                             {
                                 stage_context(aCount);
-                                arguments.push_back(native_argument{ false, false });
+                                tArguments.push_back(native_argument{ false, false });
                             }
-                            native_call(aFunction, arguments, aWithContext);
+                            native_call(aFunction, tArguments, aWithContext);
                             if (is_float(aResultType))
                             {
                                 owner(true, 0) = Locked;
@@ -3253,10 +3273,11 @@ namespace neos
                             }
                             else if (std::any_of(f.parameters.begin(), f.parameters.end(), converted))
                                 direct_helper(&plugin_arguments, aFunction, false);
-                            std::vector<native_argument> arguments;
+                            thread_local std::vector<native_argument> tArguments; // (scratch kept for reuse (one per import call compiled))
+                            tArguments.clear();
                             for (auto const p : f.parameters)
-                                arguments.push_back(native_argument{ p == NEOS_RT_F32 || p == NEOS_RT_F64, p == NEOS_RT_F64 });
-                            native_call(f.function, arguments, false);
+                                tArguments.push_back(native_argument{ p == NEOS_RT_F32 || p == NEOS_RT_F64, p == NEOS_RT_F64 });
+                            native_call(f.function, tArguments, false);
                             if (f.result == NEOS_RT_F32 || f.result == NEOS_RT_F64)
                                 a.movf_store(f.result == NEOS_RT_F64, RSP, ShadowSpace, 0);
                             else if (f.result != NEOS_RT_VOID)

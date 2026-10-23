@@ -1551,8 +1551,42 @@ namespace neos::python_runtime::detail
             std::optional<expression_scan> expression()
             {
                 auto const start = iNext;
-                // (lambda, yield and starred: not scanned)
-                if (is_name("lambda") || is_name("yield") || is_op("*") || is_op("**"))
+                // (a lambda: its parameters (to its ':'; a default can be a lambda of its own) and its body)
+                if (is_name("lambda"))
+                {
+                    ++iNext;
+                    std::size_t depth = 0u;
+                    std::size_t lambdas = 0u;
+                    for (; !at_end(); ++iNext)
+                    {
+                        auto const& t = iTokens[iNext];
+                        if (t.kind == token::Op && (t.text == "(" || t.text == "[" || t.text == "{"))
+                            ++depth;
+                        else if (t.kind == token::Op && (t.text == ")" || t.text == "]" || t.text == "}"))
+                        {
+                            if (depth == 0u)
+                                return {};
+                            --depth;
+                        }
+                        else if (depth == 0u && t.kind == token::Name && t.text == "lambda")
+                            ++lambdas;
+                        else if (depth == 0u && t.kind == token::Op && t.text == ":")
+                        {
+                            if (lambdas == 0u)
+                                break;
+                            --lambdas;
+                        }
+                    }
+                    if (at_end())
+                        return {};
+                    ++iNext;
+                    auto const body = expression();
+                    if (!body)
+                        return {};
+                    return expression_scan{ expression_scan::Other, iTokens[start].start, body->end };
+                }
+                // (yield and starred: not scanned)
+                if (is_name("yield") || is_op("*") || is_op("**"))
                     return {};
                 auto result = disjunction();
                 if (!result)
@@ -2765,7 +2799,7 @@ namespace neos::python_runtime::detail
                     {
                         auto const a = parse("exc_type", aArgs, aKwargs, { "self" }, 1u);
                         import_attribute("warnings", "warn").call({ py{ "Deprecated in 3.13. Use exc_type_str instead." }, builtin("DeprecationWarning") },
-                            { { "stacklevel", py{ 2 } } });
+                            { { "stacklevel", py{ 1 } } });
                         return a[0].attr("_exc_type");
                     });
                 } },

@@ -72,6 +72,7 @@ namespace neos::javascript_runtime
         auto& f = the_heap().make<function_object>(prototype, function_kind::Compiled);
         f.functionRealm = &the_realm();
         f.program = current_program();
+        retain_program(f.program);
         f.index = aIndex;
         f.nativeId = aNumber;
         f.environment = aEnvironment;

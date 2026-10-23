@@ -1280,9 +1280,10 @@ namespace neos::numpy
             else if (is_sequence(otypes))
                 otypes = otypes.items().at(0);
             std::vector<value> results;
+            std::vector<value> callArgs;
             for (std::int64_t i = 0; i < n; ++i)
             {
-                std::vector<value> callArgs;
+                callArgs.clear();
                 for (std::size_t a = 0u; a < broadcast.size(); ++a)
                     callArgs.push_back(element(a, i, false));
                 results.push_back(aFunction.call(callArgs, kwargs));
@@ -1341,9 +1342,9 @@ namespace neos::numpy
                 }
             std::vector<value> items;
             auto const n = element_count(shape);
+            std::vector<long long> index(shape.size());
             for (std::int64_t i = 0; i < n; ++i)
             {
-                std::vector<long long> index(shape.size());
                 auto rest = i;
                 for (std::size_t d = shape.size(); d-- > 0u;)
                 {
@@ -1364,9 +1365,9 @@ namespace neos::numpy
             auto const* x = a.array();
             std::vector<value> items;
             auto const n = x->size();
+            std::vector<long long> index(x->ndim());
             for (std::int64_t i = 0; i < n; ++i)
             {
-                std::vector<long long> index(x->ndim());
                 std::int64_t offset = 0;
                 auto rest = i;
                 for (std::size_t d = x->ndim(); d-- > 0u;)

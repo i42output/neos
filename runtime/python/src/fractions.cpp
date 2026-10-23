@@ -549,6 +549,15 @@ namespace neos::python_runtime
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
                 {
                     auto const& f = as_fraction(aSelf);
+                    // (pickling: (type(self), (numerator, denominator)))
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            auto const& fraction = as_fraction(aArgs.at(0u));
+                            ref const cls{ class_of(aArgs[0]) };
+                            return make_tuple({ borrowed(cls.get()), make_tuple({ borrowed(fraction.numerator), borrowed(fraction.denominator) }) });
+                        } };
+                    if (auto const method = reduce_method(aSelf, aName, sReduce))
+                        return method;
                     std::string_view const name{ aName };
                     if (name == "numerator")
                         return borrowed(f.numerator);

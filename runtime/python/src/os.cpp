@@ -30,8 +30,8 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py and
-  Modules/errnomodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
+  Portions of this file are derived from CPython 3.13 (Lib/posixpath.py, Lib/ntpath.py, Lib/genericpath.py,
+  Modules/errnomodule.c and Lib/os.py (PathLike)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the
   Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python and C to C++
   for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
@@ -68,6 +68,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <pwd.h>
+#include <grp.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
 #include <sys/times.h>
@@ -77,6 +78,7 @@
 #endif
 #include <fcntl.h>
 #include "objects.hpp"
+#include "values.hpp"
 
 #if defined(_WIN32)
 extern "C" char** _environ;
@@ -2104,6 +2106,29 @@ namespace neos::python_runtime
                 return make_int(r);
             }
 
+#if !defined(_WIN32)
+            // (a function of ids (aCount: their number): aSet(ids), or OSError)
+            template <typename F>
+            object* set_ids(char const* aName, std::vector<object*> const& aArgs, object* aKwargs, std::size_t aCount, F aSet)
+            {
+                static char const* const sNames[] = { "a", "b", "c" };
+                std::vector<object*> a;
+                if (!host_unrestricted((std::string{ "os." } + aName).c_str()))
+                    return nullptr;
+                if (aArgs.size() != aCount || (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty()))
+                    return error("TypeError", std::string{ aName } + "() takes exactly " + std::to_string(aCount) + " argument" + (aCount == 1u ? "" : "s") + 
+                        " (" + std::to_string(aArgs.size()) + " given)");
+                (void)sNames;
+                long long values[3] = {};
+                for (std::size_t i = 0u; i < aCount; ++i)
+                    if (!int_argument(aArgs[i], values[i], aName))
+                        return nullptr;
+                if (aSet(values) != 0)
+                    return raise_os_error(errno);
+                return none();
+            }
+#endif
+
             builtin_entry const sPosixFunctions[] =
             {
                 { "open", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
@@ -2481,6 +2506,74 @@ namespace neos::python_runtime
                         return r < 0 ? raise_os_error(errno) : make_int(r);
                     } },
                 { "setsid", [](std::vector<object*> const&, object*) -> object* { return ::setsid() < 0 ? raise_os_error(errno) : none(); } },
+                // (the process's ids (setuid, setgid, seteuid, setegid; setreuid, setregid; setresuid, setresgid (-1: unchanged)), its 
+                // groups, and its process group)
+                { "setuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setuid", aArgs, aKwargs, 1u, [](long long const* v) { return ::setuid(static_cast<uid_t>(v[0])); }); } },
+                { "setgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setgid", aArgs, aKwargs, 1u, [](long long const* v) { return ::setgid(static_cast<gid_t>(v[0])); }); } },
+                { "seteuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("seteuid", aArgs, aKwargs, 1u, [](long long const* v) { return ::seteuid(static_cast<uid_t>(v[0])); }); } },
+                { "setegid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setegid", aArgs, aKwargs, 1u, [](long long const* v) { return ::setegid(static_cast<gid_t>(v[0])); }); } },
+                { "setreuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setreuid", aArgs, aKwargs, 2u, [](long long const* v) { return ::setreuid(static_cast<uid_t>(v[0]), static_cast<uid_t>(v[1])); }); } },
+                { "setregid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setregid", aArgs, aKwargs, 2u, [](long long const* v) { return ::setregid(static_cast<gid_t>(v[0]), static_cast<gid_t>(v[1])); }); } },
+#if defined(__linux__)
+                { "setresuid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setresuid", aArgs, aKwargs, 3u, [](long long const* v) { return ::setresuid(static_cast<uid_t>(v[0]), static_cast<uid_t>(v[1]), static_cast<uid_t>(v[2])); }); } },
+                { "setresgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setresgid", aArgs, aKwargs, 3u, [](long long const* v) { return ::setresgid(static_cast<gid_t>(v[0]), static_cast<gid_t>(v[1]), static_cast<gid_t>(v[2])); }); } },
+                { "getresuid", [](std::vector<object*> const&, object*) -> object*
+                    {
+                        uid_t r = 0, e = 0, s = 0;
+                        if (::getresuid(&r, &e, &s) != 0)
+                            return raise_os_error(errno);
+                        return make_tuple({ make_int(static_cast<long long>(r)), make_int(static_cast<long long>(e)), make_int(static_cast<long long>(s)) });
+                    } },
+                { "getresgid", [](std::vector<object*> const&, object*) -> object*
+                    {
+                        gid_t r = 0, e = 0, s = 0;
+                        if (::getresgid(&r, &e, &s) != 0)
+                            return raise_os_error(errno);
+                        return make_tuple({ make_int(static_cast<long long>(r)), make_int(static_cast<long long>(e)), make_int(static_cast<long long>(s)) });
+                    } },
+#endif
+                { "setgroups", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.setgroups"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        if (!parse_arguments("setgroups", aArgs, aKwargs, { "groups" }, 1u, 1u, a))
+                            return nullptr;
+                        std::vector<object*> items;
+                        if (!collect(a[0], items))
+                            return error("TypeError", "setgroups argument must be a sequence");
+                        std::vector<gid_t> groups;
+                        bool ok = true;
+                        for (auto i : items)
+                        {
+                            long long g = 0;
+                            if (ok && (kind_of(i) != NEOS_PY_INT || !to_index(i, g)))
+                                ok = false;
+                            groups.push_back(static_cast<gid_t>(g));
+                            release(i);
+                        }
+                        if (!ok)
+                            return failed() ? nullptr : error("TypeError", "groups must be integers");
+                        if (::setgroups(groups.size(), groups.empty() ? nullptr : groups.data()) != 0)
+                            return raise_os_error(errno);
+                        return none();
+                    } },
+                { "initgroups", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (!host_unrestricted("os.initgroups"))
+                            return nullptr;
+                        std::vector<object*> a;
+                        std::string user;
+                        long long group = 0;
+                        if (!parse_arguments("initgroups", aArgs, aKwargs, { "username", "gid" }, 2u, 2u, a) || !path_argument(a[0], user, "initgroups", "username") ||
+                            !int_argument(a[1], group, "initgroups"))
+                            return nullptr;
+                        if (::initgroups(user.c_str(), static_cast<gid_t>(group)) != 0)
+                            return raise_os_error(errno);
+                        return none();
+                    } },
+                { "setpgid", [](std::vector<object*> const& aArgs, object* aKwargs) -> object* { return set_ids("setpgid", aArgs, aKwargs, 2u, [](long long const* v) { return ::setpgid(static_cast<pid_t>(v[0]), static_cast<pid_t>(v[1])); }); } },
+                { "setpgrp", [](std::vector<object*> const&, object*) -> object* { return ::setpgid(0, 0) < 0 ? raise_os_error(errno) : none(); } },
                 { "killpg", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         if (!host_unrestricted("os.killpg"))
@@ -4693,7 +4786,132 @@ namespace neos::python_runtime
                 return true;
             }
 
-            inline bool const sOs = register_module("os", os_module);
+            // (os.PathLike (Lib/os.py's): the abstract base class of the file system path protocol (an object with __fspath__))
+            bool os_only_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                if (!os_module(aAttributes))
+                    return false;
+                static object* const sPathLike = py_guarded([]()
+                {
+                    auto const native = [](char const* aName, char const* aQualname, char const* aDoc, native_body aBody)
+                    {
+                        return make_native_function(aName, aQualname, aDoc, "os", std::move(aBody));
+                    };
+                    py const ns = py_dict();
+                    ns.set_item(py{ "__module__" }, py{ "os" });
+                    ns.set_item(py{ "__qualname__" }, py{ "PathLike" });
+                    ns.set_item(py{ "__doc__" }, py{ "Abstract base class for implementing the file system path protocol." });
+                    ns.set_item(py{ "__slots__" }, py_tuple());
+                    ns.set_item(py{ "__fspath__" }, import_attribute("abc", "abstractmethod")(native("__fspath__", "PathLike.__fspath__",
+                        "Return the file system path representation of the object.", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            py_bind("PathLike.__fspath__", { py_positional("self") }, aArgs, aKwargs);
+                            py_raise(builtin("NotImplementedError"));
+                        })));
+                    ns.set_item(py{ "__subclasshook__" }, builtin("classmethod")(native("__subclasshook__", "PathLike.__subclasshook__", "",
+                        [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("PathLike.__subclasshook__", { py_positional("cls"), py_positional("subclass") }, aArgs, aKwargs);
+                            if (!a[0].is(import_attribute("os", "PathLike")))
+                                return builtin("NotImplemented");
+                            // (_collections_abc._check_methods(subclass, '__fspath__'))
+                            for (py const& b : a[1].attr("__mro__").items())
+                            {
+                                py const d = b.attr("__dict__");
+                                if (d.contains(py{ "__fspath__" }))
+                                    return d[py{ "__fspath__" }].is_none() ? builtin("NotImplemented") : py::boolean(true);
+                            }
+                            return builtin("NotImplemented");
+                        })));
+                    ns.set_item(py{ "__class_getitem__" }, builtin("classmethod")(import_attribute("types", "GenericAlias")));
+                    return import_attribute("abc", "ABCMeta")(py{ "PathLike" }, py_tuple({ import_attribute("abc", "ABC") }), ns);
+                });
+                if (sPathLike == nullptr)
+                    return false;
+                retain(sPathLike);
+                aAttributes.emplace_back("PathLike", sPathLike);
+                // (Lib/os.py's fsencode, fsdecode and get_exec_path: the file system's encoding is UTF-8 (its errors: surrogateescape))
+                static object* const sFunctions = py_guarded([]()
+                {
+                    auto const native = [](char const* aName, char const* aDoc, native_body aBody)
+                    {
+                        return make_native_function(aName, aName, aDoc, "os", std::move(aBody));
+                    };
+                    auto const fspath = [](py const& aFilename) -> py
+                    {
+                        if (isinstance(aFilename, builtin("str")) || isinstance(aFilename, builtin("bytes")))
+                            return aFilename;
+                        return import_attribute("os", "fspath")(aFilename);
+                    };
+                    py const fsencode = native("fsencode", "Encode filename (an os.PathLike, bytes, or str) to the filesystem\nencoding with 'surrogateescape' error handler, return bytes unchanged.\nOn Windows, use 'strict' error handler if the file system encoding is\n'mbcs' (which is the default encoding).",
+                        [fspath](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("fsencode", { py_positional("filename") }, aArgs, aKwargs);
+                            py const filename = fspath(a[0]);
+                            if (isinstance(filename, builtin("str")))
+                                return filename.method("encode", { py{ "utf-8" }, py{ "surrogateescape" } });
+                            return filename;
+                        });
+                    py const fsdecode = native("fsdecode", "Decode filename (an os.PathLike, bytes, or str) from the filesystem\nencoding with 'surrogateescape' error handler, return str unchanged. On\nWindows, use 'strict' error handler if the file system encoding is\n'mbcs' (which is the default encoding).",
+                        [fspath](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("fsdecode", { py_positional("filename") }, aArgs, aKwargs);
+                            py const filename = fspath(a[0]);
+                            if (isinstance(filename, builtin("bytes")))
+                                return filename.method("decode", { py{ "utf-8" }, py{ "surrogateescape" } });
+                            return filename;
+                        });
+                    py const getExecPath = native("get_exec_path", "Returns the sequence of directories that will be searched for the\nnamed executable (similar to a shell) when launching a process.\n\n*env* must be an environment variable dict or None.  If *env* is None,\nos.environ will be used.",
+                        [fsdecode](std::vector<py> const& aArgs, object* aKwargs) -> py
+                        {
+                            auto const a = py_bind("get_exec_path", { py_positional("env", py::none()) }, aArgs, aKwargs);
+                            py const env = a[0].is_none() ? import_attribute("os", "environ") : a[0];
+                            // (env.get('PATH'), or env[b'PATH'] (not both))
+                            py pathList = py::none();
+                            try
+                            {
+                                pathList = env.method("get", { py{ "PATH" } });
+                            }
+                            catch (raised const&)
+                            {
+                                py const e = py_take_exception();
+                                if (!isinstance(e, builtin("TypeError")))
+                                    py_reraise(e);
+                            }
+#if !defined(_WIN32)
+                            try
+                            {
+                                py const pathListB = env[py{ make_bytes("PATH") }];
+                                if (!pathList.is_none())
+                                    py_raise("ValueError", "env cannot contain 'PATH' and b'PATH' keys");
+                                pathList = pathListB;
+                            }
+                            catch (raised const&)
+                            {
+                                py const e = py_take_exception();
+                                if (!isinstance(e, py_tuple({ builtin("KeyError"), builtin("TypeError") })))
+                                    py_reraise(e);
+                            }
+                            if (!pathList.is_none() && isinstance(pathList, builtin("bytes")))
+                                pathList = fsdecode(pathList);
+#endif
+                            if (pathList.is_none())
+                                pathList = import_attribute("os", "defpath");
+                            return pathList.method("split", { import_attribute("os", "pathsep") });
+                        });
+                    return py_tuple({ fsencode, fsdecode, getExecPath });
+                });
+                if (sFunctions == nullptr)
+                    return false;
+                for (std::size_t i = 0u; i < 3u; ++i)
+                {
+                    auto const f = as<tuple_object>(sFunctions)->items[i];
+                    aAttributes.emplace_back(i == 0u ? "fsencode" : i == 1u ? "fsdecode" : "get_exec_path", (retain(f), f));
+                }
+                return true;
+            }
+
+            inline bool const sOs = register_module("os", os_only_module);
 #if defined(_WIN32)
             inline bool const sPosixModule = register_module("nt", os_module);
 #else

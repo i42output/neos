@@ -146,15 +146,16 @@ namespace neos::python_runtime
             {
                 std::u32string output;
                 output.reserve(aInput.size());
-                std::vector<char32_t> stack;
+                thread_local std::vector<char32_t> tStack;
+                tStack.clear();
                 std::u32string decomposition;
                 for (auto c : aInput)
                 {
-                    stack.push_back(c);
-                    while (!stack.empty())
+                    tStack.push_back(c);
+                    while (!tStack.empty())
                     {
-                        auto const code = stack.back();
-                        stack.pop_back();
+                        auto const code = tStack.back();
+                        tStack.pop_back();
                         if (code >= SBase && code < SBase + SCount)
                         {
                             auto const s = code - SBase;
@@ -167,7 +168,7 @@ namespace neos::python_runtime
                         if (aOld)
                             if (auto const value = old_normalization(code); value != 0u)
                             {
-                                stack.push_back(value);
+                                tStack.push_back(value);
                                 continue;
                             }
                         std::uint32_t tag = 0u;
@@ -177,7 +178,7 @@ namespace neos::python_runtime
                             continue;
                         }
                         for (auto i = decomposition.size(); i-- > 0u;)
-                            stack.push_back(decomposition[i]);
+                            tStack.push_back(decomposition[i]);
                     }
                 }
                 // (canonical ordering)
@@ -242,14 +243,15 @@ namespace neos::python_runtime
                 auto const data = decomposed(aInput, aCompatibility, aOld);
                 auto const len = data.size();
                 std::u32string output(len, U'\0');
-                std::vector<std::size_t> skipped;
+                thread_local std::vector<std::size_t> tSkipped;
+                tSkipped.clear();
                 std::size_t i = 0u, o = 0u;
                 while (i < len)
                 {
-                    if (auto const s = std::find(skipped.begin(), skipped.end(), i); s != skipped.end())
+                    if (auto const s = std::find(tSkipped.begin(), tSkipped.end(), i); s != tSkipped.end())
                     {
-                        *s = skipped.back();
-                        skipped.pop_back();
+                        *s = tSkipped.back();
+                        tSkipped.pop_back();
                         ++i;
                         continue;
                     }
@@ -298,7 +300,7 @@ namespace neos::python_runtime
                             continue;
                         }
                         output[o] = composite;
-                        skipped.push_back(i1);
+                        tSkipped.push_back(i1);
                         ++i1;
                         if (!composes_first(output[o]))
                             break;

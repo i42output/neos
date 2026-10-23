@@ -60,6 +60,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -75,14 +77,17 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 #endif
 #if defined(__GLIBC__)
 #include <gnu/libc-version.h>
 #endif
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -490,19 +495,98 @@ namespace neos::python_runtime
                         if (!to_index(a[1], protocol))
                             return nullptr;
                         ref const cls{ class_of(self) };
-                        if (!is_class(cls.get()))
+                        // (an object of a type of a module that has a __getstate__ of its own (e.g. io.BytesIO's): protocols 2 and above 
+                        // (copyreg.__newobj__(cls) and its state, as CPython's reduce_newobj; below 2, copyreg._reduce_ex finds no base))
+                        auto const ownGetstate = [&]()
+                        {
+                            auto const type = python_type(self);
+                            if (kind_of(self) != NEOS_PY_OTHER || type == nullptr || type->getattr == nullptr)
+                                return false;
+                            ref const method{ type->getattr(context(), self, "__getstate__") };
+                            if (!method)
+                                clear_error();
+                            return static_cast<bool>(method);
+                        };
+                        // (a user class's instance, or object())
+                        if (!is_class(cls.get()) && !(kind_of(self) == NEOS_PY_OTHER && std::strcmp(self->type->name, "object") == 0) && 
+                            !(protocol >= 2 && is_type_object(cls.get()) && ownGetstate()))
                         {
                             std::string name = type_name(self);
                             return error("TypeError", "cannot pickle '" + name + "' object");
                         }
+                        // (an instance of a subclass of set, frozenset or bytearray: their __reduce__ (cls, (list(self),), state) and
+                        // (cls, (latin-1 text, 'latin-1'), state))
+                        auto const value = builtin_value(self);
+                        std::string_view const valueType = value != self ? type_name(value) : "";
+                        if (valueType == "set" || valueType == "frozenset" || valueType == "bytearray")
+                        {
+                            ref const getstate{ getattr(self, "__getstate__") };
+                            ref const state{ getstate ? invoke(getstate.get(), {}) : nullptr };
+                            if (!state)
+                                return nullptr;
+                            ref args;
+                            if (valueType == "bytearray")
+                            {
+                                std::string_view data;
+                                bytes_like(value, data);
+                                std::string text;
+                                for (auto c : data)
+                                    append_code_point(text, static_cast<unsigned char>(c));
+                                args = ref{ make_tuple({ make_str(std::move(text), data.size()), make_str("latin-1") }) };
+                            }
+                            else
+                            {
+                                std::vector<object*> items;
+                                if (!collect(value, items))
+                                    return nullptr;
+                                args = ref{ make_tuple({ make_list(std::move(items)) }) };
+                            }
+                            return make_tuple({ new_reference(cls.get()), new_reference(args.get()), new_reference(state.get()) });
+                        }
                         ref const getstate{ getattr(self, "__getstate__") };
+                        // (protocols 0 and 1 (copyreg._reduce_ex): slots need a __getstate__ of the class's own)
+                        if (getstate && protocol < 2)
+                        {
+                            ref const classGetstate{ getattr(cls.get(), "__getstate__") };
+                            ref const objectGetstate{ object_attribute(nullptr, "__getstate__") };
+                            ref slots{ getattr(self, "__slots__") };
+                            if (!slots)
+                                clear_error();
+                            if (classGetstate && classGetstate.get() == objectGetstate.get() && slots && truth(slots.get()) == 1)
+                                return error("TypeError", "a class that defines __slots__ without defining __getstate__ cannot be pickled");
+                            if (!classGetstate)
+                                clear_error();
+                        }
                         ref const state{ getstate ? invoke(getstate.get(), {}) : nullptr };
                         if (!state)
                             return nullptr;
                         if (protocol >= 2)
                         {
                             std::vector<object*> args{ new_reference(cls.get()) };
-                            if (ref const getnewargs{ special_method(self, "__getnewargs__") })
+                            struct release_args { std::vector<object*>& args; ~release_args() { for (auto a : args) release(a); } } const releasing{ args };
+                            // (__getnewargs_ex__: (args, kwargs); keyword arguments: copyreg.__newobj_ex__(cls, args, kwargs))
+                            ref newobjEx;
+                            if (ref const getnewargsEx{ special_method(self, "__getnewargs_ex__") })
+                            {
+                                ref const value{ invoke(getnewargsEx.get(), {}) };
+                                if (!value)
+                                    return nullptr;
+                                if (kind_of(value.get()) != NEOS_PY_TUPLE)
+                                    return error("TypeError", std::string{ "__getnewargs_ex__ should return a tuple, not '" } + type_name(value.get()) + "'");
+                                auto const& pair = as<tuple_object>(value.get())->items;
+                                if (pair.size() != 2u)
+                                    return error("ValueError", "__getnewargs_ex__ should return a tuple of length 2, not " + std::to_string(pair.size()));
+                                if (kind_of(builtin_value(pair[0])) != NEOS_PY_TUPLE)
+                                    return error("TypeError", std::string{ "first item of the tuple returned by __getnewargs_ex__ must be a tuple, not '" } + type_name(pair[0]) + "'");
+                                if (kind_of(builtin_value(pair[1])) != NEOS_PY_DICT)
+                                    return error("TypeError", std::string{ "second item of the tuple returned by __getnewargs_ex__ must be a dict, not '" } + type_name(pair[1]) + "'");
+                                if (!as<dict_object>(builtin_value(pair[1]))->items.empty())
+                                    newobjEx = ref{ make_tuple({ new_reference(cls.get()), new_reference(pair[0]), new_reference(pair[1]) }) };
+                                else
+                                    for (auto a : as<tuple_object>(builtin_value(pair[0]))->items)
+                                        args.push_back(new_reference(a));
+                            }
+                            else if (ref const getnewargs{ special_method(self, "__getnewargs__") })
                             {
                                 ref const extra{ invoke(getnewargs.get(), {}) };
                                 if (!extra)
@@ -512,24 +596,45 @@ namespace neos::python_runtime
                                     return nullptr;
                                 args.insert(args.end(), items.begin(), items.end());
                             }
-                            ref const value{ builtin_value(self) != self ? new_reference(builtin_value(self)) : nullptr };
-                            auto const vk = value ? kind_of(value.get()) : NEOS_PY_NONE;
-                            ref const listItems{ vk == NEOS_PY_LIST ? iter(value.get()) : new_reference(none()) };
-                            ref const dictItems{ vk == NEOS_PY_DICT ? call_method_named(value.get(), "items", {}) : new_reference(none()) };
+                            // (the __getnewargs__ of int, float, str, bytes and tuple: (value,); complex's: (real, imag))
+                            else if (value != self)
+                            {
+                                auto const vk = kind_of(value);
+                                if (vk == NEOS_PY_COMPLEX)
+                                {
+                                    args.push_back(make_float(as<complex_object>(value)->real));
+                                    args.push_back(make_float(as<complex_object>(value)->imag));
+                                }
+                                else if (vk == NEOS_PY_INT || vk == NEOS_PY_BOOL || vk == NEOS_PY_FLOAT || vk == NEOS_PY_STR || vk == NEOS_PY_TUPLE || valueType == "bytes")
+                                    args.push_back(new_reference(value));
+                            }
+                            auto const vk = value != self ? kind_of(value) : NEOS_PY_NONE;
+                            ref const listItems{ vk == NEOS_PY_LIST ? iter(value) : new_reference(none()) };
+                            ref const dictItems{ vk == NEOS_PY_DICT ? call_method_named(value, "items", {}) : new_reference(none()) };
                             ref const dictIter{ vk == NEOS_PY_DICT && dictItems ? iter(dictItems.get()) : new_reference(none()) };
-                            ref const newobj{ module_attribute("copyreg", "__newobj__") };
+                            static object* sNewobj = nullptr;
+                            static object* sNewobjEx = nullptr;
+                            ref const newobj{ newobjEx ? module_attribute_once(sNewobjEx, "copyreg", "__newobj_ex__") : module_attribute_once(sNewobj, "copyreg", "__newobj__") };
                             if (!newobj || !listItems || !dictIter)
                                 return nullptr;
-                            return make_tuple({ new_reference(newobj.get()), make_tuple(std::move(args)), new_reference(state.get()), new_reference(listItems.get()),
+                            if (newobjEx)
+                            {
+                                return make_tuple({ new_reference(newobj.get()), new_reference(newobjEx.get()), new_reference(state.get()), new_reference(listItems.get()),
+                                    new_reference(dictIter.get()) });
+                            }
+                            auto newargs = std::move(args);
+                            args.clear();
+                            return make_tuple({ new_reference(newobj.get()), make_tuple(std::move(newargs)), new_reference(state.get()), new_reference(listItems.get()),
                                 new_reference(dictIter.get()) });
                         }
                         // (protocols 0 and 1: copyreg._reconstructor(cls, base, state))
-                        ref const reconstructor{ module_attribute("copyreg", "_reconstructor") };
+                        static object* sReconstructor = nullptr;
+                        ref const reconstructor{ module_attribute_once(sReconstructor, "copyreg", "_reconstructor") };
                         if (!reconstructor)
                             return nullptr;
                         ref base{ module_attribute("builtins", "object") };
                         ref baseState{ new_reference(none()) };
-                        if (auto const value = builtin_value(self); value != self)
+                        if (value != self)
                         {
                             base = ref{ class_of(value) };
                             baseState = ref{ new_reference(value) };
@@ -561,14 +666,174 @@ namespace neos::python_runtime
                         if (!is_callable(a[0]))
                             return error("TypeError", "constructors must be callable");
                         return new_reference(none());
+                    } },
+                // pickle_complex(c): (complex, (c.real, c.imag))
+                { "pickle_complex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("pickle_complex", aArgs, aKwargs, { "c" }, 1u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            py const c = py::borrowed(a[0]);
+                            return py_tuple({ builtin("complex"), py_tuple({ c.attr("real"), c.attr("imag") }) });
+                        });
+                    } },
+                // pickle_union(obj): (functools.reduce, (operator.or_, obj.__args__))
+                { "pickle_union", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("pickle_union", aArgs, aKwargs, { "obj" }, 1u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            return py_tuple({ import_attribute("functools", "reduce"), py_tuple({ import_attribute("operator", "or_"), py::borrowed(a[0]).attr("__args__") }) });
+                        });
+                    } },
+                // (Python's object.__reduce_ex__ for protocols 0 and 1)
+                { "_reduce_ex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("_reduce_ex", aArgs, aKwargs, { "self", "proto" }, 2u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            if (!(py::borrowed(a[1]) < py{ 2 }))
+                                py_raise("AssertionError", "");
+                            return import_attribute("copyreg", "__reduce_ex__")(py::borrowed(a[0]), py::borrowed(a[1]));
+                        });
+                    } },
+                // _slotnames(cls): the names of the slots of a class and its bases (cached as its __slotnames__)
+                { "_slotnames", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("_slotnames", aArgs, aKwargs, { "cls" }, 1u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            py const cls = py::borrowed(a[0]);
+                            py names = cls.attr("__dict__").method("get", { py{ "__slotnames__" } });
+                            if (!names.is_none())
+                                return names;
+                            names = py_list();
+                            if (builtin("hasattr")(cls, py{ "__slots__" }).truthy())
+                                for (auto const& c : cls.attr("__mro__").items())
+                                {
+                                    py const dict = c.attr("__dict__");
+                                    if (!dict.contains(py{ "__slots__" }))
+                                        continue;
+                                    py slots = dict[py{ "__slots__" }];
+                                    if (isinstance(slots, builtin("str")))
+                                        slots = py_tuple({ slots });
+                                    for (auto const& name : slots.items())
+                                    {
+                                        if (name == py{ "__dict__" } || name == py{ "__weakref__" })
+                                            continue;
+                                        // (private names are mangled)
+                                        if (name.method("startswith", { py{ "__" } }).truthy() && !name.method("endswith", { py{ "__" } }).truthy())
+                                        {
+                                            py const stripped = c.attr("__name__").method("lstrip", { py{ "_" } });
+                                            names.method("append", { stripped.truthy() ? py{ "_" + stripped.str() + name.str() } : name });
+                                        }
+                                        else
+                                            names.method("append", { name });
+                                    }
+                                }
+                            if (setattr(cls.get(), "__slotnames__", names.get()) != 0)
+                                clear_error();
+                            return names;
+                        });
+                    } },
+                // add_extension(module, name, code): an extension code registered
+                { "add_extension", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("add_extension", aArgs, aKwargs, { "module", "name", "code" }, 3u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            py const code = builtin("int")(py::borrowed(a[2]));
+                            if (!(py{ 1 } <= code && code <= py{ 0x7fffffffll }))
+                                py_raise("ValueError", "code out of range");
+                            py const key = py_tuple({ py::borrowed(a[0]), py::borrowed(a[1]) });
+                            py const registry = import_attribute("copyreg", "_extension_registry");
+                            py const inverted = import_attribute("copyreg", "_inverted_registry");
+                            if (registry.method("get", { key }) == code && inverted.method("get", { code }) == key)
+                                return py::none();      // (redundant registrations are benign)
+                            if (registry.contains(key))
+                                py_raise("ValueError", "key " + key.str() + " is already registered with code " + registry[key].str());
+                            if (inverted.contains(code))
+                                py_raise("ValueError", "code " + code.str() + " is already in use for key " + inverted[code].str());
+                            registry.set_item(key, code);
+                            inverted.set_item(code, key);
+                            return py::none();
+                        });
+                    } },
+                // remove_extension(module, name, code): an extension code unregistered
+                { "remove_extension", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("remove_extension", aArgs, aKwargs, { "module", "name", "code" }, 3u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]()
+                        {
+                            py const code = py::borrowed(a[2]);
+                            py const key = py_tuple({ py::borrowed(a[0]), py::borrowed(a[1]) });
+                            py const registry = import_attribute("copyreg", "_extension_registry");
+                            py const inverted = import_attribute("copyreg", "_inverted_registry");
+                            py const cache = import_attribute("copyreg", "_extension_cache");
+                            if (registry.method("get", { key }) != code || inverted.method("get", { code }) != key)
+                                py_raise("ValueError", "key " + key.str() + " is not registered with code " + code.str());
+                            registry.method("__delitem__", { key });
+                            inverted.method("__delitem__", { code });
+                            if (cache.contains(code))
+                                cache.method("__delitem__", { code });
+                            return py::none();
+                        });
+                    } },
+                { "clear_extension_cache", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("clear_extension_cache", aArgs, aKwargs, {}, 0u, 0u, a))
+                            return nullptr;
+                        return py_guarded([&]() { import_attribute("copyreg", "_extension_cache").method("clear"); return py::none(); });
                     } }
             };
 
             bool copyreg_module(std::vector<std::pair<std::string, object*>>& aAttributes)
             {
+                object* pickleComplex = nullptr;
+                object* pickleUnion = nullptr;
                 for (auto const& f : sCopyregFunctions)
+                {
                     aAttributes.emplace_back(f.name, make_builtin(f));
-                aAttributes.emplace_back("dispatch_table", make_dict());
+                    if (std::strcmp(f.name, "pickle_complex") == 0)
+                        pickleComplex = aAttributes.back().second;
+                    else if (std::strcmp(f.name, "pickle_union") == 0)
+                        pickleUnion = aAttributes.back().second;
+                }
+                // (the reductions of complex and of types.UnionType (int | str))
+                auto const dispatchTable = make_dict();
+                aAttributes.emplace_back("dispatch_table", dispatchTable);
+                {
+                    ref const complexType{ fn_builtin("complex") };
+                    ref const intType{ fn_builtin("int") };
+                    ref const strType{ fn_builtin("str") };
+                    ref const unionValue{ intType && strType ? binary(NEOS_PY_OR, intType.get(), strType.get(), false) : nullptr };
+                    ref const unionType{ unionValue ? class_of(unionValue.get()) : nullptr };
+                    if (!complexType || !unionType)
+                        return false;
+                    dict_set(dispatchTable, complexType.get(), pickleComplex);
+                    dict_set(dispatchTable, unionType.get(), pickleUnion);
+                }
+                aAttributes.emplace_back("_HEAPTYPE", make_int(1 << 9));
+                {
+                    ref const intType{ fn_builtin("int") };
+                    ref const intNew{ intType ? getattr(intType.get(), "__new__") : nullptr };
+                    if (!intNew)
+                        return false;
+                    aAttributes.emplace_back("_new_type", class_of(intNew.get()));
+                }
                 aAttributes.emplace_back("_extension_registry", make_dict());
                 aAttributes.emplace_back("_inverted_registry", make_dict());
                 aAttributes.emplace_back("_extension_cache", make_dict());
@@ -1208,6 +1473,11 @@ namespace neos::python_runtime
             object* sDefaultIntHandler = nullptr;
             std::thread::id sMainThread = std::this_thread::get_id();
             bool sSignalModule = false;
+            std::atomic<long long> sWakeupFd{ -1 };     ///< (set_wakeup_fd's: the signals' numbers are written to it (as bytes))
+#if defined(_WIN32)
+            using socket_send = int (__stdcall*)(std::uintptr_t, char const*, int, int);
+            std::atomic<socket_send> sWakeupSend{ nullptr };   ///< (Windows: the wakeup fd is a socket (Winsock's send))
+#endif
 
             void neos_python_signal(int aSignal)
             {
@@ -1215,6 +1485,20 @@ namespace neos::python_runtime
                 {
                     sPending[aSignal].store(true);
                     sAnyPending.store(true);
+                }
+                // (the wakeup fd: the signal's number written to it (a full buffer or another error is ignored))
+                auto const wakeup = sWakeupFd.load();
+                if (wakeup != -1)
+                {
+                    char const byte = static_cast<char>(static_cast<unsigned char>(aSignal));
+#if defined(_WIN32)
+                    if (auto const send = sWakeupSend.load())
+                        send(static_cast<std::uintptr_t>(wakeup), &byte, 1, 0);
+#else
+                    int const savedErrno = errno;
+                    [[maybe_unused]] auto const written = ::write(static_cast<int>(wakeup), &byte, 1u);
+                    errno = savedErrno;
+#endif
                 }
 #if defined(_WIN32)
                 std::signal(aSignal, neos_python_signal);   // (Windows resets the handler)
@@ -1391,14 +1675,32 @@ namespace neos::python_runtime
                 { "set_wakeup_fd", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
-                        if (!parse_arguments("set_wakeup_fd", aArgs, aKwargs, { "fd", "warn_on_full_buffer" }, 1u, 1u, a))
+                        if (!parse_arguments("set_wakeup_fd", aArgs, aKwargs, { "fd", "warn_on_full_buffer" }, 1u, 2u, a))
                             return nullptr;
-                        static long long sWakeup = -1;
                         long long fd = 0;
                         if (!to_index(a[0], fd))
                             return nullptr;
-                        auto const previous = sWakeup;
-                        sWakeup = fd;
+                        if (std::this_thread::get_id() != sMainThread)
+                            return error("ValueError", "set_wakeup_fd only works in main thread of the main interpreter");
+                        if (fd != -1)
+                        {
+#if defined(_WIN32)
+                            // (a socket (non-blocking: as CPython requires it))
+                            auto const winsock = ::LoadLibraryA("ws2_32.dll");
+                            auto const send = winsock != nullptr ? reinterpret_cast<socket_send>(::GetProcAddress(winsock, "send")) : nullptr;
+                            if (send == nullptr)
+                                return raise_os_error(EINVAL);
+                            sWakeupSend.store(send);
+#else
+                            // (a valid fd, in non-blocking mode)
+                            auto const flags = ::fcntl(static_cast<int>(fd), F_GETFL);
+                            if (flags == -1)
+                                return raise_os_error(errno);
+                            if ((flags & O_NONBLOCK) == 0)
+                                return error("ValueError", "the fd " + std::to_string(fd) + " must be in non-blocking mode");
+#endif
+                        }
+                        auto const previous = sWakeupFd.exchange(fd);
                         return make_int(previous);
                     } },
 #if !defined(_WIN32)

@@ -30,9 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/heapq.py and Lib/copy.py), Copyright (c) 2001-2024 Python
-  Software Foundation; All Rights Reserved. They are used under the Python Software Foundation License Version 2 (see
-  runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the neos Python runtime plugin and adapted to
+  Portions of this file are derived from CPython 3.13 (Lib/heapq.py, Lib/copy.py and Modules/_operator.c (the reductions of
+  itemgetter, attrgetter and methodcaller)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They
+  are used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated
+  from Python and C to C++ for the neos Python runtime plugin and adapted to
   its object model (see runtime/python/NOTICE).
 */
 
@@ -346,6 +347,32 @@ namespace neos::python_runtime
                         }
                     return make_str(std::string{ "operator." } + sGetterNames[g.kind] + "(" + text + ")");
                 };
+                // (pickling: (type, (items...)); a methodcaller with keyword arguments: (partial(type, name, **kwargs), (args...)))
+                type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+                {
+                    static builtin_entry const sReduce{ "__reduce__", [](std::vector<object*> const& aArgs, object*) -> object*
+                        {
+                            auto const& g = *reinterpret_cast<getter_object*>(aArgs.at(0u));
+                            ref const cls{ class_of(aArgs[0]) };
+                            if (g.kind == 2 && g.kwargs != nullptr && !as<dict_object>(g.kwargs)->items.empty())
+                            {
+                                ref const partial{ module_attribute("functools", "partial") };
+                                ref const partialArgs{ make_tuple({ borrowed(cls.get()), borrowed(g.items[0]) }) };
+                                ref const function{ partial ? call(partial.get(), partialArgs.get(), g.kwargs) : nullptr };
+                                if (!function)
+                                    return nullptr;
+                                std::vector<object*> rest;
+                                for (std::size_t i = 1u; i < g.items.size(); ++i)
+                                    rest.push_back(borrowed(g.items[i]));
+                                return make_tuple({ borrowed(function.get()), make_tuple(std::move(rest)) });
+                            }
+                            std::vector<object*> items;
+                            for (auto i : g.items)
+                                items.push_back(borrowed(i));
+                            return make_tuple({ borrowed(cls.get()), make_tuple(std::move(items)) });
+                        } };
+                    return reduce_method(aSelf, aName, sReduce);
+                };
                 return type;
             }
 
@@ -387,6 +414,7 @@ namespace neos::python_runtime
                 }
                 for (auto const& f : sOperatorFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                set_functions_module(aAttributes, "_operator");
                 for (std::uintptr_t i = 0u; i < 3u; ++i)
                     aAttributes.emplace_back(sGetterNames[i], context()->type_new(context(), sGetterNames[i], (std::string{ "operator." } + sGetterNames[i]).c_str(),
                         new_getter, reinterpret_cast<void*>(i), getter_instancecheck));
@@ -642,6 +670,8 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sHeapqFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                set_functions_module(aAttributes, "_heapq", { "heappush", "heappop", "heapify", "heapreplace", "heappushpop", "_heapify_max", "_heappop_max",
+                    "_heapreplace_max" });
                 return true;
             }
 
@@ -721,6 +751,7 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sBisectFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                set_functions_module(aAttributes, "_bisect");
                 return true;
             }
 
@@ -810,10 +841,29 @@ namespace neos::python_runtime
 
             // (an instance whose class defines __reduce_ex__ or __reduce__: copied as CPython's copy._reconstruct does (a str: the object 
             // itself); aHandled false if it defines neither)
+            // (an object of a type of a module that has a __getstate__ of its own (e.g. io.BytesIO): copied by its reduction 
+            // (object.__reduce_ex__(4)), as CPython's copy does)
+            bool own_state(object* aObject)
+            {
+                auto const type = python_type(aObject);
+                if (kind_of(aObject) != NEOS_PY_OTHER || type == nullptr || type->getattr == nullptr)
+                    return false;
+                ref const method{ type->getattr(context(), aObject, "__getstate__") };
+                if (!method)
+                    clear_error();
+                return static_cast<bool>(method);
+            }
+
             object* reduce_copy(object* aObject, object* aMemo, bool& aHandled)
             {
                 aHandled = false;
                 ref reductor{ special_method(aObject, "__reduce_ex__") };
+                if (!reductor && own_state(aObject))
+                {
+                    reductor = ref{ getattr(aObject, "__reduce_ex__") };
+                    if (!reductor)
+                        clear_error();
+                }
                 bool const ex = static_cast<bool>(reductor);
                 if (!reductor)
                     reductor = ref{ special_method(aObject, "__reduce__") };
@@ -943,6 +993,12 @@ namespace neos::python_runtime
                         return call_with(method.get(), {});
                     clear_error();
                 }
+                if (own_state(aObject))
+                {
+                    bool reduced = false;
+                    if (auto const copied = reduce_copy(aObject, nullptr, reduced); reduced)
+                        return copied;
+                }
                 return error("TypeError", std::string{ "cannot copy '" } + type_name(aObject) + "' object");
             }
 
@@ -1048,6 +1104,12 @@ namespace neos::python_runtime
                         return result.release_ownership();
                     }
                     clear_error();
+                    if (own_state(aObject))
+                    {
+                        bool reduced = false;
+                        if (auto const copied = reduce_copy(aObject, aMemo, reduced); reduced)
+                            return copied;
+                    }
                 }
                 // (a set, a deque etc.: its type called with a deep copy of its items)
                 if (auto const t = python_type(aObject); t != nullptr && t->iter != nullptr)
@@ -1136,6 +1198,31 @@ namespace neos::python_runtime
             }
 
             inline bool const sOperator = register_module("operator", operator_module);
+            // (CPython's C modules _operator, _heapq and _bisect: operator's, heapq's and bisect's functions)
+            // (_operator._compare_digest(a, b): a == b, in constant time (as secrets.compare_digest))
+            builtin_entry const sCompareDigest = { "_compare_digest", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                {
+                    if (aKwargs != nullptr && !as<dict_object>(aKwargs)->items.empty())
+                        return error("TypeError", "_compare_digest() takes no keyword arguments");
+                    if (aArgs.size() != 2u)
+                        return error("TypeError", "_compare_digest expected 2 arguments, got " + std::to_string(aArgs.size()));
+                    ref const compare{ module_attribute("secrets", "compare_digest") };
+                    if (!compare)
+                        return nullptr;
+                    ref const args{ make_tuple({ new_reference(aArgs[0]), new_reference(aArgs[1]) }) };
+                    return call(compare.get(), args.get(), nullptr);
+                } };
+            inline bool const sOperatorC = register_module("_operator", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                {
+                    if (!c_module_attributes("operator", "_operator", { "itemgetter", "attrgetter", "methodcaller" }, aAttributes))
+                        return false;
+                    aAttributes.emplace_back("_compare_digest", make_builtin(sCompareDigest));
+                    return true;
+                });
+            inline bool const sHeapqC = register_module("_heapq", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                { return c_module_attributes("heapq", "_heapq", {}, aAttributes); });
+            inline bool const sBisectC = register_module("_bisect", [](std::vector<std::pair<std::string, object*>>& aAttributes)
+                { return c_module_attributes("bisect", "_bisect", {}, aAttributes); });
             inline bool const sHeapq = register_module("heapq", heapq_module);
             inline bool const sBisect = register_module("bisect", bisect_module);
             inline bool const sCopy = register_module("copy", copy_module);

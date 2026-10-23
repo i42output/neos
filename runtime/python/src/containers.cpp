@@ -353,12 +353,13 @@ namespace neos::python_runtime
                     error("TypeError", std::string{ "'" } + type_name(aOther) + "' object is not iterable");
                     return false;
                 }
+                std::vector<object*> pair;
                 for (long long index = 0;; ++index)
                 {
                     ref const element{ next(it.get()) };
                     if (!element)
                         return !failed();
-                    std::vector<object*> pair;
+                    pair.clear();
                     ref const pairIt{ iter(element.get()) };
                     if (!pairIt)
                     {

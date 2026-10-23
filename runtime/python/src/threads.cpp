@@ -29,6 +29,11 @@
   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  Portions of this file are derived from CPython 3.13 (Lib/threading.py, Lib/_threading_local.py and
+  Modules/_threadmodule.c), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under
+  the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python and C
+  to C++ for the neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
 
 // Threads: the global interpreter lock (GIL: once a thread has been started, one thread at a time runs the program; it is
@@ -49,6 +54,7 @@
 #include <thread>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -894,6 +900,134 @@ namespace neos::python_runtime
                 return type;
             }
 
+            // --- threading.local (_thread._local) (as CPython's Lib/_threading_local.py: a class (so that programs derive from it) whose 
+            // instances' attributes are each thread's own: an instance's __dict__ is the thread's, made when the thread first uses it (and then
+            // its class's __init__ is called with its arguments))
+
+            struct local_impl
+            {
+                std::map<long long, py> dicts;  ///< (each thread's attributes (by its ident))
+                py args;
+                py kwargs;
+            };
+            std::map<object*, local_impl>& local_impls()
+            {
+                static std::map<object*, local_impl> sImpls;
+                return sImpls;
+            }
+            object* sLocalClass = nullptr;
+
+            // (the instance's __dict__: the thread's (made, and __init__ called, if the thread has none))
+            void local_patch(py const& aSelf)
+            {
+                auto& impls = local_impls();
+                auto const i = impls.find(aSelf.get());
+                if (i == impls.end())
+                    return;
+                static py const sSetattr = builtin("object").attr("__setattr__");
+                auto const ident = thread_ident();
+                if (auto const d = i->second.dicts.find(ident); d != i->second.dicts.end())
+                {
+                    sSetattr(aSelf, py{ "__dict__" }, d->second);
+                    return;
+                }
+                py const dict = py_dict();
+                i->second.dicts[ident] = dict;
+                sSetattr(aSelf, py{ "__dict__" }, dict);
+                std::vector<object*> args{ aSelf.reference() };
+                for (auto const& a : i->second.args.items())
+                    args.push_back(a.reference());
+                py const init = type_of(aSelf).attr("__init__");
+                py{ invoke(init.get(), std::move(args), i->second.kwargs.get()) };
+            }
+
+            builtin_entry const sLocalMethods[] =
+            {
+                { "__new__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        return py_guarded([&]()
+                        {
+                            if (aArgs.empty())
+                                py_raise("TypeError", "_local.__new__(): not enough arguments");
+                            py const cls = py::borrowed(aArgs[0]);
+                            bool const arguments = aArgs.size() > 1u || (aKwargs != nullptr && length(aKwargs) > 0);
+                            if (arguments && cls.attr("__init__").is(builtin("object").attr("__init__")))
+                                py_raise("TypeError", "Initialization arguments are not supported");
+                            py const self = builtin("object").attr("__new__")(cls);
+                            auto& impl = local_impls()[self.get()];
+                            std::vector<py> args;
+                            for (std::size_t i = 1u; i < aArgs.size(); ++i)
+                                args.push_back(py::borrowed(aArgs[i]));
+                            impl.args = py_tuple(args);
+                            impl.kwargs = aKwargs != nullptr ? builtin("dict")(py::borrowed(aKwargs)) : py_dict();
+                            // (the thread's dict made in anticipation of __init__ being called (so that it is not called again here))
+                            py const dict = py_dict();
+                            impl.dicts[thread_ident()] = dict;
+                            builtin("object").attr("__setattr__")(self, py{ "__dict__" }, dict);
+                            return self;
+                        });
+                    } },
+                { "__getattribute__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        return py_guarded([&]()
+                        {
+                            if (aArgs.size() != 2u)
+                                py_raise("TypeError", "expected 1 argument, got " + std::to_string(aArgs.size() - 1u));
+                            py const self = py::borrowed(aArgs[0]);
+                            local_patch(self);
+                            return builtin("object").attr("__getattribute__")(self, py::borrowed(aArgs[1]));
+                        });
+                    } },
+                { "__setattr__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        return py_guarded([&]()
+                        {
+                            if (aArgs.size() != 3u)
+                                py_raise("TypeError", "expected 2 arguments, got " + std::to_string(aArgs.size() - 1u));
+                            py const self = py::borrowed(aArgs[0]);
+                            if (kind_of(aArgs[1]) == NEOS_PY_STR && as<str_object>(aArgs[1])->value == "__dict__")
+                                py_raise("AttributeError", "'" + (type_of(self).get() == sLocalClass ? std::string{ "_thread._local" } : type_of(self).attr("__name__").str()) + 
+                                    "' object attribute '__dict__' is read-only");
+                            local_patch(self);
+                            return builtin("object").attr("__setattr__")(self, py::borrowed(aArgs[1]), py::borrowed(aArgs[2]));
+                        });
+                    } },
+                { "__delattr__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        return py_guarded([&]()
+                        {
+                            if (aArgs.size() != 2u)
+                                py_raise("TypeError", "expected 1 argument, got " + std::to_string(aArgs.size() - 1u));
+                            py const self = py::borrowed(aArgs[0]);
+                            if (kind_of(aArgs[1]) == NEOS_PY_STR && as<str_object>(aArgs[1])->value == "__dict__")
+                                py_raise("AttributeError", "'" + (type_of(self).get() == sLocalClass ? std::string{ "_thread._local" } : type_of(self).attr("__name__").str()) + 
+                                    "' object attribute '__dict__' is read-only");
+                            local_patch(self);
+                            return builtin("object").attr("__delattr__")(self, py::borrowed(aArgs[1]));
+                        });
+                    } },
+                { "__del__", [](std::vector<object*> const& aArgs, object*) -> object*
+                    {
+                        if (!aArgs.empty())
+                            local_impls().erase(aArgs[0]);
+                        return new_reference(none());
+                    } }
+            };
+
+            object* local_class()
+            {
+                if (sLocalClass == nullptr)
+                {
+                    std::vector<std::pair<std::string, object*>> ns;
+                    for (auto const& m : sLocalMethods)
+                        ns.emplace_back(m.name, make_builtin(m));
+                    sLocalClass = make_class("_thread", "_local", {}, ns);
+                    for (auto& n : ns)
+                        release(n.second);
+                }
+                return sLocalClass != nullptr ? new_reference(sLocalClass) : nullptr;
+            }
+
             // --- threads
 
             struct thread_state
@@ -1351,8 +1485,30 @@ namespace neos::python_runtime
 
             // --- the modules
 
+            // (threading._register_atexit's functions: called (in reverse order) before the program's threads are joined)
+            std::vector<object*> sThreadingAtexits;
+            bool sThreadsShuttingDown = false;
+
             builtin_entry const sThreadingFunctions[] =
             {
+                { "_register_atexit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        if (aArgs.empty())
+                            return error("TypeError", "_register_atexit() missing 1 required positional argument: 'func'");
+                        if (sThreadsShuttingDown)
+                            return error("RuntimeError", "can't register atexit after shutdown");
+                        ref const partial{ module_attribute("functools", "partial") };
+                        if (!partial)
+                            return nullptr;
+                        std::vector<object*> args;
+                        for (auto a : aArgs)
+                            args.push_back(new_reference(a));
+                        auto const call = invoke(partial.get(), std::move(args), aKwargs);
+                        if (call == nullptr)
+                            return nullptr;
+                        sThreadingAtexits.push_back(call);
+                        return new_reference(none());
+                    } },
                 { "Lock", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
                         std::vector<object*> a;
@@ -1441,7 +1597,6 @@ namespace neos::python_runtime
                         }
                         return &b->h.base;
                     } },
-                { "local", [](std::vector<object*> const&, object*) -> object* { return &(new local_object{ { { &sLocalType.base } } })->h.base; } },
                 { "current_thread", [](std::vector<object*> const&, object*) -> object* { return current_thread(); } },
                 { "currentThread", [](std::vector<object*> const&, object*) -> object* { return current_thread(); } },
                 { "main_thread", [](std::vector<object*> const&, object*) -> object* { return main_thread(); } },
@@ -1474,6 +1629,7 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sThreadingFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                aAttributes.emplace_back("local", local_class());
                 auto const thread = thread_class();
                 if (thread == nullptr)
                     return false;
@@ -1541,7 +1697,6 @@ namespace neos::python_runtime
                     } },
                 { "interrupt_main", [](std::vector<object*> const&, object*) -> object* { return none(); } },
                 { "exit", [](std::vector<object*> const&, object*) -> object* { return error("SystemExit", ""); } },
-                { "_local", [](std::vector<object*> const&, object*) -> object* { return &(new local_object{ { { &sLocalType.base } } })->h.base; } },
                 { "stack_size", [](std::vector<object*> const&, object*) -> object* { return make_int(0); } }
             };
 
@@ -1549,6 +1704,7 @@ namespace neos::python_runtime
             {
                 for (auto const& f : sThreadFunctions)
                     aAttributes.emplace_back(f.name, make_builtin(f));
+                aAttributes.emplace_back("_local", local_class());
                 aAttributes.emplace_back("LockType", type_object_for("lock", "_thread.lock"));
                 aAttributes.emplace_back("TIMEOUT_MAX", make_float(9223372036.0));
                 aAttributes.emplace_back("error", exception_class("RuntimeError"));
@@ -1562,6 +1718,18 @@ namespace neos::python_runtime
         // (the program has ended: its threads (except daemon threads) finish first)
         void threads_end()
         {
+            // (threading._shutdown: the functions registered by threading._register_atexit (e.g. concurrent.futures's), in reverse order)
+            if (!sThreadsShuttingDown)
+            {
+                sThreadsShuttingDown = true;
+                for (auto i = sThreadingAtexits.rbegin(); i != sThreadingAtexits.rend(); ++i)
+                {
+                    ref const args{ make_tuple() };
+                    ref const r{ call(*i, args.get(), nullptr) };
+                    if (!r)
+                        write_unraisable(*i);
+                }
+            }
             for (;;)
             {
                 object* thread = nullptr;

@@ -57,10 +57,9 @@
 
 // The module logging.config (CPython 3.13's Lib/logging/config.py): dictConfig (BaseConfigurator, DictConfigurator and the ConvertingXXX
 // wrappers), fileConfig, listen and stopListening; its classes are made (by type) of closures, so a program's subclasses override their
-// methods. The module's variables that a program can rebind (dictConfigClass, _listener) are read from the module. configparser (fileConfig's)
-// and socketserver (listen's: config.py imports ThreadingTCPServer and StreamRequestHandler from it when it is imported) are imported when they
-// are used (the runtime does not have them yet); _is_queue_like_object does not check for a multiprocessing queue if multiprocessing cannot be
-// imported (the runtime does not have it: there can be no such queue).
+// methods. The module's variables that a program can rebind (dictConfigClass, _listener) are read from the module. configparser is imported
+// when fileConfig is called (as config.py imports it); _is_queue_like_object does not check for a multiprocessing queue if multiprocessing cannot
+// be imported (the runtime does not have it: there can be no such queue).
 
 #include <functional>
 #include <map>
@@ -1164,9 +1163,8 @@ namespace neos::python_runtime::detail
         // (listen's classes (as it defines them each time that it is called): a request's handler, the server and its thread)
         py listen(py const& aPort, py const& aVerify)
         {
-            py const socketserver{ fn_import("socketserver") };
-            py const threadingTCPServer = socketserver.attr("ThreadingTCPServer");
-            py const streamRequestHandler = socketserver.attr("StreamRequestHandler");
+            py const threadingTCPServer = G("ThreadingTCPServer");
+            py const streamRequestHandler = G("StreamRequestHandler");
             char const* const handlerName = "listen.<locals>.ConfigStreamHandler";
             py const configStreamHandler = make_config_class("ConfigStreamHandler", { streamRequestHandler }, {
                 { "handle", method(handlerName, "handle", {}, [](std::vector<py> const& a)
@@ -1324,6 +1322,8 @@ namespace neos::python_runtime::detail
                 for (auto module : { "errno", "functools", "io", "logging", "os", "queue", "re", "socket", "struct", "threading", "traceback" })
                     add(module, py{ fn_import(module) });
                 py const handlers{ fn_import("logging.handlers") };    // (as config.py imports it)
+                add("ThreadingTCPServer", M("socketserver", "ThreadingTCPServer"));
+                add("StreamRequestHandler", M("socketserver", "StreamRequestHandler"));
                 add("DEFAULT_LOGGING_CONFIG_PORT", py{ 9030 });
                 for (auto const& [name, value] : g)
                     add(name.c_str(), value);

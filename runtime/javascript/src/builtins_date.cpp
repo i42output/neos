@@ -566,7 +566,8 @@ namespace neos::javascript_runtime
             int meridiem = 0;           ///< (1 AM, 2 PM)
             bool utcWord = false;
             std::optional<double> offset;
-            std::vector<number_token> numbers;
+            thread_local std::vector<number_token> tNumbers;
+            tNumbers.clear();
             std::size_t pos = 0u;
             auto const n = aText.size();
             auto const read_number = [&](int& aDigits) -> std::int64_t
@@ -710,7 +711,7 @@ namespace neos::javascript_runtime
                     }
                     int count = 0;
                     auto const v = read_number(count);
-                    numbers.push_back({ negative ? -v : v, count, true });
+                    tNumbers.push_back({ negative ? -v : v, count, true });
                     continue;
                 }
                 if (is_digit(c))
@@ -793,7 +794,7 @@ namespace neos::javascript_runtime
                         }
                         continue;
                     }
-                    numbers.push_back({ v, count, false });
+                    tNumbers.push_back({ v, count, false });
                     continue;
                 }
                 if (c == u'-' || c == u'/' || c == u'.')
@@ -804,7 +805,7 @@ namespace neos::javascript_runtime
                 return nan;
             }
             // (the other numbers: a day of the month and a year)
-            for (auto const& number : numbers)
+            for (auto const& number : tNumbers)
             {
                 if (!number.signed_ && number.digits <= 2 && !date && month)
                     date = number.value;

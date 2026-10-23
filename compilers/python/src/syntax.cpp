@@ -662,6 +662,7 @@ namespace neos::compilers::python
                     expectName = false;
                 }
             };
+            std::vector<statement> statements;
             for (std::size_t l = 0u; l < lines.size(); ++l)
             {
                 auto const& line = lines[l];
@@ -717,7 +718,7 @@ namespace neos::compilers::python
                         }
                         break;
                     }
-                std::vector<statement> statements;
+                statements.clear();
                 for (std::size_t i = start; i < t.size(); ++i)
                     if (d[i] == 0 && is_op(aSource, t[i], ";"))
                     {

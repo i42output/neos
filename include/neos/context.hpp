@@ -36,10 +36,13 @@
 #include <neos/neos.hpp>
 #include <map>
 #include <string>
+#include <string_view>
 #include <iostream>
 #include <optional>
 #include <vector>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <neolib/file/json.hpp>
 #include <neolib/app/i_application.hpp>
 #include <neolib/plugin/i_plugin.hpp>
@@ -55,6 +58,23 @@ namespace neos
         typedef neolib::map<neolib::string, neolib::ref_ptr<language::i_concept_library>> concept_libraries_t;
         typedef language::translation_unit translation_unit_t;
         typedef language::program program_t;
+        // the syntax highlighting of a source (see highlight): runs of its bytes ([first, last)) and their categories
+        enum class highlight_category : std::uint32_t
+        {
+            Comment,
+            Keyword,
+            String,
+            Number,
+            Constant,
+            Type,
+            Function
+        };
+        struct highlight_span
+        {
+            std::size_t first;
+            std::size_t last;
+            highlight_category category;
+        };
     public:
         context(std::ostream& aCout) : 
             context{ std::cin, aCout, std::cerr } {}
@@ -102,6 +122,13 @@ namespace neos
         int exit_status() const final;
         language::data_type evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
+    public:
+        // the syntax highlighting of a source in the language of the schema aSchemaPath (loaded (once) for it: not the context's schema), 
+        // from the trees that its grammar parses it into: the first stage's tokens (with the comments that the language discards), then the 
+        // last stage's AST (its semantic concepts) of the source as the language's own pass over it rewrites it (as much of it as needs no 
+        // compilation: see i_language_compiler::parsable_source); a later span replaces an earlier one that it overlaps; none: the source 
+        // cannot be highlighted
+        std::vector<highlight_span> highlight(std::string const& aSchemaPath, std::string_view aSource);
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);
@@ -115,6 +142,14 @@ namespace neos
         std::unique_ptr<neolib::i_application> iPrivateApplication;
         neolib::i_application& iApplication;
         concept_libraries_t iConceptLibraries;
+        // (find_concept's results, by symbol (each node of each program compiled is looked up): forgotten when a library is added)
+        struct concept_symbol_hash
+        {
+            using is_transparent = void;
+            std::size_t operator()(std::string_view aSymbol) const { return std::hash<std::string_view>{}(aSymbol); }
+        };
+        mutable std::mutex iConceptCacheMutex;
+        mutable std::unordered_map<std::string, neolib::ref_ptr<language::i_semantic_concept>, concept_symbol_hash, std::equal_to<>> iConceptCache;
         std::shared_ptr<language::schema> iSchema;
         language::compiler iCompiler;
         program_t iProgram;
@@ -123,5 +158,8 @@ namespace neos
         std::map<std::string, std::string> iPackages;
         std::vector<std::string> iArguments;
         bool iRestricted = false;
+        std::map<std::string, std::pair<std::shared_ptr<language::schema>, std::shared_ptr<language::schema>>> iHighlightSchemas; ///< (by path: 
+                                                        ///< the schema whose stages discard what the language discards (as the compiler's do: the 
+                                                        ///< AST) and the schema with nothing discarded (the first stage's tree has the comments))
     };
 }

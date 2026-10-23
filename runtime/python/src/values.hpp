@@ -38,6 +38,8 @@
 // guarded catches at the boundary of a builtin function
 
 #include <functional>
+#include <memory>
+#include <span>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -93,26 +95,70 @@ namespace neos::python_runtime
             void set_item(py const& aKey, py const& aValue) const { py_checked(setitem(get(), aKey.get(), aValue.get()) == 0); }
             py call(std::vector<py> const& aArgs, std::vector<std::pair<char const*, py>> const& aKeywords = {}) const
             {
-                std::vector<object*> args;
-                for (auto const& a : aArgs)
-                    args.push_back(a.reference());
-                ref kwargs;
-                if (!aKeywords.empty())
-                {
-                    kwargs = ref{ make_dict() };
-                    for (auto const& [name, value] : aKeywords)
-                    {
-                        ref const key{ make_str(name) };
-                        dict_set(kwargs.get(), key.get(), value.get());
-                    }
-                }
-                return py{ invoke(get(), std::move(args), kwargs.get()) };
+                return call_with(std::span<py const>{ aArgs }, std::span<std::pair<char const*, py> const>{ aKeywords });
+            }
+            py call(std::initializer_list<py> aArgs, std::initializer_list<std::pair<char const*, py>> aKeywords = {}) const
+            {
+                return call_with(std::span<py const>{ aArgs.begin(), aArgs.size() }, std::span<std::pair<char const*, py> const>{ aKeywords.begin(), aKeywords.size() });
             }
             template <typename... Args>
-            py operator()(Args const&... aArgs) const { return call(std::vector<py>{ py{ aArgs }... }); }
-            py method(char const* aName, std::vector<py> const& aArgs = {}, std::vector<std::pair<char const*, py>> const& aKeywords = {}) const
+            py operator()(Args const&... aArgs) const
             {
-                return attr(aName).call(aArgs, aKeywords);
+                if constexpr (sizeof...(Args) == 0u)
+                    return call_with({}, {});
+                else
+                {
+                    py const items[] = { py{ aArgs }... };
+                    return call_with(std::span<py const>{ items }, {});
+                }
+            }
+            py method(char const* aName, std::initializer_list<py> aArgs = {}, std::initializer_list<std::pair<char const*, py>> aKeywords = {}) const
+            {
+                return method_with(aName, std::span<py const>{ aArgs.begin(), aArgs.size() }, std::span<std::pair<char const*, py> const>{ aKeywords.begin(), aKeywords.size() });
+            }
+            py method(char const* aName, std::vector<py> const& aArgs, std::vector<std::pair<char const*, py>> const& aKeywords = {}) const
+            {
+                return method_with(aName, std::span<py const>{ aArgs }, std::span<std::pair<char const*, py> const>{ aKeywords });
+            }
+        private:
+            // (the arguments as the runtime takes them (borrowed), and the keyword arguments' dict (null: none))
+            static constexpr std::size_t kSmallCall = 8u;
+            static ref keywords_of(std::span<std::pair<char const*, py> const> aKeywords)
+            {
+                if (aKeywords.empty())
+                    return ref{};
+                ref kwargs{ make_dict() };
+                for (auto const& [name, value] : aKeywords)
+                {
+                    ref const key{ interned_name(name) };
+                    dict_set(kwargs.get(), key.get(), value.get());
+                }
+                return kwargs;
+            }
+            template <typename F>
+            static object* with_items(std::span<py const> aArgs, F&& aCall)
+            {
+                object* fixedItems[kSmallCall];
+                std::vector<object*> large;
+                object** items = fixedItems;
+                if (aArgs.size() > kSmallCall)
+                {
+                    large.resize(aArgs.size());
+                    items = large.data();
+                }
+                for (std::size_t i = 0u; i < aArgs.size(); ++i)
+                    items[i] = aArgs[i].get();
+                return aCall(std::span<object* const>{ items, aArgs.size() });
+            }
+            py call_with(std::span<py const> aArgs, std::span<std::pair<char const*, py> const> aKeywords) const
+            {
+                ref const kwargs = keywords_of(aKeywords);
+                return py{ with_items(aArgs, [&](std::span<object* const> aItems) { return arguments_call(get(), aItems, nullptr, kwargs.get()); }) };
+            }
+            py method_with(char const* aName, std::span<py const> aArgs, std::span<std::pair<char const*, py> const> aKeywords) const
+            {
+                ref const kwargs = keywords_of(aKeywords);
+                return py{ with_items(aArgs, [&](std::span<object* const> aItems) { return method_call(get(), aName, aItems, kwargs.get()); }) };
             }
         public:
             bool truthy() const
@@ -264,6 +310,25 @@ namespace neos::python_runtime
         // (a function whose body is C++ (e.g. a closure): of its arguments and keyword arguments (values.cpp))
         using native_body = std::function<py(std::vector<py> const&, object*)>;
         py make_native_function(std::string aName, std::string aQualname, std::string aDoc, std::string aModule, native_body aBody);
+        // (the parameters of such a function (as a Python function's: its __code__, __defaults__ and __kwdefaults__, e.g. for inspect.signature); 
+        // aVarArgs: it has *args; aVarKeywords: **kwargs; aFlags: its code's other flags (e.g. CO_COROUTINE: an async def's))
+        struct native_signature
+        {
+            std::vector<py_parameter> parameters;
+            bool varArgs = false;
+            bool varKeywords = false;
+            unsigned flags = 0u;
+        };
+        py make_native_function(std::string aName, std::string aQualname, std::string aDoc, std::string aModule, native_body aBody,
+            std::shared_ptr<native_signature const> aSignature);
+        inline constexpr unsigned CO_COROUTINE = 0x0080u;
+        // (a function whose arguments are bound to its parameters before its body runs (as module_writer's): its body has them in the order 
+        // of its signature's parameters, then *args (a tuple) and **kwargs (a dict), if it has them; called with no tuple or vector made for 
+        // them)
+        using arguments = std::span<py const>;
+        using bound_body = std::function<py(arguments)>;
+        py make_bound_function(std::string aName, std::string aQualname, std::string aDoc, std::string aModule, std::shared_ptr<native_signature const> aSignature,
+            bound_body aBody);
 
         // (a generator, coroutine or asynchronous generator whose body is C++: it runs on a coroutine of its own (as a Python generator's 
         // body does), so py_yield and py_await suspend it)

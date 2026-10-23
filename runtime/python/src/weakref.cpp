@@ -635,11 +635,14 @@ namespace neos::python_runtime
             {
                 if (aArgs.empty())
                     py_raise("TypeError", std::string{ aFunction } + "() missing 1 required positional argument: 'self'");
-                std::vector<object*> const rest{ aArgs.begin() + 1, aArgs.end() };
-                std::vector<object*> a;
-                py_checked(parse_arguments(aFunction, rest, aKwargs, aNames, aRequired, aPositionalOnly, a));
+                // (scratch kept for reuse (a parse is made per WeakValueDictionary, WeakKeyDictionary and WeakSet operation))
+                thread_local std::vector<object*> tRest;
+                tRest.assign(aArgs.begin() + 1, aArgs.end());
+                thread_local std::vector<object*> tA;
+                tA.clear();
+                py_checked(parse_arguments(aFunction, tRest, aKwargs, aNames, aRequired, aPositionalOnly, tA));
                 std::vector<py> result{ py::borrowed(aArgs[0]) };
-                for (auto v : a)
+                for (auto v : tA)
                     result.push_back(v != nullptr ? py::borrowed(v) : py{});
                 return result;
             }

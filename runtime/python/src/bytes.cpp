@@ -293,6 +293,213 @@ namespace neos::python_runtime
             }
         }
 
+        namespace
+        {
+            // (format % values (bytes, bytearray: PEP 461): its conversions' text, as str's (%s and %b: a bytes-like object, or one that has
+            // __bytes__; %r and %a: ascii(); %c: an int in range(256), or a single byte))
+            object* bytes_percent_format(std::string_view aFormat, object* aValues)
+            {
+                std::vector<object*> values;
+                bool const isTuple = kind_of(aValues) == NEOS_PY_TUPLE;
+                std::string_view probe;
+                auto const has = [&](char const* aName) { ref const a{ optional_attribute(aValues, aName) }; clear_error(); return static_cast<bool>(a); };
+                bool const mapping = !isTuple && kind_of(aValues) != NEOS_PY_STR && !bytes_like(aValues, probe) &&
+                    (kind_of(aValues) == NEOS_PY_DICT || (has("__getitem__") && has("keys")));
+                if (isTuple)
+                    values = as<tuple_object>(aValues)->items;
+                else
+                    values.push_back(aValues);
+                std::size_t next = 0u;
+                auto const next_value = [&]() -> object*
+                {
+                    if (next >= values.size())
+                        return error("TypeError", "not enough arguments for format string");
+                    return values[next++];
+                };
+                std::string result;
+                auto const n = aFormat.size();
+                for (std::size_t i = 0u; i < n;)
+                {
+                    if (aFormat[i] != '%')
+                    {
+                        result += aFormat[i++];
+                        continue;
+                    }
+                    ++i;
+                    if (i >= n)
+                        return error("ValueError", "incomplete format");
+                    ref keyed;
+                    if (aFormat[i] == '(')
+                    {
+                        if (!mapping)
+                            return error("TypeError", "format requires a mapping");
+                        std::size_t depth = 1u, j = i + 1u;
+                        for (; j < n && depth != 0u; ++j)
+                        {
+                            if (aFormat[j] == '(') ++depth;
+                            else if (aFormat[j] == ')') --depth;
+                        }
+                        if (depth != 0u)
+                            return error("ValueError", "incomplete format key");
+                        ref const key{ make_bytes(std::string{ aFormat.substr(i + 1u, j - i - 2u) }) };
+                        keyed = ref{ getitem(aValues, key.get()) };
+                        if (!keyed)
+                            return nullptr;
+                        i = j;
+                    }
+                    // (its flags, width and precision: the str conversion's (a * resolved))
+                    std::string spec = "%";
+                    bool left = false;
+                    for (; i < n && (aFormat[i] == '-' || aFormat[i] == '+' || aFormat[i] == ' ' || aFormat[i] == '#' || aFormat[i] == '0'); ++i)
+                    {
+                        left = left || aFormat[i] == '-';
+                        spec += aFormat[i];
+                    }
+                    long long width = -1, precision = -1;
+                    auto const number = [&](long long& aResult) -> bool
+                    {
+                        if (i < n && aFormat[i] == '*')
+                        {
+                            ++i;
+                            auto const v = next_value();
+                            if (v == nullptr)
+                                return false;
+                            if (!is_int_like(v))
+                                return (error("TypeError", "* wants int"), false);
+                            if (!to_index(v, aResult)) return false;
+                            return true;
+                        }
+                        if (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
+                        {
+                            aResult = 0;
+                            while (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
+                                aResult = aResult * 10 + (aFormat[i++] - '0');
+                        }
+                        return true;
+                    };
+                    if (!number(width))
+                        return nullptr;
+                    if (width < -1)
+                    {
+                        left = true;
+                        spec += '-';
+                        width = -width;
+                    }
+                    if (width >= 0)
+                        spec += std::to_string(width);
+                    if (i < n && aFormat[i] == '.')
+                    {
+                        ++i;
+                        precision = 0;
+                        if (!number(precision))
+                            return nullptr;
+                        spec += "." + std::to_string(precision);
+                    }
+                    while (i < n && (aFormat[i] == 'h' || aFormat[i] == 'l' || aFormat[i] == 'L'))
+                        ++i;
+                    if (i >= n)
+                        return error("ValueError", "incomplete format");
+                    auto const type = aFormat[i++];
+                    if (type == '%')
+                    {
+                        result += '%';
+                        continue;
+                    }
+                    object* value = keyed ? keyed.get() : next_value();
+                    if (value == nullptr)
+                        return nullptr;
+                    std::string body;
+                    bool padded = false;
+                    switch (type)
+                    {
+                    case 's':
+                    case 'b':
+                        {
+                            std::string_view data;
+                            if (bytes_like(value, data))
+                                body = std::string{ data };
+                            else if (ref const method{ kind_of(value) != NEOS_PY_STR ? optional_attribute(value, "__bytes__") : nullptr }; method)
+                            {
+                                ref const noArgs{ make_tuple() };
+                                ref const b{ call(method.get(), noArgs.get(), nullptr) };
+                                if (!b)
+                                    return nullptr;
+                                if (!is_bytes(b.get()))
+                                    return error("TypeError", std::string{ "__bytes__ returned non-bytes (type " } + type_name(b.get()) + ")");
+                                body = data_of(b.get());
+                            }
+                            else
+                                return error("TypeError", std::string{ "%b requires a bytes-like object, or an object that implements __bytes__, not '" } +
+                                    type_name(value) + "'");
+                            if (precision >= 0 && static_cast<long long>(body.size()) > precision)
+                                body.resize(static_cast<std::size_t>(precision));
+                        }
+                        break;
+                    case 'r':
+                    case 'a':
+                        {
+                            ref const text{ b_ascii({ value }, nullptr) };
+                            if (!text)
+                                return nullptr;
+                            body = as<str_object>(text.get())->value;
+                            if (precision >= 0 && static_cast<long long>(body.size()) > precision)
+                                body.resize(static_cast<std::size_t>(precision));
+                        }
+                        break;
+                    case 'c':
+                        {
+                            std::string_view data;
+                            if ((is_bytes(value) || is_bytearray(value)) && bytes_like(value, data))
+                            {
+                                if (data.size() != 1u)
+                                    return error("TypeError", "%c requires an integer in range(256) or a single byte");
+                                body = std::string{ data };
+                            }
+                            else
+                            {
+                                long long c = 0;
+                                if (!to_index(value, c))
+                                {
+                                    clear_error();
+                                    return error("TypeError", "%c requires an integer in range(256) or a single byte");
+                                }
+                                if (c < 0 || c > 255)
+                                    return error("OverflowError", "%c arg not in range(256)");
+                                body = std::string(1u, static_cast<char>(static_cast<unsigned char>(c)));
+                            }
+                        }
+                        break;
+                    case 'd': case 'i': case 'u': case 'o': case 'x': case 'X': case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+                        {
+                            ref const one{ make_tuple({ new_reference(value) }) };
+                            ref const text{ percent_format(spec + type, one.get()) };
+                            if (!text)
+                                return nullptr;
+                            body = as<str_object>(text.get())->value;
+                            padded = true;
+                        }
+                        break;
+                    default:
+                        {
+                            char buffer[96];
+                            std::snprintf(buffer, sizeof(buffer), "unsupported format character '%c' (0x%x) at index %zu", type,
+                                static_cast<unsigned>(static_cast<unsigned char>(type)), i - 1u);
+                            return error("ValueError", buffer);
+                        }
+                    }
+                    if (!padded && width > static_cast<long long>(body.size()))
+                    {
+                        auto const padding = std::string(static_cast<std::size_t>(width) - body.size(), ' ');
+                        body = left ? body + padding : padding + body;
+                    }
+                    result += body;
+                }
+                if (!mapping && next < values.size())
+                    return error("TypeError", "not all arguments converted during bytes formatting");
+                return make_bytes(std::move(result));
+            }
+        }
+
         bool bytes_like(object* aObject, std::string_view& aData)
         {
             if (memoryview_data(aObject, aData))
@@ -1212,12 +1419,13 @@ namespace neos::python_runtime
                 std::size_t begin = 0u, end = 0u;
                 if (!slice_bounds(a[1], a[2], data.size(), begin, end))
                     return nullptr;
-                std::vector<object*> affixes;
+                thread_local std::vector<object*> tAffixes;
+                tAffixes.clear();
                 if (kind_of(a[0]) == NEOS_PY_TUPLE)
-                    affixes = as<tuple_object>(a[0])->items;
+                    tAffixes = as<tuple_object>(a[0])->items;
                 else
-                    affixes.push_back(a[0]);
-                for (auto affix : affixes)
+                    tAffixes.push_back(a[0]);
+                for (auto affix : tAffixes)
                 {
                     std::string_view sub;
                     if (!bytes_like(affix, sub))
@@ -1988,6 +2196,13 @@ namespace neos::python_runtime
                             return aLhs;
                         }
                         return same_type(aLhs, std::string{ a } + std::string{ b });
+                    }
+                    if (aOperation == NEOS_PY_REMAINDER && (is_bytes(aLhs) || is_bytearray(aLhs)))
+                    {
+                        ref formatted{ bytes_percent_format(data_of(aLhs), aRhs) };
+                        if (!formatted)
+                            return nullptr;
+                        return is_bytearray(aLhs) ? same_type(aLhs, data_of(formatted.get())) : formatted.release_ownership();
                     }
                     if (aOperation == NEOS_PY_MULTIPLY)
                     {

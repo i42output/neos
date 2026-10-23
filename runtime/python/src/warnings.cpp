@@ -538,8 +538,9 @@ namespace neos::python_runtime
                 return shown ? new_reference(none()) : nullptr;
             }
 
-            // (warn(message, category=None, stacklevel=1, source=None, *, skip_file_prefixes=()))
-            object* warn(object* aMessage, object* aCategory, object* aSource, object* aSkip)
+            // (warn(message, category=None, stacklevel=1, source=None, *, skip_file_prefixes=()): its location the frame aStackLevel frames out (1:
+            // the innermost Python frame, the caller's), skipping the frames whose files have one of the prefixes (CPython's setup_context))
+            object* warn(object* aMessage, object* aCategory, long long aStackLevel, object* aSource, object* aSkip)
             {
                 ref const warning{ exception_class("Warning") };
                 ref category{ aCategory != nullptr ? new_reference(aCategory) : new_reference(none()) };
@@ -557,12 +558,84 @@ namespace neos::python_runtime
                     return error("TypeError", "category must be a Warning subclass, not '" + class_name_of(category.get()) + "'");
                 if (aSkip != nullptr && kind_of(aSkip) != NEOS_PY_TUPLE)
                     return error("TypeError", "skip_file_prefixes must be a tuple of strs.");
-                if (sRegistry == nullptr)
-                    sRegistry = make_dict();
-                ref const filename{ main_filename() };
-                ref const lineno{ make_int(0) };
-                ref const module{ make_str("__main__") };
-                return warn_explicit(aMessage, category.get(), filename.get(), lineno.get(), module.get(), sRegistry, aSource);
+                std::vector<std::string> prefixes;
+                if (aSkip != nullptr)
+                    for (auto const prefix : as<tuple_object>(aSkip)->items)
+                    {
+                        if (kind_of(prefix) != NEOS_PY_STR)
+                            return error("TypeError", "Found non-str '" + class_name_of(prefix) + "' in skip_file_prefixes.");
+                        prefixes.push_back(as<str_object>(prefix)->value);
+                    }
+                if (!prefixes.empty() && aStackLevel < 2)
+                    aStackLevel = 2;
+                // (the frame)
+                auto const frames = capture_frames();
+                auto const skipped = [&](std::size_t aIndex)
+                {
+                    std::string const file = (*frames)[aIndex].source != nullptr ? (*frames)[aIndex].source : "";
+                    for (auto const& p : prefixes)
+                        if (file.starts_with(p))
+                            return true;
+                    return false;
+                };
+                std::size_t index = 0u;
+                bool found = !frames->empty();
+                for (auto level = aStackLevel; found && level > 1; --level)
+                {
+                    ++index;
+                    while (index < frames->size() && skipped(index))
+                        ++index;
+                    found = index < frames->size();
+                }
+                ref globals;
+                ref filename;
+                ref lineno;
+                if (!found)
+                {
+                    globals = ref{ fn_module_namespace("sys", nullptr) };
+                    filename = ref{ make_str("<sys>") };
+                    lineno = ref{ make_int(0) };
+                }
+                else
+                {
+                    ref const frame{ make_frame(frames, index) };
+                    if (!frame)
+                        return nullptr;
+                    globals = ref{ getattr(frame.get(), "f_globals") };
+                    ref const code{ getattr(frame.get(), "f_code") };
+                    filename = code ? ref{ getattr(code.get(), "co_filename") } : ref{};
+                    lineno = ref{ getattr(frame.get(), "f_lineno") };
+                    if (!globals || !filename || !lineno)
+                        return nullptr;
+                }
+                // (its registry: its globals' __warningregistry__; its module: their __name__)
+                ref registry;
+                ref module;
+                if (kind_of(builtin_value(globals.get())) == NEOS_PY_DICT)
+                {
+                    ref const registryKey{ make_str("__warningregistry__") };
+                    registry = ref{ getitem(globals.get(), registryKey.get()) };
+                    if (!registry)
+                    {
+                        clear_error();
+                        registry = ref{ make_dict() };
+                        if (setitem(globals.get(), registryKey.get(), registry.get()) != 0)
+                            return nullptr;
+                    }
+                    ref const nameKey{ make_str("__name__") };
+                    module = ref{ getitem(globals.get(), nameKey.get()) };
+                    if (!module)
+                        clear_error();
+                }
+                if (!registry)
+                {
+                    if (sRegistry == nullptr)
+                        sRegistry = make_dict();
+                    registry = ref{ new_reference(sRegistry) };
+                }
+                if (!module || (kind_of(module.get()) != NEOS_PY_STR && kind_of(module.get()) != NEOS_PY_NONE))
+                    module = ref{ make_str("<string>") };
+                return warn_explicit(aMessage, category.get(), filename.get(), lineno.get(), module.get(), registry.get(), aSource);
             }
 
             // --- -W options (sys.warnoptions)
@@ -699,6 +772,16 @@ namespace neos::python_runtime
 
             // --- deprecated (the wrappers of what it decorates)
 
+            // (the stacklevel of a wrapper's warning: deprecated's (the wrapper has no frame, so it is not one of the levels))
+            long long deprecated_stacklevel(object* aWrapper)
+            {
+                long long level = 1;
+                ref const stacklevel{ getattr(aWrapper, "_deprecated_stacklevel") };
+                if (!stacklevel || !to_index(stacklevel.get(), level))
+                    clear_error();
+                return level;
+            }
+
             // (a function's wrapper: it warns, then calls the function (its __wrapped__))
             builtin_entry const sDeprecatedWrapperMethods[] =
             {
@@ -710,7 +793,7 @@ namespace neos::python_runtime
                         ref const wrapped{ category ? getattr(self, "__wrapped__") : nullptr };
                         if (!wrapped)
                             return nullptr;
-                        ref const warned{ warn(msg.get(), category.get(), nullptr, nullptr) };
+                        ref const warned{ warn(msg.get(), category.get(), deprecated_stacklevel(self), nullptr, nullptr) };
                         if (!warned)
                             return nullptr;
                         ref const args{ make_tuple({ aArgs.begin() + 1, aArgs.end() }) };
@@ -749,7 +832,7 @@ namespace neos::python_runtime
                             return nullptr;
                         if (cls == arg.get())
                         {
-                            ref const warned{ warn(msg.get(), category.get(), nullptr, nullptr) };
+                            ref const warned{ warn(msg.get(), category.get(), deprecated_stacklevel(self), nullptr, nullptr) };
                             if (!warned)
                                 return nullptr;
                         }
@@ -789,7 +872,7 @@ namespace neos::python_runtime
                         ref const arg{ original ? getattr(self, "_deprecated_class") : nullptr };
                         if (!arg)
                             return nullptr;
-                        ref const warned{ warn(msg.get(), category.get(), nullptr, nullptr) };
+                        ref const warned{ warn(msg.get(), category.get(), deprecated_stacklevel(self), nullptr, nullptr) };
                         if (!warned)
                             return nullptr;
                         std::vector<object*> rest;
@@ -842,7 +925,7 @@ namespace neos::python_runtime
                         return nullptr;
                     ref const newWrapper{ call(sDeprecatedNew, nullptr, nullptr) };
                     if (!newWrapper || !set_all(newWrapper.get(), { { "_deprecated_class", aArg }, { "_deprecated_new", originalNew.get() },
-                        { "__deprecated__", msg.get() }, { "_deprecated_category", category.get() } }))
+                        { "__deprecated__", msg.get() }, { "_deprecated_category", category.get() }, { "_deprecated_stacklevel", stacklevel.get() } }))
                         return nullptr;
                     ref const update{ module_attribute("functools", "update_wrapper") };
                     ref const updated{ update ? invoke(update.get(), { new_reference(newWrapper.get()), new_reference(originalNew.get()) }) : nullptr };
@@ -870,7 +953,7 @@ namespace neos::python_runtime
                     }
                     ref const initWrapper{ call(sDeprecatedInitSubclass, nullptr, nullptr) };
                     if (!initWrapper || !set_all(initWrapper.get(), { { "_deprecated_class", aArg }, { "_deprecated_original", original.get() },
-                        { "__deprecated__", msg.get() }, { "_deprecated_category", category.get() } }))
+                        { "__deprecated__", msg.get() }, { "_deprecated_category", category.get() }, { "_deprecated_stacklevel", stacklevel.get() } }))
                         return nullptr;
                     ref const classInit{ b_classmethod({ initWrapper.get() }, nullptr) };
                     if (!classInit || setattr(aArg, "__init_subclass__", classInit.get()) < 0 || !set_all(aArg, { { "__deprecated__", msg.get() } }))
@@ -886,7 +969,8 @@ namespace neos::python_runtime
                     ref const updated{ update ? invoke(update.get(), { new_reference(wrapper.get()), new_reference(aArg) }) : nullptr };
                     if (!updated)
                         return nullptr;
-                    if (!set_all(wrapper.get(), { { "__wrapped__", aArg }, { "_deprecated_category", category.get() }, { "__deprecated__", msg.get() } }))
+                    if (!set_all(wrapper.get(), { { "__wrapped__", aArg }, { "_deprecated_category", category.get() }, { "__deprecated__", msg.get() },
+                        { "_deprecated_stacklevel", stacklevel.get() } }))
                         return nullptr;
                     if (setattr(aArg, "__deprecated__", msg.get()) < 0)
                         clear_error();
@@ -1099,7 +1183,7 @@ namespace neos::python_runtime
                             if (tuple(head) > tuple(remove) || (tuple(head) == tuple(remove) && version[py{ 3 }] != py{ "alpha" }))
                                 py_raise("RuntimeError", name.repr() + " was slated for removal after Python " + removeFormatted.str() + " alpha");
                             py const msg = message.method("format", {}, { { "name", name }, { "remove", removeFormatted } });
-                            import_attribute("warnings", "warn").call({ msg, builtin("DeprecationWarning") }, { { "stacklevel", py{ 3 } } });
+                            import_attribute("warnings", "warn").call({ msg, builtin("DeprecationWarning") }, { { "stacklevel", py{ 2 } } });   // (the caller of the function that called _deprecated: it has no frame)
                             return py::none();
                         });
                     } },
@@ -1113,7 +1197,7 @@ namespace neos::python_runtime
                         long long stacklevel = 1;
                         if (a[2] != nullptr && !to_index(a[2], stacklevel))
                             return nullptr;
-                        return warn(a[0], a[1], a[3] != nullptr ? a[3] : none(), a[4]);
+                        return warn(a[0], a[1], stacklevel, a[3] != nullptr ? a[3] : none(), a[4]);
                     } },
                 { "warn_explicit", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -1341,7 +1425,7 @@ namespace neos::python_runtime
                         if (!msg)
                             return nullptr;
                         ref const category{ exception_class("DeprecationWarning") };
-                        return warn(msg.get(), category.get(), none(), nullptr);
+                        return warn(msg.get(), category.get(), 2, none(), nullptr);   // (the caller of the function that called it (it has no frame))
                     } }
             };
 

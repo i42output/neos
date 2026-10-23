@@ -1367,13 +1367,14 @@ namespace neos::numpy
             auto const is1 = a->strides[a->ndim() - 1u];
             auto const is2 = b->strides[matchDim];
             std::vector<std::int64_t> ai(a->ndim() - 1u, 0);
+            std::vector<std::int64_t> bi;
             auto* out = r->pointer();
             for (std::int64_t i = 0; i < aOuter; ++i)
             {
                 std::int64_t aOffset = 0;
                 for (std::size_t d = 0u; d + 1u < a->ndim(); ++d)
                     aOffset += ai[d] * a->strides[d];
-                std::vector<std::int64_t> bi(bOther.size(), 0);
+                bi.assign(bOther.size(), 0);
                 for (std::int64_t j = 0; j < bOuter; ++j)
                 {
                     std::int64_t bOffset = 0;
@@ -2003,6 +2004,7 @@ namespace neos::numpy
             auto* const r = new_array(t, shape);
             auto const outerCount = element_count(outer);
             auto* out = r->pointer();
+            std::vector<std::int64_t> index;
             for (std::int64_t qi = 0; qi < q->size(); ++qi)
             {
                 auto const quantile = read_as<double>(q->pointer() + qi * (q->ndim() ? q->strides.back() : 0), dtype::Float64);
@@ -2012,7 +2014,7 @@ namespace neos::numpy
                 double const gamma = virtualIndex - static_cast<double>(previous);
                 previous = std::clamp<std::int64_t>(previous, 0, n - 1);
                 next = std::clamp<std::int64_t>(next, 0, n - 1);
-                std::vector<std::int64_t> index(outer.size(), 0);
+                index.assign(outer.size(), 0);
                 for (std::int64_t o = 0; o < outerCount; ++o, out += r->itemsize())
                 {
                     std::int64_t offset = static_cast<std::int64_t>(s->offset);

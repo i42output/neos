@@ -415,14 +415,24 @@ namespace neos::language
     {
         std::vector<std::filesystem::path> schema_folders()
         {
-            // (relative to where neos is installed, e.g. /usr/local/bin/neos -> /usr/local/share/neos/languages, else side-by-side with the neos binary)
-            std::filesystem::path const programDirectory{ neolib::program_directory() };
+            // (relative to where neos is installed, e.g. /usr/local/bin/neos -> /usr/local/share/neos/languages, else side-by-side with the neos binary
+            // (neos's home: see neos::home))
+            std::filesystem::path const programDirectory{ neos::home() };
             return { programDirectory.parent_path() / "share" / "neos" / "languages", programDirectory };
         }
     }
 
     std::optional<std::string> schema::find(std::string const& aSourceFileExtension)
     {
+        for (auto const& [extension, path] : installed())
+            if (extension == aSourceFileExtension)
+                return path;
+        return {};
+    }
+
+    std::vector<std::pair<std::string, std::string>> schema::installed()
+    {
+        std::vector<std::pair<std::string, std::string>> result;
         for (auto const& folder : schema_folders())
         {
             std::error_code ec;
@@ -453,13 +463,11 @@ namespace neos::language
                         {
                             if (meta.type() == neolib::json_type::String)
                             {
-                                if (std::string{ meta.as<neolib::rjson_string>() } == aSourceFileExtension)
-                                    return entry.path().string();
+                                result.emplace_back(std::string{ meta.as<neolib::rjson_string>() }, entry.path().string());
                             }
                             else
                                 for (auto const& ext : meta)
-                                    if (std::string{ ext.as<neolib::rjson_string>() } == aSourceFileExtension)
-                                        return entry.path().string();
+                                    result.emplace_back(std::string{ ext.as<neolib::rjson_string>() }, entry.path().string());
                         }
                 }
                 catch (...)
@@ -468,7 +476,7 @@ namespace neos::language
                 }
             }
         }
-        return {};
+        return result;
     }
 
     schema::schema(std::string const& aPath, const concept_libraries_t& aConceptLibraries, bool aShowParseTimes, std::optional<std::string> const& aSource) :
