@@ -327,10 +327,16 @@ namespace neos::python_runtime
                     {
                         if (aArgs.size() == 1u && kind_of(aArgs[0]) != NEOS_PY_NONE)
                         {
+                            // (builtins._: None while it is shown, then the value (as CPython's sys_displayhook))
+                            ref const builtins{ fn_import("builtins") };
+                            if (!builtins || setattr(builtins.get(), "_", none()) < 0)
+                                return nullptr;
                             std::string text;
                             if (!repr_of(aArgs[0], text))
                                 return nullptr;
                             if (!write_out(text + "\n"))
+                                return nullptr;
+                            if (setattr(builtins.get(), "_", aArgs[0]) < 0)
                                 return nullptr;
                         }
                         return none();

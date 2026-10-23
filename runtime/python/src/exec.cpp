@@ -83,6 +83,7 @@ namespace neos::python_runtime
                 std::string filename;
                 std::string mode;
                 void* program = nullptr;    ///< (once loaded)
+                bool display = false;       ///< ('single' mode's expression: its value is shown (sys.displayhook))
             };
 
             neos_py_type make_code_type()
@@ -328,6 +329,17 @@ namespace neos::python_runtime
                 }
                 if (failed())
                     return nullptr;
+                if (code.display)
+                {
+                    // ('single' mode's expression statement: its value shown)
+                    ref const hook{ module_attribute("sys", "displayhook") };
+                    if (!hook)
+                        return nullptr;
+                    ref const shown{ invoke(hook.get(), { value ? value.release_ownership() : (retain(none()), none()) }) };
+                    if (!shown)
+                        return nullptr;
+                    return (retain(none()), none());
+                }
                 if (!value)
                     return (retain(none()), none());
                 return value.release_ownership();
@@ -669,10 +681,137 @@ namespace neos::python_runtime
                 return error("ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
             if (source.find('\0') != std::string::npos)
                 return error("SyntaxError", "source code string cannot contain null bytes");
+            long long flags = 0;
+            if (a[3] != nullptr && !to_index(a[3], flags))
+                return nullptr;
+            bool const incompleteInput = mode == "single" && (flags & 0x4000) != 0;    // (PyCF_ALLOW_INCOMPLETE_INPUT)
+            bool const impliedDedent = (flags & 0x200) == 0;                            // (PyCF_DONT_IMPLY_DEDENT)
+            // (the statement of 'single' mode: its first line's)
+            std::string_view first;
+            for (std::size_t line = 0u; line < source.size();)
+            {
+                auto const end = std::min(source.find('\n', line), source.size());
+                auto text = std::string_view{ source }.substr(line, end - line);
+                auto const start = text.find_first_not_of(" \t\r\f");
+                if (start != std::string_view::npos && text[start] != '#')
+                {
+                    first = text.substr(start);
+                    break;
+                }
+                line = end + 1u;
+            }
+            // (input that is incomplete (PyCF_ALLOW_INCOMPLETE_INPUT, codeop's): _IncompleteInputError)
+            auto const incomplete = [&](object* aException) -> std::nullptr_t
+            {
+                ref const location{ make_tuple({ make_str(filename), aException ? getattr(aException, "lineno") : make_int(1),
+                    aException ? getattr(aException, "offset") : make_int(1), aException ? getattr(aException, "text") : (retain(none()), none()),
+                    aException ? getattr(aException, "end_lineno") : (retain(none()), none()),
+                    aException ? getattr(aException, "end_offset") : (retain(none()), none()) }) };
+                clear_error();
+                ref const exceptionClass{ fn_builtin("_IncompleteInputError") };
+                ref const args{ make_tuple({ make_str("incomplete input"), new_reference(location.get()) }) };
+                ref const exception{ exceptionClass ? call(exceptionClass.get(), args.get(), nullptr) : nullptr };
+                if (exception)
+                    fn_raise(exception.get());
+                return nullptr;
+            };
+            // (a compound statement (or a decorator): complete once its input ends with a newline (its block's dedent not implied))
+            static std::regex const sCompound{ "^(?:(?:if|while|for|def|class|try|with|async)\\b|@|match\\b.*:\\s*(?:#.*)?$)" };
+            bool const compound = std::regex_search(first.begin(), first.end(), sCompound);
+            // ('single' mode: one statement (a line at column 0 outside brackets and strings, after the first, is another statement, 
+            // unless it continues a compound statement))
+            if (mode == "single" && !first.empty())
+            {
+                int depth = 0;
+                char quote = 0;
+                bool triple = false;
+                bool statement = false;
+                bool lineStart = true;
+                for (std::size_t i = 0u; i < source.size(); ++i)
+                {
+                    auto const c = source[i];
+                    if (quote != 0)
+                    {
+                        if (c == '\\')
+                            ++i;
+                        else if (c == quote && (!triple || source.compare(i, 3u, std::string(3u, quote)) == 0))
+                        {
+                            if (triple)
+                                i += 2u;
+                            quote = 0;
+                        }
+                        else if (c == '\n' && !triple)
+                            quote = 0;
+                        continue;
+                    }
+                    if (lineStart && depth == 0 && c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '\f' && c != '#')
+                    {
+                        auto const rest = std::string_view{ source }.substr(i);
+                        static std::regex const sContinuation{ "^(?:else|elif|except|finally|case)\\b" };
+                        if (statement && !std::regex_search(rest.begin(), rest.end(), sContinuation))
+                            return error("SyntaxError", compound ? "invalid syntax" : "multiple statements found while compiling a single statement");
+                        statement = true;
+                    }
+                    lineStart = false;
+                    if (c == '#')
+                        while (i + 1u < source.size() && source[i + 1u] != '\n')
+                            ++i;
+                    else if (c == '\'' || c == '"')
+                    {
+                        quote = c;
+                        triple = source.compare(i, 3u, std::string(3u, c)) == 0;
+                        if (triple)
+                            i += 2u;
+                    }
+                    else if (c == '(' || c == '[' || c == '{')
+                        ++depth;
+                    else if ((c == ')' || c == ']' || c == '}') && depth > 0)
+                        --depth;
+                    else if (c == '\\' && i + 1u < source.size() && source[i + 1u] == '\n')
+                        ++i;
+                    else if (c == '\n')
+                        lineStart = true;
+                }
+            }
+            // ('single' mode's expression: shown when the code is run)
+            if (mode == "single" && !first.empty())
+            {
+                ref expression{ make_code(source, filename, "eval") };
+                if (program_of(as_code(expression.get())) != nullptr)
+                {
+                    as_code(expression.get()).display = true;
+                    return expression.release_ownership();
+                }
+                clear_error();
+            }
             ref code{ make_code(source, filename, mode == "single" ? "exec" : mode) };
             // (compiled now: SyntaxError)
             if (program_of(as_code(code.get())) == nullptr)
+            {
+                if (!incompleteInput)
+                    return nullptr;
+                // (its input ended before its statement, bracket or string did)
+                ref const exception{ take_exception() };
+                ref const message{ exception ? getattr(exception.get(), "msg") : nullptr };
+                auto const text = message && kind_of(message.get()) == NEOS_PY_STR ? as<str_object>(message.get())->value : std::string{};
+                clear_error();
+                // (or a compound statement whose input ended without a newline: what follows it can complete it (e.g. try's except))
+                auto const lines = static_cast<long long>(std::count(source.begin(), source.end(), '\n')) + 1;
+                long long line = 0;
+                ref const lineno{ exception ? getattr(exception.get(), "lineno") : nullptr };
+                if (!lineno || !to_index(lineno.get(), line))
+                    clear_error();
+                if (text.starts_with("expected an indented block") || text.ends_with("was never closed") ||
+                    text.starts_with("unterminated triple-quoted string literal") || text.starts_with("unexpected EOF") ||
+                    (compound && first.front() == '@') || (compound && !impliedDedent && ((!source.ends_with('\n') && line >= lines) ||
+                    (text == "expected 'except' or 'finally' block" && !source.ends_with("\n\n")))))
+                    return incomplete(exception.get());
+                if (exception)
+                    reraise_exception(exception.get());
                 return nullptr;
+            }
+            if (incompleteInput && !impliedDedent && compound && !source.ends_with('\n'))
+                return incomplete(nullptr);
             return code.release_ownership();
         }
 

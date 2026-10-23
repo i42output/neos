@@ -1,5 +1,5 @@
 /*
-  _compression.cpp
+  compression.cpp
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 

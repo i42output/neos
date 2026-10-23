@@ -64,8 +64,10 @@ namespace neos::python_runtime
 
         namespace
         {
-            std::mutex sGilMutex;
-            std::condition_variable sGilCondition;
+            // (never destroyed: daemon threads can still be waiting for the GIL when the process exits (a condition variable's 
+            // destruction waits for its waiters))
+            std::mutex& sGilMutex = *new std::mutex;
+            std::condition_variable& sGilCondition = *new std::condition_variable;
             std::atomic<bool> sGilActive{ false };
             bool sGilLocked = false;
             std::atomic<bool> sDropRequest{ false };
