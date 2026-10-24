@@ -76,6 +76,28 @@ namespace neos
             std::size_t last;
             highlight_category category;
         };
+        // the outline of a source's structure (see outline): its statements, each in the one whose body it is in (and the parameters of 
+        // its functions), as a script editor's node graph shows them
+        enum class outline_kind : std::uint32_t
+        {
+            Module,
+            Function,
+            Class,
+            Parameter,
+            Loop,
+            Branch,
+            Return,
+            Statement
+        };
+        struct outline_node
+        {
+            static constexpr std::uint32_t NoParent = ~std::uint32_t{};
+            std::uint32_t parent;   ///< (the node that it is in (before it): NoParent for the module)
+            outline_kind kind;
+            std::size_t first;      ///< (its text: the bytes [first, last) of the source)
+            std::size_t last;
+            std::size_t headerLast; ///< (the end of its header: before its body (if it has one), else last)
+        };
     public:
         context(std::ostream& aCout) : 
             context{ std::cin, aCout, std::cerr } {}
@@ -134,6 +156,10 @@ namespace neos
         // (the schema aSchemaPath): the syntax highlighting configuration's (highlighting.json: the one beside the schema, overridden by the 
         // user's (~/.neos/highlighting.json; on Windows %LOCALAPPDATA%\neos\highlighting.json)); none: not configured
         static std::vector<std::string> highlight_colours(std::string const& aSchemaPath, std::string const& aTheme);
+        // the outline of a source in the language of the schema aSchemaPath (as it is parsed, not as the language's own pass over it (if 
+        // any) rewrites it): its nodes, each after the node that it is in (its children in the order of the source); empty if the source 
+        // does not parse
+        std::vector<outline_node> outline(std::string const& aSchemaPath, std::string_view aSource);
     private:
         void init();
         translation_unit_t& load_unit(language::source_fragment&& aFragment);
@@ -166,5 +192,7 @@ namespace neos
         std::map<std::string, std::pair<std::shared_ptr<language::schema>, std::shared_ptr<language::schema>>> iHighlightSchemas; ///< (by path: 
                                                         ///< the schema whose stages discard what the language discards (as the compiler's do: the 
                                                         ///< AST) and the schema with nothing discarded (the first stage's tree has the comments))
+        std::map<std::string, std::shared_ptr<language::schema>> iOutlineSchemas; ///< (by path: the schema whose stages discard what the 
+                                                        ///< language discards, for outlines (its parsers parse the sources outlined incrementally))
     };
-}
+}

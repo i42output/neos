@@ -38,6 +38,8 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <cctype>
 #include <sstream>
 
 #include <neolib/core/string_utf.hpp>
@@ -751,6 +753,311 @@ namespace neos
         return result;
     }
 
+    namespace
+    {
+        // (whether a concept is one of a name: the name, or a concept whose name ends with ".<name>" (e.g. python.for, javascript.for))
+        bool named(std::string_view aConcept, std::string_view aName)
+        {
+            return aConcept == aName || 
+                (aConcept.size() > aName.size() && aConcept.ends_with(aName) && aConcept[aConcept.size() - aName.size() - 1u] == '.');
+        }
+    }
+
+    std::vector<context::outline_node> context::outline(std::string const& aSchemaPath, std::string_view aSource)
+    {
+        std::vector<outline_node> result;
+        try
+        {
+            auto existing = iOutlineSchemas.find(aSchemaPath);
+            if (existing == iOutlineSchemas.end())
+            {
+                // (a schema that cannot be loaded is not tried again)
+                existing = iOutlineSchemas.emplace(aSchemaPath, nullptr).first;
+                auto schema = std::make_shared<language::schema>(aSchemaPath, concept_libraries());
+                for (auto const& stage : schema->pipeline())
+                {
+                    for (auto const& discard : *stage->discard)
+                        stage->parser->ignore(stage->symbolMap->at(discard));
+                    stage->parser->set_incremental(true);
+                }
+                existing->second = schema;
+            }
+            auto const& schema = existing->second;
+            if (!schema)
+                return result;
+            std::string script{ aSource };
+            if (!script.empty() && script.back() != '\n')
+                script += '\n';
+            for (auto const& stage : schema->pipeline())
+                if (!highlight_parse(*stage, script))
+                    return result;
+            auto const& last = *schema->pipeline().back();
+            last.parser->create_ast();
+            std::string_view const text = last.parser->text();
+
+            using node_t = language::parser::cst_node;
+            auto const name_of = [](node_t const& aNode) { return aNode.c ? std::string_view{ *aNode.c } : std::string_view{}; };
+            // (a node's text in the source, without the whitespace at its ends)
+            auto const first_of = [&](node_t const& aNode) -> std::size_t
+            {
+                auto first = std::min<std::size_t>(std::max<std::ptrdiff_t>(aNode.value.data() - text.data(), 0), aSource.size());
+                auto const end = std::min(first + aNode.value.size(), aSource.size());
+                while (first < end && std::isspace(static_cast<unsigned char>(aSource[first])))
+                    ++first;
+                return first;
+            };
+            auto const last_of = [&](node_t const& aNode) -> std::size_t
+            {
+                auto const first = first_of(aNode);
+                auto end = std::min<std::size_t>(std::max<std::ptrdiff_t>(aNode.value.data() - text.data(), 0) + aNode.value.size(), aSource.size());
+                while (end > first && std::isspace(static_cast<unsigned char>(aSource[end - 1u])))
+                    --end;
+                return end;
+            };
+            // (the statements, and the parts of them, that the outline has: by (generic) childConcept)
+            auto const ignored = [&](std::string_view aConcept)
+            {
+                return aConcept.empty() || named(aConcept, "keyword") || named(aConcept, "scope.open") || named(aConcept, "scope.close") ||
+                    named(aConcept, "indentation") || named(aConcept, "comment") || aConcept.starts_with("language.comment");
+            };
+            auto const is_block = [&](std::string_view aConcept)
+            {
+                return named(aConcept, "scope") || named(aConcept, "body") || named(aConcept, "block");
+            };
+            auto const kind_of = [&](std::string_view aConcept) -> std::optional<outline_kind>
+            {
+                auto const any = [&](std::initializer_list<std::string_view> aNames) 
+                { 
+                    return std::any_of(aNames.begin(), aNames.end(), [&](std::string_view aName) { return named(aConcept, aName); }); 
+                };
+                if (any({ "function", "method" }))
+                    return outline_kind::Function;
+                if (any({ "class", "struct", "interface" }))
+                    return outline_kind::Class;
+                if (any({ "statement.loop", "loop", "for", "for.in", "for.of", "while", "do" }))
+                    return outline_kind::Loop;
+                if (any({ "if", "elif", "else", "switch", "case", "default", "try", "except", "catch", "finally", "with", "match" }))
+                    return outline_kind::Branch;
+                if (any({ "return", "function.return", "break", "continue", "throw", "raise" }))
+                    return outline_kind::Return;
+                return {};
+            };
+            auto const is_alternative = [&](std::string_view aConcept)
+            {
+                return named(aConcept, "elif") || named(aConcept, "else") || named(aConcept, "except") || named(aConcept, "catch") || named(aConcept, "finally");
+            };
+            auto const statement_like = [&](std::string_view aConcept)
+            {
+                return kind_of(aConcept).has_value() || named(aConcept, "statement") || named(aConcept, "let") || named(aConcept, "const") || 
+                    named(aConcept, "var") || named(aConcept, "declaration") ||
+                    (named(aConcept, "expression") && !aConcept.starts_with("language.") && !aConcept.starts_with("math.") && !aConcept.starts_with("boolean."));
+            };
+            // (the children of a node that have concepts (those of its children that have none are looked through))
+            std::function<void(node_t const&, std::vector<node_t const*>&)> concept_children = [&](node_t const& aNode, std::vector<node_t const*>& aChildren)
+            {
+                for (auto const& child : aNode.children)
+                    if (child->c)
+                        aChildren.push_back(child.get());
+                    else
+                        concept_children(*child, aChildren);
+            };
+            // (the statements of a body: its children (those in blocks within it too), except the parts of them that are not statements)
+            std::function<void(node_t const&, std::vector<node_t const*>&)> statements_of = [&](node_t const& aNode, std::vector<node_t const*>& aStatements)
+            {
+                std::vector<node_t const*> children;
+                concept_children(aNode, children);
+                for (auto const child : children)
+                {
+                    auto const childConcept = name_of(*child);
+                    if (ignored(childConcept))
+                        continue;
+                    if (is_block(childConcept))
+                        statements_of(*child, aStatements);
+                    else
+                        aStatements.push_back(child);
+                }
+            };
+            // (a statement that is only a statement of another kind (e.g. a loop or a return): it)
+            auto const inner = [&](node_t const& aNode) -> node_t const&
+            {
+                node_t const* node = &aNode;
+                while (!kind_of(name_of(*node)) && named(name_of(*node), "statement"))
+                {
+                    std::vector<node_t const*> children;
+                    concept_children(*node, children);
+                    std::erase_if(children, [&](node_t const* aChild) { return ignored(name_of(*aChild)); });
+                    if (children.size() != 1u || !kind_of(name_of(*children[0])))
+                        break;
+                    node = children[0];
+                }
+                return *node;
+            };
+            auto const indentation = [&](std::size_t aPosition)
+            {
+                auto const lineStart = aSource.rfind('\n', aPosition == 0u ? 0u : aPosition - 1u);
+                return aPosition - (lineStart == std::string_view::npos || lineStart >= aPosition ? 0u : lineStart + 1u);
+            };
+            auto const has_body = [&](std::uint32_t aIndex)
+            {
+                for (auto i = aIndex + 1u; i < result.size(); ++i)
+                    if (result[i].parent == aIndex && result[i].kind != outline_kind::Parameter)
+                        return true;
+                return false;
+            };
+            auto const compound = [](outline_kind aKind)
+            {
+                return aKind == outline_kind::Function || aKind == outline_kind::Class || aKind == outline_kind::Loop || aKind == outline_kind::Branch;
+            };
+
+            std::function<void(std::vector<node_t const*> const&, std::uint32_t)> add_statements;
+            auto const add_statement = [&](node_t const& aStatement, std::uint32_t aParent) -> std::uint32_t
+            {
+                auto const& node = inner(aStatement);
+                auto const kind = kind_of(name_of(node)).value_or(outline_kind::Statement);
+                auto const index = static_cast<std::uint32_t>(result.size());
+                result.push_back(outline_node{ aParent, kind, first_of(aStatement), last_of(aStatement), last_of(aStatement) });
+                if (!compound(kind))
+                    return index;
+                std::vector<node_t const*> children;
+                concept_children(node, children);
+                // (a function's parameters: those of its parameter list (all of the list's parts that are not types if it has none))
+                if (kind == outline_kind::Function)
+                {
+                    std::function<node_t const*(node_t const&)> parameters_of = [&](node_t const& aNode) -> node_t const*
+                    {
+                        std::vector<node_t const*> nodeChildren;
+                        concept_children(aNode, nodeChildren);
+                        for (auto const child : nodeChildren)
+                        {
+                            if (named(name_of(*child), "parameters"))
+                                return child;
+                            if (is_block(name_of(*child)))
+                                continue;
+                            if (auto const found = parameters_of(*child))
+                                return found;
+                        }
+                        return nullptr;
+                    };
+                    if (auto const parameters = parameters_of(node))
+                    {
+                        std::vector<node_t const*> parameterNodes;
+                        concept_children(*parameters, parameterNodes);
+                        bool const named_parameters = std::any_of(parameterNodes.begin(), parameterNodes.end(), 
+                            [&](node_t const* aParameter) { return named(name_of(*aParameter), "parameter"); });
+                        for (auto const parameter : parameterNodes)
+                            if (named_parameters ? named(name_of(*parameter), "parameter") : 
+                                !ignored(name_of(*parameter)) && !name_of(*parameter).starts_with("language.type"))
+                                result.push_back(outline_node{ index, outline_kind::Parameter, first_of(*parameter), last_of(*parameter), last_of(*parameter) });
+                    }
+                }
+                // (its body: its blocks, else a statement that ends it (or that is before an else); what is after an else is a branch of its own)
+                bool const hasBlock = std::any_of(children.begin(), children.end(), [&](node_t const* aChild) { return is_block(name_of(*aChild)); });
+                auto const is_else = [&](node_t const* aChild) { return named(name_of(*aChild), "keyword") && aChild->value == "else"; };
+                // (without blocks: the statements that end it (e.g. a for's, or a switch's cases))
+                std::size_t trailingStatements = children.size();
+                for (auto i = children.size(); i > 0u; --i)
+                {
+                    auto const childConcept = name_of(*children[i - 1u]);
+                    if (ignored(childConcept))
+                        continue;
+                    if (!statement_like(childConcept))
+                        break;
+                    trailingStatements = i - 1u;
+                }
+                std::optional<std::size_t> bodyStart;
+                std::optional<std::size_t> elseStart;
+                for (std::size_t i = 0u; i < children.size(); ++i)
+                {
+                    auto const& child = *children[i];
+                    auto const childConcept = name_of(child);
+                    if (is_else(&child))
+                    {
+                        elseStart = first_of(child);
+                        continue;
+                    }
+                    if (elseStart)
+                    {
+                        if (!bodyStart)
+                            bodyStart = *elseStart;
+                        auto const elseIndex = static_cast<std::uint32_t>(result.size());
+                        result.push_back(outline_node{ index, outline_kind::Branch, *elseStart, last_of(child), first_of(child) });
+                        std::vector<node_t const*> statements;
+                        if (is_block(childConcept))
+                            statements_of(child, statements);
+                        else
+                            statements.push_back(&child);
+                        add_statements(statements, elseIndex);
+                        elseStart = std::nullopt;
+                        continue;
+                    }
+                    if (ignored(childConcept))
+                        continue;
+                    bool const beforeElse = i + 1u < children.size() && is_else(children[i + 1u]);
+                    if (is_block(childConcept) || (statement_like(childConcept) && (beforeElse || (!hasBlock && i >= trailingStatements))))
+                    {
+                        if (!bodyStart)
+                            bodyStart = first_of(child);
+                        std::vector<node_t const*> statements;
+                        if (is_block(childConcept))
+                            statements_of(child, statements);
+                        else
+                            statements.push_back(&child);
+                        add_statements(statements, index);
+                    }
+                }
+                if (bodyStart)
+                    result[index].headerLast = *bodyStart;
+                return index;
+            };
+            add_statements = [&](std::vector<node_t const*> const& aStatements, std::uint32_t aParent)
+            {
+                std::optional<std::uint32_t> previous;
+                for (std::size_t i = 0u; i < aStatements.size();)
+                {
+                    auto const& statement = *aStatements[i++];
+                    auto const index = add_statement(statement, aParent);
+                    // (an alternative (else, elif, except, finally) of a branch that is a statement of its own (e.g. Python's): in the branch)
+                    std::optional<std::uint32_t> alternativeOf;
+                    if (result[index].kind == outline_kind::Branch && previous && result[*previous].kind == outline_kind::Branch && 
+                        is_alternative(name_of(inner(statement))))
+                    {
+                        alternativeOf = *previous;
+                        result[index].parent = *previous;
+                    }
+                    else
+                        previous = index;
+                    // (a compound statement whose body is not in it (e.g. Python's): the statements after it that are indented more than it)
+                    if (compound(result[index].kind) && !has_body(index) && 
+                        result[index].last > result[index].first && aSource[result[index].last - 1u] == ':')
+                    {
+                        auto const indent = indentation(result[index].first);
+                        auto end = i;
+                        while (end < aStatements.size() && indentation(first_of(*aStatements[end])) > indent)
+                            ++end;
+                        if (end > i)
+                        {
+                            std::vector<node_t const*> const body(aStatements.begin() + i, aStatements.begin() + end);
+                            add_statements(body, index);
+                            result[index].last = std::max(result[index].last, last_of(*aStatements[end - 1u]));
+                            i = end;
+                        }
+                    }
+                    if (alternativeOf)
+                        result[*alternativeOf].last = std::max(result[*alternativeOf].last, result[index].last);
+                }
+            };
+            result.push_back(outline_node{ outline_node::NoParent, outline_kind::Module, 0u, aSource.size(), 0u });
+            std::vector<node_t const*> statements;
+            statements_of(last.parser->ast(), statements);
+            add_statements(statements, 0u);
+        }
+        catch (...)
+        {
+            result.clear();
+        }
+        return result;
+    }
+
     std::vector<std::string> context::highlight_colours(std::string const& aSchemaPath, std::string const& aTheme)
     {
         // (highlighting.json: an object of themes, each an object of the categories' colours: "comment", "keyword", "string", "number", 
@@ -792,4 +1099,4 @@ namespace neos
             result.clear();
         return result;
     }
-}
+}
