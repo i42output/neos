@@ -139,6 +139,17 @@ namespace neos
             if (!aContext.schema().meta().copyright.empty())
                 aContext.cout() << aContext.schema().meta().copyright << std::endl;
         };
+        auto load_program = [&aContext, &output_schema](std::string const& aPath)
+        {
+            bool const schemaWasLoaded = aContext.schema_loaded();
+            aContext.load_program(aPath);
+            if (!schemaWasLoaded && aContext.schema_loaded()) // (the schema for the program's file type)
+            {
+                aContext.cout() << "Loading schema '" << aContext.schema().path() << "'..." << std::endl;
+                output_schema();
+            }
+            aContext.cout() << "Program: " << aPath << std::endl;
+        };
         // (a command's spaces at the start and end of the line are not part of it (a program's input, when interactive, is as typed))
         auto const first = aConsoleInput.find_first_not_of(" \t");
         std::string const input = first == std::string::npos ? std::string{} : aConsoleInput.substr(first, aConsoleInput.find_last_not_of(" \t") + 1u - first);
@@ -162,7 +173,7 @@ namespace neos
                     << "l(oad) <path to program>                 Load program\n"
                     << "list                                     List program\n"
                     << "c(ompile)                                Compile program\n"
-                    << "r(un)                                    Run program\n"
+                    << "r(un) [<path to program>]                Run program (a path: load and compile it first)\n"
                     << "img [<path>]                             Make an image of the (compiled) program: an executable that\n"
                     << "                                         runs it (by default <program>.exe on Windows, else a.out)\n"
                     << "![<expression>]                          Evaluate expression (enter interactive mode if expression omitted)\n"
@@ -190,16 +201,7 @@ namespace neos
                 output_schema();
             }
             else if (command == "l" || command == "load")
-            {
-                bool const schemaWasLoaded = aContext.schema_loaded();
-                aContext.load_program(parameters);
-                if (!schemaWasLoaded && aContext.schema_loaded()) // (the schema for the program's file type)
-                {
-                    aContext.cout() << "Loading schema '" << aContext.schema().path() << "'..." << std::endl;
-                    output_schema();
-                }
-                aContext.cout() << "Program: " << parameters << std::endl;
-            }
+                load_program(parameters);
             else if (command == "c" || command == "compile")
             {
                 aContext.compile_program();
@@ -223,7 +225,15 @@ namespace neos
                     }
             }
             else if (command == "r" || command == "run")
+            {
+                if (!parameters.empty())
+                {
+                    load_program(parameters);
+                    aContext.compile_program();
+                    output_compilation_time();
+                }
                 aContext.run();
+            }
             else if (command == "img")
             {
                 if (aContext.text().empty())
