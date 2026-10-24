@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <cctype>
 #include <sstream>
 
@@ -627,6 +628,29 @@ namespace neos
                     std::vector<std::string_view> sources;
                 };
                 std::vector<function_scope> functions;
+                // (the end of the text that a function's body is in, from a position in its header: its node's, and the lines after the 
+                // position's that are indented more than it (e.g. Python's))
+                auto const extent_of = [&](std::size_t aFirst, language::parser::cst_node const* aFunction)
+                {
+                    std::size_t last = aText.size();
+                    auto const lineStart = aText.rfind('\n', aFirst) == std::string_view::npos ? 0u : aText.rfind('\n', aFirst) + 1u;
+                    auto const indentation = std::min(aText.find_first_not_of(" \t", lineStart), aFirst) - lineStart;
+                    for (auto lineEnd = aText.find('\n', aFirst); lineEnd != std::string_view::npos;)
+                    {
+                        auto const next = lineEnd + 1u;
+                        auto const nextEnd = std::min(aText.find('\n', next), aText.size());
+                        auto const content = aText.find_first_not_of(" \t\r", next);
+                        if (content != std::string_view::npos && content < nextEnd && content - next <= indentation)
+                        {
+                            last = next;
+                            break;
+                        }
+                        lineEnd = nextEnd < aText.size() ? nextEnd : std::string_view::npos;
+                    }
+                    if (aFunction != nullptr && within(aFunction->value))
+                        last = std::max(last, static_cast<std::size_t>(aFunction->value.data() + aFunction->value.size() - aText.data()));
+                    return last;
+                };
                 auto const function_of = [&](language::parser::cst_node const& aParameters, language::parser::cst_node const* aFunction)
                 {
                     function_scope result{ static_cast<std::size_t>(aParameters.value.data() - aText.data()), aText.size() };
@@ -656,30 +680,79 @@ namespace neos
                         for (auto const& child : node.children)
                             parameterNodes.push_back(child.get());
                     }
-                    auto const lineStart = aText.rfind('\n', result.first) == std::string_view::npos ? 0u : aText.rfind('\n', result.first) + 1u;
-                    auto const indentation = std::min(aText.find_first_not_of(" \t", lineStart), result.first) - lineStart;
-                    for (auto lineEnd = aText.find('\n', result.first); lineEnd != std::string_view::npos;)
+                    result.last = extent_of(result.first, aFunction);
+                    return result;
+                };
+                // (the local variables that a function (or the script, if they are not in one) defines (a language.function.local: e.g. 
+                // neoscript's locals, Python's assignment targets, JavaScript's declarators): their names (as parsed and in the source) and 
+                // the text that they are its in (the function's, else the script's); a local's name, and a name there that is it, are its)
+                struct local_scope
+                {
+                    std::size_t first;
+                    std::size_t last;
+                    std::vector<std::string_view> names;
+                    std::vector<std::string_view> sources;
+                };
+                std::vector<local_scope> locals;
+                // (the names that a local's definition defines: its names, if it is only names (e.g. not obj.attr, nor x[i]); of an 
+                // initialization only what it initializes)
+                auto const local_of = [&](language::parser::cst_node const& aLocal, language::parser::cst_node const* aFunction) -> std::optional<local_scope>
+                {
+                    local_scope result{};
+                    std::vector<language::parser::cst_node const*> localNodes{ &aLocal };
+                    while (!localNodes.empty())
                     {
-                        auto const next = lineEnd + 1u;
-                        auto const nextEnd = std::min(aText.find('\n', next), aText.size());
-                        auto const content = aText.find_first_not_of(" \t\r", next);
-                        if (content != std::string_view::npos && content < nextEnd && content - next <= indentation)
+                        auto const& node = *localNodes.back();
+                        localNodes.pop_back();
+                        if (node.c && &node != &aLocal)
                         {
-                            result.last = next;
-                            break;
+                            if (is_a(node, "language.identifier"))
+                            {
+                                if (within(node.value))
+                                {
+                                    result.names.push_back(node.value);
+                                    if (auto const source = source_of(node.value, aText, aPositions))
+                                        result.sources.push_back(*source);
+                                }
+                                continue;
+                            }
+                            if (is_a(node, "language.keyword") || std::string_view{ *node.c }.starts_with("language.type"))
+                                continue;
+                            if (is_a(node, "language.initialize"))
+                            {
+                                if (!node.children.empty())
+                                    localNodes.push_back(node.children.front().get());
+                                continue;
+                            }
+                            if (!is_a(node, "language.function.local"))
+                                return {};
                         }
-                        lineEnd = nextEnd < aText.size() ? nextEnd : std::string_view::npos;
+                        for (auto const& child : node.children)
+                            localNodes.push_back(child.get());
                     }
+                    if (result.names.empty())
+                        return {};
                     if (aFunction != nullptr && within(aFunction->value))
-                        result.last = std::max(result.last, static_cast<std::size_t>(aFunction->value.data() + aFunction->value.size() - aText.data()));
+                    {
+                        result.first = static_cast<std::size_t>(aFunction->value.data() - aText.data());
+                        result.last = extent_of(result.first, aFunction);
+                    }
+                    else
+                        result.last = aText.size();
                     return result;
                 };
                 std::vector<std::string_view> identifiers;
-                // (the nodes, and their nearest ancestors that have concepts)
-                std::vector<std::pair<language::parser::cst_node const*, language::parser::cst_node const*>> nodes{ { &aRoot, nullptr } };
+                // (the nodes, their nearest ancestors that have concepts and their nearest ancestors that are functions)
+                struct walked
+                {
+                    language::parser::cst_node const* node;
+                    language::parser::cst_node const* parent;
+                    language::parser::cst_node const* function;
+                };
+                std::vector<walked> nodes{ { &aRoot, nullptr, nullptr } };
                 while (!nodes.empty())
                 {
-                    auto const [nodePtr, parent] = nodes.back();
+                    auto const [nodePtr, parent, function] = nodes.back();
                     auto const& node = *nodePtr;
                     nodes.pop_back();
                     if (node.c)
@@ -689,28 +762,53 @@ namespace neos
                             push(node.value, *category, aText, aPositions);
                             continue;
                         }
+                        // (a package's name is names (e.g. neo.string: its parts are not highlighted, even one spelt as a type's keyword))
+                        if (is_a(node, "source.package.name"))
+                            continue;
+                        // (the node that its parameters are in: its function's (e.g. neoscript's: its parameters are in its signature, its 
+                        // body after it), else their nearest ancestor that has a concept)
                         if (is_a(node, "language.function.parameters") && within(node.value))
-                            functions.push_back(function_of(node, parent));
-                        else if (is_a(node, "language.identifier") && within(node.value))
+                            functions.push_back(function_of(node, function ? function : parent));
+                        else if (is_a(node, "language.function.local") && within(node.value))
+                        {
+                            if (auto const local = local_of(node, function))
+                                locals.push_back(*local);
+                        }
+                        if (is_a(node, "language.identifier") && within(node.value))
                             identifiers.push_back(node.value);
                     }
+                    auto const childFunction = node.c && is_a(node, "language.function") ? &node : function;
                     for (auto child = node.children.rbegin(); child != node.children.rend(); ++child)
-                        nodes.emplace_back(child->get(), node.c ? &node : parent);
+                        nodes.push_back(walked{ child->get(), node.c ? &node : parent, childFunction });
                 }
                 // (a name in a function's body that is one of its parameters' (as parsed, or in the source (e.g. a rewrite's name for it)) is its 
-                // parameter)
+                // parameter; else a name where a local variable of its name is (the innermost) is it)
                 for (auto const& identifier : identifiers)
                 {
                     auto const at = static_cast<std::size_t>(identifier.data() - aText.data());
                     auto const source = source_of(identifier, aText, aPositions);
+                    auto const named = [&](std::vector<std::string_view> const& aNames, std::vector<std::string_view> const& aSources)
+                    {
+                        return std::find(aNames.begin(), aNames.end(), identifier) != aNames.end() ||
+                            (source && std::find(aSources.begin(), aSources.end(), *source) != aSources.end());
+                    };
+                    bool parameter = false;
                     for (auto const& function : functions)
-                        if (at >= function.first && at < function.last && 
-                            (std::find(function.parameters.begin(), function.parameters.end(), identifier) != function.parameters.end() ||
-                                (source && std::find(function.sources.begin(), function.sources.end(), *source) != function.sources.end())))
+                        if (at >= function.first && at < function.last && named(function.parameters, function.sources))
                         {
                             push(identifier, highlight_category::Parameter, aText, aPositions);
+                            parameter = true;
                             break;
                         }
+                    if (parameter)
+                        continue;
+                    local_scope const* innermost = nullptr;
+                    for (auto const& local : locals)
+                        if (at >= local.first && at < local.last && named(local.names, local.sources) &&
+                            (innermost == nullptr || local.last - local.first < innermost->last - innermost->first))
+                            innermost = &local;
+                    if (innermost != nullptr)
+                        push(identifier, highlight_category::Variable, aText, aPositions);
                 }
             };
             // (the first stage (e.g. a tokenizer): its tokens and comments (even if the source does not parse as a whole))
@@ -751,16 +849,6 @@ namespace neos
             result.clear();
         }
         return result;
-    }
-
-    namespace
-    {
-        // (whether a concept is one of a name: the name, or a concept whose name ends with ".<name>" (e.g. python.for, javascript.for))
-        bool named(std::string_view aConcept, std::string_view aName)
-        {
-            return aConcept == aName || 
-                (aConcept.size() > aName.size() && aConcept.ends_with(aName) && aConcept[aConcept.size() - aName.size() - 1u] == '.');
-        }
     }
 
     std::vector<context::outline_node> context::outline(std::string const& aSchemaPath, std::string_view aSource)
@@ -814,43 +902,65 @@ namespace neos
                     --end;
                 return end;
             };
-            // (the statements, and the parts of them, that the outline has: by (generic) childConcept)
+            // (the statements, and the parts of them, that the outline has: by the generic (neos.core's) concepts that their concepts are 
+            // (see i_semantic_concept::is), e.g. a language's own concept for its if statements is language.statement.if)
+            std::map<std::string_view, neolib::ref_ptr<language::i_semantic_concept>> concepts;
+            auto const is_a = [&](std::string_view aConcept, std::string_view aGeneric)
+            {
+                if (aConcept.empty())
+                    return false;
+                if (aConcept == aGeneric)
+                    return true;
+                auto existing = concepts.find(aConcept);
+                if (existing == concepts.end())
+                {
+                    neolib::ref_ptr<language::i_semantic_concept> found;
+                    find_concept(neolib::string_view{ aConcept }, found);
+                    existing = concepts.emplace(aConcept, found).first;
+                }
+                return existing->second && existing->second->is(neolib::string_view{ aGeneric });
+            };
+            auto const is_any = [&](std::string_view aConcept, std::initializer_list<std::string_view> aGenerics)
+            {
+                return std::any_of(aGenerics.begin(), aGenerics.end(), [&](std::string_view aGeneric) { return is_a(aConcept, aGeneric); });
+            };
             auto const ignored = [&](std::string_view aConcept)
             {
-                return aConcept.empty() || named(aConcept, "keyword") || named(aConcept, "scope.open") || named(aConcept, "scope.close") ||
-                    named(aConcept, "indentation") || named(aConcept, "comment") || aConcept.starts_with("language.comment");
+                return aConcept.empty() || 
+                    is_any(aConcept, { "language.keyword", "language.comment", "language.whitespace", "language.scope.open", "language.scope.close" });
             };
             auto const is_block = [&](std::string_view aConcept)
             {
-                return named(aConcept, "scope") || named(aConcept, "body") || named(aConcept, "block");
+                return is_any(aConcept, { "language.scope", "language.function.scope", "language.function.body" });
             };
             auto const kind_of = [&](std::string_view aConcept) -> std::optional<outline_kind>
             {
-                auto const any = [&](std::initializer_list<std::string_view> aNames) 
-                { 
-                    return std::any_of(aNames.begin(), aNames.end(), [&](std::string_view aName) { return named(aConcept, aName); }); 
-                };
-                if (any({ "function", "method" }))
+                if (is_a(aConcept, "language.function"))
                     return outline_kind::Function;
-                if (any({ "class", "struct", "interface" }))
+                if (is_a(aConcept, "language.class"))
                     return outline_kind::Class;
-                if (any({ "statement.loop", "loop", "for", "for.in", "for.of", "while", "do" }))
+                if (is_a(aConcept, "language.statement.loop"))
                     return outline_kind::Loop;
-                if (any({ "if", "elif", "else", "switch", "case", "default", "try", "except", "catch", "finally", "with", "match" }))
+                if (is_any(aConcept, { "language.statement.if", "logic.operator.if", "language.statement.try", "language.statement.switch", 
+                    "language.statement.with" }))
                     return outline_kind::Branch;
-                if (any({ "return", "function.return", "break", "continue", "throw", "raise" }))
+                if (is_any(aConcept, { "language.statement.elseif", "logic.operator.elseif", "language.statement.else", "logic.operator.else", 
+                    "language.statement.catch", "language.statement.finally", "language.statement.case" }))
+                    return outline_kind::Alternative;
+                if (is_a(aConcept, "language.function.return"))
                     return outline_kind::Return;
+                if (is_any(aConcept, { "language.statement.break", "language.statement.continue", "language.statement.throw" }))
+                    return outline_kind::Jump;
                 return {};
             };
-            auto const is_alternative = [&](std::string_view aConcept)
+            // (a type: language.type or one of its kinds (e.g. language.type.string))
+            auto const is_type = [&](std::string_view aConcept)
             {
-                return named(aConcept, "elif") || named(aConcept, "else") || named(aConcept, "except") || named(aConcept, "catch") || named(aConcept, "finally");
+                return is_a(aConcept, "language.type") || aConcept.starts_with("language.type.");
             };
             auto const statement_like = [&](std::string_view aConcept)
             {
-                return kind_of(aConcept).has_value() || named(aConcept, "statement") || named(aConcept, "let") || named(aConcept, "const") || 
-                    named(aConcept, "var") || named(aConcept, "declaration") ||
-                    (named(aConcept, "expression") && !aConcept.starts_with("language.") && !aConcept.starts_with("math.") && !aConcept.starts_with("boolean."));
+                return kind_of(aConcept).has_value() || is_a(aConcept, "language.statement");
             };
             // (the children of a node that have concepts (those of its children that have none are looked through))
             std::function<void(node_t const&, std::vector<node_t const*>&)> concept_children = [&](node_t const& aNode, std::vector<node_t const*>& aChildren)
@@ -881,7 +991,7 @@ namespace neos
             auto const inner = [&](node_t const& aNode) -> node_t const&
             {
                 node_t const* node = &aNode;
-                while (!kind_of(name_of(*node)) && named(name_of(*node), "statement"))
+                while (!kind_of(name_of(*node)) && is_a(name_of(*node), "language.statement"))
                 {
                     std::vector<node_t const*> children;
                     concept_children(*node, children);
@@ -906,7 +1016,8 @@ namespace neos
             };
             auto const compound = [](outline_kind aKind)
             {
-                return aKind == outline_kind::Function || aKind == outline_kind::Class || aKind == outline_kind::Loop || aKind == outline_kind::Branch;
+                return aKind == outline_kind::Function || aKind == outline_kind::Class || aKind == outline_kind::Loop || aKind == outline_kind::Branch ||
+                    aKind == outline_kind::Alternative;
             };
 
             std::function<void(std::vector<node_t const*> const&, std::uint32_t)> add_statements;
@@ -920,6 +1031,18 @@ namespace neos
                     return index;
                 std::vector<node_t const*> children;
                 concept_children(node, children);
+                // (its first part, if it is of its kind, is it (e.g. neoscript's logic.operator.if (its condition and its body) in its 
+                // language.statement.if, or its logic.operator.else in its language.statement.else): its parts are its)
+                for (;;)
+                {
+                    auto const first = std::find_if(children.begin(), children.end(), [&](node_t const* aChild) { return !ignored(name_of(*aChild)); });
+                    if (first == children.end() || kind_of(name_of(**first)) != kind)
+                        break;
+                    std::vector<node_t const*> parts;
+                    concept_children(**first, parts);
+                    auto const at = children.erase(first);
+                    children.insert(at, parts.begin(), parts.end());
+                }
                 // (a function's parameters: those of its parameter list (all of the list's parts that are not types if it has none))
                 if (kind == outline_kind::Function)
                 {
@@ -929,7 +1052,7 @@ namespace neos
                         concept_children(aNode, nodeChildren);
                         for (auto const child : nodeChildren)
                         {
-                            if (named(name_of(*child), "parameters"))
+                            if (is_a(name_of(*child), "language.function.parameters"))
                                 return child;
                             if (is_block(name_of(*child)))
                                 continue;
@@ -943,16 +1066,17 @@ namespace neos
                         std::vector<node_t const*> parameterNodes;
                         concept_children(*parameters, parameterNodes);
                         bool const named_parameters = std::any_of(parameterNodes.begin(), parameterNodes.end(), 
-                            [&](node_t const* aParameter) { return named(name_of(*aParameter), "parameter"); });
+                            [&](node_t const* aParameter) { return is_a(name_of(*aParameter), "language.function.parameter"); });
                         for (auto const parameter : parameterNodes)
-                            if (named_parameters ? named(name_of(*parameter), "parameter") : 
-                                !ignored(name_of(*parameter)) && !name_of(*parameter).starts_with("language.type"))
+                            if (named_parameters ? is_a(name_of(*parameter), "language.function.parameter") : 
+                                !ignored(name_of(*parameter)) && !is_type(name_of(*parameter)))
                                 result.push_back(outline_node{ index, outline_kind::Parameter, first_of(*parameter), last_of(*parameter), last_of(*parameter) });
                     }
                 }
-                // (its body: its blocks, else a statement that ends it (or that is before an else); what is after an else is a branch of its own)
+                // (its body: its blocks, else a statement that ends it (or that is before an alternative); an alternative that is not a 
+                // statement of its own (e.g. JavaScript's else) is a keyword after a branch's body, and what follows it)
                 bool const hasBlock = std::any_of(children.begin(), children.end(), [&](node_t const* aChild) { return is_block(name_of(*aChild)); });
-                auto const is_else = [&](node_t const* aChild) { return named(name_of(*aChild), "keyword") && aChild->value == "else"; };
+                auto const introduces_alternative = [&](node_t const* aChild) { return kind == outline_kind::Branch && is_a(name_of(*aChild), "language.keyword"); };
                 // (without blocks: the statements that end it (e.g. a for's, or a switch's cases))
                 std::size_t trailingStatements = children.size();
                 for (auto i = children.size(); i > 0u; --i)
@@ -970,7 +1094,7 @@ namespace neos
                 {
                     auto const& child = *children[i];
                     auto const childConcept = name_of(child);
-                    if (is_else(&child))
+                    if (bodyStart && introduces_alternative(&child))
                     {
                         elseStart = first_of(child);
                         continue;
@@ -980,7 +1104,7 @@ namespace neos
                         if (!bodyStart)
                             bodyStart = *elseStart;
                         auto const elseIndex = static_cast<std::uint32_t>(result.size());
-                        result.push_back(outline_node{ index, outline_kind::Branch, *elseStart, last_of(child), first_of(child) });
+                        result.push_back(outline_node{ index, outline_kind::Alternative, *elseStart, last_of(child), first_of(child) });
                         std::vector<node_t const*> statements;
                         if (is_block(childConcept))
                             statements_of(child, statements);
@@ -992,8 +1116,16 @@ namespace neos
                     }
                     if (ignored(childConcept))
                         continue;
-                    bool const beforeElse = i + 1u < children.size() && is_else(children[i + 1u]);
-                    if (is_block(childConcept) || (statement_like(childConcept) && (beforeElse || (!hasBlock && i >= trailingStatements))))
+                    // (an alternative that is a part of it (e.g. a try's catch, a switch's case, or neoscript's else): one of its alternatives)
+                    if (kind_of(childConcept) == outline_kind::Alternative)
+                    {
+                        if (!bodyStart)
+                            bodyStart = first_of(child);
+                        add_statements({ &child }, index);
+                        continue;
+                    }
+                    bool const beforeAlternative = i + 1u < children.size() && introduces_alternative(children[i + 1u]);
+                    if (is_block(childConcept) || (statement_like(childConcept) && (beforeAlternative || (!hasBlock && i >= trailingStatements))))
                     {
                         if (!bodyStart)
                             bodyStart = first_of(child);
@@ -1016,10 +1148,9 @@ namespace neos
                 {
                     auto const& statement = *aStatements[i++];
                     auto const index = add_statement(statement, aParent);
-                    // (an alternative (else, elif, except, finally) of a branch that is a statement of its own (e.g. Python's): in the branch)
+                    // (an alternative (e.g. an elif or an else) of a branch that is a statement of its own (e.g. Python's): in the branch)
                     std::optional<std::uint32_t> alternativeOf;
-                    if (result[index].kind == outline_kind::Branch && previous && result[*previous].kind == outline_kind::Branch && 
-                        is_alternative(name_of(inner(statement))))
+                    if (result[index].kind == outline_kind::Alternative && previous && result[*previous].kind == outline_kind::Branch)
                     {
                         alternativeOf = *previous;
                         result[index].parent = *previous;
@@ -1027,8 +1158,7 @@ namespace neos
                     else
                         previous = index;
                     // (a compound statement whose body is not in it (e.g. Python's): the statements after it that are indented more than it)
-                    if (compound(result[index].kind) && !has_body(index) && 
-                        result[index].last > result[index].first && aSource[result[index].last - 1u] == ':')
+                    if (compound(result[index].kind) && !has_body(index))
                     {
                         auto const indent = indentation(result[index].first);
                         auto end = i;
@@ -1061,10 +1191,10 @@ namespace neos
     std::vector<std::string> context::highlight_colours(std::string const& aSchemaPath, std::string const& aTheme)
     {
         // (highlighting.json: an object of themes, each an object of the categories' colours: "comment", "keyword", "string", "number", 
-        // "constant", "type", "function" and "parameter"; the installed configuration's (beside the schema), then the user's, which override 
+        // "constant", "type", "function", "parameter" and "variable"; the installed configuration's (beside the schema), then the user's, which override 
         // them: ~/.neos/highlighting.json (as vim's ~/.vim), or on Windows %LOCALAPPDATA%\neos\highlighting.json)
-        static char const* const sCategories[] = { "comment", "keyword", "string", "number", "constant", "type", "function", "parameter" };
-        static_assert(std::size(sCategories) == static_cast<std::size_t>(highlight_category::Parameter) + 1u);
+        static char const* const sCategories[] = { "comment", "keyword", "string", "number", "constant", "type", "function", "parameter", "variable" };
+        static_assert(std::size(sCategories) == static_cast<std::size_t>(highlight_category::Variable) + 1u);
         std::vector<std::string> result(std::size(sCategories));
         auto const apply = [&](std::filesystem::path const& aPath)
         {
@@ -1099,4 +1229,4 @@ namespace neos
             result.clear();
         return result;
     }
-}
+}

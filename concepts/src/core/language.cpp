@@ -991,6 +991,46 @@ namespace neos::concepts::core
         }
     };
 
+    // the concepts of a program's structure that have no code of their own: a language's own concepts derive from them (see 
+    // i_semantic_concept::is), e.g. for a script's outline (see neos::context::outline)
+    namespace structure
+    {
+        struct class_ { static constexpr auto Name = "language.class"; };
+        struct try_ { static constexpr auto Name = "language.statement.try"; };
+        struct catch_ { static constexpr auto Name = "language.statement.catch"; };
+        struct finally_ { static constexpr auto Name = "language.statement.finally"; };
+        struct switch_ { static constexpr auto Name = "language.statement.switch"; };
+        struct case_ { static constexpr auto Name = "language.statement.case"; };
+        struct with_ { static constexpr auto Name = "language.statement.with"; };
+        struct break_ { static constexpr auto Name = "language.statement.break"; };
+        struct continue_ { static constexpr auto Name = "language.statement.continue"; };
+        struct throw_ { static constexpr auto Name = "language.statement.throw"; };
+    }
+
+    template <typename Structure>
+    class language_structure : public semantic_concept<language_structure<Structure>>
+    {
+        // concept
+    public:
+        static constexpr auto Name = Structure::Name;
+        // construction
+    public:
+        language_structure() :
+            semantic_concept<language_structure<Structure>>{ neos::language::emit_type::Infix }
+        {
+        }
+        // emit
+    public:
+        bool can_fold() const override
+        {
+            return true;
+        }
+        void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override
+        {
+            // (no code of its own)
+        }
+    };
+
     template <bool Value>
     class language_object_boolean : public semantic_concept<language_object_boolean<Value>>
     {
@@ -1442,6 +1482,26 @@ namespace neos::concepts::core
             neolib::make_ref<language_statement_else>();
         concepts()[neolib::string{ language_statement_loop::Name }] =
             neolib::make_ref<language_statement_loop>();
+        concepts()[neolib::string{ language_structure<structure::class_>::Name }] =
+            neolib::make_ref<language_structure<structure::class_>>();
+        concepts()[neolib::string{ language_structure<structure::try_>::Name }] =
+            neolib::make_ref<language_structure<structure::try_>>();
+        concepts()[neolib::string{ language_structure<structure::catch_>::Name }] =
+            neolib::make_ref<language_structure<structure::catch_>>();
+        concepts()[neolib::string{ language_structure<structure::finally_>::Name }] =
+            neolib::make_ref<language_structure<structure::finally_>>();
+        concepts()[neolib::string{ language_structure<structure::switch_>::Name }] =
+            neolib::make_ref<language_structure<structure::switch_>>();
+        concepts()[neolib::string{ language_structure<structure::case_>::Name }] =
+            neolib::make_ref<language_structure<structure::case_>>();
+        concepts()[neolib::string{ language_structure<structure::with_>::Name }] =
+            neolib::make_ref<language_structure<structure::with_>>();
+        concepts()[neolib::string{ language_structure<structure::break_>::Name }] =
+            neolib::make_ref<language_structure<structure::break_>>();
+        concepts()[neolib::string{ language_structure<structure::continue_>::Name }] =
+            neolib::make_ref<language_structure<structure::continue_>>();
+        concepts()[neolib::string{ language_structure<structure::throw_>::Name }] =
+            neolib::make_ref<language_structure<structure::throw_>>();
         concepts()[neolib::string{ language_object_boolean<true>::Name }] =
             neolib::make_ref<language_object_boolean<true>>();
         concepts()[neolib::string{ language_object_boolean<false>::Name }] =

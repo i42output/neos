@@ -68,7 +68,8 @@ namespace neos
             Constant,
             Type,
             Function,
-            Parameter
+            Parameter,
+            Variable        ///< (a local variable (or one of the script's))
         };
         struct highlight_span
         {
@@ -87,7 +88,9 @@ namespace neos
             Loop,
             Branch,
             Return,
-            Statement
+            Statement,
+            Alternative,    ///< (of the branch that it is in: e.g. an else, an elif, an except)
+            Jump            ///< (a break, a continue or a throw (a return is Return))
         };
         struct outline_node
         {

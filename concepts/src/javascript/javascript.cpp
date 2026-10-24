@@ -58,6 +58,74 @@ namespace neos::concepts::javascript
                 return neolib::string_view{ "language.identifier" };
             case construct::Initializer:
                 return neolib::string_view{ "language.initialize" };
+            // (a declaration's names, and a for's: its local variables)
+            case construct::Declarator:
+            case construct::ForVar:
+            case construct::ForLet:
+            case construct::ForConst:
+                return neolib::string_view{ "language.function.local" };
+            // (the generic concepts of a script's structure: e.g. for its outline (see neos::context::outline))
+            case construct::Function:
+            case construct::AsyncFunction:
+            case construct::FunctionExpression:
+            case construct::AsyncFunctionExpression:
+            case construct::Arrow:
+            case construct::AsyncArrow:
+            case construct::Method:
+            case construct::Getter:
+            case construct::Setter:
+            case construct::GeneratorMethod:
+            case construct::AsyncMethod:
+            case construct::AsyncGeneratorMethod:
+                return neolib::string_view{ "language.function" };
+            case construct::Body:
+                return neolib::string_view{ "language.function.body" };
+            case construct::Block:
+            case construct::StaticBlock:
+                return neolib::string_view{ "language.scope" };
+            case construct::If:
+                return neolib::string_view{ "language.statement.if" };
+            case construct::Do:
+            case construct::While:
+            case construct::For:
+            case construct::ForIn:
+            case construct::ForOf:
+            case construct::ForAwaitOf:
+                return neolib::string_view{ "language.statement.loop" };
+            case construct::Return:
+                return neolib::string_view{ "language.function.return" };
+            case construct::Break:
+                return neolib::string_view{ "language.statement.break" };
+            case construct::Continue:
+                return neolib::string_view{ "language.statement.continue" };
+            case construct::Throw:
+                return neolib::string_view{ "language.statement.throw" };
+            case construct::Try:
+                return neolib::string_view{ "language.statement.try" };
+            case construct::Catch:
+                return neolib::string_view{ "language.statement.catch" };
+            case construct::Finally:
+                return neolib::string_view{ "language.statement.finally" };
+            case construct::Switch:
+                return neolib::string_view{ "language.statement.switch" };
+            case construct::Case:
+            case construct::Default:
+                return neolib::string_view{ "language.statement.case" };
+            case construct::With:
+                return neolib::string_view{ "language.statement.with" };
+            case construct::Class:
+            case construct::ClassExpression:
+                return neolib::string_view{ "language.class" };
+            case construct::ExpressionStatement:
+            case construct::Empty:
+            case construct::Debugger:
+            case construct::Var:
+            case construct::Let:
+            case construct::Const:
+            case construct::Using:
+            case construct::AwaitUsing:
+            case construct::Labelled:
+                return neolib::string_view{ "language.statement" };
             default:
                 return {};
             }

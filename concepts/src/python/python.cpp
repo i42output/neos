@@ -81,7 +81,7 @@ namespace neos::concepts::python
         // construction
     public:
         python_indentation() :
-            semantic_concept{ neos::language::emit_type::Infix }
+            semantic_concept{ neolib::string_view{ Name }, neos::language::emit_type::Infix, neolib::string_view{ "language.whitespace" } }
         {
         }
         // emit
@@ -105,7 +105,7 @@ namespace neos::concepts::python
         // construction
     public:
         python_statement() :
-            semantic_concept{ neos::language::emit_type::Infix }
+            semantic_concept{ neolib::string_view{ Name }, neos::language::emit_type::Infix, neolib::string_view{ "language.statement" } }
         {
         }
         // emit
@@ -134,6 +134,19 @@ namespace neos::concepts::python
         template <> struct indented_name<language::indented_construct::Except> { static constexpr auto Name = "python.except"; };
         template <> struct indented_name<language::indented_construct::Finally> { static constexpr auto Name = "python.finally"; };
         template <> struct indented_name<language::indented_construct::With> { static constexpr auto Name = "python.with"; };
+        // (the generic concept (neos.core's) that a compound statement's concept derives from, if any: e.g. for a script's outline (see 
+        // neos::context::outline))
+        template <language::indented_construct Construct> struct indented_generic { static constexpr auto Name = ""; };
+        template <> struct indented_generic<language::indented_construct::If> { static constexpr auto Name = "language.statement.if"; };
+        template <> struct indented_generic<language::indented_construct::ElseIf> { static constexpr auto Name = "language.statement.elseif"; };
+        template <> struct indented_generic<language::indented_construct::Else> { static constexpr auto Name = "language.statement.else"; };
+        template <> struct indented_generic<language::indented_construct::While> { static constexpr auto Name = "language.statement.loop"; };
+        template <> struct indented_generic<language::indented_construct::For> { static constexpr auto Name = "language.statement.loop"; };
+        template <> struct indented_generic<language::indented_construct::Function> { static constexpr auto Name = "language.function"; };
+        template <> struct indented_generic<language::indented_construct::Try> { static constexpr auto Name = "language.statement.try"; };
+        template <> struct indented_generic<language::indented_construct::Except> { static constexpr auto Name = "language.statement.catch"; };
+        template <> struct indented_generic<language::indented_construct::Finally> { static constexpr auto Name = "language.statement.finally"; };
+        template <> struct indented_generic<language::indented_construct::With> { static constexpr auto Name = "language.statement.with"; };
     }
 
     template <language::indented_construct Construct>
@@ -145,7 +158,8 @@ namespace neos::concepts::python
         // construction
     public:
         python_compound_statement() :
-            semantic_concept<python_compound_statement<Construct>>{ neos::language::emit_type::Infix }
+            semantic_concept<python_compound_statement<Construct>>{ neolib::string_view{ Name }, neos::language::emit_type::Infix, 
+                neolib::string_view{ indented_generic<Construct>::Name } }
         {
         }
         // emit
@@ -174,7 +188,7 @@ namespace neos::concepts::python
         // construction
     public:
         python_for_variable() :
-            semantic_concept{ neos::language::emit_type::Infix }
+            semantic_concept{ neolib::string_view{ Name }, neos::language::emit_type::Infix, neolib::string_view{ "language.function.local" } }
         {
         }
         // emit
@@ -311,6 +325,18 @@ namespace neos::concepts::python
         template <> struct python_construct_name<construct::Del> { static constexpr auto Name = "python.del"; };
         template <> struct python_construct_name<construct::Walrus> { static constexpr auto Name = "python.walrus"; };
         template <> struct python_construct_name<construct::TargetGroup> { static constexpr auto Name = "python.target.group"; };
+        // (the generic concept (neos.core's) that a construct's concept derives from, if any: e.g. for a script's outline (see 
+        // neos::context::outline))
+        template <construct Construct> struct python_construct_generic { static constexpr auto Name = ""; };
+        template <> struct python_construct_generic<construct::Return> { static constexpr auto Name = "language.function.return"; };
+        template <> struct python_construct_generic<construct::ForIn> { static constexpr auto Name = "language.statement.loop"; };
+        template <> struct python_construct_generic<construct::Break> { static constexpr auto Name = "language.statement.break"; };
+        template <> struct python_construct_generic<construct::Continue> { static constexpr auto Name = "language.statement.continue"; };
+        template <> struct python_construct_generic<construct::Raise> { static constexpr auto Name = "language.statement.throw"; };
+        template <> struct python_construct_generic<construct::Target> { static constexpr auto Name = "language.function.local"; };
+        template <> struct python_construct_generic<construct::TargetGroup> { static constexpr auto Name = "language.function.local"; };
+        template <> struct python_construct_generic<construct::ForTargets> { static constexpr auto Name = "language.function.local"; };
+        template <> struct python_construct_generic<construct::AsName> { static constexpr auto Name = "language.function.local"; };
     }
 
     // a construct whose code the compiler generates once its parts have been compiled
@@ -323,7 +349,8 @@ namespace neos::concepts::python
         // construction
     public:
         python_construct() :
-            semantic_concept<python_construct<Construct>>{ neos::language::emit_type::Infix }
+            semantic_concept<python_construct<Construct>>{ neolib::string_view{ Name }, neos::language::emit_type::Infix, 
+                neolib::string_view{ python_construct_generic<Construct>::Name } }
         {
         }
         // emit

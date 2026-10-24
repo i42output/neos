@@ -7,7 +7,8 @@
         "constant": "#569CD6",
         "type": "#4EC9B0",
         "function": "#DCDCAA",
-        "parameter": "#9A9A9A"
+        "parameter": "#9A9A9A",
+        "variable": "#9CDCFE"
     },
     "light": {
         "comment": "#008000",
@@ -17,6 +18,7 @@
         "constant": "#0000FF",
         "type": "#2B91AF",
         "function": "#74531F",
-        "parameter": "#808080"
+        "parameter": "#808080",
+        "variable": "#001080"
     }
 }
