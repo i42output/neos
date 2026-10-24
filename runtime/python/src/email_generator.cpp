@@ -132,7 +132,7 @@ namespace neos::python_runtime::detail::email_generator_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))
@@ -282,7 +282,6 @@ namespace neos::python_runtime::detail::email_generator_module
                             {
                                 pending1 = py_take_exception();
                             }
-                            finally1:
                             self.set_attr("policy", old_gen_policy);
                             msg.set_attr("policy", old_msg_policy);
                             if (pending1)
@@ -356,7 +355,6 @@ namespace neos::python_runtime::detail::email_generator_module
                             {
                                 pending3 = py_take_exception();
                             }
-                            finally3:
                             self.set_attr("_fp", oldfp);
                             munge_cte = self.attr("_munge_cte");
                             del_attr(self, "_munge_cte");
@@ -639,7 +637,6 @@ namespace neos::python_runtime::detail::email_generator_module
                             {
                                 pending9 = py_take_exception();
                             }
-                            finally9:
                             self.set_attr("policy", p);
                             if (pending9)
                                 py_reraise(*pending9);

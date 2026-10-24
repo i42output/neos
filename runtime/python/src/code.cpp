@@ -132,7 +132,7 @@ namespace neos::python_runtime::detail::code_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))
@@ -259,7 +259,6 @@ namespace neos::python_runtime::detail::code_module
                             {
                                 pending3 = py_take_exception();
                             }
-                            finally3:
                             py const value5 = none();
                             typ = value5;
                             value = value5;
@@ -293,7 +292,6 @@ namespace neos::python_runtime::detail::code_module
                             {
                                 pending6 = py_take_exception();
                             }
-                            finally6:
                             py const value8 = none();
                             typ = value8;
                             value = value8;
@@ -547,7 +545,6 @@ namespace neos::python_runtime::detail::code_module
                             {
                                 pending13 = py_take_exception();
                             }
-                            finally13:
                             // restore exit and quit in builtins if they were modified
                             if (!_exit.is_none())
                             {

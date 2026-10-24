@@ -753,7 +753,6 @@ namespace neos::python_runtime::detail::http_server_module
                                 {
                                     pending17 = py_take_exception();
                                 }
-                                finally17:
                                 f.method("close");
                                 if (pending17)
                                     py_reraise(*pending17);
@@ -1718,7 +1717,6 @@ namespace neos::python_runtime::detail::http_server_module
                             if (!exit57(manager57, type_of(handler57.exception), handler57.exception, handler57.exception.attr("__traceback__")).truthy())
                                 py_reraise(handler57.exception);
                         }
-                        finally57:
                         if (!exited57)
                             exit57(manager57, none(), none(), none());
                         if (flow57 == 1)

@@ -1988,7 +1988,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending39 = py_take_exception();
                             }
-                            finally39:
                             self.attr("_cookies_lock").method("release");
                             if (pending39)
                                 py_reraise(*pending39);
@@ -2450,7 +2449,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending57 = py_take_exception();
                             }
-                            finally57:
                             self.attr("_cookies_lock").method("release");
                             if (pending57)
                                 py_reraise(*pending57);
@@ -2490,7 +2488,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending59 = py_take_exception();
                             }
-                            finally59:
                             self.attr("_cookies_lock").method("release");
                             if (pending59)
                                 py_reraise(*pending59);
@@ -2527,7 +2524,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending60 = py_take_exception();
                             }
-                            finally60:
                             self.attr("_cookies_lock").method("release");
                             if (pending60)
                                 py_reraise(*pending60);
@@ -2592,7 +2588,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending62 = py_take_exception();
                             }
-                            finally62:
                             self.attr("_cookies_lock").method("release");
                             if (pending62)
                                 py_reraise(*pending62);
@@ -2627,7 +2622,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending64 = py_take_exception();
                             }
-                            finally64:
                             self.attr("_cookies_lock").method("release");
                             if (pending64)
                                 py_reraise(*pending64);
@@ -2746,7 +2740,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                                 if (!exit69(manager69, type_of(handler69.exception), handler69.exception, handler69.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler69.exception);
                             }
-                            finally69:
                             if (!exited69)
                                 exit69(manager69, none(), none(), none());
                             if (flow69 == 1)
@@ -2801,7 +2794,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                             {
                                 pending70 = py_take_exception();
                             }
-                            finally70:
                             self.attr("_cookies_lock").method("release");
                             if (pending70)
                                 py_reraise(*pending70);
@@ -2931,7 +2923,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                                 if (!exit74(manager74, type_of(handler74.exception), handler74.exception, handler74.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler74.exception);
                             }
-                            finally74:
                             if (!exited74)
                                 exit74(manager74, none(), none(), none());
                             if (flow74 == 1)
@@ -3286,7 +3277,6 @@ namespace neos::python_runtime::detail::http_cookiejar_module
                                 if (!exit85(manager85, type_of(handler85.exception), handler85.exception, handler85.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler85.exception);
                             }
-                            finally85:
                             if (!exited85)
                                 exit85(manager85, none(), none(), none());
                             if (flow85 == 1)

@@ -132,7 +132,7 @@ namespace neos::python_runtime::detail::http_client_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))
@@ -735,7 +735,6 @@ namespace neos::python_runtime::detail::http_client_module
                             {
                                 pending19 = py_take_exception();
                             }
-                            finally19:
                             if (self.attr("fp").truthy())
                             {
                                 self.method("_close_conn");
@@ -1612,7 +1611,6 @@ namespace neos::python_runtime::detail::http_client_module
                             {
                                 pending42 = py_take_exception();
                             }
-                            finally42:
                             response.method("close");
                             if (pending42)
                                 py_reraise(*pending42);
@@ -1680,7 +1678,6 @@ namespace neos::python_runtime::detail::http_client_module
                             {
                                 pending46 = py_take_exception();
                             }
-                            finally46:
                             response = self.attr("_HTTPConnection__response");
                             if (response.truthy())
                             {

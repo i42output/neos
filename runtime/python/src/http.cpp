@@ -100,7 +100,7 @@ namespace neos::python_runtime::detail::http_module
         }
 
         // (its entry: the object, as it is defined (or assigned) now)
-        py const& object_entry(char const* aQualifiedName)
+        [[maybe_unused]] py const& object_entry(char const* aQualifiedName)
         {
             auto& s = the_state();
             auto const o = s.objects.find(aQualifiedName);
@@ -132,7 +132,7 @@ namespace neos::python_runtime::detail::http_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))

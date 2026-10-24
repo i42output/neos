@@ -130,7 +130,7 @@ namespace neos::python_runtime::detail::_compression_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))
@@ -269,7 +269,6 @@ namespace neos::python_runtime::detail::_compression_module
                                         if (!exit2(manager2, type_of(handler2.exception), handler2.exception, handler2.exception.attr("__traceback__")).truthy())
                                             py_reraise(handler2.exception);
                                     }
-                                    finally2:
                                     if (!exited2)
                                         exit2(manager2, none(), none(), none());
                                     if (flow2 == 1)

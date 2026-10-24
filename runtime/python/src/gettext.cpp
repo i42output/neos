@@ -1147,7 +1147,6 @@ namespace neos::python_runtime::detail::gettext_module
                                     if (!exit40(manager40, type_of(handler40.exception), handler40.exception, handler40.exception.attr("__traceback__")).truthy())
                                         py_reraise(handler40.exception);
                                 }
-                                finally40:
                                 if (!exited40)
                                     exit40(manager40, none(), none(), none());
                                 if (flow40 == 1)

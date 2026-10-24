@@ -340,7 +340,6 @@ namespace neos::python_runtime::detail::fileinput_module
                             {
                                 pending1 = py_take_exception();
                             }
-                            finally1:
                             self.set_attr("_files", py_tuple());
                             if (pending1)
                                 py_reraise(*pending1);
@@ -421,7 +420,6 @@ namespace neos::python_runtime::detail::fileinput_module
                             {
                                 pending4 = py_take_exception();
                             }
-                            finally4:
                             file = self.attr("_file");
                             self.set_attr("_file", none());
                             try
@@ -452,7 +450,6 @@ namespace neos::python_runtime::detail::fileinput_module
                                 {
                                     pending6 = py_take_exception();
                                 }
-                                finally6:
                                 backupfilename = self.attr("_backupfilename");
                                 self.set_attr("_backupfilename", none());
                                 if ((backupfilename.truthy() && (!self.attr("_backup").truthy())))

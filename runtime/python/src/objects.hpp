@@ -274,11 +274,11 @@ namespace neos::python_runtime
         inline neos_py_type sIteratorType = make_type("python.iterator", "iterator", retain_object, release_object<iterator_object>);
         inline neos_py_type sFunctionType = make_type("python.builtin_function_or_method", "builtin_function_or_method", retain_object, release_object<function_object>);
 
-        inline singleton sNone{ &sNoneType.base };
-        inline singleton sNotImplemented{ &sNotImplementedType.base };
-        inline singleton sEllipsis{ &sEllipsisType.base };
-        inline singleton sTrue{ &sBoolType.base };
-        inline singleton sFalse{ &sBoolType.base };
+        inline singleton sNone{ { &sNoneType.base } };
+        inline singleton sNotImplemented{ { &sNotImplementedType.base } };
+        inline singleton sEllipsis{ { &sEllipsisType.base } };
+        inline singleton sTrue{ { &sBoolType.base } };
+        inline singleton sFalse{ { &sBoolType.base } };
 
         inline int kind_of_other(object* aObject);
         // (the commonest kinds here (inline: always); the rest: kind_of_other)

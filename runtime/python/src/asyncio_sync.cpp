@@ -127,7 +127,6 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     pending2 = py_take_exception();
                                 }
-                                finally2:
                                 self.attr("_waiters").method("remove", { fut });
                                 if (pending2)
                                     py_reraise(*pending2);
@@ -402,7 +401,6 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             pending11 = py_take_exception();
                                         }
-                                        finally11:
                                         err = none();
                                         if (pending11)
                                             py_reraise(*pending11);
@@ -558,7 +556,6 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             pending16 = py_take_exception();
                                         }
-                                        finally16:
                                         self.attr("_waiters").method("remove", { fut });
                                         if (pending16)
                                             py_reraise(*pending16);
@@ -860,7 +857,6 @@ namespace neos::python_runtime::detail::asyncio
                                 if (!py_await(exit26(manager26, type_of(handler26.exception), handler26.exception, handler26.exception.attr("__traceback__"))).truthy())
                                     py_reraise(handler26.exception);
                             }
-                            finally26:
                             if (!exited26)
                                 py_await(exit26(manager26, none(), none(), none()));
                             if (flow26 == 1)
@@ -890,7 +886,6 @@ namespace neos::python_runtime::detail::asyncio
                                 if (!py_await(exit27(manager27, type_of(handler27.exception), handler27.exception, handler27.exception.attr("__traceback__"))).truthy())
                                     py_reraise(handler27.exception);
                             }
-                            finally27:
                             if (!exited27)
                                 py_await(exit27(manager27, none(), none(), none()));
                             if (flow27 == 1)
@@ -1704,7 +1699,6 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     pending4 = py_take_exception();
                                 }
-                                finally4:
                                 exc = none();
                                 if (pending4)
                                     py_reraise(*pending4);
@@ -1744,7 +1738,6 @@ namespace neos::python_runtime::detail::asyncio
                                         {
                                             pending6 = py_take_exception();
                                         }
-                                        finally6:
                                         exc = none();
                                         if (pending6)
                                             py_reraise(*pending6);
@@ -1791,7 +1784,6 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     pending7 = py_take_exception();
                                 }
-                                finally7:
                                 exc = none();
                                 if (pending7)
                                     py_reraise(*pending7);
@@ -2156,7 +2148,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending5 = py_take_exception();
                             }
-                            finally5:
                             self.attr("_drain_waiters").method("remove", { waiter });
                             if (pending5)
                                 py_reraise(*pending5);
@@ -2741,7 +2732,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending8 = py_take_exception();
                             }
-                            finally8:
                             self.set_attr("_waiter", none());
                             if (pending8)
                                 py_reraise(*pending8);
@@ -3103,7 +3093,6 @@ namespace neos::python_runtime::detail::asyncio
                     if (!exit1(manager1, type_of(handler1.exception), handler1.exception, handler1.exception.attr("__traceback__")).truthy())
                         py_reraise(handler1.exception);
                 }
-                finally1:
                 if (!exited1)
                     exit1(manager1, none(), none(), none());
                 if (flow1 == 1)

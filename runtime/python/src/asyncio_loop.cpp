@@ -1236,7 +1236,6 @@ namespace neos::python_runtime::detail::asyncio
                                             {
                                                 pending12 = py_take_exception();
                                             }
-                                            finally12:
                                             py_reraise(handler11.exception);
                                             if (pending12)
                                                 py_reraise(*pending12);
@@ -1572,7 +1571,6 @@ namespace neos::python_runtime::detail::asyncio
                                         if (!py_await(exit17(manager17, type_of(handler17.exception), handler17.exception, handler17.exception.attr("__traceback__"))).truthy())
                                             py_reraise(handler17.exception);
                                     }
-                                    finally17:
                                     if (!exited17)
                                         py_await(exit17(manager17, none(), none(), none()));
                                     if (flow17 == 1)
@@ -1690,7 +1688,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending19 = py_take_exception();
                             }
-                            finally19:
                             self.method("_run_forever_cleanup");
                             if (pending19)
                                 py_reraise(*pending19);
@@ -1744,7 +1741,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending21 = py_take_exception();
                             }
-                            finally21:
                             future.method("remove_done_callback", { G<"base_events._run_until_complete_cb">() });
                             if (pending21)
                                 py_reraise(*pending21);
@@ -2498,7 +2494,6 @@ namespace neos::python_runtime::detail::asyncio
                                     {
                                         pending35 = py_take_exception();
                                     }
-                                    finally35:
                                     *exceptions = none();
                                     if (pending35)
                                         py_reraise(*pending35);
@@ -3227,7 +3222,6 @@ namespace neos::python_runtime::detail::asyncio
                                 {
                                     pending57 = py_take_exception();
                                 }
-                                finally57:
                                 if (!completed.truthy())
                                 {
                                     for (py const& item : iterate{ sockets })
@@ -3849,7 +3843,6 @@ namespace neos::python_runtime::detail::asyncio
                                     {
                                         pending77 = py_take_exception();
                                     }
-                                    finally77:
                                     self.set_attr("_current_handle", none());
                                     if (pending77)
                                         py_reraise(*pending77);
@@ -5118,7 +5111,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending36 = py_take_exception();
                             }
-                            finally36:
                             fut = none();
                             if (pending36)
                                 py_reraise(*pending36);
@@ -5196,7 +5188,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending37 = py_take_exception();
                             }
-                            finally37:
                             fut = none();
                             if (pending37)
                                 py_reraise(*pending37);
@@ -5629,7 +5620,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending49 = py_take_exception();
                             }
-                            finally49:
                             self.attr("_sock").method("close");
                             self.set_attr("_sock", none());
                             self.set_attr("_protocol", none());
@@ -6230,7 +6220,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending62 = py_take_exception();
                             }
-                            finally62:
                             self.set_attr("_write_ready", none());
                             if (!self.attr("_empty_waiter").is_none())
                             {
@@ -7009,7 +6998,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending12 = py_take_exception();
                             }
-                            finally12:
                             self.set_attr("_loop", none());
                             self.set_attr("_proc", none());
                             self.set_attr("_protocol", none());
@@ -7079,7 +7067,7 @@ namespace neos::python_runtime::detail::asyncio
 
         // --- unix_events (Lib/asyncio/unix_events.py)
 
-        void make_unix_events()
+        [[maybe_unused]] void make_unix_events()
         {
             static module_writer const& w = writer("unix_events");
             define("unix_events", "__all__", py_tuple({ S<"SelectorEventLoop">(), S<"AbstractChildWatcher">(), S<"SafeChildWatcher">(), S<"FastChildWatcher">(), S<"PidfdChildWatcher">(), S<"MultiLoopChildWatcher">(), S<"ThreadedChildWatcher">(), S<"DefaultEventLoopPolicy">(), S<"EventLoop">() }));
@@ -7404,7 +7392,6 @@ namespace neos::python_runtime::detail::asyncio
                                 if (!exit10(manager10, type_of(handler10.exception), handler10.exception, handler10.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler10.exception);
                             }
-                            finally10:
                             if (!exited10)
                                 exit10(manager10, none(), none(), none());
                             if (flow10 == 1)
@@ -7458,7 +7445,6 @@ namespace neos::python_runtime::detail::asyncio
                                 if (!exit11(manager11, type_of(handler11.exception), handler11.exception, handler11.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler11.exception);
                             }
-                            finally11:
                             if (!exited11)
                                 exit11(manager11, none(), none(), none());
                             if (flow11 == 1)
@@ -8202,7 +8188,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending24 = py_take_exception();
                             }
-                            finally24:
                             self.attr("_pipe").method("close");
                             self.set_attr("_pipe", none());
                             self.set_attr("_protocol", none());
@@ -8592,7 +8577,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending31 = py_take_exception();
                             }
-                            finally31:
                             self.attr("_pipe").method("close");
                             self.set_attr("_pipe", none());
                             self.set_attr("_protocol", none());
@@ -8646,7 +8630,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending33 = py_take_exception();
                             }
-                            finally33:
                             if (!stdin_w.is_none())
                             {
                                 stdin_.method("close");
@@ -9756,7 +9739,6 @@ namespace neos::python_runtime::detail::asyncio
                                 if (!exit66(manager66, type_of(handler66.exception), handler66.exception, handler66.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler66.exception);
                             }
-                            finally66:
                             if (!exited66)
                                 exit66(manager66, none(), none(), none());
                             if (flow66 == 1)
@@ -9870,7 +9852,6 @@ namespace neos::python_runtime::detail::asyncio
                             {
                                 pending1 = py_take_exception();
                             }
-                            finally1:
                             if (self.attr("_set_event_loop").truthy())
                             {
                                 (G<"events.set_event_loop">())(none());

@@ -278,7 +278,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                 {
                                     pending1 = py_take_exception();
                                 }
-                                finally1:
                                 if (!self.attr("sock").is_none())
                                 {
                                     self.method("close");
@@ -696,7 +695,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                     if (!exit7(manager7, type_of(handler7.exception), handler7.exception, handler7.exception.attr("__traceback__")).truthy())
                                         py_reraise(handler7.exception);
                                 }
-                                finally7:
                                 if (!exited7)
                                     exit7(manager7, none(), none(), none());
                                 if (flow7 == 1)
@@ -799,7 +797,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                 if (!exit9(manager9, type_of(handler9.exception), handler9.exception, handler9.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler9.exception);
                             }
-                            finally9:
                             if (!exited9)
                                 exit9(manager9, none(), none(), none());
                             if (flow9 == 1)
@@ -879,7 +876,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                         if (!exit12(manager12, type_of(handler12.exception), handler12.exception, handler12.exception.attr("__traceback__")).truthy())
                                             py_reraise(handler12.exception);
                                     }
-                                    finally12:
                                     if (!exited12)
                                         exit12(manager12, none(), none(), none());
                                     if (flow12 == 1)
@@ -943,7 +939,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                 if (!exit14(manager14, type_of(handler14.exception), handler14.exception, handler14.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler14.exception);
                             }
-                            finally14:
                             if (!exited14)
                                 exit14(manager14, none(), none(), none());
                             if (flow14 == 1)
@@ -1008,7 +1003,6 @@ namespace neos::python_runtime::detail::ftplib_module
                                 if (!exit16(manager16, type_of(handler16.exception), handler16.exception, handler16.exception.attr("__traceback__")).truthy())
                                     py_reraise(handler16.exception);
                             }
-                            finally16:
                             if (!exited16)
                                 exit16(manager16, none(), none(), none());
                             if (flow16 == 1)
@@ -1261,7 +1255,6 @@ namespace neos::python_runtime::detail::ftplib_module
                             {
                                 pending26 = py_take_exception();
                             }
-                            finally26:
                             sock = self.attr("sock");
                             self.set_attr("sock", none());
                             if (!sock.is_none())

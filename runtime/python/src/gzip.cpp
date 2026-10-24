@@ -130,7 +130,7 @@ namespace neos::python_runtime::detail::gzip_module
             std::erase_if(s.attributes, [&](auto const& a) { return a.first == aName; });
         }
         // (a module's global assigned (global name; name = value): its object, and the module's attribute (if it has been imported))
-        void set_global(char const* aModule, char const* aName, py const& aValue)
+        [[maybe_unused]] void set_global(char const* aModule, char const* aName, py const& aValue)
         {
             define(aModule, aName, aValue);
             if (modules_imported(aModule))
@@ -650,7 +650,6 @@ namespace neos::python_runtime::detail::gzip_module
                             {
                                 pending9 = py_take_exception();
                             }
-                            finally9:
                             self.method("_close");
                             if (pending9)
                                 py_reraise(*pending9);

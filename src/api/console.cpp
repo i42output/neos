@@ -139,15 +139,18 @@ namespace neos
             if (!aContext.schema().meta().copyright.empty())
                 aContext.cout() << aContext.schema().meta().copyright << std::endl;
         };
+        // (a command's spaces at the start and end of the line are not part of it (a program's input, when interactive, is as typed))
+        auto const first = aConsoleInput.find_first_not_of(" \t");
+        std::string const input = first == std::string::npos ? std::string{} : aConsoleInput.substr(first, aConsoleInput.find_last_not_of(" \t") + 1u - first);
         std::vector<std::pair<std::string::const_iterator, std::string::const_iterator>> words;
         const std::string delimeters{ " " };
-        neolib::tokens(aConsoleInput.cbegin(), aConsoleInput.cend(), delimeters.cbegin(), delimeters.cend(), words);
+        neolib::tokens(input.cbegin(), input.cend(), delimeters.cbegin(), delimeters.cend(), words);
         if (words.empty())
             return true;
         const std::string command{ words[0].first, words[0].second };
         if (command.empty())
             return true;
-        std::string parameters{ words.size() > 1 ? words[1].first : aConsoleInput.cend(), aConsoleInput.cend() };
+        std::string parameters{ words.size() > 1 ? words[1].first : input.cend(), input.cend() };
         try
         {
             if (aInteractive)
@@ -232,7 +235,7 @@ namespace neos
             {
                 if (!aContext.schema_loaded())
                     throw std::runtime_error("no schema loaded");
-                std::string expression(std::next(words[0].first), aConsoleInput.cend());
+                std::string expression(std::next(words[0].first), input.cend());
                 if (!expression.empty())
                 {
                     aContext.evaluate(expression);
