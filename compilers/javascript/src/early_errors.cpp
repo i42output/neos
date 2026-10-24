@@ -698,8 +698,13 @@ namespace neos::compilers::javascript
                     return "=";
                 bool lineTerminator = false;
                 auto p = next_token(iSource, end_of(aAssignment->child(0u)), lineTerminator);
+                // (up to the value (a value that starts with an operator character (e.g. a regular expression literal, as in a=/x/) is not
+                // the operator's))
+                auto const value = aAssignment->child(1u)->source.data();
+                auto const end = value >= iSource.data() && value <= iSource.data() + iSource.size() ?
+                    static_cast<std::size_t>(value - iSource.data()) : iSource.size();
                 std::string result;
-                while (p < iSource.size() && std::string_view{ "=*/%+-<>&^|?" }.find(iSource[p]) != std::string_view::npos)
+                while (p < end && std::string_view{ "=*/%+-<>&^|?" }.find(iSource[p]) != std::string_view::npos)
                     result.push_back(iSource[p++]);
                 return result;
             }
@@ -1564,7 +1569,7 @@ namespace neos::compilers::javascript
 
             // --- assignment targets
 
-            bool simple_target(node* aTarget, context const& c, bool aLogical)
+            bool simple_target(node* aTarget, context const& c, bool aNoCall)
             {
                 auto* t = unparenthesized(aTarget);
                 if (t == nullptr)
@@ -1585,7 +1590,7 @@ namespace neos::compilers::javascript
                 case construct::SuperIndex:
                     return true;
                 case construct::Call:
-                    return !c.strict && !aLogical;  // (Annex B: a runtime ReferenceError in non-strict code)
+                    return !c.strict && !aNoCall;  // (web compatibility: a runtime ReferenceError in non-strict code (not a pattern's target))
                 default:
                     return false;
                 }
@@ -1601,11 +1606,12 @@ namespace neos::compilers::javascript
                     error(target, "Invalid left-hand side in assignment");
             }
 
-            void destructuring_target(node* aTarget, context const& c, char const* aMessage)
+            void destructuring_target(node* aTarget, context const& c, char const* aMessage, bool aInPattern = false)
             {
+                // (a call is not a target in a pattern (its AssignmentTargetType is not simple), even in non-strict code)
                 if (aTarget->is(construct::Object) || aTarget->is(construct::Array))
                     assignment_pattern(aTarget, c);
-                else if (!simple_target(aTarget, c, false))
+                else if (!simple_target(aTarget, c, aInPattern))
                     error(aTarget, aMessage);
             }
 
@@ -1629,11 +1635,11 @@ namespace neos::compilers::javascript
                                 error(rest, "Invalid rest element");
                             if (aPattern->is(construct::Object))
                             {
-                                if (!simple_target(rest, c, false))
+                                if (!simple_target(rest, c, true))
                                     error(rest, "`...` must be followed by an assignable reference in assignment contexts");
                             }
                             else
-                                destructuring_target(rest, c, "Invalid destructuring assignment target");
+                                destructuring_target(rest, c, "Invalid destructuring assignment target", true);
                         }
                         break;
                     case construct::Property:
@@ -1656,9 +1662,9 @@ namespace neos::compilers::javascript
             void assignment_element(node* aElement, context const& c)
             {
                 if (aElement->is(construct::Assign) && operator_of(aElement) == "=")
-                    destructuring_target(aElement->child(0u), c, "Invalid destructuring assignment target");
+                    destructuring_target(aElement->child(0u), c, "Invalid destructuring assignment target", true);
                 else
-                    destructuring_target(aElement, c, "Invalid destructuring assignment target");
+                    destructuring_target(aElement, c, "Invalid destructuring assignment target", true);
             }
 
             void object_literal(node* aNode)

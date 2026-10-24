@@ -1348,9 +1348,14 @@ namespace neos::javascript_runtime
             return guard([&]() -> value { return class_finish(aConstructor); });
         }
 
-        value super_construct_(value aConstructor, value aNewTarget, value aArguments)
+        value super_constructor_(value aConstructor)
         {
-            return guard([&]() -> value { return super_construct(aConstructor, checked(aNewTarget), aArguments); });
+            return guard([&]() -> value { return super_constructor(aConstructor); });
+        }
+
+        value super_construct_(value aParent, value aNewTarget, value aArguments)
+        {
+            return guard([&]() -> value { return super_construct(aParent, checked(aNewTarget), aArguments); });
         }
 
         value initialize_fields(value aObject, value aConstructor)
@@ -1558,6 +1563,7 @@ namespace neos::javascript_runtime
             { "class_field", NEOS_RT_FUNCTION(class_field_), I64, 5u, { I64, I64, I64, I64, I32 }, 0u },
             { "class_static_block", NEOS_RT_FUNCTION(class_static_block_), I64, 2u, { I64, I64 }, 0u },
             { "class_finish", NEOS_RT_FUNCTION(class_finish_), I64, 1u, { I64 }, 0u },
+            { "super_constructor", NEOS_RT_FUNCTION(super_constructor_), I64, 1u, { I64 }, 0u },
             { "super_construct", NEOS_RT_FUNCTION(super_construct_), I64, 3u, { I64, I64, I64 }, 0u },
             { "initialize_fields", NEOS_RT_FUNCTION(initialize_fields), I64, 2u, { I64, I64 }, 0u },
             { "private_get", NEOS_RT_FUNCTION(private_get_), I64, 2u, { I64, I64 }, 0u },
@@ -1575,6 +1581,7 @@ namespace neos::javascript_runtime
             { "dyn_reference_set", NEOS_RT_FUNCTION(dyn_reference_set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "eval_declare", NEOS_RT_FUNCTION(eval_declare), I64, 3u, { I64, I64, I32 }, 0u },
             { "eval_function", NEOS_RT_FUNCTION(eval_function), I64, 3u, { I64, I64, I64 }, 0u },
+            { "eval_var_set", NEOS_RT_FUNCTION(eval_var_set), I64, 3u, { I64, I64, I64 }, 0u },
             { "eval_direct", NEOS_RT_FUNCTION(eval_direct), I64, 8u, { I64, I64, I32, I32, I64, I64, I64, I64 }, 0u },
             { "eval_this", NEOS_RT_FUNCTION(eval_this), I64, 0u, {}, 0u },
             { "eval_this_derived", NEOS_RT_FUNCTION(eval_this_derived), I64, 1u, { I64 }, 0u },

@@ -1107,17 +1107,17 @@ namespace neos::javascript_runtime::temporal
         return pad_iso_year(aDate.year) + "-" + zero_pad(aDate.month, 2) + "-" + zero_pad(aDate.day, 2);
     }
 
-    std::string format_calendar_annotation(show_calendar aShowCalendar)
+    std::string format_calendar_annotation(calendar_id aCalendar, show_calendar aShowCalendar)
     {
-        if (aShowCalendar == show_calendar::Never || aShowCalendar == show_calendar::Auto)
+        if (aShowCalendar == show_calendar::Never || (aShowCalendar == show_calendar::Auto && aCalendar == calendar_id::Iso8601))
             return {};
-        return aShowCalendar == show_calendar::Critical ? "[!u-ca=iso8601]" : "[u-ca=iso8601]";
+        return std::string{ aShowCalendar == show_calendar::Critical ? "[!u-ca=" : "[u-ca=" } + calendar_identifier(aCalendar) + "]";
     }
 
-    std::string iso_date_time_to_string(iso_date_time const& aDateTime, int aPrecision, show_calendar aShowCalendar)
+    std::string iso_date_time_to_string(iso_date_time const& aDateTime, int aPrecision, calendar_id aCalendar, show_calendar aShowCalendar)
     {
         return iso_date_to_string(aDateTime.date) + "T" + time_record_to_string(aDateTime.time, aPrecision) +
-            format_calendar_annotation(aShowCalendar);
+            format_calendar_annotation(aCalendar, aShowCalendar);
     }
 
     std::string format_offset_minutes(int aOffsetMinutes, bool aSeparated)
@@ -1416,47 +1416,54 @@ namespace neos::javascript_runtime::temporal
         return aText;
     }
 
-    value canonicalize_calendar(value aId)
+    calendar_id canonicalize_calendar(value aId)
     {
-        if (ascii_lowercase(str(aId)) != u"iso8601")
-            throw_range_error("unsupported calendar: " + utf8(aId));
-        return ascii("iso8601");
+        if (auto const calendar = available_calendar(str(aId)))
+            return *calendar;
+        throw_range_error("unsupported calendar: " + utf8(aId));
     }
 
-    value to_temporal_calendar_identifier(value aValue)
+    namespace
     {
-        if (is_object(aValue))
+        bool has_calendar(value aValue)
         {
+            if (!is_object(aValue))
+                return false;
             auto const cls = obj(aValue).cls;
-            if (cls == object_class::TemporalPlainDate || cls == object_class::TemporalPlainDateTime || cls == object_class::TemporalPlainMonthDay ||
-                cls == object_class::TemporalPlainYearMonth || cls == object_class::TemporalZonedDateTime)
-                return ascii("iso8601");
+            return cls == object_class::TemporalPlainDate || cls == object_class::TemporalPlainDateTime || cls == object_class::TemporalPlainMonthDay ||
+                cls == object_class::TemporalPlainYearMonth || cls == object_class::TemporalZonedDateTime;
         }
+    }
+
+    calendar_id to_temporal_calendar_identifier(value aValue)
+    {
+        if (has_calendar(aValue))
+            return tobj(aValue).calendar;
         if (!is_string(aValue))
             throw_type_error("calendar must be a string");
         auto const identifier = parse_temporal_calendar_string(str(aValue));
         return canonicalize_calendar(make_string(identifier));
     }
 
-    value get_temporal_calendar_with_iso_default(value aItem)
+    calendar_id get_temporal_calendar_with_iso_default(value aItem)
     {
-        auto const cls = obj(aItem).cls;
-        if (cls == object_class::TemporalPlainDate || cls == object_class::TemporalPlainDateTime || cls == object_class::TemporalPlainMonthDay ||
-            cls == object_class::TemporalPlainYearMonth || cls == object_class::TemporalZonedDateTime)
-            return ascii("iso8601");
+        if (has_calendar(aItem))
+            return tobj(aItem).calendar;
         auto const calendarLike = get(aItem, ascii("calendar"));
         if (is_undefined(calendarLike))
-            return ascii("iso8601");
+            return calendar_id::Iso8601;
         return to_temporal_calendar_identifier(calendarLike);
     }
 
-    calendar_fields prepare_calendar_fields(value aObject, unsigned aFieldNames, unsigned aRequired, bool aPartial)
+    calendar_fields prepare_calendar_fields(calendar_id aCalendar, value aObject, unsigned aFieldNames, unsigned aRequired, bool aPartial)
     {
         calendar_fields result;
         bool any = false;
+        aFieldNames |= calendar_extra_fields(aCalendar, aFieldNames);
         // (lexicographic order of the property names)
         static struct { char const* name; unsigned key; } const sOrder[] = {
-            { "day", FieldDay }, { "hour", FieldHour }, { "microsecond", FieldMicrosecond }, { "millisecond", FieldMillisecond },
+            { "day", FieldDay }, { "era", FieldEra }, { "eraYear", FieldEraYear }, { "hour", FieldHour }, { "microsecond", FieldMicrosecond },
+            { "millisecond", FieldMillisecond },
             { "minute", FieldMinute }, { "month", FieldMonth }, { "monthCode", FieldMonthCode }, { "nanosecond", FieldNanosecond },
             { "offset", FieldOffset }, { "second", FieldSecond }, { "timeZone", FieldTimeZone }, { "year", FieldYear } };
         for (auto const& [name, key] : sOrder)
@@ -1470,6 +1477,8 @@ namespace neos::javascript_runtime::temporal
                 switch (key)
                 {
                 case FieldYear: result.year = to_integer_with_truncation(v); break;
+                case FieldEraYear: result.eraYear = to_integer_with_truncation(v); break;
+                case FieldEra: result.era = str(to_string(v)); break;
                 case FieldMonth: result.month = to_positive_integer_with_truncation(v); break;
                 case FieldDay: result.day = to_positive_integer_with_truncation(v); break;
                 case FieldHour: result.hour = to_integer_with_truncation(v); break;
@@ -1528,18 +1537,28 @@ namespace neos::javascript_runtime::temporal
         return result;
     }
 
-    calendar_fields iso_date_to_fields(iso_date const& aDate, int aType)
+    calendar_fields iso_date_to_fields(calendar_id aCalendar, iso_date const& aDate, int aType)
     {
         calendar_fields f;
-        f.monthCode = u16("M" + zero_pad(aDate.month, 2));
+        if (aCalendar == calendar_id::Iso8601)
+        {
+            f.monthCode = u16("M" + zero_pad(aDate.month, 2));
+            if (aType == 0 || aType == 2)
+                f.day = static_cast<double>(aDate.day);
+            if (aType == 0 || aType == 1)
+                f.year = static_cast<double>(aDate.year);
+            return f;
+        }
+        auto const date = calendar_iso_to_date(aCalendar, aDate);
+        f.monthCode = u16(date.month_code());
         if (aType == 0 || aType == 2)
-            f.day = static_cast<double>(aDate.day);
+            f.day = static_cast<double>(date.day);
         if (aType == 0 || aType == 1)
-            f.year = static_cast<double>(aDate.year);
+            f.year = static_cast<double>(date.year);
         return f;
     }
 
-    calendar_fields merge_calendar_fields(calendar_fields const& aFields, calendar_fields const& aAdditional)
+    calendar_fields merge_calendar_fields(calendar_id aCalendar, calendar_fields const& aFields, calendar_fields const& aAdditional)
     {
         auto merged = aFields;
         auto const mergeOne = [](auto& aTarget, auto const& aSource)
@@ -1547,12 +1566,23 @@ namespace neos::javascript_runtime::temporal
             if (aSource)
                 aTarget = aSource;
         };
-        // (ISO 8601: month and monthCode replace each other)
-        if (aAdditional.month || aAdditional.monthCode)
-        {
-            merged.month.reset();
-            merged.monthCode.reset();
-        }
+        // (CalendarFieldKeysToIgnore: the fields the additional fields override)
+        unsigned additionalKeys = 0u;
+        if (aAdditional.year) additionalKeys |= FieldYear;
+        if (aAdditional.month) additionalKeys |= FieldMonth;
+        if (aAdditional.monthCode) additionalKeys |= FieldMonthCode;
+        if (aAdditional.day) additionalKeys |= FieldDay;
+        if (aAdditional.era) additionalKeys |= FieldEra;
+        if (aAdditional.eraYear) additionalKeys |= FieldEraYear;
+        auto const overridden = calendar_field_keys_to_ignore(aCalendar, additionalKeys);
+        if ((overridden & FieldYear) != 0u) merged.year.reset();
+        if ((overridden & FieldMonth) != 0u) merged.month.reset();
+        if ((overridden & FieldMonthCode) != 0u) merged.monthCode.reset();
+        if ((overridden & FieldDay) != 0u) merged.day.reset();
+        if ((overridden & FieldEra) != 0u) merged.era.reset();
+        if ((overridden & FieldEraYear) != 0u) merged.eraYear.reset();
+        mergeOne(merged.era, aAdditional.era);
+        mergeOne(merged.eraYear, aAdditional.eraYear);
         mergeOne(merged.year, aAdditional.year);
         mergeOne(merged.month, aAdditional.month);
         mergeOne(merged.monthCode, aAdditional.monthCode);
@@ -1570,8 +1600,13 @@ namespace neos::javascript_runtime::temporal
 
     namespace
     {
-        void calendar_resolve_fields(calendar_fields& aFields, int aType)   ///< (0 date, 1 year-month, 2 month-day)
+        void calendar_resolve_fields(calendar_id aCalendar, calendar_fields& aFields, int aType)   ///< (0 date, 1 year-month, 2 month-day)
         {
+            if (aCalendar != calendar_id::Iso8601)
+            {
+                non_iso_resolve_fields(aCalendar, aFields, aType);
+                return;
+            }
             bool const needsYear = aType == 0 || aType == 1;
             bool const needsDay = aType == 0 || aType == 2;
             if (needsYear && !aFields.year)
@@ -1596,43 +1631,50 @@ namespace neos::javascript_runtime::temporal
         }
     }
 
-    iso_date calendar_date_from_fields(calendar_fields aFields, overflow aOverflow)
+    iso_date calendar_date_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow)
     {
-        calendar_resolve_fields(aFields, 0);
-        auto const result = regulate_iso_date(clamp_int(*aFields.year), clamp_int(*aFields.month), clamp_int(*aFields.day), aOverflow);
+        calendar_resolve_fields(aCalendar, aFields, 0);
+        auto const result = aCalendar == calendar_id::Iso8601 ?
+            regulate_iso_date(clamp_int(*aFields.year), clamp_int(*aFields.month), clamp_int(*aFields.day), aOverflow) :
+            non_iso_calendar_date_to_iso(aCalendar, aFields, aOverflow);
         if (!iso_date_within_limits(result))
             throw_range_error("date is outside the representable range");
         return result;
     }
 
-    iso_date calendar_year_month_from_fields(calendar_fields aFields, overflow aOverflow)
+    iso_date calendar_year_month_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow)
     {
         aFields.day = 1.0;
-        calendar_resolve_fields(aFields, 1);
-        auto const result = regulate_iso_date(clamp_int(*aFields.year), clamp_int(*aFields.month), 1, aOverflow);
+        calendar_resolve_fields(aCalendar, aFields, 1);
+        auto const result = aCalendar == calendar_id::Iso8601 ? regulate_iso_date(clamp_int(*aFields.year), clamp_int(*aFields.month), 1, aOverflow) :
+            non_iso_calendar_date_to_iso(aCalendar, aFields, aOverflow);
         if (!iso_year_month_within_limits(result))
             throw_range_error("year-month is outside the representable range");
         return result;
     }
 
-    iso_date calendar_month_day_from_fields(calendar_fields aFields, overflow aOverflow)
+    iso_date calendar_month_day_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow)
     {
-        calendar_resolve_fields(aFields, 2);
+        calendar_resolve_fields(aCalendar, aFields, 2);
+        if (aCalendar != calendar_id::Iso8601)
+            return non_iso_month_day_to_iso_reference_date(aCalendar, aFields, aOverflow);
         auto const year = aFields.year ? clamp_int(*aFields.year) : 1972;
         auto const result = regulate_iso_date(year, clamp_int(*aFields.month), clamp_int(*aFields.day), aOverflow);
         return { 1972, result.month, result.day };
     }
 
-    iso_date_time interpret_temporal_date_time_fields(calendar_fields const& aFields, overflow aOverflow)
+    iso_date_time interpret_temporal_date_time_fields(calendar_id aCalendar, calendar_fields const& aFields, overflow aOverflow)
     {
-        auto const date = calendar_date_from_fields(aFields, aOverflow);
+        auto const date = calendar_date_from_fields(aCalendar, aFields, aOverflow);
         auto const time = regulate_time(aFields.hour.value_or(0.0), aFields.minute.value_or(0.0), aFields.second.value_or(0.0),
             aFields.millisecond.value_or(0.0), aFields.microsecond.value_or(0.0), aFields.nanosecond.value_or(0.0), aOverflow);
         return { date, time };
     }
 
-    iso_date calendar_date_add(iso_date const& aDate, date_duration const& aDuration, overflow aOverflow)
+    iso_date calendar_date_add(calendar_id aCalendar, iso_date const& aDate, date_duration const& aDuration, overflow aOverflow)
     {
+        if (aCalendar != calendar_id::Iso8601)
+            return non_iso_date_add(aCalendar, aDate, aDuration, aOverflow);
         auto const [year, month] = balance_iso_year_month(aDate.year + static_cast<std::int64_t>(aDuration.years),
             aDate.month + static_cast<std::int64_t>(aDuration.months));
         auto const intermediate = regulate_iso_date(year, month, aDate.day, aOverflow);
@@ -1662,8 +1704,10 @@ namespace neos::javascript_runtime::temporal
     // time, with ISODateSurpasses) computed directly. Note: the current text of ISODateSurpasses returns false when months
     // is 0 before it looks at weeks and days, which would never end the days loop; the intended semantics (each larger
     // unit, then the regulated date plus weeks and days, must not surpass the target) are used.)
-    date_duration calendar_date_until(iso_date const& aOne, iso_date const& aTwo, unit aLargestUnit)
+    date_duration calendar_date_until(calendar_id aCalendar, iso_date const& aOne, iso_date const& aTwo, unit aLargestUnit)
     {
+        if (aCalendar != calendar_id::Iso8601)
+            return non_iso_date_until(aCalendar, aOne, aTwo, aLargestUnit);
         auto sign = compare_iso_date(aOne, aTwo);
         if (sign == 0)
             return {};
@@ -1743,7 +1787,7 @@ namespace neos::javascript_runtime::temporal
         }
 
         nudge_window compute_nudge_window(int aSign, internal_duration const& aDuration, i128 const& aOriginNs, iso_date_time const& aDateTime,
-            time_zone const* aTimeZone, std::int64_t aIncrement, unit aUnit, bool aAdditionalShift)
+            calendar_id aCalendar, time_zone const* aTimeZone, std::int64_t aIncrement, unit aUnit, bool aAdditionalShift)
         {
             nudge_window w;
             auto const inc = static_cast<double>(aIncrement);
@@ -1768,9 +1812,9 @@ namespace neos::javascript_runtime::temporal
             else if (aUnit == unit::Week)
             {
                 auto const yearsMonths = adjust_date_duration(aDuration.date, 0.0, 0.0);
-                auto const weeksStart = calendar_date_add(aDateTime.date, yearsMonths, overflow::Constrain);
+                auto const weeksStart = calendar_date_add(aCalendar, aDateTime.date, yearsMonths, overflow::Constrain);
                 auto const weeksEnd = add_days_to_iso_date(weeksStart, static_cast<std::int64_t>(aDuration.date.days));
-                auto const untilResult = calendar_date_until(weeksStart, weeksEnd, unit::Week);
+                auto const untilResult = calendar_date_until(aCalendar, weeksStart, weeksEnd, unit::Week);
                 auto const weeks = round_number_trunc(aDuration.date.weeks + untilResult.weeks, aIncrement);
                 w.r1 = weeks;
                 w.r2 = weeks + inc * aSign;
@@ -1791,10 +1835,10 @@ namespace neos::javascript_runtime::temporal
                 w.startEpochNs = aOriginNs;
             else
             {
-                auto const start = calendar_date_add(aDateTime.date, startDate, overflow::Constrain);
+                auto const start = calendar_date_add(aCalendar, aDateTime.date, startDate, overflow::Constrain);
                 w.startEpochNs = epoch_ns_for({ start, aDateTime.time }, aTimeZone);
             }
-            auto const end = calendar_date_add(aDateTime.date, endDate, overflow::Constrain);
+            auto const end = calendar_date_add(aCalendar, aDateTime.date, endDate, overflow::Constrain);
             w.endEpochNs = epoch_ns_for({ end, aDateTime.time }, aTimeZone);
             w.startDuration = { startDate, i128{} };
             w.endDuration = { endDate, i128{} };
@@ -1802,15 +1846,16 @@ namespace neos::javascript_runtime::temporal
         }
 
         nudge_result nudge_to_calendar_unit(int aSign, internal_duration const& aDuration, i128 const& aOriginNs, i128 const& aDestNs,
-            iso_date_time const& aDateTime, time_zone const* aTimeZone, std::int64_t aIncrement, unit aUnit, rounding_mode aMode, double* aTotal)
+            iso_date_time const& aDateTime, calendar_id aCalendar, time_zone const* aTimeZone, std::int64_t aIncrement, unit aUnit,
+            rounding_mode aMode, double* aTotal)
         {
             bool didExpand = false;
-            auto w = compute_nudge_window(aSign, aDuration, aOriginNs, aDateTime, aTimeZone, aIncrement, aUnit, false);
+            auto w = compute_nudge_window(aSign, aDuration, aOriginNs, aDateTime, aCalendar, aTimeZone, aIncrement, aUnit, false);
             bool const inside = aSign == 1 ? (w.startEpochNs <= aDestNs && aDestNs <= w.endEpochNs) :
                 (w.endEpochNs <= aDestNs && aDestNs <= w.startEpochNs);
             if (!inside)
             {
-                w = compute_nudge_window(aSign, aDuration, aOriginNs, aDateTime, aTimeZone, aIncrement, aUnit, true);
+                w = compute_nudge_window(aSign, aDuration, aOriginNs, aDateTime, aCalendar, aTimeZone, aIncrement, aUnit, true);
                 didExpand = true;
             }
             // (progress = (dest - start) / (end - start); total = r1 + progress × increment × sign)
@@ -1851,10 +1896,10 @@ namespace neos::javascript_runtime::temporal
             return result;
         }
 
-        nudge_result nudge_to_zoned_time(int aSign, internal_duration const& aDuration, iso_date_time const& aDateTime, time_zone const& aTimeZone,
-            std::int64_t aIncrement, unit aUnit, rounding_mode aMode)
+        nudge_result nudge_to_zoned_time(int aSign, internal_duration const& aDuration, iso_date_time const& aDateTime, calendar_id aCalendar,
+            time_zone const& aTimeZone, std::int64_t aIncrement, unit aUnit, rounding_mode aMode)
         {
-            auto const start = calendar_date_add(aDateTime.date, aDuration.date, overflow::Constrain);
+            auto const start = calendar_date_add(aCalendar, aDateTime.date, aDuration.date, overflow::Constrain);
             auto const endDate = add_days_to_iso_date(start, aSign);
             auto const startEpochNs = get_epoch_ns_for(aTimeZone, { start, aDateTime.time }, disambiguation::Compatible);
             auto const endEpochNs = get_epoch_ns_for(aTimeZone, { endDate, aDateTime.time }, disambiguation::Compatible);
@@ -1907,7 +1952,7 @@ namespace neos::javascript_runtime::temporal
         }
 
         internal_duration bubble_relative_duration(int aSign, internal_duration aDuration, i128 const& aNudgedEpochNs, iso_date_time const& aDateTime,
-            time_zone const* aTimeZone, unit aLargestUnit, unit aSmallestUnit)
+            calendar_id aCalendar, time_zone const* aTimeZone, unit aLargestUnit, unit aSmallestUnit)
         {
             if (aSmallestUnit == aLargestUnit)
                 return aDuration;
@@ -1924,7 +1969,7 @@ namespace neos::javascript_runtime::temporal
                     endDuration = adjust_date_duration(aDuration.date, 0.0, 0.0, aDuration.date.months + aSign);
                 else
                     endDuration = adjust_date_duration(aDuration.date, 0.0, aDuration.date.weeks + aSign);
-                auto const end = calendar_date_add(aDateTime.date, endDuration, overflow::Constrain);
+                auto const end = calendar_date_add(aCalendar, aDateTime.date, endDuration, overflow::Constrain);
                 auto const endEpochNs = epoch_ns_for({ end, aDateTime.time }, aTimeZone);
                 auto const beyondEnd = aNudgedEpochNs - endEpochNs;
                 if (beyondEnd.sign() != -aSign)
@@ -1937,42 +1982,43 @@ namespace neos::javascript_runtime::temporal
     }
 
     internal_duration round_relative_duration(internal_duration aDuration, i128 const& aOriginNs, i128 const& aDestNs,
-        iso_date_time const& aDateTime, time_zone const* aTimeZone, unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit,
-        rounding_mode aMode)
+        iso_date_time const& aDateTime, calendar_id aCalendar, time_zone const* aTimeZone, unit aLargestUnit, std::int64_t aIncrement,
+        unit aSmallestUnit, rounding_mode aMode)
     {
         bool const irregularLengthUnit = is_calendar_unit(aSmallestUnit) || (aTimeZone != nullptr && aSmallestUnit == unit::Day);
         int const sign = internal_duration_sign(aDuration) < 0 ? -1 : 1;
         nudge_result nudge;
         if (irregularLengthUnit)
-            nudge = nudge_to_calendar_unit(sign, aDuration, aOriginNs, aDestNs, aDateTime, aTimeZone, aIncrement, aSmallestUnit, aMode, nullptr);
+            nudge = nudge_to_calendar_unit(sign, aDuration, aOriginNs, aDestNs, aDateTime, aCalendar, aTimeZone, aIncrement, aSmallestUnit, aMode,
+                nullptr);
         else if (aTimeZone != nullptr)
-            nudge = nudge_to_zoned_time(sign, aDuration, aDateTime, *aTimeZone, aIncrement, aSmallestUnit, aMode);
+            nudge = nudge_to_zoned_time(sign, aDuration, aDateTime, aCalendar, *aTimeZone, aIncrement, aSmallestUnit, aMode);
         else
             nudge = nudge_to_day_or_time(aDuration, aDestNs, aLargestUnit, aIncrement, aSmallestUnit, aMode);
         aDuration = nudge.duration;
         if (nudge.didExpandCalendarUnit && aSmallestUnit != unit::Week)
         {
             auto const startUnit = larger_unit(aSmallestUnit, unit::Day);
-            aDuration = bubble_relative_duration(sign, aDuration, nudge.nudgedEpochNs, aDateTime, aTimeZone, aLargestUnit, startUnit);
+            aDuration = bubble_relative_duration(sign, aDuration, nudge.nudgedEpochNs, aDateTime, aCalendar, aTimeZone, aLargestUnit, startUnit);
         }
         return aDuration;
     }
 
     double total_relative_duration(internal_duration const& aDuration, i128 const& aOriginNs, i128 const& aDestNs,
-        iso_date_time const& aDateTime, time_zone const* aTimeZone, unit aUnit)
+        iso_date_time const& aDateTime, calendar_id aCalendar, time_zone const* aTimeZone, unit aUnit)
     {
         if (is_calendar_unit(aUnit) || (aTimeZone != nullptr && aUnit == unit::Day))
         {
             int const sign = internal_duration_sign(aDuration) < 0 ? -1 : 1;
             double total = 0.0;
-            nudge_to_calendar_unit(sign, aDuration, aOriginNs, aDestNs, aDateTime, aTimeZone, 1, aUnit, rounding_mode::Trunc, &total);
+            nudge_to_calendar_unit(sign, aDuration, aOriginNs, aDestNs, aDateTime, aCalendar, aTimeZone, 1, aUnit, rounding_mode::Trunc, &total);
             return total;
         }
         auto const timeDuration = add_24_hour_days(aDuration.time, aDuration.date.days);
         return total_time_duration(timeDuration, aUnit);
     }
 
-    internal_duration difference_iso_date_time(iso_date_time const& a, iso_date_time const& b, unit aLargestUnit)
+    internal_duration difference_iso_date_time(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b, unit aLargestUnit)
     {
         auto timeDuration = difference_time(a.time, b.time);
         auto const timeSign = timeDuration.sign();
@@ -1984,7 +2030,7 @@ namespace neos::javascript_runtime::temporal
             timeDuration = add_24_hour_days(timeDuration, -timeSign);
         }
         auto const dateLargestUnit = larger_unit(unit::Day, aLargestUnit);
-        auto dateDifference = calendar_date_until(a.date, adjustedDate, dateLargestUnit);
+        auto dateDifference = calendar_date_until(aCalendar, a.date, adjustedDate, dateLargestUnit);
         if (aLargestUnit != dateLargestUnit)
         {
             timeDuration = add_24_hour_days(timeDuration, dateDifference.days);
@@ -1993,29 +2039,30 @@ namespace neos::javascript_runtime::temporal
         return { dateDifference, timeDuration };
     }
 
-    internal_duration difference_plain_date_time_with_rounding(iso_date_time const& a, iso_date_time const& b, unit aLargestUnit,
-        std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode)
+    internal_duration difference_plain_date_time_with_rounding(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b,
+        unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode)
     {
         if (compare_iso_date_time(a, b) == 0)
             return {};
         if (!iso_date_time_within_limits(a) || !iso_date_time_within_limits(b))
             throw_range_error("date-time is outside the representable range");
-        auto const diff = difference_iso_date_time(a, b, aLargestUnit);
+        auto const diff = difference_iso_date_time(aCalendar, a, b, aLargestUnit);
         if (aSmallestUnit == unit::Nanosecond && aIncrement == 1)
             return diff;
-        return round_relative_duration(diff, get_utc_epoch_ns(a), get_utc_epoch_ns(b), a, nullptr, aLargestUnit, aIncrement, aSmallestUnit, aMode);
+        return round_relative_duration(diff, get_utc_epoch_ns(a), get_utc_epoch_ns(b), a, aCalendar, nullptr, aLargestUnit, aIncrement,
+            aSmallestUnit, aMode);
     }
 
-    double difference_plain_date_time_with_total(iso_date_time const& a, iso_date_time const& b, unit aUnit)
+    double difference_plain_date_time_with_total(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b, unit aUnit)
     {
         if (compare_iso_date_time(a, b) == 0)
             return 0.0;
         if (!iso_date_time_within_limits(a) || !iso_date_time_within_limits(b))
             throw_range_error("date-time is outside the representable range");
-        auto const diff = difference_iso_date_time(a, b, aUnit);
+        auto const diff = difference_iso_date_time(aCalendar, a, b, aUnit);
         if (aUnit == unit::Nanosecond)
             return diff.time.to_double();
-        return total_relative_duration(diff, get_utc_epoch_ns(a), get_utc_epoch_ns(b), a, nullptr, aUnit);
+        return total_relative_duration(diff, get_utc_epoch_ns(a), get_utc_epoch_ns(b), a, aCalendar, nullptr, aUnit);
     }
 
     internal_duration difference_instant(i128 const& a, i128 const& b, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode)
@@ -2031,12 +2078,13 @@ namespace neos::javascript_runtime::temporal
         return result;
     }
 
-    i128 add_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, internal_duration const& aDuration, overflow aOverflow)
+    i128 add_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, calendar_id aCalendar, internal_duration const& aDuration,
+        overflow aOverflow)
     {
         if (date_duration_sign(aDuration.date) == 0)
             return add_instant(aEpochNs, aDuration.time);
         auto const dateTime = get_iso_date_time_for(aTimeZone, aEpochNs);
-        auto const addedDate = calendar_date_add(dateTime.date, aDuration.date, aOverflow);
+        auto const addedDate = calendar_date_add(aCalendar, dateTime.date, aDuration.date, aOverflow);
         iso_date_time const intermediate{ addedDate, dateTime.time };
         if (!iso_date_time_within_limits(intermediate))
             throw_range_error("date-time is outside the representable range");
@@ -2044,7 +2092,8 @@ namespace neos::javascript_runtime::temporal
         return add_instant(intermediateNs, aDuration.time);
     }
 
-    internal_duration difference_zoned_date_time(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aLargestUnit)
+    internal_duration difference_zoned_date_time(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar,
+        unit aLargestUnit)
     {
         if (a == b)
             return {};
@@ -2071,29 +2120,29 @@ namespace neos::javascript_runtime::temporal
             ++dayCorrection;
         }
         auto const dateLargestUnit = larger_unit(aLargestUnit, unit::Day);
-        auto const dateDifference = calendar_date_until(start.date, intermediate.date, dateLargestUnit);
+        auto const dateDifference = calendar_date_until(aCalendar, start.date, intermediate.date, dateLargestUnit);
         return { dateDifference, timeDuration };
     }
 
-    internal_duration difference_zoned_date_time_with_rounding(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aLargestUnit,
-        std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode)
+    internal_duration difference_zoned_date_time_with_rounding(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar,
+        unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode)
     {
         if (!is_date_unit(aLargestUnit))
             return difference_instant(a, b, aIncrement, aSmallestUnit, aMode);
-        auto const difference = difference_zoned_date_time(a, b, aTimeZone, aLargestUnit);
+        auto const difference = difference_zoned_date_time(a, b, aTimeZone, aCalendar, aLargestUnit);
         if (aSmallestUnit == unit::Nanosecond && aIncrement == 1)
             return difference;
         auto const dateTime = get_iso_date_time_for(aTimeZone, a);
-        return round_relative_duration(difference, a, b, dateTime, &aTimeZone, aLargestUnit, aIncrement, aSmallestUnit, aMode);
+        return round_relative_duration(difference, a, b, dateTime, aCalendar, &aTimeZone, aLargestUnit, aIncrement, aSmallestUnit, aMode);
     }
 
-    double difference_zoned_date_time_with_total(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aUnit)
+    double difference_zoned_date_time_with_total(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar, unit aUnit)
     {
         if (!is_date_unit(aUnit))
             return total_time_duration(b - a, aUnit);
-        auto const difference = difference_zoned_date_time(a, b, aTimeZone, aUnit);
+        auto const difference = difference_zoned_date_time(a, b, aTimeZone, aCalendar, aUnit);
         auto const dateTime = get_iso_date_time_for(aTimeZone, a);
-        return total_relative_duration(difference, a, b, dateTime, &aTimeZone, aUnit);
+        return total_relative_duration(difference, a, b, dateTime, aCalendar, &aTimeZone, aUnit);
     }
 
     i128 interpret_iso_date_time_offset(iso_date const& aDate, std::optional<time_record> const& aTime, int aOffsetBehaviour,

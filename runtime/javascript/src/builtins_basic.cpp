@@ -39,6 +39,7 @@
 #include <random>
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
+#include "intl.hpp"
 #include "api.hpp"
 
 namespace neos::javascript_runtime
@@ -225,9 +226,15 @@ namespace neos::javascript_runtime
             return make_string(number_to_u16string(x, radix));
         }
 
-        value number_prototype_to_locale_string(value aThis, arguments, value, function_object&)
+        value number_prototype_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
-            return number_to_string(this_number(aThis));
+            auto const x = this_number(aThis);
+#if defined(NEOS_JS_ICU)
+            return intl::number_to_locale_string(number(x), argument(aArguments, 0u), argument(aArguments, 1u));
+#else
+            (void)aArguments;
+            return number_to_string(x);
+#endif
         }
 
         value number_prototype_value_of(value aThis, arguments, value, function_object&)

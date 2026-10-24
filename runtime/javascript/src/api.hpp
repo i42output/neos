@@ -106,7 +106,8 @@ namespace neos::javascript_runtime
     void class_field(value aConstructor, value aHome, value aName, value aInitializer, bool aStatic);
     void class_static_block(value aConstructor, value aFunction);
     value class_finish(value aConstructor);
-    value super_construct(value aConstructor, value aNewTarget, value aArguments);
+    value super_constructor(value aConstructor);
+    value super_construct(value aParent, value aNewTarget, value aArguments);
     value private_get(value aObject, value aName);
     void private_set(value aObject, value aName, value aValue);
     bool private_in(value aName, value aObject);
@@ -126,6 +127,7 @@ namespace neos::javascript_runtime
         value dyn_reference_set(value aBase, value aName, value aValue, std::int32_t aFlags);
         value eval_declare(value aEnvironment, value aName, std::int32_t aFlags);
         value eval_function(value aEnvironment, value aName, value aFunction);
+        value eval_var_set(value aEnvironment, value aName, value aValue);
         value eval_direct(value aCallee, value aSource, std::int32_t aCount, std::int32_t aFlags, value aEnvironment, value aThis, value aNewTarget, value aHome);
         value tail_call(value aCallee, value aThis, std::int32_t aCount, value a0, value a1, value a2, value a3);
         value eval_this();

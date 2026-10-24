@@ -1,24 +1,20 @@
 // neoscript example: Fibonacci
-
 using neoscript.test;
 using neo.string;
 using neo.stream;
-
 // functions are pure
 fn add(x, y : i32) -> i32
 {
     return x + y;
 }
-
 // functions are pure
-fn fib(x : i32) -> i32 
+fn fib(y : i32) -> i32 
 {
-    if (x < 2) 
-        return x; 
+    if (y < 2) 
+        return y; 
     else
-        return add(fib(x-1), fib(x-2));
+        return add(fib(y-1), fib(y-2));
 }
-
 // procedures are impure
 proc main()
     s : string;
@@ -28,4 +24,3 @@ proc main()
    neo::input(s);
    neo::print("Fibonacci(" + s + ") = " + neo::to_string(fib(neo::to_integer(s))) + "\n");
 }
-

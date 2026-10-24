@@ -37,6 +37,7 @@
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
 #include "api.hpp"
+#include "intl.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -372,6 +373,9 @@ namespace neos::javascript_runtime
         {
             auto const s = this_string(aThis, "localeCompare");
             auto const that = to_string(argument(aArguments, 0u));
+#if defined(NEOS_JS_ICU)
+            return intl::locale_compare(s, that, argument(aArguments, 1u), argument(aArguments, 2u));
+#endif
             auto const a = utf8(normalize_string(s, u"NFC"));
             auto const b = utf8(normalize_string(that, u"NFC"));
             return number(a < b ? -1.0 : a > b ? 1.0 : 0.0);
@@ -506,6 +510,28 @@ namespace neos::javascript_runtime
         value string_to_upper_case(value aThis, arguments, value, function_object&)
         {
             return make_string(case_map(text_of(this_string(aThis, "toUpperCase")), true));
+        }
+
+        value string_to_locale_lower_case(value aThis, arguments aArguments, value, function_object&)
+        {
+            auto const s = this_string(aThis, "toLocaleLowerCase");
+#if defined(NEOS_JS_ICU)
+            return intl::to_locale_case(s, argument(aArguments, 0u), false);
+#else
+            (void)aArguments;
+            return make_string(case_map(text_of(s), false));
+#endif
+        }
+
+        value string_to_locale_upper_case(value aThis, arguments aArguments, value, function_object&)
+        {
+            auto const s = this_string(aThis, "toLocaleUpperCase");
+#if defined(NEOS_JS_ICU)
+            return intl::to_locale_case(s, argument(aArguments, 0u), true);
+#else
+            (void)aArguments;
+            return make_string(case_map(text_of(s), true));
+#endif
         }
 
         value string_to_string(value aThis, arguments, value, function_object&)
@@ -896,8 +922,8 @@ namespace neos::javascript_runtime
         method(pr, "startsWith", 1u, string_starts_with);
         method(pr, "substr", 2u, string_substr);
         method(pr, "substring", 2u, string_substring);
-        method(pr, "toLocaleLowerCase", 0u, string_to_lower_case);
-        method(pr, "toLocaleUpperCase", 0u, string_to_upper_case);
+        method(pr, "toLocaleLowerCase", 0u, string_to_locale_lower_case);
+        method(pr, "toLocaleUpperCase", 0u, string_to_locale_upper_case);
         method(pr, "toLowerCase", 0u, string_to_lower_case);
         method(pr, "toString", 0u, string_to_string);
         method(pr, "toUpperCase", 0u, string_to_upper_case);

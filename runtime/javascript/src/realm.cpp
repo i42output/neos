@@ -326,6 +326,7 @@ namespace neos::javascript_runtime
         init_regexp(r);
         init_date(r);
         init_temporal(r);
+        init_intl(r);
         init_typed_arrays(r);
         init_console(r);
         init_host262(r);

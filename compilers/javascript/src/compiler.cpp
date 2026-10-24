@@ -516,8 +516,9 @@ namespace neos::compilers::javascript
         {
             if (function->strict)
                 continue;
+            // (a function named arguments in a function that has an arguments object: arguments is one of its parameter names (B.3.2.1))
             auto const name = name_of(declaration->child(0u));
-            if (name == "arguments" && !function->script)
+            if (name == "arguments" && !function->script && !function->arrow)
                 continue;
             bool conflict = false;
             for (auto* s = blockScope->parent; s != nullptr; s = s->parent)
@@ -685,7 +686,35 @@ namespace neos::compilers::javascript
                 while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t' || rest.front() == '\n' || rest.front() == '\r'))
                     rest.remove_prefix(1u);
                 if (!rest.starts_with("*"))
+                {
+                    // (yield followed by what is an operand in a generator (e.g. "yield + 1", "yield [0]", "yield (x)"): the identifier
+                    // as a binary operator's left operand, an index's object, a call's callee or a tagged template's tag)
+                    auto* operand = c->child(0u);
+                    aNode->children[i] = operand;
+                    operand->parent = aNode;
+                    node* leftmost = operand;
+                    while (leftmost->size() > 0u && (leftmost->kind == construct::Dot || leftmost->kind == construct::DotPrivate ||
+                        leftmost->kind == construct::Index || leftmost->kind == construct::Call || leftmost->kind == construct::Tagged ||
+                        leftmost->kind == construct::PostIncrement || leftmost->kind == construct::PostDecrement ||
+                        leftmost->kind == construct::Conditional || leftmost->kind == construct::Exponent || leftmost->kind == construct::Multiply ||
+                        leftmost->kind == construct::Divide || leftmost->kind == construct::Remainder || leftmost->kind == construct::Add ||
+                        leftmost->kind == construct::Subtract || leftmost->kind == construct::ShiftLeft || leftmost->kind == construct::ShiftRight ||
+                        leftmost->kind == construct::ShiftRightUnsigned || leftmost->kind == construct::LessThan ||
+                        leftmost->kind == construct::GreaterThan || leftmost->kind == construct::LessEqual || leftmost->kind == construct::GreaterEqual ||
+                        leftmost->kind == construct::InstanceOf || leftmost->kind == construct::In || leftmost->kind == construct::StrictEqual ||
+                        leftmost->kind == construct::StrictNotEqual || leftmost->kind == construct::Equal || leftmost->kind == construct::NotEqual ||
+                        leftmost->kind == construct::BitAnd || leftmost->kind == construct::BitXor || leftmost->kind == construct::BitOr ||
+                        leftmost->kind == construct::And || leftmost->kind == construct::Or || leftmost->kind == construct::Coalesce))
+                        leftmost = leftmost->child(0u);
+                    if (!keyword_identifier_operand(identifier, leftmost, aNode))
+                    {
+                        aNode->children[i] = c;
+                        operand->parent = c;
+                        return;
+                    }
+                    yield_identifiers(aNode->children[i], aGenerator);
                     return;
+                }
                 // (yield * x ...: the multiplication's right operand is the leftmost operand of the expression that follows)
                 auto const binary = [](node const* n)
                 {
@@ -728,6 +757,112 @@ namespace neos::compilers::javascript
             }
             yield_identifiers(c, aGenerator);
         }
+    }
+
+    bool compiler::keyword_identifier_operand(node* aKeyword, node* aLeftmost, node* aBoundary)
+    {
+        // (a keyword (yield or await) that is an identifier where it parsed as an operator (outside generators or async code): what parsed
+        // as its operand's leftmost part (aLeftmost) is what follows the identifier: a unary + or - is a binary operator's (its right
+        // operand is its operand and what binds more tightly), an array literal an index, a parenthesized expression a call's arguments and
+        // a template a tagged template's (aBoundary: the node above the operand (climbing stops there)))
+        auto const span = [](std::string_view aFirst, std::string_view aLast)
+        {
+            return std::string_view{ aFirst.data(), static_cast<std::size_t>(aLast.data() + aLast.size() - aFirst.data()) };
+        };
+        auto const replace = [](node* aParent, node* aOld, node* aNew)
+        {
+            for (auto*& child : aParent->children)
+                if (child == aOld)
+                {
+                    child = aNew;
+                    break;
+                }
+            aNew->parent = aParent;
+        };
+        auto* const parent = aLeftmost->parent;
+        node* replacement = nullptr;
+        switch (aLeftmost->kind)
+        {
+        case construct::Plus:
+        case construct::Negate:
+            {
+                if (aLeftmost->size() != 1u)
+                    return false;
+                auto* x = aLeftmost->child(0u);
+                replace(parent, aLeftmost, x);
+                node* right = x;
+                while (right->parent != aBoundary && right->parent != nullptr && right->parent->size() > 0u && right->parent->child(0u) == right &&
+                    (right->parent->is(construct::Multiply) || right->parent->is(construct::Divide) || right->parent->is(construct::Remainder) ||
+                     right->parent->is(construct::Exponent)))
+                    right = right->parent;
+                auto* binary = make_node(aLeftmost->is(construct::Plus) ? construct::Add : construct::Subtract, span(aKeyword->source, right->source));
+                replace(right->parent, right, binary);
+                binary->children = { aKeyword, right };
+                aKeyword->parent = binary;
+                right->parent = binary;
+                return true;
+            }
+        case construct::Array:
+            {
+                node* index = nullptr;
+                for (auto* e : aLeftmost->children)
+                {
+                    if (e->is(construct::Hole) || e->is(construct::Spread))
+                        return false;
+                    if (index == nullptr)
+                        index = e;
+                    else
+                    {
+                        auto* comma = make_node(construct::Comma, span(index->source, e->source));
+                        comma->children = { index, e };
+                        index->parent = comma;
+                        e->parent = comma;
+                        index = comma;
+                    }
+                }
+                if (index == nullptr)
+                    return false;
+                replacement = make_node(construct::Index, span(aKeyword->source, aLeftmost->source));
+                replacement->children = { aKeyword, index };
+                index->parent = replacement;
+                break;
+            }
+        case construct::Parenthesized:
+            {
+                if (aLeftmost->size() != 1u)
+                    return false;
+                std::vector<node*> arguments;
+                std::function<void(node*)> flatten = [&](node* n)
+                {
+                    if (n->is(construct::Comma) && n->size() == 2u)
+                    {
+                        flatten(n->child(0u));
+                        flatten(n->child(1u));
+                    }
+                    else
+                        arguments.push_back(n);
+                };
+                flatten(aLeftmost->child(0u));
+                replacement = make_node(construct::Call, span(aKeyword->source, aLeftmost->source));
+                replacement->children.push_back(aKeyword);
+                for (auto* a : arguments)
+                {
+                    replacement->children.push_back(a);
+                    a->parent = replacement;
+                }
+                break;
+            }
+        case construct::Template:
+            replacement = make_node(construct::Tagged, span(aKeyword->source, aLeftmost->source));
+            replacement->children = { aKeyword, aLeftmost };
+            aLeftmost->parent = replacement;
+            break;
+        default:
+            return false;
+        }
+        aKeyword->parent = replacement;
+        replace(parent, aLeftmost, replacement);
+        return true;
     }
 
     void compiler::array_commas(node* aNode)
@@ -789,6 +924,16 @@ namespace neos::compilers::javascript
         for (std::size_t i = 0u; i < aNode->size(); ++i)
         {
             auto* top = aNode->child(i);
+            if (!aAwait && top->is(construct::Await) && top->size() == 1u && (top->child(0u)->is(construct::Plus) ||
+                top->child(0u)->is(construct::Negate)))
+            {
+                // (where await is an identifier, "await + x" and "await - x" are additions and subtractions)
+                auto* unary = top->child(0u);
+                aNode->children[i] = unary;
+                unary->parent = aNode;
+                keyword_identifier_operand(make_node(construct::Identifier, top->source.substr(0u, 5u)), unary, nullptr);
+                top = aNode->child(i);
+            }
             if (aAwait && link(top))
             {
                 // (the chain's base: the first link's callee/tag/object)
@@ -871,7 +1016,10 @@ namespace neos::compilers::javascript
                     b->captured = true;
             if (s.dynamic)
                 for (auto& b : s.bindings)
-                    b->captured = true;
+                    // (not a sloppy eval's var and function declarations: they are bindings of the code that called eval)
+                    if (!(eval_code() && s.kind == scope_kind::Script && !aFunction.strict &&
+                        (b->kind == binding_kind::Var || b->kind == binding_kind::Function)))
+                        b->captured = true;
             // (a sloppy function with simple parameters that uses its arguments object: its parameters are the object's mapped elements)
             if (&s == aFunction.top && aFunction.argumentsBinding != nullptr && !aFunction.strict && aFunction.simpleParameters)
                 for (auto& b : s.bindings)
@@ -943,9 +1091,10 @@ namespace neos::compilers::javascript
             if (name != nullptr)
                 aInner->name = name_of(name);
             scope* outer = aScope;
-            if (aInner->expression && name != nullptr)
+            // (a named function expression's name is a binding of a scope of its own (not a dynamic function's (new Function): its name,
+            // anonymous, is not a binding))
+            if (aInner->expression && name != nullptr && !(iKind == code_kind::Function && aFunction->script))
             {
-                // (a named function expression's name is a binding of a scope of its own)
                 outer = new_scope(scope_kind::Block, aScope, nullptr, aInner);
                 declare(outer, aInner->name, binding_kind::Callee, name);
                 aInner->calleeBinding = outer->find(aInner->name);
@@ -1285,7 +1434,7 @@ namespace neos::compilers::javascript
                     };
                     if (inner->usesThis && (!f->script || eval_code()))
                         internal(f->thisBinding, "%this");
-                    if (inner->usesNewTarget && !f->script)
+                    if (inner->usesNewTarget && (!f->script || eval_code()))
                         internal(f->newTargetBinding, "%newtarget");
                     if ((inner->usesSuper || inner->usesSuperCall) && (!f->script || eval_code()))
                         internal(f->homeBinding, "%home");
@@ -1337,7 +1486,11 @@ namespace neos::compilers::javascript
                         return;
                     }
                 }
-                if (name == "eval" && aNode->parent != nullptr && aNode->parent->is(construct::Call) && aNode->parent->child(0u) == aNode)
+                // (the callee of a call, perhaps parenthesized ((eval)(x) is a direct eval too))
+                node const* callee = aNode;
+                while (callee->parent != nullptr && callee->parent->is(construct::Parenthesized) && callee->parent->size() == 1u)
+                    callee = callee->parent;
+                if (name == "eval" && callee->parent != nullptr && callee->parent->is(construct::Call) && callee->parent->child(0u) == callee)
                 {
                     // (a direct eval: every binding of the scopes that enclose it can be found by name)
                     aFunction->directEval = true;
@@ -1364,6 +1517,17 @@ namespace neos::compilers::javascript
                     {
                         f->usesThis = true;
                         f->usesNewTarget = true;
+                    }
+                    {
+                        // (in an arrow function in a method (or in eval code that a method called) the eval code may use super.x: the
+                        // method's home object)
+                        auto* f = aFunction;
+                        while (f->arrow && f->parent != nullptr)
+                            f = f->parent;
+                        if (f != aFunction && ((!f->script && (f->method || f->classConstructor || f->fieldInitializer || f->staticBlock)) ||
+                            (f->script && eval_code() && (iEvalFlags & EvalMethod) != 0u)))
+                            for (auto* g = aFunction; g != f; g = g->parent)
+                                g->usesSuper = true;
                     }
                     {
                         // (in a derived class's constructor the eval code may call super() and use this before (and after) it: the
@@ -1435,11 +1599,20 @@ namespace neos::compilers::javascript
 
     std::uint32_t compiler::global_index(std::string const& aName, type aType)
     {
-        for (std::size_t g = 0u; g < generator().global_count(); ++g)
-            if (generator().global_name(g).to_std_string_view() == aName)
-                return static_cast<std::uint32_t>(g + 1u);
-        generator().add_global(neolib::string{ aName }, aType);
-        return static_cast<std::uint32_t>(generator().global_count());
+        // (the generator's globals, by name (not searched: a program with many literals has a global for each): those added since the
+        // index was last brought up to date (e.g. by the generator itself) are indexed first; the first of a name is the one found)
+        auto& g = generator();
+        if (g.global_count() < iGlobalIndexed)
+        {
+            iGlobalIndex.clear();
+            iGlobalIndexed = 0u;
+        }
+        for (; iGlobalIndexed < g.global_count(); ++iGlobalIndexed)
+            iGlobalIndex.emplace(g.global_name(iGlobalIndexed).to_std_string(), static_cast<std::uint32_t>(iGlobalIndexed + 1u));
+        if (auto const existing = iGlobalIndex.find(aName); existing != iGlobalIndex.end())
+            return existing->second;
+        g.add_global(neolib::string{ aName }, aType);
+        return static_cast<std::uint32_t>(g.global_count());
     }
 
     std::uint32_t compiler::literal_string(std::string const& aText)

@@ -903,6 +903,45 @@ namespace neos::javascript_runtime
             });
         }
 
+        value eval_var_set(value aEnvironment, value aName, value aValue)
+        {
+            // (a sloppy direct eval's block-level function (Annex B.3.2.3): its value is assigned to the var binding of the variable
+            // environment (not found by name: a with statement's object between them is not its environment))
+            return guarded([&]() -> value
+            {
+                auto const name = intern(aName);
+                environment* varEnv = nullptr;
+                for (auto e = aEnvironment; e != Undefined && is_internal(e);)
+                {
+                    auto& env = cell_of<environment>(e);
+                    if (auto* n = names_of(env); n != nullptr && n->varScope)
+                    {
+                        varEnv = &env;
+                        break;
+                    }
+                    e = env.parent;
+                }
+                if (varEnv != nullptr)
+                {
+                    auto& n = *names_of(*varEnv);
+                    for (std::size_t i = 0u; i < n.entries.size(); ++i)
+                        if (n.entries[i].first == name && n.entries[i].second != 'i')
+                        {
+                            varEnv->slots[i] = aValue;
+                            return Undefined;
+                        }
+                    for (auto& entry : n.extension)
+                        if (entry.first == name)
+                        {
+                            entry.second = aValue;
+                            return Undefined;
+                        }
+                }
+                set(the_realm().global, name, aValue, false);
+                return Undefined;
+            });
+        }
+
         value eval_function(value aEnvironment, value aName, value aFunction)
         {
             return guarded([&]() -> value

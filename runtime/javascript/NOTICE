@@ -93,6 +93,32 @@ authorization of the copyright holder.
 
 SPDX-License-Identifier: Unicode-3.0
 
+ICU (src/intl*.cpp, src/temporal_calendar.cpp)
+----------------------------------------------
+
+Intl (ECMA-402) uses ICU, International Components for Unicode
+(https://icu.unicode.org/), through its C API: the system's ICU library (on
+Windows, the ICU in Windows (icu.dll)), which is linked and not included in
+neos. ICU's locale data (CLDR) and formatting provide Intl's locale
+negotiation, collation, number, date, list, relative time, display name,
+segmentation and duration formatting and Temporal's non-ISO 8601 calendars.
+ICU is Copyright © 2016 and later Unicode, Inc. and others, and is licensed
+under the Unicode License V3 (the licence above; SPDX-License-Identifier:
+Unicode-3.0); ICU's own LICENSE file (with the notices of the third-party data
+it includes) is distributed with ICU.
+
+ICU4X (src/temporal_calendar.cpp)
+---------------------------------
+
+The tables of the Chinese and Korean calendars' years from 1900 to 2102
+(sChineseYears and sDangiYears: each year's new year, months' lengths and
+leap month) are derived from ICU4X's data
+(https://github.com/unicode-org/icu4x, components/calendar/src/cal/
+east_asian_traditional/qing_data.rs, china_data.rs and korea_data.rs),
+Copyright © 2020-2024 Unicode, Inc., licensed under the Unicode License V3
+(the licence above; SPDX-License-Identifier: Unicode-3.0). Changes: the data
+are packed into C++ tables of 32-bit values.
+
 TC39 proposal-math-sum (src/builtins_basic.cpp)
 -----------------------------------------------
 

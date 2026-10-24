@@ -371,6 +371,8 @@ namespace neos::compilers::javascript
             analyse(aScript);
             iLiterals.clear();
             iLiteralOrder.clear();
+            iGlobalIndex.clear();
+            iGlobalIndexed = 0u;
             iMirrors.clear();
             iMirrorOrder.clear();
             iScriptFunctions.clear();
@@ -1568,6 +1570,11 @@ namespace neos::compilers::javascript
                 runtime("eval_home", {}, I64);
                 initialize_binding(iFunction.homeBinding);
             }
+            if (iFunction.newTargetBinding != nullptr)
+            {
+                runtime("eval_new_target", {}, I64);
+                initialize_binding(iFunction.newTargetBinding);
+            }
             return;
         }
         if (iFunction.script)
@@ -1935,8 +1942,7 @@ namespace neos::compilers::javascript
                             get(*iFunctionEnvironment);
                             key(f->name);
                             get(value);
-                            i32(0);
-                            runtime("dyn_set", { I64, I64, I64, I32 }, I64);
+                            runtime("eval_var_set", { I64, I64, I64 }, I64);
                             check_void();
                             release(value);
                         }
@@ -2440,8 +2446,12 @@ namespace neos::compilers::javascript
         enter_scope(s);
         if (head->is(construct::ForVar) && head->child(0u)->is(construct::Initializer))
         {
-            // (Annex B: for (var x = init in ...))
-            expression(head->child(0u)->child(1u));
+            // (Annex B: for (var x = init in ...) (an anonymous function's name is the binding's))
+            auto* target = head->child(0u)->child(0u);
+            if (target->is(construct::Binding))
+                named_evaluation(head->child(0u)->child(1u), name_of(target));
+            else
+                expression(head->child(0u)->child(1u));
             bind_pattern(head->child(0u)->child(0u), false, binding_kind::Var);
         }
         expression(object);
@@ -3159,12 +3169,13 @@ namespace neos::compilers::javascript
             get(NewTargetLocal);
             return;
         }
-        if (outer->script && iCompiler.eval_code())
+        if (outer->script && iCompiler.eval_code() && (outer == &iFunction || outer->newTargetBinding == nullptr))
         {
+            // (eval code: the new.target of the function that called eval (its arrow functions': the eval code's %newtarget binding's))
             runtime("eval_new_target", {}, I64);
             return;
         }
-        if (outer->script || outer->newTargetBinding == nullptr)
+        if ((outer->script && !iCompiler.eval_code()) || outer->newTargetBinding == nullptr)
         {
             undefined();
             return;
@@ -4129,6 +4140,40 @@ namespace neos::compilers::javascript
     void function_generator::super_call(node* aNode)
     {
         // super(...): the parent constructor constructs this (with new.target); this is then bound and the class's fields initialized
+        // (the parent constructor is found before the arguments are evaluated (GetSuperConstructor); it is a constructor is checked after)
+        auto* outer = &iFunction;
+        while (outer->arrow && outer->parent != nullptr)
+            outer = outer->parent;
+        bool const evalCode = outer->script && derived_eval_code();
+        if (evalCode)
+        {
+            // (eval code: the constructor's bindings, found by name)
+            environment_value();
+            key("%callee");
+            runtime("eval_internal", { I64, I64 }, I64);
+            check();
+        }
+        else if (outer == &iFunction)
+            get(CalleeLocal);
+        else
+        {
+            auto* b = outer->top->find("%callee");
+            if (b == nullptr)
+                iCompiler.error(aNode->source, "'super' keyword unexpected here");
+            std::uint32_t hops = 0u;
+            scope* start = iScopes.empty() ? iFunction.top : iScopes.back();
+            for (auto* s = start; s != nullptr && s != outer->top; s = s->parent)
+                if (s->hasEnvironment)
+                    ++hops;
+            environment_value();
+            i32(static_cast<std::int32_t>(hops));
+            i32(static_cast<std::int32_t>(b->slot));
+            runtime("env_get", { I64, I32, I32 }, I64);
+        }
+        runtime("super_constructor", { I64 }, I64);
+        check();
+        auto const parent = temporary();
+        set(parent);
         std::vector<node*> arguments{ aNode->children.begin(), aNode->children.end() };
         i32(static_cast<std::int32_t>(arguments.size()));
         runtime("array", { I32 }, I64);
@@ -4149,17 +4194,10 @@ namespace neos::compilers::javascript
             }
             check_void();
         }
-        // (the constructor: the function itself, or the function that encloses the arrow function)
-        auto* outer = &iFunction;
-        while (outer->arrow && outer->parent != nullptr)
-            outer = outer->parent;
-        if (outer->script && derived_eval_code())
+        if (evalCode)
         {
-            // (eval code: the constructor's bindings, found by name)
-            environment_value();
-            key("%callee");
-            runtime("eval_internal", { I64, I64 }, I64);
-            check();
+            get(parent);
+            release(parent);
             new_target_value();
             get(list);
             runtime("super_construct", { I64, I64, I64 }, I64);
@@ -4182,23 +4220,8 @@ namespace neos::compilers::javascript
             release(result);
             return;
         }
-        if (outer == &iFunction)
-            get(CalleeLocal);
-        else
-        {
-            auto* b = outer->top->find("%callee");
-            if (b == nullptr)
-                iCompiler.error(aNode->source, "'super' keyword unexpected here");
-            std::uint32_t hops = 0u;
-            scope* start = iScopes.empty() ? iFunction.top : iScopes.back();
-            for (auto* s = start; s != nullptr && s != outer->top; s = s->parent)
-                if (s->hasEnvironment)
-                    ++hops;
-            environment_value();
-            i32(static_cast<std::int32_t>(hops));
-            i32(static_cast<std::int32_t>(b->slot));
-            runtime("env_get", { I64, I32, I32 }, I64);
-        }
+        get(parent);
+        release(parent);
         new_target_value();
         get(list);
         runtime("super_construct", { I64, I64, I64 }, I64);
@@ -4284,9 +4307,10 @@ namespace neos::compilers::javascript
         }
     }
 
-    void function_generator::optional_chain(node* aNode, std::optional<std::uint32_t>* aThis)
+    void function_generator::optional_chain(node* aNode, std::optional<std::uint32_t>* aThis, bool aDelete)
     {
-        // a?.b.c: if a is null or undefined the whole chain is undefined (the chain's optional links branch out of its block)
+        // a?.b.c: if a is null or undefined the whole chain is undefined (the chain's optional links branch out of its block) (aDelete: the
+        // chain is delete's operand: its last link (a member) is deleted, and a chain that short circuits is true)
         begin(control_kind::Block, I64);
         iControls.back().kind = control_kind::Block;
         auto const chain = iControls.size() - 1u;
@@ -4307,7 +4331,10 @@ namespace neos::compilers::javascript
                 op(opcode::If);
                 iCode.push_back(0x40u);
                 iControls.push_back(control{ control_kind::Block });
-                undefined();
+                if (aDelete)
+                    constant(values::True);
+                else
+                    undefined();
                 branch(chain);
                 end_control();
                 get(iScratch);
@@ -4329,7 +4356,16 @@ namespace neos::compilers::javascript
                         *aThis = temporary();
                         tee(**aThis);
                     }
-                    if (n->is(construct::Dot) || n->is(construct::OptionalDot))
+                    if (aDelete && n == aNode->child(0u) && !n->is(construct::DotPrivate) && !n->is(construct::OptionalPrivate))
+                    {
+                        if (n->is(construct::Dot) || n->is(construct::OptionalDot))
+                            key(name_of(n->child(1u)));
+                        else
+                            expression(n->child(1u));
+                        i32(iFunction.strict ? 1 : 0);
+                        runtime("delete", { I64, I64, I32 }, I64);
+                    }
+                    else if (n->is(construct::Dot) || n->is(construct::OptionalDot))
                     {
                         key(name_of(n->child(1u)));
                         runtime("get_named", { I64, I64 }, I64);
@@ -4394,6 +4430,16 @@ namespace neos::compilers::javascript
             }
         };
         link(aNode->child(0u), aThis);
+        if (aDelete)
+        {
+            // (a chain that ends with a call: its value is not a reference (delete is true))
+            auto const* last = aNode->child(0u);
+            if (!(last->is(construct::Dot) || last->is(construct::OptionalDot) || last->is(construct::Index) || last->is(construct::OptionalIndex)))
+            {
+                drop();
+                constant(values::True);
+            }
+        }
         end_control();
     }
 
@@ -4437,8 +4483,20 @@ namespace neos::compilers::javascript
                     constant(values::False);
             }
             break;
+        case construct::Optional:
+            // (a?.b: deleted unless the chain short circuits)
+            optional_chain(target, nullptr, true);
+            break;
         case construct::SuperDot:
         case construct::SuperIndex:
+            // (the reference is made (this, then super[x]'s x, is evaluated): then the ReferenceError)
+            this_value(target);
+            drop();
+            if (target->is(construct::SuperIndex) && target->size() > 0u)
+            {
+                expression(target->child(target->size() - 1u));
+                drop();
+            }
             runtime("throw_super_delete", {}, I64);
             check();
             break;
@@ -5803,6 +5861,14 @@ namespace neos::compilers::javascript
     {
         // ClassDefinitionEvaluation: the class's scope (its name and private names); its heritage; its prototype and constructor; its
         // elements (methods are defined; fields and static blocks are recorded); its static elements run when it is complete
+        // (all of a class is strict code: its heritage and computed keys too)
+        struct strict_code
+        {
+            bool& strict;
+            bool const previous;
+            ~strict_code() { strict = previous; }
+        } const strictCode{ iFunction.strict, iFunction.strict };
+        iFunction.strict = true;
         auto* classScope = aNode->ownScope;
         node* nameNode = (aNode->size() > 0u && aNode->child(0u)->is(construct::Binding)) ? aNode->child(0u) : nullptr;
         node* heritage = nullptr;

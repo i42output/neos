@@ -3631,6 +3631,52 @@ namespace neos::language
         bool didSome = false;
         try
         {
+            {
+                // (the nodes at the front that fold by themselves (as the loop below would fold them, one after another): folded in order,
+                // then erased together (erasing each from the front of the stack in turn costs the stack's size each time))
+                auto& stack = fold_stack();
+                std::size_t folded = 0u;
+                struct erase_folded
+                {
+                    neos::language::fold_stack& stack;
+                    std::size_t& folded;
+                    ~erase_folded()
+                    {
+                        if (folded != 0u)
+                            stack.erase(stack.begin(), std::next(stack.begin(), static_cast<std::ptrdiff_t>(folded)));
+                    }
+                } const eraseFolded{ stack, folded };
+                while (folded < stack.size() && stack[folded]->can_fold())
+                {
+                    auto& lhs = *stack[folded];
+                    auto const size = stack.size();
+                    trace_out("Folding", lhs);
+                    auto const result = lhs.fold(iContext);
+                    trace_out("Folded", lhs, {}, result);
+                    didSome = true;
+                    if (&fold_stack() != &stack || stack.size() != size)
+                    {
+                        // (the fold changed the stack: the node that folded is erased (where it now is); the loop below goes on)
+                        auto& current = fold_stack();
+                        for (auto i = current.begin(); i != current.end(); ++i)
+                            if (&**i == &lhs)
+                            {
+                                if (!result->is_empty())
+                                    *i = result;
+                                else
+                                    current.erase(i);
+                                break;
+                            }
+                        break;
+                    }
+                    if (!result->is_empty())
+                    {
+                        stack[folded] = result;
+                        break;
+                    }
+                    ++folded;
+                }
+            }
             for (auto ilhs = fold_stack().begin(); !didSome && ilhs != fold_stack().end();)
             {
                 auto& lhs = **ilhs;

@@ -302,6 +302,9 @@
     arrow parameters ::= single arrow parameter | formal parameters ;
     single arrow parameter $ javascript.parameters ::= binding identifier ;
     concise body ::= function body / assignment expression ;
+    arrow function no in $ javascript.arrow ::= arrow parameters , S , "=>" , WS , concise body no in ;
+    async arrow function no in $ javascript.arrow.async ::= async , S , arrow parameters , S , "=>" , WS , concise body no in ;
+    concise body no in ::= function body / assignment no in expression ;
 
     class expression $ javascript.class.expression ::= class , WS , [ binding identifier , WS ] , class tail ;
     class tail ::= [ class heritage , WS ] , '{' , WS , { class element , WS } , '}' ;
@@ -457,12 +460,13 @@
     conditional no in tail $ javascript.conditional ::= '?' , WS , assignment expression , WS , ':' , WS , assignment no in expression ;
 
     assignment expression ::= arrow function | async arrow function | yield expression | assignment | conditional expression ;
-    assignment no in expression ::= arrow function | async arrow function | yield expression | assignment no in | conditional no in expression ;
+    assignment no in expression ::= arrow function no in | async arrow function no in | yield no in expression | assignment no in | conditional no in expression ;
     assignment $ javascript.assign ::= left hand side expression , WS , assignment operator , WS , assignment expression ;
     assignment no in $ javascript.assign ::= left hand side expression , WS , assignment operator , WS , assignment no in expression ;
     assignment operator ::=
         "=" | "*=" | "/=" | "%=" | "+=" | "-=" | "<<=" | ">>=" | ">>>=" | "&=" | "^=" | "|=" | "**=" | "&&=" | "||=" | "??=" ;
     yield expression $ javascript.yield ::= yield , [ S , [ '*' , WS ] , assignment expression ] ;
+    yield no in expression $ javascript.yield ::= yield , [ S , [ '*' , WS ] , assignment no in expression ] ;
 
     expression ::= assignment expression , { WS , comma tail } ;
     expression no in ::= assignment no in expression , { WS , comma no in tail } ;

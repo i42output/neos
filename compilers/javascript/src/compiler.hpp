@@ -332,7 +332,7 @@ namespace neos::compilers::javascript
         void tagged_template(node* aNode);
         void function_expression(node* aNode);
         void class_expression(node* aNode, std::optional<std::string> aName = {});
-        void optional_chain(node* aNode, std::optional<std::uint32_t>* aThis = nullptr);
+        void optional_chain(node* aNode, std::optional<std::uint32_t>* aThis = nullptr, bool aDelete = false);
         bool is_call_reference(node* aNode) const;
         void delete_expression(node* aNode);
         void yield_expression(node* aNode);
@@ -479,6 +479,7 @@ namespace neos::compilers::javascript
     private:
         void yield_identifiers(node* aNode, bool aGenerator);
         void yield_identifiers_child(node* aNode, std::size_t aIndex, bool aGenerator);
+        bool keyword_identifier_operand(node* aKeyword, node* aLeftmost, node* aBoundary);
         void array_commas(node* aNode);
         void eval_context_errors(node* aNode);
         void build(construct aKind, std::string_view aSource);
@@ -516,6 +517,8 @@ namespace neos::compilers::javascript
         std::vector<std::tuple<node*, scope*, function_info*>> iAnnexBFunctions;
         std::map<std::string, std::uint32_t> iLiterals;     ///< (string literals -> their globals)
         std::vector<std::pair<std::string, std::uint32_t>> iLiteralOrder;
+        std::unordered_map<std::string, std::uint32_t> iGlobalIndex;   ///< (the generator's globals (global_index's), by name)
+        std::size_t iGlobalIndexed = 0u;                                ///< (how many of the generator's globals iGlobalIndex has)
         std::map<std::string, std::uint32_t> iMirrors;      ///< (global binding names -> the globals that mirror their values)
         std::vector<std::pair<std::string, std::uint32_t>> iMirrorOrder;
         std::map<std::string, function_info*> iScriptFunctions;     ///< (the script's function declarations (those that define its functions))

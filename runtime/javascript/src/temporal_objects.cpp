@@ -36,6 +36,7 @@
 
 #include <cmath>
 #include "temporal.hpp"
+#include "intl.hpp"
 #include "gc.hpp"
 
 namespace neos::javascript_runtime
@@ -88,12 +89,13 @@ namespace neos::javascript_runtime
             return value_of(o);
         }
 
-        value create_plain_date(iso_date const& aDate, value aNewTarget)
+        value create_plain_date(iso_date const& aDate, calendar_id aCalendar, value aNewTarget)
         {
             if (!iso_date_within_limits(aDate))
                 throw_range_error("date is outside the representable range");
             auto& o = make_temporal(object_class::TemporalPlainDate, aNewTarget, &realm::temporalPlainDatePrototype);
             o.date = aDate;
+            o.calendar = aCalendar;
             return value_of(o);
         }
 
@@ -105,40 +107,44 @@ namespace neos::javascript_runtime
             return value_of(o);
         }
 
-        value create_plain_date_time(iso_date_time const& aDateTime, value aNewTarget)
+        value create_plain_date_time(iso_date_time const& aDateTime, calendar_id aCalendar, value aNewTarget)
         {
             if (!iso_date_time_within_limits(aDateTime))
                 throw_range_error("date-time is outside the representable range");
             auto& o = make_temporal(object_class::TemporalPlainDateTime, aNewTarget, &realm::temporalPlainDateTimePrototype);
             o.date = aDateTime.date;
+            o.calendar = aCalendar;
             o.time = aDateTime.time;
             o.time.days = 0;
             return value_of(o);
         }
 
-        value create_plain_year_month(iso_date const& aDate, value aNewTarget)
+        value create_plain_year_month(iso_date const& aDate, calendar_id aCalendar, value aNewTarget)
         {
             if (!iso_year_month_within_limits(aDate))
                 throw_range_error("year-month is outside the representable range");
             auto& o = make_temporal(object_class::TemporalPlainYearMonth, aNewTarget, &realm::temporalPlainYearMonthPrototype);
             o.date = aDate;
+            o.calendar = aCalendar;
             return value_of(o);
         }
 
-        value create_plain_month_day(iso_date const& aDate, value aNewTarget)
+        value create_plain_month_day(iso_date const& aDate, calendar_id aCalendar, value aNewTarget)
         {
             if (!iso_date_within_limits(aDate))
                 throw_range_error("month-day is outside the representable range");
             auto& o = make_temporal(object_class::TemporalPlainMonthDay, aNewTarget, &realm::temporalPlainMonthDayPrototype);
             o.date = aDate;
+            o.calendar = aCalendar;
             return value_of(o);
         }
 
-        value create_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, value aNewTarget)
+        value create_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, calendar_id aCalendar, value aNewTarget)
         {
             auto& o = make_temporal(object_class::TemporalZonedDateTime, aNewTarget, &realm::temporalZonedDateTimePrototype);
             o.epochNs = aEpochNs;
             o.timeZone = aTimeZone;
+            o.calendar = aCalendar;
             return value_of(o);
         }
 
@@ -187,7 +193,7 @@ namespace neos::javascript_runtime
             return epochNs;
         }
 
-        iso_date to_temporal_date(value aItem, value aOptions)
+        temporal_date to_temporal_date(value aItem, value aOptions)
         {
             if (is_object(aItem))
             {
@@ -195,30 +201,29 @@ namespace neos::javascript_runtime
                 if (cls == object_class::TemporalPlainDate || cls == object_class::TemporalPlainDateTime)
                 {
                     get_overflow_option(get_options_object(aOptions));
-                    return tobj(aItem).date;
+                    return { tobj(aItem).date, tobj(aItem).calendar };
                 }
                 if (cls == object_class::TemporalZonedDateTime)
                 {
                     auto const& z = tobj(aItem);
                     auto const dateTime = get_iso_date_time_for(z.timeZone, z.epochNs);
                     get_overflow_option(get_options_object(aOptions));
-                    return dateTime.date;
+                    return { dateTime.date, z.calendar };
                 }
-                get_temporal_calendar_with_iso_default(aItem);
-                auto const fields = prepare_calendar_fields(aItem, FieldsDate, 0u, false);
+                auto const calendar = get_temporal_calendar_with_iso_default(aItem);
+                auto const fields = prepare_calendar_fields(calendar, aItem, FieldsDate, 0u, false);
                 auto const overflow = get_overflow_option(get_options_object(aOptions));
-                return calendar_date_from_fields(fields, overflow);
+                return { calendar_date_from_fields(calendar, fields, overflow), calendar };
             }
             if (!is_string(aItem))
                 throw_type_error("date must be a string or an object");
             auto const result = parse_iso_date_time(str(aItem), { GoalDateTime });
-            if (result.calendar)
-                canonicalize_calendar(make_string(*result.calendar));
+            auto const calendar = result.calendar ? canonicalize_calendar(make_string(*result.calendar)) : calendar_id::Iso8601;
             get_overflow_option(get_options_object(aOptions));
             iso_date const date{ result.year, result.month, result.day };
             if (!iso_date_within_limits(date))
                 throw_range_error("date is outside the representable range");
-            return date;
+            return { date, calendar };
         }
 
         time_record to_temporal_time(value aItem, value aOptions)
@@ -271,7 +276,7 @@ namespace neos::javascript_runtime
             return to_temporal_time(aItem);
         }
 
-        iso_date_time to_temporal_date_time(value aItem, value aOptions)
+        temporal_date_time to_temporal_date_time(value aItem, value aOptions)
         {
             if (is_object(aItem))
             {
@@ -279,14 +284,14 @@ namespace neos::javascript_runtime
                 if (cls == object_class::TemporalPlainDateTime)
                 {
                     get_overflow_option(get_options_object(aOptions));
-                    return { tobj(aItem).date, tobj(aItem).time };
+                    return { { tobj(aItem).date, tobj(aItem).time }, tobj(aItem).calendar };
                 }
                 if (cls == object_class::TemporalZonedDateTime)
                 {
                     auto const& z = tobj(aItem);
                     auto const dateTime = get_iso_date_time_for(z.timeZone, z.epochNs);
                     get_overflow_option(get_options_object(aOptions));
-                    return dateTime;
+                    return { dateTime, z.calendar };
                 }
                 if (cls == object_class::TemporalPlainDate)
                 {
@@ -294,75 +299,77 @@ namespace neos::javascript_runtime
                     iso_date_time const dateTime{ tobj(aItem).date, {} };
                     if (!iso_date_time_within_limits(dateTime))
                         throw_range_error("date-time is outside the representable range");
-                    return dateTime;
+                    return { dateTime, tobj(aItem).calendar };
                 }
-                get_temporal_calendar_with_iso_default(aItem);
-                auto const fields = prepare_calendar_fields(aItem, FieldsDate | FieldsTime, 0u, false);
+                auto const calendar = get_temporal_calendar_with_iso_default(aItem);
+                auto const fields = prepare_calendar_fields(calendar, aItem, FieldsDate | FieldsTime, 0u, false);
                 auto const overflow = get_overflow_option(get_options_object(aOptions));
-                auto const result = interpret_temporal_date_time_fields(fields, overflow);
+                auto const result = interpret_temporal_date_time_fields(calendar, fields, overflow);
                 if (!iso_date_time_within_limits(result))
                     throw_range_error("date-time is outside the representable range");
-                return result;
+                return { result, calendar };
             }
             if (!is_string(aItem))
                 throw_type_error("date-time must be a string or an object");
             auto const result = parse_iso_date_time(str(aItem), { GoalDateTime });
-            if (result.calendar)
-                canonicalize_calendar(make_string(*result.calendar));
+            auto const calendar = result.calendar ? canonicalize_calendar(make_string(*result.calendar)) : calendar_id::Iso8601;
             get_overflow_option(get_options_object(aOptions));
             iso_date_time const dateTime{ { result.year, result.month, result.day }, result.hasTime ? result.time : time_record{} };
             if (!iso_date_time_within_limits(dateTime))
                 throw_range_error("date-time is outside the representable range");
-            return dateTime;
+            return { dateTime, calendar };
         }
 
-        iso_date to_temporal_year_month(value aItem, value aOptions)
+        temporal_date to_temporal_year_month(value aItem, value aOptions)
         {
             if (is_object(aItem))
             {
                 if (auto const* ym = as_temporal(aItem, object_class::TemporalPlainYearMonth))
                 {
                     get_overflow_option(get_options_object(aOptions));
-                    return ym->date;
+                    return { ym->date, ym->calendar };
                 }
-                get_temporal_calendar_with_iso_default(aItem);
-                auto const fields = prepare_calendar_fields(aItem, FieldYear | FieldMonth | FieldMonthCode, 0u, false);
+                auto const calendar = get_temporal_calendar_with_iso_default(aItem);
+                auto const fields = prepare_calendar_fields(calendar, aItem, FieldYear | FieldMonth | FieldMonthCode, 0u, false);
                 auto const overflow = get_overflow_option(get_options_object(aOptions));
-                return calendar_year_month_from_fields(fields, overflow);
+                return { calendar_year_month_from_fields(calendar, fields, overflow), calendar };
             }
             if (!is_string(aItem))
                 throw_type_error("year-month must be a string or an object");
             auto const result = parse_iso_date_time(str(aItem), { GoalYearMonth });
-            if (result.calendar)
-                canonicalize_calendar(make_string(*result.calendar));
+            auto const calendar = result.calendar ? canonicalize_calendar(make_string(*result.calendar)) : calendar_id::Iso8601;
             get_overflow_option(get_options_object(aOptions));
             iso_date const date{ result.year, result.month, result.day };
             if (!iso_year_month_within_limits(date))
                 throw_range_error("year-month is outside the representable range");
-            return calendar_year_month_from_fields(iso_date_to_fields(date, 1), overflow::Constrain);
+            return { calendar_year_month_from_fields(calendar, iso_date_to_fields(calendar, date, 1), overflow::Constrain), calendar };
         }
 
-        iso_date to_temporal_month_day(value aItem, value aOptions)
+        temporal_date to_temporal_month_day(value aItem, value aOptions)
         {
             if (is_object(aItem))
             {
                 if (auto const* md = as_temporal(aItem, object_class::TemporalPlainMonthDay))
                 {
                     get_overflow_option(get_options_object(aOptions));
-                    return md->date;
+                    return { md->date, md->calendar };
                 }
-                get_temporal_calendar_with_iso_default(aItem);
-                auto const fields = prepare_calendar_fields(aItem, FieldsDate, 0u, false);
+                auto const calendar = get_temporal_calendar_with_iso_default(aItem);
+                auto const fields = prepare_calendar_fields(calendar, aItem, FieldsDate, 0u, false);
                 auto const overflow = get_overflow_option(get_options_object(aOptions));
-                return calendar_month_day_from_fields(fields, overflow);
+                return { calendar_month_day_from_fields(calendar, fields, overflow), calendar };
             }
             if (!is_string(aItem))
                 throw_type_error("month-day must be a string or an object");
             auto const result = parse_iso_date_time(str(aItem), { GoalMonthDay });
-            if (result.calendar)
-                canonicalize_calendar(make_string(*result.calendar));
+            auto const calendar = result.calendar ? canonicalize_calendar(make_string(*result.calendar)) : calendar_id::Iso8601;
             get_overflow_option(get_options_object(aOptions));
-            return { 1972, result.month, result.day };
+            if (calendar == calendar_id::Iso8601)
+                return { { 1972, result.month, result.day }, calendar };
+            iso_date const date{ result.year, result.month, result.day };
+            if (!iso_date_within_limits(date))
+                throw_range_error("month-day is outside the representable range");
+            return { calendar_month_day_from_fields(calendar, iso_date_to_fields(calendar, date, 2), overflow::Constrain), calendar };
         }
 
         temporal_object& to_temporal_zoned_date_time(value aItem, value aOptions)
@@ -375,6 +382,7 @@ namespace neos::javascript_runtime
             std::optional<time_record> time;
             disambiguation disambiguationOption = disambiguation::Compatible;
             offset_option offsetOption = offset_option::Reject;
+            calendar_id calendar = calendar_id::Iso8601;
             if (is_object(aItem))
             {
                 if (auto* z = as_temporal(aItem, object_class::TemporalZonedDateTime))
@@ -383,17 +391,17 @@ namespace neos::javascript_runtime
                     get_disambiguation_option(options);
                     get_offset_option(options, offset_option::Reject);
                     get_overflow_option(options);
-                    return tobj(create_zoned_date_time(z->epochNs, z->timeZone));
+                    return tobj(create_zoned_date_time(z->epochNs, z->timeZone, z->calendar));
                 }
-                get_temporal_calendar_with_iso_default(aItem);
-                auto const fields = prepare_calendar_fields(aItem, FieldsDate | FieldsTime | FieldOffset | FieldTimeZone, FieldTimeZone, false);
+                calendar = get_temporal_calendar_with_iso_default(aItem);
+                auto const fields = prepare_calendar_fields(calendar, aItem, FieldsDate | FieldsTime | FieldOffset | FieldTimeZone, FieldTimeZone, false);
                 timeZone = *fields.timeZone;
                 offsetString = fields.offset;
                 auto const options = get_options_object(aOptions);
                 disambiguationOption = get_disambiguation_option(options);
                 offsetOption = get_offset_option(options, offset_option::Reject);
                 auto const overflow = get_overflow_option(options);
-                auto const result = interpret_temporal_date_time_fields(fields, overflow);
+                auto const result = interpret_temporal_date_time_fields(calendar, fields, overflow);
                 date = result.date;
                 time = result.time;
             }
@@ -406,7 +414,7 @@ namespace neos::javascript_runtime
                 offsetString = result.offset;
                 hasUTCDesignator = result.z;
                 if (result.calendar)
-                    canonicalize_calendar(make_string(*result.calendar));
+                    calendar = canonicalize_calendar(make_string(*result.calendar));
                 matchMinutes = true;
                 if (offsetString)
                 {
@@ -433,7 +441,7 @@ namespace neos::javascript_runtime
                 offsetNs = *parse_date_time_utc_offset(*offsetString);
             auto const epochNs = interpret_iso_date_time_offset(date, time, offsetBehaviour, offsetNs, timeZone, disambiguationOption,
                 offsetOption, matchMinutes);
-            return tobj(create_zoned_date_time(epochNs, timeZone));
+            return tobj(create_zoned_date_time(epochNs, timeZone, calendar));
         }
 
         bool is_partial_temporal_object(value aValue)
@@ -490,6 +498,7 @@ namespace neos::javascript_runtime
             iso_date date;
             i128 epochNs;
             time_zone timeZone;
+            calendar_id calendar = calendar_id::Iso8601;
         };
 
         relative_to get_relative_to_option(value aOptions)
@@ -512,17 +521,19 @@ namespace neos::javascript_runtime
                     r.zoned = true;
                     r.epochNs = tobj(v).epochNs;
                     r.timeZone = tobj(v).timeZone;
+                    r.calendar = tobj(v).calendar;
                     return r;
                 }
                 if (cls == object_class::TemporalPlainDate || cls == object_class::TemporalPlainDateTime)
                 {
                     r.plain = true;
                     r.date = tobj(v).date;
+                    r.calendar = tobj(v).calendar;
                     return r;
                 }
-                get_temporal_calendar_with_iso_default(v);
-                auto const fields = prepare_calendar_fields(v, FieldsDate | FieldsTime | FieldOffset | FieldTimeZone, 0u, false);
-                auto const result = interpret_temporal_date_time_fields(fields, overflow::Constrain);
+                r.calendar = get_temporal_calendar_with_iso_default(v);
+                auto const fields = prepare_calendar_fields(r.calendar, v, FieldsDate | FieldsTime | FieldOffset | FieldTimeZone, 0u, false);
+                auto const result = interpret_temporal_date_time_fields(r.calendar, fields, overflow::Constrain);
                 timeZone = fields.timeZone;
                 offsetString = fields.offset;
                 if (!offsetString)
@@ -553,7 +564,7 @@ namespace neos::javascript_runtime
                     }
                 }
                 if (result.calendar)
-                    canonicalize_calendar(make_string(*result.calendar));
+                    r.calendar = canonicalize_calendar(make_string(*result.calendar));
                 date = { result.year, result.month, result.day };
                 if (result.hasTime)
                     time = result.time;
@@ -576,12 +587,12 @@ namespace neos::javascript_runtime
             return r;
         }
 
-        double date_duration_days(date_duration const& aDuration, iso_date const& aRelativeTo)
+        double date_duration_days(date_duration const& aDuration, iso_date const& aRelativeTo, calendar_id aCalendar)
         {
             auto const yearsMonthsWeeks = create_date_duration(aDuration.years, aDuration.months, aDuration.weeks, 0.0);
             if (date_duration_sign(yearsMonthsWeeks) == 0)
                 return aDuration.days;
-            auto const later = calendar_date_add(aRelativeTo, yearsMonthsWeeks, overflow::Constrain);
+            auto const later = calendar_date_add(aCalendar, aRelativeTo, yearsMonthsWeeks, overflow::Constrain);
             auto const epochDays1 = iso_date_to_epoch_days(aRelativeTo.year, aRelativeTo.month - 1, aRelativeTo.day);
             auto const epochDays2 = iso_date_to_epoch_days(later.year, later.month - 1, later.day);
             return aDuration.days + static_cast<double>(epochDays2 - epochDays1);
@@ -630,8 +641,8 @@ namespace neos::javascript_runtime
             auto const duration2 = to_internal_duration(two);
             if (relativeTo.zoned && (is_date_unit(largestUnit1) || is_date_unit(largestUnit2)))
             {
-                auto const after1 = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, duration1, overflow::Constrain);
-                auto const after2 = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, duration2, overflow::Constrain);
+                auto const after1 = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, relativeTo.calendar, duration1, overflow::Constrain);
+                auto const after2 = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, relativeTo.calendar, duration2, overflow::Constrain);
                 return number(static_cast<double>(compare(after1, after2)));
             }
             double days1 = one.v[3];
@@ -640,8 +651,8 @@ namespace neos::javascript_runtime
             {
                 if (!relativeTo.plain)
                     throw_range_error("relativeTo is required to compare durations with calendar units");
-                days1 = date_duration_days(duration1.date, relativeTo.date);
-                days2 = date_duration_days(duration2.date, relativeTo.date);
+                days1 = date_duration_days(duration1.date, relativeTo.date, relativeTo.calendar);
+                days2 = date_duration_days(duration2.date, relativeTo.date, relativeTo.calendar);
             }
             auto const time1 = add_24_hour_days(duration1.time, days1);
             auto const time2 = add_24_hour_days(duration2.time, days2);
@@ -750,9 +761,9 @@ namespace neos::javascript_runtime
             if (relativeTo.zoned)
             {
                 auto internal = to_internal_duration(duration);
-                auto const target = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, internal, overflow::Constrain);
-                internal = difference_zoned_date_time_with_rounding(relativeTo.epochNs, target, relativeTo.timeZone, largestUnit, roundingIncrement,
-                    smallestUnit, roundingMode);
+                auto const target = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, relativeTo.calendar, internal, overflow::Constrain);
+                internal = difference_zoned_date_time_with_rounding(relativeTo.epochNs, target, relativeTo.timeZone, relativeTo.calendar, largestUnit,
+                    roundingIncrement, smallestUnit, roundingMode);
                 if (is_date_unit(largestUnit))
                     largestUnit = unit::Hour;
                 return create_duration(duration_from_internal(internal, largestUnit));
@@ -763,11 +774,11 @@ namespace neos::javascript_runtime
                 auto const targetTime = add_time({}, internal.time);
                 auto const dateDuration = create_date_duration(internal.date.years, internal.date.months, internal.date.weeks,
                     static_cast<double>(targetTime.days));
-                auto const targetDate = calendar_date_add(relativeTo.date, dateDuration, overflow::Constrain);
+                auto const targetDate = calendar_date_add(relativeTo.calendar, relativeTo.date, dateDuration, overflow::Constrain);
                 iso_date_time const dateTime{ relativeTo.date, {} };
                 iso_date_time const targetDateTime{ targetDate, targetTime };
-                internal = difference_plain_date_time_with_rounding(dateTime, targetDateTime, largestUnit, roundingIncrement, smallestUnit,
-                    roundingMode);
+                internal = difference_plain_date_time_with_rounding(relativeTo.calendar, dateTime, targetDateTime, largestUnit, roundingIncrement,
+                    smallestUnit, roundingMode);
                 return create_duration(duration_from_internal(internal, largestUnit));
             }
             if (is_calendar_unit(existingLargestUnit) || is_calendar_unit(largestUnit))
@@ -795,8 +806,8 @@ namespace neos::javascript_runtime
             if (relativeTo.zoned)
             {
                 auto const internal = to_internal_duration(duration);
-                auto const target = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, internal, overflow::Constrain);
-                total = difference_zoned_date_time_with_total(relativeTo.epochNs, target, relativeTo.timeZone, u);
+                auto const target = add_zoned_date_time(relativeTo.epochNs, relativeTo.timeZone, relativeTo.calendar, internal, overflow::Constrain);
+                total = difference_zoned_date_time_with_total(relativeTo.epochNs, target, relativeTo.timeZone, relativeTo.calendar, u);
             }
             else if (relativeTo.plain)
             {
@@ -804,8 +815,8 @@ namespace neos::javascript_runtime
                 auto const targetTime = add_time({}, internal.time);
                 auto const dateDuration = create_date_duration(internal.date.years, internal.date.months, internal.date.weeks,
                     static_cast<double>(targetTime.days));
-                auto const targetDate = calendar_date_add(relativeTo.date, dateDuration, overflow::Constrain);
-                total = difference_plain_date_time_with_total({ relativeTo.date, {} }, { targetDate, targetTime }, u);
+                auto const targetDate = calendar_date_add(relativeTo.calendar, relativeTo.date, dateDuration, overflow::Constrain);
+                total = difference_plain_date_time_with_total(relativeTo.calendar, { relativeTo.date, {} }, { targetDate, targetTime }, u);
             }
             else
             {
@@ -841,9 +852,15 @@ namespace neos::javascript_runtime
             return string_value(duration_to_string(this_duration(aThis, "Temporal.Duration.prototype.toJSON"), -1));
         }
 
-        value duration_to_locale_string(value aThis, arguments, value, function_object&)
+        value duration_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
+#if defined(NEOS_JS_ICU)
+            this_duration(aThis, "Temporal.Duration.prototype.toLocaleString");
+            return intl::duration_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+#else
+            (void)aArguments;
             return string_value(duration_to_string(this_duration(aThis, "Temporal.Duration.prototype.toLocaleString"), -1));
+#endif
         }
 
         // --- Temporal.Instant
@@ -990,7 +1007,7 @@ namespace neos::javascript_runtime
         {
             auto const outputTimeZone = aTimeZone ? *aTimeZone : time_zone_from_identifier(u"UTC");
             auto const dateTime = get_iso_date_time_for(outputTimeZone, aEpochNs);
-            auto const dateTimeString = iso_date_time_to_string(dateTime, aPrecision, show_calendar::Never);
+            auto const dateTimeString = iso_date_time_to_string(dateTime, aPrecision, calendar_id::Iso8601, show_calendar::Never);
             if (!aTimeZone)
                 return dateTimeString + "Z";
             return dateTimeString + format_utc_offset_rounded(get_offset_ns_for(outputTimeZone, aEpochNs));
@@ -1020,16 +1037,22 @@ namespace neos::javascript_runtime
             return string_value(temporal_instant_to_string(this_instant(aThis, "Temporal.Instant.prototype.toJSON"), {}, -1));
         }
 
-        value instant_to_locale_string(value aThis, arguments, value, function_object&)
+        value instant_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
+#if defined(NEOS_JS_ICU)
+            this_instant(aThis, "Temporal.Instant.prototype.toLocaleString");
+            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+#else
+            (void)aArguments;
             return string_value(temporal_instant_to_string(this_instant(aThis, "Temporal.Instant.prototype.toLocaleString"), {}, -1));
+#endif
         }
 
         value instant_to_zoned_date_time_iso(value aThis, arguments aArguments, value, function_object&)
         {
             auto const ns = this_instant(aThis, "Temporal.Instant.prototype.toZonedDateTimeISO");
             auto const timeZone = to_temporal_time_zone_identifier(argument(aArguments, 0u));
-            return create_zoned_date_time(ns, timeZone);
+            return create_zoned_date_time(ns, timeZone, calendar_id::Iso8601);
         }
 
         // --- Temporal.Now
@@ -1054,17 +1077,17 @@ namespace neos::javascript_runtime
         {
             auto const like = argument(aArguments, 0u);
             auto const timeZone = is_undefined(like) ? system_time_zone() : to_temporal_time_zone_identifier(like);
-            return create_zoned_date_time(system_utc_epoch_ns(), timeZone);
+            return create_zoned_date_time(system_utc_epoch_ns(), timeZone, calendar_id::Iso8601);
         }
 
         value now_plain_date_time_iso(value, arguments aArguments, value, function_object&)
         {
-            return create_plain_date_time(system_date_time(argument(aArguments, 0u)));
+            return create_plain_date_time(system_date_time(argument(aArguments, 0u)), calendar_id::Iso8601);
         }
 
         value now_plain_date_iso(value, arguments aArguments, value, function_object&)
         {
-            return create_plain_date(system_date_time(argument(aArguments, 0u)).date);
+            return create_plain_date(system_date_time(argument(aArguments, 0u)).date, calendar_id::Iso8601);
         }
 
         value now_plain_time_iso(value, arguments aArguments, value, function_object&)

@@ -396,6 +396,7 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/temporal_objects.cpp
     runtime/javascript/src/temporal_plain.cpp
     runtime/javascript/src/temporal_zoned.cpp
+    runtime/javascript/src/temporal_calendar.cpp
     runtime/javascript/src/builtins_json.cpp
     runtime/javascript/src/builtins_iterator.cpp
     runtime/javascript/src/builtins_disposable.cpp
@@ -415,8 +416,42 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/modules.cpp
     runtime/javascript/src/builtins_async.cpp
     runtime/javascript/src/bigint.cpp
-    runtime/javascript/src/stubs.cpp)
+    runtime/javascript/src/stubs.cpp
+    runtime/javascript/src/intl.cpp
+    runtime/javascript/src/intl_locale.cpp
+    runtime/javascript/src/intl_collator.cpp
+    runtime/javascript/src/intl_number_format.cpp
+    runtime/javascript/src/intl_date_time_format.cpp
+    runtime/javascript/src/intl_relative_time_format.cpp
+    runtime/javascript/src/intl_list_format.cpp
+    runtime/javascript/src/intl_display_names.cpp
+    runtime/javascript/src/intl_segmenter.cpp
+    runtime/javascript/src/intl_duration_format.cpp)
 target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include") # (ECMAScript's conversions)
+
+# ICU (Intl, ECMA-402): its C API (on Windows the system's ICU (icu.dll: the Windows SDK's icu.h); elsewhere the system's libicu); without
+# it the JavaScript runtime has no Intl
+option(NEOS_ICU "JavaScript's Intl with ICU" ON)
+if(NEOS_ICU)
+    if(WIN32)
+        include(CheckIncludeFileCXX)
+        check_include_file_cxx(icu.h NEOS_HAVE_WINDOWS_ICU)
+        if(NEOS_HAVE_WINDOWS_ICU)
+            target_compile_definitions(javascript PRIVATE NEOS_JS_ICU NEOS_JS_WINDOWS_ICU)
+            target_link_libraries(javascript PRIVATE icu)
+        else()
+            message(STATUS "ICU (the Windows SDK's icu.h) not found: JavaScript has no Intl")
+        endif()
+    else()
+        find_package(ICU COMPONENTS uc i18n data)
+        if(ICU_FOUND)
+            target_compile_definitions(javascript PRIVATE NEOS_JS_ICU)
+            target_link_libraries(javascript PRIVATE ICU::i18n ICU::uc ICU::data)
+        else()
+            message(STATUS "ICU not found: JavaScript has no Intl")
+        endif()
+    endif()
+endif()
 
 # zlib (the Python runtime plugin's module zlib): the bundled source (3rdparty/zlib-1.3.1), compiled into the plugin (its names
 # prefixed (Z_PREFIX): they are not those of any other zlib the process has)

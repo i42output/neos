@@ -1019,8 +1019,14 @@ namespace neos::javascript_runtime
             return value_of(typed_array_species_create(t, args));
         }
 
-        value typed_array_to_locale_string(value aThis, arguments, value, function_object&)
+        value typed_array_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
+#if defined(NEOS_JS_ICU)
+            value const localeArguments[] = { argument(aArguments, 0u), argument(aArguments, 1u) };
+#else
+            (void)aArguments;
+            arguments const localeArguments{};
+#endif
             auto& t = validate_typed_array(aThis);
             auto const length = static_cast<double>(t.length());
             std::u16string result;
@@ -1030,7 +1036,7 @@ namespace neos::javascript_runtime
                     result += u",";
                 auto const element = typed_array_get_element(t, k);
                 if (!is_nullish(element))
-                    result += to_u16string(invoke(element, ascii("toLocaleString")));
+                    result += to_u16string(invoke(element, ascii("toLocaleString"), localeArguments));
             }
             return make_string(std::move(result));
         }

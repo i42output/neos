@@ -325,7 +325,8 @@ namespace neos::javascript_runtime
                     return ascii("function () { [native code] }");
                 throw_type_error("Function.prototype.toString requires that 'this' be a Function");
             }
-            if (f->kind == function_kind::Compiled && is_string(f->sourceText))
+            // (a class's (its constructor may be a default one: a native function) has its source text too)
+            if ((f->kind == function_kind::Compiled || f->flavour == function_flavour::ClassConstructor) && is_string(f->sourceText))
                 return f->sourceText;
             // (NativeFunction syntax: function [get|set] [PropertyName] (): a name that is not a property name (e.g. "bound f", "$&") is
             // left out)

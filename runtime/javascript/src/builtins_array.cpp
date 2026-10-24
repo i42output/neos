@@ -595,8 +595,15 @@ namespace neos::javascript_runtime
             return call(f, o);
         }
 
-        value array_to_locale_string(value aThis, arguments, value, function_object&)
+        value array_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
+            // (ECMA-402's: the elements' toLocaleString with the locales and options; ECMA-262's: with none)
+#if defined(NEOS_JS_ICU)
+            value const localeArguments[] = { argument(aArguments, 0u), argument(aArguments, 1u) };
+#else
+            (void)aArguments;
+            arguments const localeArguments{};
+#endif
             auto const o = to_object(aThis);
             auto const len = length_of_array_like(o);
             std::u16string result;
@@ -606,7 +613,7 @@ namespace neos::javascript_runtime
                     result += u",";
                 auto const element = get(o, key(k));
                 if (!is_nullish(element))
-                    result += str(to_string(invoke(element, ascii("toLocaleString"))));
+                    result += str(to_string(invoke(element, ascii("toLocaleString"), localeArguments)));
             }
             return make_string(std::move(result));
         }

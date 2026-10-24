@@ -494,7 +494,19 @@ namespace neos::javascript_runtime
         TemporalPlainDateTime,
         TemporalPlainYearMonth,
         TemporalPlainMonthDay,
-        TemporalZonedDateTime
+        TemporalZonedDateTime,
+        IntlCollator,           ///< (intl*.cpp: the Intl objects (intl::intl_object))
+        IntlDateTimeFormat,
+        IntlDisplayNames,
+        IntlDurationFormat,
+        IntlListFormat,
+        IntlLocale,
+        IntlNumberFormat,
+        IntlPluralRules,
+        IntlRelativeTimeFormat,
+        IntlSegmenter,
+        IntlSegments,
+        IntlSegmentIterator
     };
 
     using arguments = std::span<value const>;
@@ -757,6 +769,12 @@ namespace neos::javascript_runtime
             temporalPlainDateTimePrototype = Undefined, temporalPlainDateTime = Undefined, temporalPlainYearMonthPrototype = Undefined,
             temporalPlainYearMonth = Undefined, temporalPlainMonthDayPrototype = Undefined, temporalPlainMonthDay = Undefined,
             temporalZonedDateTimePrototype = Undefined, temporalZonedDateTime = Undefined;
+        value intl = Undefined, intlCollatorPrototype = Undefined, intlDateTimeFormatPrototype = Undefined, intlDisplayNamesPrototype = Undefined,
+            intlDurationFormatPrototype = Undefined, intlListFormatPrototype = Undefined, intlLocalePrototype = Undefined, intlLocale = Undefined,
+            intlNumberFormatPrototype = Undefined, intlPluralRulesPrototype = Undefined, intlRelativeTimeFormatPrototype = Undefined,
+            intlSegmenterPrototype = Undefined, intlSegmentsPrototype = Undefined, intlSegmentIteratorPrototype = Undefined,
+            intlCollator = Undefined, intlDateTimeFormat = Undefined, intlNumberFormat = Undefined, intlDurationFormat = Undefined,
+            intlFallbackSymbol = Undefined;
         value throwTypeError = Undefined;       ///< (%ThrowTypeError%)
         value arrayProtoValues = Undefined;     ///< (%Array.prototype.values%)
         value eval = Undefined;
@@ -973,6 +991,7 @@ namespace neos::javascript_runtime
     void init_regexp(realm& aRealm);
     void init_date(realm& aRealm);
     void init_temporal(realm& aRealm);                           ///< (temporal_objects.cpp: Temporal (after init_date))
+    void init_intl(realm& aRealm);                               ///< (intl.cpp: Intl (none without ICU))
     void init_typed_arrays(realm& aRealm);
     void init_console(realm& aRealm);
     void init_host262(realm& aRealm);

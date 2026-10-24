@@ -32,7 +32,10 @@
 */
 
 // Temporal: time zones. Offset time zones (±HH:MM) and the named time zones of the IANA Time Zone Database through C++20
-// <chrono> (std::chrono::get_tzdb, time_zone::get_info); only "UTC" if the library has no time zone database.
+// <chrono> (std::chrono::get_tzdb, time_zone::get_info); only "UTC" if the library has no time zone database. A zone's offsets
+// are those of its compiled (TZif, RFC 8536) file if the system has one (in TZDIR, else /usr/share/zoneinfo: the database as
+// zic compiled it, which the C library uses too (some <chrono> libraries' readings of the source data err: e.g. in libstdc++
+// 13, a rule's saving in effect at a zone line's change, and a line's UNTIL in local time)), else the library's.
 //
 // Identifiers are matched ASCII-case-insensitively; a Link's primary identifier is its target (and the zones that CLDR
 // treats as UTC (Etc/UTC, Etc/GMT and their links) have the primary identifier "UTC"). Times beyond the range the
@@ -41,7 +44,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include "temporal.hpp"
 
 namespace neos::javascript_runtime::temporal
@@ -58,6 +64,20 @@ namespace neos::javascript_runtime::temporal
             return aTarget == "Etc/UTC" || aTarget == "Etc/GMT" || aTarget == "UTC" || aTarget == "GMT";
         }
 
+        // (the zones the IANA database has made links (2024b): their targets are their primary identifiers, though a system's
+        // database (one built with its backward-compatible data (backzone)) has them as zones)
+        std::optional<std::string> legacy_zone_target(std::string const& aName)
+        {
+            static std::pair<char const*, char const*> const sLinks[] = { { "CET", "Europe/Brussels" }, { "CST6CDT", "America/Chicago" },
+                { "EET", "Europe/Athens" }, { "EST", "America/Panama" }, { "EST5EDT", "America/New_York" }, { "HST", "Pacific/Honolulu" },
+                { "MET", "Europe/Brussels" }, { "MST", "America/Phoenix" }, { "MST7MDT", "America/Denver" }, { "PST8PDT", "America/Los_Angeles" },
+                { "WET", "Europe/Lisbon" } };
+            for (auto const& [name, target] : sLinks)
+                if (aName == name)
+                    return target;
+            return std::nullopt;
+        }
+
         zone_table const& zones()
         {
             static zone_table const sTable = []()
@@ -69,15 +89,26 @@ namespace neos::javascript_runtime::temporal
                     for (auto const& z : db.zones)
                     {
                         auto const name = u16(std::string{ z.name() });
-                        auto const primary = is_utc_alias(std::string{ z.name() }) ? std::u16string{ u"UTC" } : name;
-                        table.byLowercase[ascii_lowercase(name)] = { name, primary, &z };
+                        auto primary = is_utc_alias(std::string{ z.name() }) ? std::u16string{ u"UTC" } : name;
+                        auto const* zone = &z;
+                        if (auto const target = legacy_zone_target(std::string{ z.name() }))
+                        {
+                            primary = u16(*target);
+                            zone = std::chrono::locate_zone(*target);
+                        }
+                        table.byLowercase[ascii_lowercase(name)] = { name, primary, zone };
                     }
                     for (auto const& l : db.links)
                     {
                         auto const name = u16(std::string{ l.name() });
                         auto const target = std::string{ l.target() };
                         auto const* zone = std::chrono::locate_zone(target);
-                        auto const primary = is_utc_alias(target) || is_utc_alias(std::string{ l.name() }) ? std::u16string{ u"UTC" } : u16(target);
+                        auto primary = is_utc_alias(target) || is_utc_alias(std::string{ l.name() }) ? std::u16string{ u"UTC" } : u16(target);
+                        if (auto const legacy = legacy_zone_target(target))
+                        {
+                            primary = u16(*legacy);
+                            zone = std::chrono::locate_zone(*legacy);
+                        }
                         table.byLowercase[ascii_lowercase(name)] = { name, primary, zone };
                     }
                 }
@@ -108,10 +139,327 @@ namespace neos::javascript_runtime::temporal
             std::int64_t offset = 0;    ///< (seconds)
         };
 
+        // --- compiled zone files (TZif)
+
+        // (a POSIX TZ string's rule (its footer's): standard and daylight saving time, and the changes between them)
+        struct posix_rule
+        {
+            struct change
+            {
+                char kind = 'M';            ///< ('J': Julian day 1-365 (no 29 February), 'D': day 0-365, 'M': month, week, weekday)
+                int month = 0;
+                int week = 0;
+                int day = 0;
+                std::int64_t time = 7200;   ///< (seconds of local time)
+            };
+            std::int64_t stdOffset = 0;     ///< (seconds east of UTC)
+            std::int64_t dstOffset = 0;
+            bool dst = false;
+            change start;
+            change end;
+        };
+
+        bool parse_posix_rule(std::string const& aText, posix_rule& aRule)
+        {
+            std::size_t i = 0u;
+            auto const name = [&]() -> bool
+            {
+                if (i < aText.size() && aText[i] == '<')
+                {
+                    auto const close = aText.find('>', i);
+                    if (close == std::string::npos)
+                        return false;
+                    i = close + 1u;
+                    return true;
+                }
+                auto const begin = i;
+                while (i < aText.size() && ((aText[i] >= 'A' && aText[i] <= 'Z') || (aText[i] >= 'a' && aText[i] <= 'z')))
+                    ++i;
+                return i - begin >= 3u;
+            };
+            auto const number = [&](std::int64_t& aValue) -> bool
+            {
+                auto const begin = i;
+                aValue = 0;
+                while (i < aText.size() && aText[i] >= '0' && aText[i] <= '9')
+                    aValue = aValue * 10 + (aText[i++] - '0');
+                return i > begin;
+            };
+            // ([+-]hh[:mm[:ss]]: seconds)
+            auto const time = [&](std::int64_t& aSeconds) -> bool
+            {
+                std::int64_t sign = 1;
+                if (i < aText.size() && (aText[i] == '+' || aText[i] == '-'))
+                    sign = aText[i++] == '-' ? -1 : 1;
+                std::int64_t h = 0, m = 0, sec = 0;
+                if (!number(h))
+                    return false;
+                if (i < aText.size() && aText[i] == ':')
+                {
+                    ++i;
+                    if (!number(m))
+                        return false;
+                    if (i < aText.size() && aText[i] == ':')
+                    {
+                        ++i;
+                        if (!number(sec))
+                            return false;
+                    }
+                }
+                aSeconds = sign * (h * 3600 + m * 60 + sec);
+                return true;
+            };
+            auto const change = [&](posix_rule::change& aChange) -> bool
+            {
+                std::int64_t a = 0, b = 0, c = 0;
+                if (i < aText.size() && aText[i] == 'J')
+                {
+                    ++i;
+                    aChange.kind = 'J';
+                    if (!number(a))
+                        return false;
+                    aChange.day = static_cast<int>(a);
+                }
+                else if (i < aText.size() && aText[i] == 'M')
+                {
+                    ++i;
+                    aChange.kind = 'M';
+                    if (!number(a) || i >= aText.size() || aText[i++] != '.' || !number(b) || i >= aText.size() || aText[i++] != '.' || !number(c))
+                        return false;
+                    aChange.month = static_cast<int>(a);
+                    aChange.week = static_cast<int>(b);
+                    aChange.day = static_cast<int>(c);
+                }
+                else
+                {
+                    aChange.kind = 'D';
+                    if (!number(a))
+                        return false;
+                    aChange.day = static_cast<int>(a);
+                }
+                aChange.time = 7200;
+                if (i < aText.size() && aText[i] == '/')
+                {
+                    ++i;
+                    if (!time(aChange.time))
+                        return false;
+                }
+                return true;
+            };
+            std::int64_t offset = 0;
+            if (!name() || !time(offset))
+                return false;
+            aRule.stdOffset = -offset;
+            if (i == aText.size())
+                return true;
+            if (!name())
+                return false;
+            aRule.dst = true;
+            aRule.dstOffset = aRule.stdOffset + 3600;
+            if (i < aText.size() && aText[i] != ',')
+            {
+                if (!time(offset))
+                    return false;
+                aRule.dstOffset = -offset;
+            }
+            if (i >= aText.size() || aText[i++] != ',' || !change(aRule.start) || i >= aText.size() || aText[i++] != ',' || !change(aRule.end))
+                return false;
+            return i == aText.size();
+        }
+
+        // (the epoch seconds of a POSIX rule's change in a year (its time in local time of the offset in effect before it))
+        std::int64_t posix_change_time(posix_rule::change const& aChange, std::int64_t aYear, std::int64_t aOffsetBefore)
+        {
+            std::int64_t day = 0;   // (epoch days)
+            if (aChange.kind == 'J')
+            {
+                day = iso_date_to_epoch_days(aYear, 0, 1) + aChange.day - 1;
+                if (is_leap_year(aYear) && aChange.day >= 60)
+                    ++day;
+            }
+            else if (aChange.kind == 'D')
+                day = iso_date_to_epoch_days(aYear, 0, 1) + aChange.day;
+            else
+            {
+                auto const first = iso_date_to_epoch_days(aYear, aChange.month - 1, 1);
+                auto const firstWeekday = ((first + 4) % 7 + 7) % 7;    // (0 Sunday: 1970-01-01 was a Thursday)
+                auto monthDay = (aChange.day - firstWeekday + 7) % 7 + 1 + (aChange.week - 1) * 7;
+                auto const length = iso_days_in_month(aYear, aChange.month);
+                while (monthDay > length)
+                    monthDay -= 7;
+                day = first + monthDay - 1;
+            }
+            return day * 86400 + aChange.time - aOffsetBefore;
+        }
+
+        struct tzif_zone
+        {
+            std::vector<std::int64_t> times;        ///< (the transitions)
+            std::vector<std::int32_t> offsets;      ///< (the offset from each transition)
+            std::int32_t initialOffset = 0;         ///< (before the first)
+            std::optional<posix_rule> rule;         ///< (after the last)
+        public:
+            // (the rule's changes in the years about a time: (time, offset after it)), sorted
+            std::vector<std::pair<std::int64_t, std::int64_t>> rule_changes(std::int64_t aSeconds) const
+            {
+                std::vector<std::pair<std::int64_t, std::int64_t>> changes;
+                auto const year = epoch_days_to_iso_date(std::clamp<std::int64_t>(aSeconds / 86400, -100000000, 100000000)).year;
+                for (auto y = year - 1; y <= year + 1; ++y)
+                {
+                    changes.emplace_back(posix_change_time(rule->start, y, rule->stdOffset), rule->dstOffset);
+                    changes.emplace_back(posix_change_time(rule->end, y, rule->dstOffset), rule->stdOffset);
+                }
+                std::sort(changes.begin(), changes.end());
+                return changes;
+            }
+            period rule_period(std::int64_t aSeconds, std::int64_t aFloor) const
+            {
+                if (!rule->dst)
+                    return { aFloor, sNone, rule->stdOffset };
+                auto const changes = rule_changes(aSeconds);
+                period p{ aFloor, sNone, 0 };
+                // (the offset before the first change: the last change's of the previous years)
+                p.offset = changes.front().second == rule->dstOffset ? rule->stdOffset : rule->dstOffset;
+                for (auto const& [t, offset] : changes)
+                {
+                    if (t <= aSeconds)
+                    {
+                        if (t > p.begin)
+                            p.begin = t;
+                        p.offset = offset;
+                    }
+                    else
+                    {
+                        p.end = t;
+                        break;
+                    }
+                }
+                return p;
+            }
+            period at(std::int64_t aSeconds) const
+            {
+                if (times.empty() || aSeconds < times.front())
+                {
+                    if (times.empty() && rule)
+                        return rule_period(aSeconds, sNoneBefore);
+                    return { sNoneBefore, times.empty() ? sNone : times.front(), initialOffset };
+                }
+                auto const next = std::upper_bound(times.begin(), times.end(), aSeconds);
+                auto const index = static_cast<std::size_t>(next - times.begin()) - 1u;
+                if (next != times.end())
+                    return { times[index], *next, offsets[index] };
+                if (!rule)
+                    return { times[index], sNone, offsets[index] };
+                auto p = rule_period(aSeconds, times[index]);
+                // (before the rule's first change after the last transition: the last transition's offset)
+                if (p.begin == times[index])
+                    p.offset = offsets[index];
+                return p;
+            }
+        };
+
+        std::unique_ptr<tzif_zone> read_tzif(std::string const& aName)
+        {
+            std::string directory = "/usr/share/zoneinfo";
+            if (auto const* dir = std::getenv("TZDIR"); dir != nullptr && *dir != '\0')
+                directory = dir;
+            if (aName.empty() || aName.find("..") != std::string::npos)
+                return nullptr;
+            std::ifstream file{ directory + "/" + aName, std::ios::binary };
+            if (!file)
+                return nullptr;
+            std::string data{ std::istreambuf_iterator<char>{ file }, std::istreambuf_iterator<char>{} };
+            auto const be32 = [&](std::size_t aAt) -> std::int64_t
+            {
+                if (aAt + 4u > data.size())
+                    throw std::out_of_range{ "tzif" };
+                std::uint32_t v = 0u;
+                for (std::size_t k = 0u; k < 4u; ++k)
+                    v = (v << 8) | static_cast<std::uint8_t>(data[aAt + k]);
+                return static_cast<std::int32_t>(v);
+            };
+            auto const be64 = [&](std::size_t aAt) -> std::int64_t
+            {
+                if (aAt + 8u > data.size())
+                    throw std::out_of_range{ "tzif" };
+                std::uint64_t v = 0u;
+                for (std::size_t k = 0u; k < 8u; ++k)
+                    v = (v << 8) | static_cast<std::uint8_t>(data[aAt + k]);
+                return static_cast<std::int64_t>(v);
+            };
+            try
+            {
+                if (data.size() < 44u || data.compare(0u, 4u, "TZif") != 0 || data[4] < '2')
+                    return nullptr;
+                // (the version 1 block, skipped: then the version 2 header and 64-bit data)
+                auto const skip = [&](std::size_t aAt, std::size_t aTimeSize) -> std::size_t
+                {
+                    auto const isutcnt = be32(aAt + 20u), isstdcnt = be32(aAt + 24u), leapcnt = be32(aAt + 28u), timecnt = be32(aAt + 32u),
+                        typecnt = be32(aAt + 36u), charcnt = be32(aAt + 40u);
+                    return aAt + 44u + static_cast<std::size_t>(timecnt) * (aTimeSize + 1u) + static_cast<std::size_t>(typecnt) * 6u +
+                        static_cast<std::size_t>(charcnt) + static_cast<std::size_t>(leapcnt) * (aTimeSize + 4u) +
+                        static_cast<std::size_t>(isstdcnt) + static_cast<std::size_t>(isutcnt);
+                };
+                auto const header = skip(0u, 4u);
+                if (data.compare(header, 4u, "TZif") != 0)
+                    return nullptr;
+                auto const timecnt = static_cast<std::size_t>(be32(header + 32u));
+                auto const typecnt = static_cast<std::size_t>(be32(header + 36u));
+                auto zone = std::make_unique<tzif_zone>();
+                auto at = header + 44u;
+                for (std::size_t k = 0u; k < timecnt; ++k)
+                    zone->times.push_back(be64(at + k * 8u));
+                at += timecnt * 8u;
+                std::vector<std::size_t> indices;
+                for (std::size_t k = 0u; k < timecnt; ++k)
+                    indices.push_back(static_cast<std::uint8_t>(data.at(at + k)));
+                at += timecnt;
+                std::vector<std::int32_t> typeOffsets;
+                for (std::size_t k = 0u; k < typecnt; ++k)
+                    typeOffsets.push_back(static_cast<std::int32_t>(be32(at + k * 6u)));
+                if (typeOffsets.empty())
+                    return nullptr;
+                for (auto const index : indices)
+                    zone->offsets.push_back(typeOffsets.at(index));
+                zone->initialOffset = typeOffsets[0];
+                // (the footer: the POSIX TZ string between newlines)
+                auto const end = skip(header, 8u);
+                if (end < data.size() && data[end] == '\n')
+                {
+                    auto const close = data.find('\n', end + 1u);
+                    if (close != std::string::npos && close > end + 1u)
+                    {
+                        posix_rule rule;
+                        if (parse_posix_rule(data.substr(end + 1u, close - end - 1u), rule))
+                            zone->rule = rule;
+                    }
+                }
+                return zone;
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        }
+
+        // (a library zone's compiled file (none: the library's offsets))
+        tzif_zone const* compiled_zone(std::chrono::time_zone const* aZone)
+        {
+            static std::mutex sMutex;
+            static std::map<std::chrono::time_zone const*, std::unique_ptr<tzif_zone>> sZones;
+            std::lock_guard lock{ sMutex };
+            auto existing = sZones.find(aZone);
+            if (existing == sZones.end())
+                existing = sZones.emplace(aZone, read_tzif(std::string{ aZone->name() })).first;
+            return existing->second.get();
+        }
+
         period period_at(std::chrono::time_zone const* aZone, std::int64_t aSeconds)
         {
             if (aZone == nullptr)
                 return { sNoneBefore, sNone, 0 };
+            if (auto const* compiled = compiled_zone(aZone))
+                return compiled->at(aSeconds);
             std::int64_t shift = 0;
             if (aSeconds >= sHighSeconds)
             {
@@ -178,6 +526,16 @@ namespace neos::javascript_runtime::temporal
         if (it == table.end())
             return {};
         return it->second;
+    }
+
+    std::vector<std::u16string> available_primary_time_zones()
+    {
+        std::vector<std::u16string> result;
+        for (auto const& [name, record] : zones().byLowercase)
+            if (record.identifier == record.primary)
+                result.push_back(record.identifier);
+        std::sort(result.begin(), result.end());
+        return result;
     }
 
     time_zone time_zone_from_identifier(std::u16string const& aIdentifier)
@@ -299,7 +657,10 @@ namespace neos::javascript_runtime::temporal
         }
         else
         {
-            check_iso_days_range(aDateTime.date);
+            // (no CheckISODaysRange (only an offset zone's date is checked): a local date may be a day beyond the instants' days)
+            auto const days = iso_date_to_epoch_days(aDateTime.date.year, aDateTime.date.month - 1, aDateTime.date.day);
+            if (days > 100000001 || days < -100000001)
+                throw_range_error("date is outside the representable range");
             auto const local = get_utc_epoch_ns(aDateTime);
             auto const day = i128{ nsPerDay };
             for (auto const probe : { local - day, local + day })

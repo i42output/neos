@@ -41,6 +41,7 @@
 #include <charconv>
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
+#include "intl.hpp"
 #include "api.hpp"
 
 namespace neos::javascript_runtime
@@ -538,9 +539,15 @@ namespace neos::javascript_runtime
             return make_string(bigint_to_string(x, radix));
         }
 
-        value bigint_prototype_to_locale_string(value aThis, arguments, value, function_object&)
+        value bigint_prototype_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
-            return make_string(bigint_to_string(this_bigint(aThis)));
+            auto const x = this_bigint(aThis);
+#if defined(NEOS_JS_ICU)
+            return intl::number_to_locale_string(x, argument(aArguments, 0u), argument(aArguments, 1u));
+#else
+            (void)aArguments;
+            return make_string(bigint_to_string(x));
+#endif
         }
 
         value bigint_prototype_value_of(value aThis, arguments, value, function_object&)

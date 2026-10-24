@@ -42,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include "js.hpp"
+#include "intl.hpp"
 #include "api.hpp"
 
 namespace neos::javascript_runtime
@@ -631,8 +632,7 @@ namespace neos::javascript_runtime
                         offset = 0.0;
                         continue;
                     }
-                    if (word == "t" && pos < n && is_digit(aText[pos]))
-                        continue;
+                    // (a T before a time: only in the Date Time String Format (e.g. "1997-3-8T11:19" is not a date))
                     static constexpr std::pair<char const*, int> sZones[] =
                     {
                         { "est", -5 }, { "edt", -4 }, { "cst", -6 }, { "cdt", -5 }, { "mst", -7 }, { "mdt", -6 }, { "pst", -8 }, { "pdt", -7 }
@@ -711,6 +711,27 @@ namespace neos::javascript_runtime
                     }
                     int count = 0;
                     auto const v = read_number(count);
+                    if (pos + 1u < n && aText[pos] == u'-' && is_digit(aText[pos + 1u]))
+                    {
+                        // (a signed year's date: y-m[-d] (e.g. "+001997-3-8"))
+                        if (date || year || month)
+                            return nan;
+                        ++pos;
+                        int count2 = 0;
+                        auto const v2 = read_number(count2);
+                        std::int64_t v3 = 1;
+                        if (pos + 1u < n && aText[pos] == u'-' && is_digit(aText[pos + 1u]))
+                        {
+                            ++pos;
+                            int count3 = 0;
+                            v3 = read_number(count3);
+                        }
+                        year = negative ? -v : v;
+                        yearFull = true;
+                        month = static_cast<int>(v2) - 1;
+                        date = v3;
+                        continue;
+                    }
                     tNumbers.push_back({ negative ? -v : v, count, true });
                     continue;
                 }
@@ -807,7 +828,8 @@ namespace neos::javascript_runtime
             // (the other numbers: a day of the month and a year)
             for (auto const& number : tNumbers)
             {
-                if (!number.signed_ && number.digits <= 2 && !date && month)
+                // (a two-digit number greater than 31 is a year)
+                if (!number.signed_ && number.digits <= 2 && number.value <= 31 && !date && month)
                     date = number.value;
                 else if (!year)
                 {
@@ -1079,6 +1101,23 @@ namespace neos::javascript_runtime
             return make_text(time_string(local_time(tv)) + time_zone_string(tv));
         }
 
+        // (toLocaleString (nativeId 0), toLocaleDateString (1) and toLocaleTimeString (2): ECMA-402's, with Intl; else toString's)
+        value date_to_locale_string(value aThis, arguments aArguments, value aNewTarget, function_object& aCallee)
+        {
+#if defined(NEOS_JS_ICU)
+            (void)aNewTarget;
+            auto const kind = static_cast<int>(aCallee.nativeId);
+            return intl::date_to_locale_string(this_time_value(aThis), argument(aArguments, 0u), argument(aArguments, 1u), kind, kind);
+#else
+            switch (aCallee.nativeId)
+            {
+            case 1u: return date_to_date_string(aThis, aArguments, aNewTarget, aCallee);
+            case 2u: return date_to_time_string(aThis, aArguments, aNewTarget, aCallee);
+            default: return date_to_string(aThis, aArguments, aNewTarget, aCallee);
+            }
+#endif
+        }
+
         value date_to_utc_string(value aThis, arguments, value, function_object&)
         {
             auto const tv = this_time_value(aThis);
@@ -1213,9 +1252,9 @@ namespace neos::javascript_runtime
         method(p, "toISOString", 0u, date_to_iso_string);
         auto const toUTCString = method(p, "toUTCString", 0u, date_to_utc_string);
         method(p, "toJSON", 1u, date_to_json);
-        method(p, "toLocaleString", 0u, date_to_string);
-        method(p, "toLocaleDateString", 0u, date_to_date_string);
-        method(p, "toLocaleTimeString", 0u, date_to_time_string);
+        as_function(method(p, "toLocaleString", 0u, date_to_locale_string))->nativeId = 0u;
+        as_function(method(p, "toLocaleDateString", 0u, date_to_locale_string))->nativeId = 1u;
+        as_function(method(p, "toLocaleTimeString", 0u, date_to_locale_string))->nativeId = 2u;
         auto const toPrimitive = make_native(aRealm.symToPrimitive, 1u, date_to_primitive);
         obj(p).put(aRealm.symToPrimitive, toPrimitive, AttributeConfigurable);
         // (Annex B.2.3)

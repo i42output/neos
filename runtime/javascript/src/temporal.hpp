@@ -31,7 +31,7 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-// Temporal (ECMA-262 Temporal, ISO 8601 calendar only): the internal records and abstract operations shared by the
+// Temporal (ECMA-262 Temporal; with Intl (ICU), ECMA-402's calendars too): the internal records and abstract operations shared by the
 // Temporal built-ins (temporal_*.cpp).
 //
 // Exact arithmetic: epoch nanoseconds and time durations are integers of up to about 90 bits; they are i128s (a portable
@@ -271,8 +271,9 @@ namespace neos::javascript_runtime::temporal
     std::string format_fractional_seconds(std::int64_t aSubSecondNs, int aPrecision);
     std::string time_record_to_string(time_record const& aTime, int aPrecision);
     std::string iso_date_to_string(iso_date const& aDate);
-    std::string iso_date_time_to_string(iso_date_time const& aDateTime, int aPrecision, show_calendar aShowCalendar);
-    std::string format_calendar_annotation(show_calendar aShowCalendar);
+    enum class calendar_id : std::uint8_t;
+    std::string iso_date_time_to_string(iso_date_time const& aDateTime, int aPrecision, calendar_id aCalendar, show_calendar aShowCalendar);
+    std::string format_calendar_annotation(calendar_id aCalendar, show_calendar aShowCalendar);
     std::string format_offset_minutes(int aOffsetMinutes, bool aSeparated = true);
     std::string format_utc_offset_ns(std::int64_t aOffsetNs);
     std::string format_utc_offset_rounded(std::int64_t aOffsetNs);
@@ -334,6 +335,7 @@ namespace neos::javascript_runtime::temporal
     };
 
     std::optional<named_zone_record> get_available_named_time_zone(std::u16string const& aName);
+    std::vector<std::u16string> available_primary_time_zones();                 ///< (AvailableNamedTimeZoneIdentifiers' primary identifiers)
     time_zone time_zone_from_identifier(std::u16string const& aIdentifier);     ///< (an available identifier (as it is stored))
     time_zone system_time_zone();
     time_zone to_temporal_time_zone_identifier(value aValue);
@@ -384,16 +386,67 @@ namespace neos::javascript_runtime::temporal
     bool is_annotation_value(std::u16string const& aText);
     std::u16string ascii_lowercase(std::u16string aText);
 
-    // --- calendars (ISO 8601 only)
+    // --- calendars (temporal_calendar.cpp: ISO 8601; with ICU, ECMA-402's (CLDR's) calendars too)
 
-    value canonicalize_calendar(value aId);         ///< (the String "iso8601", or a RangeError)
-    value to_temporal_calendar_identifier(value aValue);
-    value get_temporal_calendar_with_iso_default(value aItem);
+    enum class calendar_id : std::uint8_t
+    {
+        Iso8601,
+        Buddhist,
+        Chinese,
+        Coptic,
+        Dangi,
+        Ethioaa,
+        Ethiopic,
+        Gregory,
+        Hebrew,
+        Indian,
+        IslamicCivil,
+        IslamicTbla,
+        IslamicUmalqura,
+        Japanese,
+        Persian,
+        Roc,
+        Count
+    };
+
+    char const* calendar_identifier(calendar_id aCalendar);                 ///< (its canonical identifier, e.g. "islamic-civil")
+    std::optional<calendar_id> available_calendar(std::u16string const& aId);   ///< (AvailableCalendars (ASCII case-insensitive; aliases too))
+    value calendar_value(calendar_id aCalendar);
+    calendar_id canonicalize_calendar(value aId);   ///< (CanonicalizeCalendar: a RangeError if it is not available)
+    calendar_id to_temporal_calendar_identifier(value aValue);
+    calendar_id get_temporal_calendar_with_iso_default(value aItem);
+    bool calendar_supports_era(calendar_id aCalendar);
+
+    // (a Calendar Date Record)
+    struct calendar_date
+    {
+        std::optional<std::string> era;
+        std::optional<std::int64_t> eraYear;
+        std::int64_t year = 0;              ///< (the arithmetic year)
+        int month = 1;                      ///< (ordinal)
+        int monthNumber = 1;                ///< (its month code's number)
+        bool leapMonth = false;             ///< (its month code's L)
+        int day = 1;
+        int dayOfWeek = 1;
+        int dayOfYear = 1;
+        std::optional<int> weekOfYear;
+        std::optional<std::int64_t> yearOfWeek;
+        int daysInWeek = 7;
+        int daysInMonth = 30;
+        int daysInYear = 365;
+        int monthsInYear = 12;
+        bool inLeapYear = false;
+    public:
+        std::string month_code() const;
+    };
+    calendar_date calendar_iso_to_date(calendar_id aCalendar, iso_date const& aDate);     ///< (CalendarISOToDate)
 
     struct calendar_fields
     {
         std::optional<double> year, month, day, hour, minute, second, millisecond, microsecond, nanosecond;
         std::optional<std::u16string> monthCode;
+        std::optional<std::u16string> era;
+        std::optional<double> eraYear;
         std::optional<std::u16string> offset;
         std::optional<time_zone> timeZone;
     };
@@ -412,38 +465,50 @@ namespace neos::javascript_runtime::temporal
         FieldNanosecond = 512u,
         FieldOffset = 1024u,
         FieldTimeZone = 2048u,
+        FieldEra = 4096u,
+        FieldEraYear = 8192u,
         FieldsDate = FieldYear | FieldMonth | FieldMonthCode | FieldDay,
         FieldsTime = FieldHour | FieldMinute | FieldSecond | FieldMillisecond | FieldMicrosecond | FieldNanosecond
     };
 
-    calendar_fields prepare_calendar_fields(value aObject, unsigned aFieldNames, unsigned aRequired, bool aPartial);
-    calendar_fields iso_date_to_fields(iso_date const& aDate, int aType);   ///< (0 date, 1 year-month, 2 month-day)
-    calendar_fields merge_calendar_fields(calendar_fields const& aFields, calendar_fields const& aAdditional);
-    iso_date calendar_date_from_fields(calendar_fields aFields, overflow aOverflow);
-    iso_date calendar_year_month_from_fields(calendar_fields aFields, overflow aOverflow);
-    iso_date calendar_month_day_from_fields(calendar_fields aFields, overflow aOverflow);
-    iso_date_time interpret_temporal_date_time_fields(calendar_fields const& aFields, overflow aOverflow);
-    iso_date calendar_date_add(iso_date const& aDate, date_duration const& aDuration, overflow aOverflow);
-    date_duration calendar_date_until(iso_date const& aOne, iso_date const& aTwo, unit aLargestUnit);
+    unsigned calendar_extra_fields(calendar_id aCalendar, unsigned aFields);            ///< (CalendarExtraFields)
+    unsigned calendar_field_keys_to_ignore(calendar_id aCalendar, unsigned aKeys);      ///< (CalendarFieldKeysToIgnore)
+    calendar_fields prepare_calendar_fields(calendar_id aCalendar, value aObject, unsigned aFieldNames, unsigned aRequired, bool aPartial);
+    calendar_fields iso_date_to_fields(calendar_id aCalendar, iso_date const& aDate, int aType);   ///< (0 date, 1 year-month, 2 month-day)
+    calendar_fields merge_calendar_fields(calendar_id aCalendar, calendar_fields const& aFields, calendar_fields const& aAdditional);
+    iso_date calendar_date_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow);
+    iso_date calendar_year_month_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow);
+    iso_date calendar_month_day_from_fields(calendar_id aCalendar, calendar_fields aFields, overflow aOverflow);
+    iso_date_time interpret_temporal_date_time_fields(calendar_id aCalendar, calendar_fields const& aFields, overflow aOverflow);
+    iso_date calendar_date_add(calendar_id aCalendar, iso_date const& aDate, date_duration const& aDuration, overflow aOverflow);
+    date_duration calendar_date_until(calendar_id aCalendar, iso_date const& aOne, iso_date const& aTwo, unit aLargestUnit);
+    // (the non-ISO calendars' (temporal_calendar.cpp))
+    void non_iso_resolve_fields(calendar_id aCalendar, calendar_fields& aFields, int aType);
+    iso_date non_iso_calendar_date_to_iso(calendar_id aCalendar, calendar_fields const& aFields, overflow aOverflow);
+    iso_date non_iso_month_day_to_iso_reference_date(calendar_id aCalendar, calendar_fields const& aFields, overflow aOverflow);
+    iso_date non_iso_date_add(calendar_id aCalendar, iso_date const& aDate, date_duration const& aDuration, overflow aOverflow);
+    date_duration non_iso_date_until(calendar_id aCalendar, iso_date const& aOne, iso_date const& aTwo, unit aLargestUnit);
 
     // --- relative durations
 
     internal_duration round_relative_duration(internal_duration aDuration, i128 const& aOriginNs, i128 const& aDestNs,
-        iso_date_time const& aDateTime, time_zone const* aTimeZone, unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit,
-        rounding_mode aMode);
+        iso_date_time const& aDateTime, calendar_id aCalendar, time_zone const* aTimeZone, unit aLargestUnit, std::int64_t aIncrement,
+        unit aSmallestUnit, rounding_mode aMode);
     double total_relative_duration(internal_duration const& aDuration, i128 const& aOriginNs, i128 const& aDestNs,
-        iso_date_time const& aDateTime, time_zone const* aTimeZone, unit aUnit);
-    internal_duration difference_iso_date_time(iso_date_time const& a, iso_date_time const& b, unit aLargestUnit);
-    internal_duration difference_plain_date_time_with_rounding(iso_date_time const& a, iso_date_time const& b, unit aLargestUnit,
-        std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode);
-    double difference_plain_date_time_with_total(iso_date_time const& a, iso_date_time const& b, unit aUnit);
+        iso_date_time const& aDateTime, calendar_id aCalendar, time_zone const* aTimeZone, unit aUnit);
+    internal_duration difference_iso_date_time(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b, unit aLargestUnit);
+    internal_duration difference_plain_date_time_with_rounding(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b,
+        unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode);
+    double difference_plain_date_time_with_total(calendar_id aCalendar, iso_date_time const& a, iso_date_time const& b, unit aUnit);
     internal_duration difference_instant(i128 const& a, i128 const& b, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode);
-    internal_duration difference_zoned_date_time(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aLargestUnit);
-    internal_duration difference_zoned_date_time_with_rounding(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aLargestUnit,
-        std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode);
-    double difference_zoned_date_time_with_total(i128 const& a, i128 const& b, time_zone const& aTimeZone, unit aUnit);
+    internal_duration difference_zoned_date_time(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar,
+        unit aLargestUnit);
+    internal_duration difference_zoned_date_time_with_rounding(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar,
+        unit aLargestUnit, std::int64_t aIncrement, unit aSmallestUnit, rounding_mode aMode);
+    double difference_zoned_date_time_with_total(i128 const& a, i128 const& b, time_zone const& aTimeZone, calendar_id aCalendar, unit aUnit);
     i128 add_instant(i128 const& aEpochNs, i128 const& aTime);
-    i128 add_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, internal_duration const& aDuration, overflow aOverflow);
+    i128 add_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, calendar_id aCalendar, internal_duration const& aDuration,
+        overflow aOverflow);
     i128 interpret_iso_date_time_offset(iso_date const& aDate, std::optional<time_record> const& aTime, int aOffsetBehaviour,
         std::int64_t aOffsetNs, time_zone const& aTimeZone, disambiguation aDisambiguation, offset_option aOffsetOption, bool aMatchMinutes);
     double total_time_duration(i128 const& aTime, unit aUnit);
@@ -460,6 +525,7 @@ namespace neos::javascript_runtime::temporal
         time_record time;               ///< (PlainTime, PlainDateTime)
         time_zone timeZone;             ///< (ZonedDateTime)
         duration_fields duration;       ///< (Duration)
+        calendar_id calendar = calendar_id::Iso8601;    ///< (PlainDate, PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime)
     public:
         void trace(tracer& aTracer) override;   ///< (temporal_objects.cpp: its time zone's identifier too)
     };
@@ -481,21 +547,32 @@ namespace neos::javascript_runtime::temporal
     temporal_object& this_temporal(value aThis, object_class aClass, char const* aName);
     value create_duration(duration_fields const& aFields, value aNewTarget = Undefined);
     value create_instant(i128 const& aEpochNs, value aNewTarget = Undefined);
-    value create_plain_date(iso_date const& aDate, value aNewTarget = Undefined);
+    value create_plain_date(iso_date const& aDate, calendar_id aCalendar, value aNewTarget = Undefined);
     value create_plain_time(time_record const& aTime, value aNewTarget = Undefined);
-    value create_plain_date_time(iso_date_time const& aDateTime, value aNewTarget = Undefined);
-    value create_plain_year_month(iso_date const& aDate, value aNewTarget = Undefined);
-    value create_plain_month_day(iso_date const& aDate, value aNewTarget = Undefined);
-    value create_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, value aNewTarget = Undefined);
+    value create_plain_date_time(iso_date_time const& aDateTime, calendar_id aCalendar, value aNewTarget = Undefined);
+    value create_plain_year_month(iso_date const& aDate, calendar_id aCalendar, value aNewTarget = Undefined);
+    value create_plain_month_day(iso_date const& aDate, calendar_id aCalendar, value aNewTarget = Undefined);
+    value create_zoned_date_time(i128 const& aEpochNs, time_zone const& aTimeZone, calendar_id aCalendar, value aNewTarget = Undefined);
     temporal_object& tobj(value aObject);
     duration_fields to_temporal_duration(value aItem);
     i128 to_temporal_instant(value aItem);
-    iso_date to_temporal_date(value aItem, value aOptions = Undefined);
+    // (a date (and a date-time) with its calendar)
+    struct temporal_date
+    {
+        iso_date date;
+        calendar_id calendar = calendar_id::Iso8601;
+    };
+    struct temporal_date_time
+    {
+        iso_date_time dateTime;
+        calendar_id calendar = calendar_id::Iso8601;
+    };
+    temporal_date to_temporal_date(value aItem, value aOptions = Undefined);
     time_record to_temporal_time(value aItem, value aOptions = Undefined);
     time_record to_time_record_or_midnight(value aItem);
-    iso_date_time to_temporal_date_time(value aItem, value aOptions = Undefined);
-    iso_date to_temporal_year_month(value aItem, value aOptions = Undefined);
-    iso_date to_temporal_month_day(value aItem, value aOptions = Undefined);
+    temporal_date_time to_temporal_date_time(value aItem, value aOptions = Undefined);
+    temporal_date to_temporal_year_month(value aItem, value aOptions = Undefined);
+    temporal_date to_temporal_month_day(value aItem, value aOptions = Undefined);
     temporal_object& to_temporal_zoned_date_time(value aItem, value aOptions = Undefined);
     bool is_partial_temporal_object(value aValue);
     value round_to_options(value aRoundTo, char const* aKey);   ///< (round's and total's argument: a string becomes { [aKey]: string })
@@ -506,7 +583,7 @@ namespace neos::javascript_runtime::temporal
         CalCalendarId, CalEra, CalEraYear, CalYear, CalMonth, CalMonthCode, CalDay, CalDayOfWeek, CalDayOfYear, CalWeekOfYear, CalYearOfWeek,
         CalDaysInWeek, CalDaysInMonth, CalDaysInYear, CalMonthsInYear, CalInLeapYear
     };
-    value calendar_date_field(iso_date const& aDate, std::uint32_t aField);     ///< (temporal_plain.cpp: the calendar getters)
+    value calendar_date_field(calendar_id aCalendar, iso_date const& aDate, std::uint32_t aField);     ///< (temporal_plain.cpp: the calendar getters)
     char const* calendar_field_name(std::uint32_t aField);
     value value_of_throws(value aThis, arguments aArguments, value aNewTarget, function_object& aSelf);
 

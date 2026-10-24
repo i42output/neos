@@ -301,9 +301,16 @@ namespace neos::javascript_runtime
         return aConstructor;
     }
 
-    value super_construct(value aConstructor, value aNewTarget, value aArguments)
+    value super_constructor(value aConstructor)
     {
-        auto const parent = obj(aConstructor).get_prototype_of();
+        // (GetSuperConstructor: before the arguments are evaluated)
+        return obj(aConstructor).get_prototype_of();
+    }
+
+    value super_construct(value aParent, value aNewTarget, value aArguments)
+    {
+        // (the parent (see super_constructor) is a constructor: checked after the arguments are evaluated)
+        auto const parent = aParent;
         if (!is_constructor(parent))
             throw_type_error("Super constructor " + describe(parent) + " of anonymous class is not a constructor");
         auto const list = create_list_from_array_like(aArguments);

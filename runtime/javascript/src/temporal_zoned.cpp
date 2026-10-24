@@ -35,6 +35,7 @@
 
 #include <cmath>
 #include "temporal.hpp"
+#include "intl.hpp"
 
 namespace neos::javascript_runtime::temporal
 {
@@ -62,14 +63,15 @@ namespace neos::javascript_runtime::temporal
             if (!is_string(timeZoneArgument))
                 throw_type_error("time zone must be a string");
             auto const timeZone = parse_time_zone_identifier_checked(timeZoneArgument);
-            auto const calendar = argument(aArguments, 2u);
-            if (!is_undefined(calendar))
+            auto const calendarArgument = argument(aArguments, 2u);
+            auto calendar = calendar_id::Iso8601;
+            if (!is_undefined(calendarArgument))
             {
-                if (!is_string(calendar))
+                if (!is_string(calendarArgument))
                     throw_type_error("calendar must be a string");
-                canonicalize_calendar(calendar);
+                calendar = canonicalize_calendar(calendarArgument);
             }
-            return create_zoned_date_time(*ns, timeZone, aNewTarget);
+            return create_zoned_date_time(*ns, timeZone, calendar, aNewTarget);
         }
 
         value zoned_from(value, arguments aArguments, value, function_object&)
@@ -88,8 +90,8 @@ namespace neos::javascript_runtime::temporal
         {
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime getter");
             if (aSelf.nativeId == CalCalendarId)
-                return ascii("iso8601");
-            return calendar_date_field(zoned_date_time(z).date, aSelf.nativeId);
+                return calendar_value(z.calendar);
+            return calendar_date_field(z.calendar, zoned_date_time(z).date, aSelf.nativeId);
         }
 
         char const* const sTimeFields[] = { "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
@@ -147,9 +149,10 @@ namespace neos::javascript_runtime::temporal
                 throw_type_error("with() requires a partial zoned date-time object");
             auto const epochNs = z.epochNs;
             auto const timeZone = z.timeZone;
+            auto const calendar = z.calendar;
             auto const offsetNs = get_offset_ns_for(timeZone, epochNs);
             auto const dateTime = get_iso_date_time_for(timeZone, epochNs);
-            auto fields = iso_date_to_fields(dateTime.date, 0);
+            auto fields = iso_date_to_fields(calendar, dateTime.date, 0);
             fields.hour = dateTime.time.hour;
             fields.minute = dateTime.time.minute;
             fields.second = dateTime.time.second;
@@ -157,17 +160,17 @@ namespace neos::javascript_runtime::temporal
             fields.microsecond = dateTime.time.microsecond;
             fields.nanosecond = dateTime.time.nanosecond;
             fields.offset = u16(format_utc_offset_ns(offsetNs));
-            auto const partial = prepare_calendar_fields(like, FieldsDate | FieldsTime | FieldOffset, 0u, true);
-            fields = merge_calendar_fields(fields, partial);
+            auto const partial = prepare_calendar_fields(calendar, like, FieldsDate | FieldsTime | FieldOffset, 0u, true);
+            fields = merge_calendar_fields(calendar, fields, partial);
             auto const options = get_options_object(argument(aArguments, 1u));
             auto const disambiguationOption = get_disambiguation_option(options);
             auto const offsetOption = get_offset_option(options, offset_option::Prefer);
             auto const overflow = get_overflow_option(options);
-            auto const result = interpret_temporal_date_time_fields(fields, overflow);
+            auto const result = interpret_temporal_date_time_fields(calendar, fields, overflow);
             auto const newOffsetNs = *parse_date_time_utc_offset(*fields.offset);
             auto const ns = interpret_iso_date_time_offset(result.date, result.time, 0, newOffsetNs, timeZone, disambiguationOption, offsetOption,
                 false);
-            return create_zoned_date_time(ns, timeZone);
+            return create_zoned_date_time(ns, timeZone, calendar);
         }
 
         value zoned_with_plain_time(value aThis, arguments aArguments, value, function_object&)
@@ -184,7 +187,7 @@ namespace neos::javascript_runtime::temporal
                 auto const time = to_temporal_time(like);
                 epochNs = get_epoch_ns_for(timeZone, { dateTime.date, time }, disambiguation::Compatible);
             }
-            return create_zoned_date_time(epochNs, timeZone);
+            return create_zoned_date_time(epochNs, timeZone, z.calendar);
         }
 
         value zoned_with_time_zone(value aThis, arguments aArguments, value, function_object&)
@@ -192,7 +195,7 @@ namespace neos::javascript_runtime::temporal
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.withTimeZone");
             auto const epochNs = z.epochNs;
             auto const timeZone = to_temporal_time_zone_identifier(argument(aArguments, 0u));
-            return create_zoned_date_time(epochNs, timeZone);
+            return create_zoned_date_time(epochNs, timeZone, z.calendar);
         }
 
         value zoned_with_calendar(value aThis, arguments aArguments, value, function_object&)
@@ -200,8 +203,8 @@ namespace neos::javascript_runtime::temporal
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.withCalendar");
             auto const epochNs = z.epochNs;
             auto const timeZone = z.timeZone;
-            to_temporal_calendar_identifier(argument(aArguments, 0u));
-            return create_zoned_date_time(epochNs, timeZone);
+            auto const calendar = to_temporal_calendar_identifier(argument(aArguments, 0u));
+            return create_zoned_date_time(epochNs, timeZone, calendar);
         }
 
         value add_duration_to_zoned(bool aSubtract, temporal_object const& aZoned, value aLike, value aOptions)
@@ -213,7 +216,7 @@ namespace neos::javascript_runtime::temporal
                 duration = negate_duration(duration);
             auto const overflow = get_overflow_option(get_options_object(aOptions));
             auto const internal = to_internal_duration(duration);
-            return create_zoned_date_time(add_zoned_date_time(epochNs, timeZone, internal, overflow), timeZone);
+            return create_zoned_date_time(add_zoned_date_time(epochNs, timeZone, aZoned.calendar, internal, overflow), timeZone, aZoned.calendar);
         }
 
         value zoned_add(value aThis, arguments aArguments, value, function_object&)
@@ -232,7 +235,10 @@ namespace neos::javascript_runtime::temporal
         {
             auto const epochNs = aZoned.epochNs;
             auto const timeZone = aZoned.timeZone;
+            auto const calendar = aZoned.calendar;
             auto const& other = to_temporal_zoned_date_time(aOther);
+            if (calendar != other.calendar)
+                throw_range_error("the calendars are not the same");
             auto const options = get_options_object(aOptions);
             auto const settings = get_difference_settings(aSince, options, unit_group::DateTime, {}, unit::Nanosecond, unit::Hour);
             if (!is_date_unit(settings.largestUnit))
@@ -248,7 +254,7 @@ namespace neos::javascript_runtime::temporal
                 throw_range_error("date units cannot be computed between different time zones");
             if (epochNs == other.epochNs)
                 return create_duration({});
-            auto const internal = difference_zoned_date_time_with_rounding(epochNs, other.epochNs, timeZone, settings.largestUnit,
+            auto const internal = difference_zoned_date_time_with_rounding(epochNs, other.epochNs, timeZone, calendar, settings.largestUnit,
                 settings.roundingIncrement, settings.smallestUnit, settings.roundingMode);
             auto result = duration_from_internal(internal, unit::Hour);
             if (aSince)
@@ -283,7 +289,7 @@ namespace neos::javascript_runtime::temporal
             else
                 validate_rounding_increment(roundingIncrement, maximum_rounding_increment(smallestUnit), false);
             if (smallestUnit == unit::Nanosecond && roundingIncrement == 1)
-                return create_zoned_date_time(thisNs, timeZone);
+                return create_zoned_date_time(thisNs, timeZone, z.calendar);
             auto const dateTime = get_iso_date_time_for(timeZone, thisNs);
             i128 epochNs;
             if (smallestUnit == unit::Day)
@@ -293,7 +299,9 @@ namespace neos::javascript_runtime::temporal
                 auto const startNs = get_start_of_day(timeZone, dateStart);
                 auto const endNs = get_start_of_day(timeZone, dateEnd);
                 auto const dayLength = endNs - startNs;
-                auto const progress = thisNs - startNs;
+                // (a transition after midnight back to before it interleaves two days: an instant in the first day's second piece
+                // is beyond the next day's start (proposal-temporal issue 3312))
+                auto const progress = (thisNs >= endNs ? endNs - i128{ 1 } : thisNs) - startNs;
                 auto const rounded = round_to_increment(progress, dayLength, roundingMode);
                 epochNs = startNs + rounded;
             }
@@ -304,7 +312,7 @@ namespace neos::javascript_runtime::temporal
                 epochNs = interpret_iso_date_time_offset(roundResult.date, roundResult.time, 0, offsetNs, timeZone, disambiguation::Compatible,
                     offset_option::Prefer, false);
             }
-            return create_zoned_date_time(epochNs, timeZone);
+            return create_zoned_date_time(epochNs, timeZone, z.calendar);
         }
 
         value zoned_equals(value aThis, arguments aArguments, value, function_object&)
@@ -315,22 +323,22 @@ namespace neos::javascript_runtime::temporal
             auto const& other = to_temporal_zoned_date_time(argument(aArguments, 0u));
             if (epochNs != other.epochNs)
                 return False;
-            return boolean(time_zone_equals(timeZone, other.timeZone));
+            return boolean(time_zone_equals(timeZone, other.timeZone) && z.calendar == other.calendar);
         }
 
-        std::string zoned_to_string(i128 aEpochNs, time_zone const& aTimeZone, int aPrecision, show_calendar aShowCalendar,
+        std::string zoned_to_string(i128 aEpochNs, time_zone const& aTimeZone, calendar_id aCalendar, int aPrecision, show_calendar aShowCalendar,
             show_time_zone aShowTimeZone, bool aShowOffset, std::int64_t aIncrement = 1, unit aUnit = unit::Nanosecond,
             rounding_mode aMode = rounding_mode::Trunc)
         {
             aEpochNs = round_to_increment_as_if_positive(aEpochNs, unit_length(aUnit) * i128{ aIncrement }, aMode);
             auto const offsetNs = get_offset_ns_for(aTimeZone, aEpochNs);
             auto const dateTime = get_iso_date_time_for(aTimeZone, aEpochNs);
-            auto result = iso_date_time_to_string(dateTime, aPrecision, show_calendar::Never);
+            auto result = iso_date_time_to_string(dateTime, aPrecision, aCalendar, show_calendar::Never);
             if (aShowOffset)
                 result += format_utc_offset_rounded(offsetNs);
             if (aShowTimeZone != show_time_zone::Never)
                 result += std::string{ "[" } + (aShowTimeZone == show_time_zone::Critical ? "!" : "") + utf8(aTimeZone.id) + "]";
-            return result + format_calendar_annotation(aShowCalendar);
+            return result + format_calendar_annotation(aCalendar, aShowCalendar);
         }
 
         value zoned_to_string_method(value aThis, arguments aArguments, value, function_object&)
@@ -349,20 +357,26 @@ namespace neos::javascript_runtime::temporal
             if (smallestUnit == unit::Hour)
                 throw_range_error("smallestUnit must not be hour");
             auto const precision = to_seconds_string_precision(smallestUnit, digits);
-            return string_value(zoned_to_string(epochNs, timeZone, precision.precision, showCalendar, showTimeZone, showOffset, precision.increment,
-                precision.u, roundingMode));
+            return string_value(zoned_to_string(epochNs, timeZone, z.calendar, precision.precision, showCalendar, showTimeZone, showOffset,
+                precision.increment, precision.u, roundingMode));
         }
 
         value zoned_to_json(value aThis, arguments, value, function_object&)
         {
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toJSON");
-            return string_value(zoned_to_string(z.epochNs, z.timeZone, -1, show_calendar::Auto, show_time_zone::Auto, true));
+            return string_value(zoned_to_string(z.epochNs, z.timeZone, z.calendar, -1, show_calendar::Auto, show_time_zone::Auto, true));
         }
 
-        value zoned_to_locale_string(value aThis, arguments, value, function_object&)
+        value zoned_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
+#if defined(NEOS_JS_ICU)
+            this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toLocaleString");
+            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+#else
+            (void)aArguments;
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toLocaleString");
-            return string_value(zoned_to_string(z.epochNs, z.timeZone, -1, show_calendar::Auto, show_time_zone::Auto, true));
+            return string_value(zoned_to_string(z.epochNs, z.timeZone, z.calendar, -1, show_calendar::Auto, show_time_zone::Auto, true));
+#endif
         }
 
         value zoned_start_of_day(value aThis, arguments, value, function_object&)
@@ -370,7 +384,7 @@ namespace neos::javascript_runtime::temporal
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.startOfDay");
             auto const timeZone = z.timeZone;
             auto const dateTime = zoned_date_time(z);
-            return create_zoned_date_time(get_start_of_day(timeZone, dateTime.date), timeZone);
+            return create_zoned_date_time(get_start_of_day(timeZone, dateTime.date), timeZone, z.calendar);
         }
 
         value zoned_get_time_zone_transition(value aThis, arguments aArguments, value, function_object&)
@@ -396,7 +410,7 @@ namespace neos::javascript_runtime::temporal
             auto const transition = get_time_zone_transition(timeZone, epochNs, next);
             if (!transition)
                 return Null;
-            return create_zoned_date_time(*transition, timeZone);
+            return create_zoned_date_time(*transition, timeZone, z.calendar);
         }
 
         value zoned_to_instant(value aThis, arguments, value, function_object&)
@@ -406,7 +420,8 @@ namespace neos::javascript_runtime::temporal
 
         value zoned_to_plain_date(value aThis, arguments, value, function_object&)
         {
-            return create_plain_date(zoned_date_time(this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toPlainDate")).date);
+            auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toPlainDate");
+            return create_plain_date(zoned_date_time(z).date, z.calendar);
         }
 
         value zoned_to_plain_time(value aThis, arguments, value, function_object&)
@@ -416,7 +431,8 @@ namespace neos::javascript_runtime::temporal
 
         value zoned_to_plain_date_time(value aThis, arguments, value, function_object&)
         {
-            return create_plain_date_time(zoned_date_time(this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toPlainDateTime")));
+            auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toPlainDateTime");
+            return create_plain_date_time(zoned_date_time(z), z.calendar);
         }
     }
 
