@@ -1,0 +1,17 @@
+Expat 2.8.5, bundled for the neos Python runtime plugin's module pyexpat (runtime/python/src/pyexpat.cpp)
+=========================================================================================================
+
+These are the sources of Expat 2.8.5 as CPython 3.13 bundles them (CPython's Modules/expat), compiled into the
+plugin (CMakeLists.txt: neos_expat):
+
+  - Expat's sources and headers, unchanged: Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and
+    Clark Cooper; Copyright (c) 2001-2025 Expat maintainers. They are used under the MIT licence in COPYING.
+
+  - pyexpatns.h, and its inclusion by expat_external.h, are CPython's (Copyright (c) 2005-2006 ActiveState
+    Software Inc.; part of CPython, used under the Python Software Foundation License Version 2: see
+    runtime/python/LICENSE.PSF): they prefix Expat's names (PyExpat_), so they are not those of any other Expat
+    that the process has.
+
+  - expat_config.h is neos's, after CPython's Modules/expat/expat_config.h (the same features: XML_NS, XML_DTD,
+    XML_GE, XML_CONTEXT_BYTES 1024 and XML_POOR_ENTROPY (pyexpat sets each parser's hash salt)), with the byte
+    order the compiler's instead of pyconfig.h's.

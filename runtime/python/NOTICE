@@ -149,10 +149,14 @@ names the CPython sources it is derived from.
   pickle_docs.hpp      Modules/_pickle.c, Modules/clinic/_pickle.c.h and
                        Lib/pickle.py (their docstrings, generated)
   pkgutil.cpp          Lib/pkgutil.py
+  plistlib.cpp         Lib/plistlib.py
   poplib.cpp           Lib/poplib.py (by David Ascher)
   posixsubprocess.cpp  Modules/_posixsubprocess.c
   pprint.cpp           Lib/pprint.py
   pty.cpp              Lib/pty.py
+  pyexpat.cpp          Modules/pyexpat.c, with the bundled Expat
+                       (3rdparty/expat-2.8.5, as CPython 3.13 bundles it:
+                       its MIT licence is its COPYING; see its README.neos)
   pyio.cpp             Lib/_pyio.py (the io module's classes), with the
                        behaviour and messages of Modules/_io/iobase.c,
                        Modules/_io/bufferedio.c, Modules/_io/textio.c and
@@ -277,6 +281,24 @@ names the CPython sources it is derived from.
                        contributors: MIT licence, see below; licensed to PSF
                        under a Contributor Agreement)
   wsgiref_*_docs.hpp   Lib/wsgiref (its docstrings, generated)
+  xml.cpp, xml_parsers.cpp and xml_parsers_expat.cpp
+                       Lib/xml/__init__.py, Lib/xml/parsers/__init__.py and
+                       Lib/xml/parsers/expat.py
+  xml_dom*.cpp         Lib/xml/dom (its modules: __init__, NodeFilter, domreg,
+                       expatbuilder, minicompat, minidom, pulldom and
+                       xmlbuilder)
+  xml_etree*.cpp       Lib/xml/etree (its modules: __init__, ElementInclude,
+                       ElementPath, ElementTree and cElementTree: Copyright (c)
+                       1999-2009 by Fredrik Lundh, licensed to PSF under a
+                       Contributor Agreement; his permission notice is below)
+  xml_sax*.cpp         Lib/xml/sax (its modules: __init__, _exceptions,
+                       expatreader, handler, saxutils and xmlreader)
+  xml_*_docs.hpp       Lib/xml (its docstrings, generated)
+  xmlrpc.cpp, xmlrpc_client.cpp and xmlrpc_server.cpp
+                       Lib/xmlrpc/__init__.py, Lib/xmlrpc/client.py (Copyright
+                       (c) 1999-2002 by Secret Labs AB and Fredrik Lundh: their
+                       permission notice is below) and Lib/xmlrpc/server.py
+  xmlrpc_*_docs.hpp    Lib/xmlrpc (their docstrings, generated)
   zipfile.cpp          Lib/zipfile/__init__.py
   zipfile_path.cpp     Lib/zipfile/_path/__init__.py
   zipfile_path_glob.cpp
@@ -588,6 +610,37 @@ NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+ElementTree and the XML-RPC client (src/xml_etree*.cpp, src/xmlrpc_client.cpp)
+-------------------------------------------------------------------------------
+
+The ElementTree toolkit is Copyright (c) 1999-2008 by Fredrik Lundh (ElementPath:
+Copyright (c) 1999-2009; ElementInclude: Copyright (c) 2003-2004). The XML-RPC
+client interface is Copyright (c) 1999-2002 by Secret Labs AB and Copyright (c)
+1999-2002 by Fredrik Lundh. Each under the following terms:
+
+By obtaining, using, and/or copying this software and/or its
+associated documentation, you agree that you have read, understood,
+and will comply with the following terms and conditions:
+
+Permission to use, copy, modify, and distribute this software and
+its associated documentation for any purpose and without fee is
+hereby granted, provided that the above copyright notice appears in
+all copies, and that both that copyright notice and this permission
+notice appear in supporting documentation, and that the name of
+Secret Labs AB or the author not be used in advertising or publicity
+pertaining to distribution of the software without specific, written
+prior permission.
+
+SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD
+TO THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANT-
+ABILITY AND FITNESS.  IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR
+BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY
+DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
+OF THIS SOFTWARE.
 
 
 Unicode Character Database (src/unicode_tables.hpp, src/unicodedata.cpp)

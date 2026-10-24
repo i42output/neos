@@ -2920,6 +2920,13 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("unlink", make_builtin(sOsFunctions[9]));
                 aAttributes.emplace_back("environ", environment());
                 aAttributes.emplace_back("path", fn_import(sPlatform.windows ? "ntpath" : "posixpath"));
+                // (sys.modules['os.path']: its path module (as os.py sets it))
+                if (ref const modules{ imported_modules() }; modules && aAttributes.back().second != nullptr && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
+                {
+                    ref const key{ make_str("os.path") };
+                    if (dict_find(builtin_value(modules.get()), key.get()) == -1 && dict_set(builtin_value(modules.get()), key.get(), aAttributes.back().second) != 0)
+                        return false;
+                }
 #if defined(_WIN32)
                 aAttributes.emplace_back("name", make_str("nt"));
                 aAttributes.emplace_back("linesep", make_str("\r\n"));

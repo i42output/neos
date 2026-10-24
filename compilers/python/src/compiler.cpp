@@ -261,7 +261,7 @@ namespace neos::compilers::python
                 "hmac", "difflib", "ipaddress", "fileinput", "html", "_markupbase", "urllib", "tomllib", "importlib", "pwd", "grp", "fcntl", "_compression", "gzip", "sched", "cmd", "quopri", 
                 "mimetypes", "netrc", "zipfile", "unittest", "pkgutil", "termios",
                 "optparse", "gettext", "filecmp", "getpass", "token", "tokenize", "tarfile", "stringprep", "tty", "pty", "shelve", "wave", "webbrowser", "_tokenize", "email", "http",
-                "smtplib", "poplib", "imaplib", "ftplib", "mailbox", "nturl2path", "code", "codeop", "rlcompleter", "wsgiref" };
+                "smtplib", "poplib", "imaplib", "ftplib", "mailbox", "nturl2path", "code", "codeop", "rlcompleter", "wsgiref", "pyexpat", "xml", "plistlib", "xmlrpc" };
             return sStandard;
         }
         // (the submodules of the standard library's packages that the runtime implements as modules of their own (imported by their 
@@ -278,7 +278,10 @@ namespace neos::compilers::python
                 "unittest.main", "unittest.runner", "unittest.signals", "unittest.async_case", "unittest._log", "unittest.mock",
                 "email._encoded_words", "email._header_value_parser", "email._parseaddr", "email._policybase", "email.base64mime", "email.charset", "email.contentmanager", "email.encoders", "email.errors", "email.feedparser", "email.generator", "email.header", "email.headerregistry", "email.iterators", "email.message", "email.parser", "email.policy", "email.quoprimime", "email.utils", "email.mime", "email.mime.application", "email.mime.audio", "email.mime.base", "email.mime.image", "email.mime.message", "email.mime.multipart", "email.mime.nonmultipart", "email.mime.text",
                 "http.client", "http.cookiejar", "http.cookies", "http.server", "urllib.error", "urllib.request", "urllib.response", "urllib.robotparser",
-                "wsgiref.handlers", "wsgiref.headers", "wsgiref.simple_server", "wsgiref.util", "wsgiref.validate", "wsgiref.types" };
+                "wsgiref.handlers", "wsgiref.headers", "wsgiref.simple_server", "wsgiref.util", "wsgiref.validate", "wsgiref.types", "pyexpat.errors", "pyexpat.model",
+                "xml.parsers", "xml.parsers.expat", "xml.etree", "xml.etree.ElementPath", "xml.etree.ElementTree", "xml.etree.ElementInclude", "xml.etree.cElementTree",
+                "xml.dom", "xml.dom.NodeFilter", "xml.dom.domreg", "xml.dom.minicompat", "xml.dom.minidom", "xml.dom.xmlbuilder", "xml.dom.expatbuilder", "xml.dom.pulldom",
+                "xml.sax", "xml.sax._exceptions", "xml.sax.handler", "xml.sax.saxutils", "xml.sax.xmlreader", "xml.sax.expatreader", "xmlrpc.client", "xmlrpc.server" };
             return sSubmodules;
         }
 

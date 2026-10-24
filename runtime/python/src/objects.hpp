@@ -254,7 +254,9 @@ namespace neos::python_runtime
         };
         using native_function = neos_py_object* (*)(neos_py_context*, void*, neos_py_object*, neos_py_object*);
         struct function_object { header h; std::string name; native_function function; void* data; object* self; bool binds = true; char const* module = nullptr; char const* doc = nullptr; ~function_object() { release(self); } };  // (binds: a class's attribute is a method (CPython's builtins are not); module: its module's name (null: builtins); doc: its docstring (null: none))
-        struct singleton { neos_rt_object base; };
+        // (a static object: header's layout (its type's retain is retain_static, so retain's fast path (retain_object's) never counts its 
+        // references, but the compiler cannot know that: room for them))
+        struct singleton { neos_rt_object base; std::atomic<long> references{ 1 }; };
 
         inline neos_py_type sNoneType = make_type("python.NoneType", "NoneType", retain_static, release_static);
         inline neos_py_type sNotImplementedType = make_type("python.NotImplementedType", "NotImplementedType", retain_static, release_static);

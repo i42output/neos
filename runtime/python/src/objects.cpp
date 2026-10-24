@@ -11495,7 +11495,8 @@ namespace neos::python_runtime
         {
             std::string_view const name{ aName };
             auto const cls = user_class_of(aSelf);
-            if (name == "__class__")
+            // (its class; unless its class defines __class__ (e.g. a property, or a class attribute): that, as any attribute)
+            if (name == "__class__" && (cls == nullptr || !is_class(cls) || class_lookup(cls, "__class__") == nullptr))
             {
                 retain(cls);
                 return cls;
@@ -14699,6 +14700,22 @@ namespace neos::python_runtime
             for (auto c : classes)
                 if (is_class(c) && as<class_object>(c)->instancecheck != nullptr && as<class_object>(c)->instancecheck(aArgs[0]) == 1)
                     return make_bool(true);
+            // (an instance whose class defines __class__ (e.g. unittest.mock's spec): an instance of the class that it claims too, as 
+            // CPython's recursive_isinstance)
+            if (userClass != nullptr && is_class(userClass) && class_lookup(userClass, "__class__") != nullptr)
+            {
+                ref const claimed{ getattr(aArgs[0], "__class__") };
+                if (!claimed)
+                    clear_error();
+                else if (claimed.get() != userClass && (is_class(claimed.get()) || is_type_object(claimed.get())))
+                {
+                    ref const r{ b_issubclass({ claimed.get(), aArgs[1] }, nullptr) };
+                    if (!r)
+                        return nullptr;
+                    if (truth(r.get()) == 1)
+                        return make_bool(true);
+                }
+            }
             if (userClass != nullptr && aArgs[0]->type != &sExceptionType.base)
             {
                 auto const& base = as<class_object>(userClass)->builtinBase;
