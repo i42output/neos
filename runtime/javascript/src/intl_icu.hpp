@@ -52,7 +52,9 @@
 #include <unicode/udateintervalformat.h>
 #include <unicode/unum.h>
 #include <unicode/unumberformatter.h>
+#if U_ICU_VERSION_MAJOR_NUM >= 69
 #include <unicode/unumberrangeformatter.h>
+#endif
 #include <unicode/unumsys.h>
 #include <unicode/upluralrules.h>
 #include <unicode/ureldatefmt.h>
@@ -64,6 +66,11 @@
 #include <unicode/ufieldpositer.h>
 #include <unicode/uenum.h>
 #include <unicode/uchar.h>
+#endif
+
+// (ICU 67 is the oldest ICU supported: the number range formatter (unumrf) and its range spans are ICU 69's)
+#if defined(NEOS_JS_WINDOWS_ICU) || U_ICU_VERSION_MAJOR_NUM >= 69
+#define NEOS_JS_ICU_NUMBER_RANGES
 #endif
 
 #include <memory>
@@ -85,8 +92,10 @@ namespace neos::javascript_runtime::intl
     using collator_ptr = icu_ptr<UCollator, ucol_close>;
     using number_formatter_ptr = icu_ptr<UNumberFormatter, unumf_close>;
     using formatted_number_ptr = icu_ptr<UFormattedNumber, unumf_closeResult>;
+#if defined(NEOS_JS_ICU_NUMBER_RANGES)
     using number_range_formatter_ptr = icu_ptr<UNumberRangeFormatter, unumrf_close>;
     using formatted_number_range_ptr = icu_ptr<UFormattedNumberRange, unumrf_closeResult>;
+#endif
     using plural_rules_ptr = icu_ptr<UPluralRules, uplrules_close>;
     using date_format_ptr = icu_ptr<UDateFormat, udat_close>;
     using date_pattern_generator_ptr = icu_ptr<UDateTimePatternGenerator, udatpg_close>;

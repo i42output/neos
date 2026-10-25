@@ -398,15 +398,32 @@ namespace neos::javascript_runtime::intl
             precision = significant();
         else if (aOptions.roundingType == "fractionDigits")
             precision = fraction();
+#if defined(NEOS_JS_WINDOWS_ICU) || U_ICU_VERSION_MAJOR_NUM >= 69
         else
             precision = fraction() + "/" + significant() + (aOptions.roundingType == "morePrecision" ? "r" : "s");
         if (aOptions.trailingZeroDisplay == "stripIfInteger")
             precision += "/w";
+#else
+        // (before ICU 69 there is no rounding priority and no trailing zero display: compact notation's default (more precision of no
+        // fraction digits and two significant digits) is ICU's default for compact notation; otherwise the significant digits with more
+        // precision, the fraction digits with less)
+        else if (aOptions.roundingType == "morePrecision" && aOptions.minimumFractionDigits.value_or(0) == 0 &&
+            aOptions.maximumFractionDigits.value_or(0) == 0 && aOptions.minimumSignificantDigits.value_or(1) == 1 &&
+            aOptions.maximumSignificantDigits.value_or(1) == 2)
+            precision = {};
+        else
+            precision = aOptions.roundingType == "morePrecision" ? significant() : fraction();
+#endif
         result += precision;
         static constexpr std::pair<char const*, char const*> sModes[] =
         {
             { "ceil", "rounding-mode-ceiling" }, { "floor", "rounding-mode-floor" }, { "expand", "rounding-mode-up" }, { "trunc", "rounding-mode-down" },
+#if defined(NEOS_JS_WINDOWS_ICU) || U_ICU_VERSION_MAJOR_NUM >= 69
             { "halfCeil", "rounding-mode-half-ceiling" }, { "halfFloor", "rounding-mode-half-floor" }, { "halfExpand", "rounding-mode-half-up" },
+#else
+            // (before ICU 69: half-ceiling and half-floor are half-up)
+            { "halfCeil", "rounding-mode-half-up" }, { "halfFloor", "rounding-mode-half-up" }, { "halfExpand", "rounding-mode-half-up" },
+#endif
             { "halfTrunc", "rounding-mode-half-down" }, { "halfEven", "rounding-mode-half-even" }
         };
         for (auto const& [mode, stem] : sModes)

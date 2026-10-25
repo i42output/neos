@@ -181,13 +181,20 @@ namespace neos::javascript_runtime::intl
             std::string signDisplay = "auto";
             digit_options digits;
             number_formatter_ptr formatter;
+#if defined(NEOS_JS_ICU_NUMBER_RANGES)
             number_range_formatter_ptr rangeFormatter;
+#endif
             std::u16string skeleton;
         };
 
         std::string sign_skeleton(number_format_data const& d)
         {
             bool const accounting = d.style == "currency" && d.currencySign == "accounting";
+#if !defined(NEOS_JS_WINDOWS_ICU) && U_ICU_VERSION_MAJOR_NUM < 69
+            // (before ICU 69 there is no sign-negative: auto (only negative zero differs))
+            if (d.signDisplay == "negative")
+                return accounting ? "sign-accounting" : std::string{};
+#endif
             if (d.signDisplay == "never")
                 return "sign-never";
             if (accounting)
@@ -500,6 +507,7 @@ namespace neos::javascript_runtime::intl
 
         // --- ranges
 
+#if defined(NEOS_JS_ICU_NUMBER_RANGES)
         number_range_formatter_ptr& range_formatter(number_format_data& d)
         {
             if (!d.rangeFormatter)
@@ -570,6 +578,47 @@ namespace neos::javascript_runtime::intl
             }
             return parts;
         }
+#else
+        // (without ICU's number range formatter (before ICU 69): PartitionNumberRangePattern with the start's and the end's parts, the
+        // en dash as the range separator and "~" as the approximately sign (FormatApproximately))
+        std::vector<part> format_range_to_parts(number_format_data& d, intl_value const& x, intl_value const& y)
+        {
+            if (x.is_nan() || y.is_nan())
+                throw_range_error("Intl.NumberFormat.prototype.formatRange: a NaN cannot be formatted as a range");
+            auto parts = format_numeric_to_parts(d, x);
+            auto const end = format_numeric_to_parts(d, y);
+            auto const text = [](std::vector<part> const& aParts)
+            {
+                std::u16string result;
+                for (auto const& p : aParts)
+                    result += p.text;
+                return result;
+            };
+            if (text(parts) == text(end))
+            {
+                for (auto& p : parts)
+                    p.source = u"shared";
+                parts.insert(parts.begin(), part{ u"approximatelySign", u"~", u"shared" });
+                return parts;
+            }
+            // (spaced when either end has an affix (e.g. "$3 – $5"), as ICU's range formatter does)
+            auto const affixed = [](std::vector<part> const& aParts)
+            {
+                return std::any_of(aParts.begin(), aParts.end(), [](part const& p)
+                    { return p.type != u"integer" && p.type != u"group" && p.type != u"decimal" && p.type != u"fraction"; });
+            };
+            bool const spaced = affixed(parts) || affixed(end);
+            for (auto& p : parts)
+                p.source = u"startRange";
+            parts.push_back(part{ u"literal", spaced ? u" \u2013 " : u"\u2013", u"shared" });
+            for (auto p : end)
+            {
+                p.source = u"endRange";
+                parts.push_back(std::move(p));
+            }
+            return parts;
+        }
+#endif
 
         // --- the prototype's functions
 
@@ -612,9 +661,16 @@ namespace neos::javascript_runtime::intl
             auto& d = data_of<number_format_data>(nf);
             if (aCallee.nativeId == 0u)
             {
+#if defined(NEOS_JS_ICU_NUMBER_RANGES)
                 auto const result = format_range_value(d, x, y);
                 UErrorCode status = U_ZERO_ERROR;
                 return u16_value(formatted_value_string(unumrf_resultAsValue(result.get(), &status)));
+#else
+                std::u16string text;
+                for (auto const& p : format_range_to_parts(d, x, y))
+                    text += p.text;
+                return u16_value(text);
+#endif
             }
             return parts_array(format_range_to_parts(d, x, y));
         }
@@ -666,7 +722,9 @@ namespace neos::javascript_runtime::intl
             digit_options digits;
             plural_rules_ptr rules;
             number_formatter_ptr formatter;
+#if defined(NEOS_JS_ICU_NUMBER_RANGES)
             number_range_formatter_ptr rangeFormatter;
+#endif
             std::u16string skeleton;
         };
 
@@ -745,7 +803,7 @@ namespace neos::javascript_runtime::intl
             if (std::isnan(x) || std::isnan(y))
                 throw_range_error("Intl.PluralRules.prototype.selectRange: a NaN is not a range's end");
             auto& d = data_of<plural_rules_data>(pr);
-#if !defined(NEOS_JS_WINDOWS_ICU)
+#if defined(NEOS_JS_ICU_NUMBER_RANGES) && !defined(NEOS_JS_WINDOWS_ICU)
             if (!d.rangeFormatter)
             {
                 auto const icu = icu_locale(d.dataLocale);

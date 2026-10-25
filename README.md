@@ -13,7 +13,7 @@ neos is still a work in progress so don't expect a release anytime soon.
 * libffi
 * neolib
 * neonumeric
-* ICU (optional: JavaScript's Intl and Temporal's non-ISO 8601 calendars; the system's ICU, on Windows the ICU in Windows)
+* ICU (optional: JavaScript's Intl and Temporal's non-ISO 8601 calendars; the system's ICU (ICU 67 or later), on Windows the ICU in Windows)
 
 # Features
 * Language agnostic: a schema combined with a semantic concept library describes syntax and semantics of the scripting language to use (theoretically allowing any language to be used).

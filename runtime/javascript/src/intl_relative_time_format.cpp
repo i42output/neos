@@ -93,7 +93,9 @@ namespace neos::javascript_runtime::intl
             if (U_FAILURE(status))
                 throw_range_error("Intl.RelativeTimeFormat: the number format cannot be made");
             // (the locale's minimum grouping (e.g. Polish groups from five digits))
+#if defined(NEOS_JS_WINDOWS_ICU) || U_ICU_VERSION_MAJOR_NUM >= 68
             unum_setAttribute(number, UNUM_MINIMUM_GROUPING_DIGITS, UNUM_MINIMUM_GROUPING_DIGITS_AUTO);
+#endif
             d.format.reset(ureldatefmt_open(icu.c_str(), number, d.style == "long" ? UDAT_STYLE_LONG : d.style == "short" ? UDAT_STYLE_SHORT :
                 UDAT_STYLE_NARROW, UDISPCTX_CAPITALIZATION_NONE, &status));
             if (U_FAILURE(status))

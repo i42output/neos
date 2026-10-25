@@ -99,7 +99,11 @@ namespace neos::javascript_runtime::intl
             data->input = aString;
             data->text = str(aString);
             UErrorCode status = U_ZERO_ERROR;
+#if defined(NEOS_JS_WINDOWS_ICU) || U_ICU_VERSION_MAJOR_NUM >= 69
             data->breaker.reset(ubrk_clone(aBreaker, &status));
+#else
+            data->breaker.reset(ubrk_safeClone(aBreaker, nullptr, nullptr, &status));
+#endif
             if (U_FAILURE(status))
                 throw_range_error("Intl.Segmenter: the break iterator cannot be made");
             ubrk_setText(data->breaker.get(), uchars(data->text), ulength(data->text), &status);
