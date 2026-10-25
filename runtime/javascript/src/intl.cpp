@@ -869,11 +869,78 @@ namespace neos::javascript_runtime::intl
     }
 }
 
+#if defined(NEOS_JS_WINDOWS_ICU)
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <delayimp.h>
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+namespace neos::javascript_runtime::intl
+{
+    namespace
+    {
+        // (whether Windows' icu.dll (delay-loaded) has every function this module imports from it: Windows' ICU depends on the Windows
+        // version)
+        bool windows_icu_has_imports()
+        {
+            auto const* base = reinterpret_cast<std::uint8_t const*>(&__ImageBase);
+            auto const* nt = reinterpret_cast<IMAGE_NT_HEADERS const*>(base + __ImageBase.e_lfanew);
+            auto const& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+            if (directory.VirtualAddress == 0)
+                return true;
+            for (auto const* d = reinterpret_cast<ImgDelayDescr const*>(base + directory.VirtualAddress); d->rvaDLLName != 0; ++d)
+            {
+                if (_stricmp(reinterpret_cast<char const*>(base + d->rvaDLLName), "icu.dll") != 0)
+                    continue;
+                auto const icu = ::LoadLibraryExW(L"icu.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                if (icu == nullptr)
+                    return false;
+                for (auto const* thunk = reinterpret_cast<IMAGE_THUNK_DATA const*>(base + d->rvaINT); thunk->u1.AddressOfData != 0; ++thunk)
+                {
+                    if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal))
+                        continue;
+                    auto const* name = reinterpret_cast<IMAGE_IMPORT_BY_NAME const*>(base + thunk->u1.AddressOfData);
+                    if (::GetProcAddress(icu, reinterpret_cast<char const*>(name->Name)) == nullptr)
+                        return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    bool icu_available()
+    {
+        static bool const sAvailable = windows_icu_has_imports();
+        return sAvailable;
+    }
+}
+
+#else
+
+namespace neos::javascript_runtime::intl
+{
+    bool icu_available()
+    {
+        return true;
+    }
+}
+
+#endif
+
 namespace neos::javascript_runtime
 {
     void init_intl(realm& aRealm)
     {
         using namespace intl;
+        if (!icu_available())
+            return;
         aRealm.intl = make_object();
         obj(aRealm.global).put(ascii("Intl"), aRealm.intl);
         obj(aRealm.intl).put(aRealm.symToStringTag, ascii("Intl"), AttributeConfigurable);

@@ -37,6 +37,7 @@
 #include <functional>
 #include "js.hpp"
 #include "api.hpp"
+#include "intl.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -599,7 +600,8 @@ namespace neos::javascript_runtime
         {
             // (ECMA-402's: the elements' toLocaleString with the locales and options; ECMA-262's: with none)
 #if defined(NEOS_JS_ICU)
-            value const localeArguments[] = { argument(aArguments, 0u), argument(aArguments, 1u) };
+            value const icuArguments[] = { argument(aArguments, 0u), argument(aArguments, 1u) };
+            arguments const localeArguments = intl::icu_available() ? arguments{ icuArguments } : arguments{};
 #else
             (void)aArguments;
             arguments const localeArguments{};

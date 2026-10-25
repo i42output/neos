@@ -162,6 +162,7 @@ namespace neos::language
         iStartTime = std::chrono::steady_clock::now();
         iPreparseTime = {};
         iParseTime = {};
+        iSourceFiles.clear();
 
         bool ok = true;
 
@@ -349,6 +350,9 @@ namespace neos::language
     {
         if (aFragment.status() != compilation_status::Pending)
             return false;
+
+        if (aFragment.source_file_path().has_value())
+            iSourceFiles.insert(aFragment.source_file_path().value().to_std_string());
 
         iCompilationStateStack.push_back(std::make_unique<compilation_state>(&aProgram, &aUnit, &aFragment));
         state().language = language(aUnit.schema->meta().language);

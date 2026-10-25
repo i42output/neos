@@ -336,12 +336,14 @@ namespace neos::javascript_runtime::temporal
         value plain_date_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_date(aThis, "Temporal.PlainDate.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_date(aThis, "Temporal.PlainDate.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(plain_date_string(this_date(aThis, "Temporal.PlainDate.prototype.toLocaleString"), show_calendar::Auto));
-#endif
         }
 
         // --- Temporal.PlainTime
@@ -507,12 +509,14 @@ namespace neos::javascript_runtime::temporal
         value plain_time_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_time(aThis, "Temporal.PlainTime.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_time(aThis, "Temporal.PlainTime.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(time_record_to_string(this_time(aThis, "Temporal.PlainTime.prototype.toLocaleString"), -1));
-#endif
         }
 
         // --- Temporal.PlainDateTime
@@ -727,13 +731,15 @@ namespace neos::javascript_runtime::temporal
         value plain_date_time_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_date_time(aThis, "Temporal.PlainDateTime.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_date_time(aThis, "Temporal.PlainDateTime.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             auto const& o = this_date_time_object(aThis, "Temporal.PlainDateTime.prototype.toLocaleString");
             return string_value(iso_date_time_to_string({ o.date, o.time }, -1, o.calendar, show_calendar::Auto));
-#endif
         }
 
         value plain_date_time_to_zoned_date_time(value aThis, arguments aArguments, value, function_object&)
@@ -920,12 +926,14 @@ namespace neos::javascript_runtime::temporal
         value plain_year_month_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_year_month(aThis, "Temporal.PlainYearMonth.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_year_month(aThis, "Temporal.PlainYearMonth.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(year_month_string(this_year_month(aThis, "Temporal.PlainYearMonth.prototype.toLocaleString"), show_calendar::Auto));
-#endif
         }
 
         value plain_year_month_to_plain_date(value aThis, arguments aArguments, value, function_object&)
@@ -1022,12 +1030,14 @@ namespace neos::javascript_runtime::temporal
         value plain_month_day_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_month_day(aThis, "Temporal.PlainMonthDay.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_month_day(aThis, "Temporal.PlainMonthDay.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(month_day_string(this_month_day(aThis, "Temporal.PlainMonthDay.prototype.toLocaleString"), show_calendar::Auto));
-#endif
         }
 
         value plain_month_day_to_plain_date(value aThis, arguments aArguments, value, function_object&)

@@ -543,11 +543,11 @@ namespace neos::javascript_runtime
         {
             auto const x = this_bigint(aThis);
 #if defined(NEOS_JS_ICU)
-            return intl::number_to_locale_string(x, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+                return intl::number_to_locale_string(x, argument(aArguments, 0u), argument(aArguments, 1u));
+#endif
             (void)aArguments;
             return make_string(bigint_to_string(x));
-#endif
         }
 
         value bigint_prototype_value_of(value aThis, arguments, value, function_object&)

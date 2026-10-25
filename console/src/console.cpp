@@ -38,9 +38,15 @@
 #include <algorithm>
 #include <iostream>
 #include <filesystem>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <typeinfo>
 #include <boost/program_options.hpp>
 #include <neos/context.hpp>
 #include <neos/image.hpp>
+#include <neos/cache.hpp>
+#include <neos/bytecode/vm/vm.hpp>
 #include <neos/console.hpp>
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -52,6 +58,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+extern char** environ;
 #endif
 
 using namespace std::literals::string_literals;
@@ -153,12 +160,11 @@ void main_loop(boost::program_options::variables_map& aOptions)
     }
 }
 
-int run_program(boost::program_options::variables_map& aOptions, std::vector<std::string> const& aArguments)
+namespace
 {
-    // (a program and no console: the program is compiled and run; the only output is the program's (and any errors, to stderr))
-    try
+    // (the options of a context that compiles and runs a program (see run_program))
+    void configure(neos::context& context, boost::program_options::variables_map& aOptions, std::vector<std::string> const& aArguments)
     {
-        neos::context context{ std::cout };
         if (aOptions.count("no-preparse"))
             context.compiler().set_preparse(false);
         if (aOptions.count("trap-on-overflow"))
@@ -176,6 +182,158 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         context.set_arguments(aArguments);
         if (aOptions.count("trace"))
             context.compiler().set_trace(aOptions["trace"].as<uint32_t>());
+    }
+
+    // --cache: a program's text (the result of compiling it) is kept in the cache (see neos/cache.hpp), so that running the 
+    // program again (unchanged) does not compile it (nor load the schema, concept libraries and compiler plugin to compile it); 
+    // the key of its entry is a hash of the program (its path and source), the options it is compiled with, the current folder, 
+    // the environment variables that compilations can depend on (search paths: NEOS_* and *PATH) and neos's installation (see 
+    // cache::installation); the entry has the files that it was compiled from (its schema and packages) as they were, and is 
+    // used only if none of them have changed
+    struct cached_program
+    {
+        neos::text text;
+        bool restricted = false;
+        std::string schema;
+    };
+
+    std::uint64_t constexpr CachedProgramVersion = 1u;
+
+    std::optional<std::uint64_t> program_cache_key(boost::program_options::variables_map& aOptions, std::string const& aProgramPath)
+    {
+        std::error_code ec;
+        auto const source = neos::cache::stamp(aProgramPath);
+        if (!source)
+            return {}; // (not a file: the compiler reports it)
+        neos::cache::hasher key;
+        key.add("bytecode").add(CachedProgramVersion).add(neos::cache::installation());
+        key.add(std::filesystem::absolute(aProgramPath, ec).lexically_normal().generic_string()).add(source->size).add(source->contents);
+        key.add(std::filesystem::current_path(ec).generic_string());
+        for (char const* option : { "schema", "no-preparse", "trap-on-overflow", "bigint-promotion", "restricted" })
+        {
+            key.add(std::string_view{ option }).add(static_cast<std::uint64_t>(aOptions.count(option)));
+            if (aOptions.count(option) && aOptions[option].value().type() == typeid(std::string))
+                key.add(aOptions[option].as<std::string>());
+        }
+#if defined(_WIN32)
+        char** const environment = _environ;
+#else
+        char** const environment = environ;
+#endif
+        std::vector<std::string_view> variables;
+        for (char** variable = environment; variable != nullptr && *variable != nullptr; ++variable)
+        {
+            std::string_view const entry{ *variable };
+            auto const name = entry.substr(0u, entry.find('='));
+            if (name.starts_with("NEOS_") || name.ends_with("PATH") || name.ends_with("Path"))
+                variables.push_back(entry);
+        }
+        std::sort(variables.begin(), variables.end());
+        for (auto const& variable : variables)
+            key.add(variable);
+        return key.value();
+    }
+
+    std::optional<cached_program> load_cached_program(std::uint64_t aKey)
+    {
+        auto const entry = neos::cache::load("bytecode", aKey);
+        if (!entry)
+            return {};
+        neos::cache::reader reader{ *entry };
+        cached_program result;
+        result.restricted = reader.u64() != 0u;
+        result.schema = std::string{ reader.str() };
+        for (auto dependencies = reader.u64(); reader.ok() && dependencies != 0u; --dependencies)
+            if (!neos::cache::unchanged(reader.stamp()))
+                return {};
+        auto const text = reader.str();
+        if (!reader.ok() || !reader.at_end() || text.empty())
+            return {};
+        result.text.resize(text.size());
+        std::memcpy(result.text.data(), text.data(), text.size());
+        return result;
+    }
+
+    void store_cached_program(std::uint64_t aKey, neos::context& aContext)
+    {
+        if (aContext.text().empty() || !aContext.schema_loaded())
+            return;
+        std::error_code ec;
+        std::vector<neos::cache::file_stamp> dependencies;
+        std::vector<std::string> files{ aContext.compiler().source_files().begin(), aContext.compiler().source_files().end() };
+        files.push_back(aContext.schema().path());
+        for (auto const& file : files)
+        {
+            // (a source that is not a file (e.g. a package that is built in) is not a dependency)
+            auto const path = std::filesystem::absolute(file, ec).lexically_normal().string();
+            if (auto const stamp = neos::cache::stamp(path))
+                dependencies.push_back(*stamp);
+        }
+        neos::cache::writer writer;
+        writer.u64(aContext.restricted() ? 1u : 0u);
+        writer.str(std::filesystem::absolute(aContext.schema().path(), ec).lexically_normal().string());
+        writer.u64(dependencies.size());
+        for (auto const& dependency : dependencies)
+            writer.stamp(dependency);
+        writer.str(std::string_view{ reinterpret_cast<char const*>(aContext.text().data()), aContext.text().size() });
+        neos::cache::store("bytecode", aKey, writer.data());
+    }
+
+    // (a program's text from the cache: run as context::run runs a program's; source that it compiles while it runs is compiled
+    // by a context made for it when it is first needed)
+    int run_cached_program(cached_program const& aProgram, boost::program_options::variables_map& aOptions, std::vector<std::string> const& aArguments)
+    {
+        std::unique_ptr<neos::context> compiler;
+        neos::bytecode::vm::set_compile_service([&](std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
+            std::string const& aCompileOptions, std::string& aError) -> std::optional<neos::text>
+            {
+                if (!compiler)
+                {
+                    try
+                    {
+                        compiler = std::make_unique<neos::context>(std::cout);
+                        configure(*compiler, aOptions, aArguments);
+                        compiler->load_schema(aProgram.schema);
+                    }
+                    catch (std::exception const& e)
+                    {
+                        compiler.reset();
+                        aError = e.what();
+                        return {};
+                    }
+                }
+                return compiler->compile_source(aLanguage, aSource, aSourceName, aCompileOptions, aError);
+            });
+        neos::bytecode::vm::set_program_arguments(aArguments);
+        int status = EXIT_SUCCESS;
+        {
+            neos::bytecode::vm::thread thread{ aProgram.text, std::cout, std::cin, std::cerr, aProgram.restricted };
+            thread.join();
+            // (a runtime error has been output by the VM)
+            status = thread.error() ? EXIT_FAILURE : thread.exit_status().value_or(EXIT_SUCCESS);
+        }
+        std::cout << std::flush;
+        return status;
+    }
+}
+
+int run_program(boost::program_options::variables_map& aOptions, std::vector<std::string> const& aArguments)
+{
+    // (a program and no console: the program is compiled and run; the only output is the program's (and any errors, to stderr))
+    try
+    {
+        // (--cache: the program's text, if it is in the cache (not for an image or a trace: they are of compiling it))
+        std::optional<std::uint64_t> cacheKey;
+        auto const& programs = aOptions["load"].as<std::vector<std::string>>();
+        if (neos::cache::folder() && !aOptions.count("img") && !aOptions.count("trace") && programs.size() == 1u)
+        {
+            cacheKey = program_cache_key(aOptions, programs.front());
+            if (cacheKey)
+                if (auto const cached = load_cached_program(*cacheKey))
+                    return run_cached_program(*cached, aOptions, aArguments);
+        }
+        neos::context context{ std::cout };
+        configure(context, aOptions, aArguments);
         if (aOptions.count("schema"))
             context.load_schema(aOptions["schema"].as<std::string>());
         for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
@@ -183,6 +341,8 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         try
         {
             context.compile_program();
+            if (cacheKey)
+                store_cached_program(*cacheKey, context);
         }
         catch (const neos::context::warning& e)
         {
@@ -273,6 +433,7 @@ int main(int argc, char* argv[])
             ("trap-on-overflow", "integer arithmetic whose result overflows its (fixed size) type traps (else it wraps)")
             ("bigint-promotion", boost::program_options::value<std::string>(), "on|off: integers of any size (a result that overflows is promoted to an arbitrary precision integer), overriding the language's schema (bigint.promotion)")
             ("restricted", "restricted mode: programs cannot call runtime plugin functions that can change the host environment")
+            ("cache", "keep the results of compilations (programs' bytecode, schemas' grammars) in the user's cache folder and use them when nothing they depend on has changed")
             ("img", boost::program_options::value<std::string>(), "make an image of the program (an executable that runs it) rather than run it: --img=<path> (by default <program>.exe on Windows, else a.out)")
             ("img-default", "(--img with no path)")
             ("load,l", boost::program_options::value<std::vector<std::string>>(), "load program(s)");
@@ -283,6 +444,8 @@ int main(int argc, char* argv[])
             options(optionsDescription).positional(positionalOptionsDescription).extra_parser(img_option).run(), options);
         if (options.count("img-default") && !options.count("img"))
             options.emplace("img", boost::program_options::variable_value{ std::string{}, false });
+        if (options.count("cache"))
+            neos::cache::enable();
         if (options.count("load") && !options.count("console"))
             return run_program(options, programArguments);
         main_loop(options);

@@ -92,6 +92,7 @@ set NEOS_RUNTIME_PLUGIN_PATH=C:\usr\local\bin\plugins
 | `--trap-on-overflow` | Integer arithmetic whose result overflows its (fixed size) type traps (by default it wraps) |
 | `--bigint-promotion <on\|off>` | Integers of any size (a result that overflows is promoted to an arbitrary precision integer), overriding the schema's `bigint.promotion` |
 | `--parse-times` | Console: output the time of each parse (by default only the total) |
+| `--cache` | Keep the results of compilations (a program's bytecode, a schema's parsed grammars) in the user's cache folder (`$XDG_CACHE_HOME/neos` or `~/.cache/neos`; on Windows `%LOCALAPPDATA%\neos\cache`) and reuse them while nothing they depend on has changed; deleting the folder is always safe |
 
 ## Contributing
 If you wish to contribute to the neos project then create an issue containing a prompt suitable for the project maintainer to review and for Claude Code to analyse. We are not accepting pull requests at this time.

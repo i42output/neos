@@ -85,13 +85,16 @@ namespace neos::javascript_runtime::temporal
     {
         auto const id = ascii_lowercase(aId);
 #if defined(NEOS_JS_ICU)
-        for (auto const& c : sCalendars)
-            if (id == u16(c.name))
-                return c.id;
-#else
+        if (intl::icu_available())
+        {
+            for (auto const& c : sCalendars)
+                if (id == u16(c.name))
+                    return c.id;
+            return std::nullopt;
+        }
+#endif
         if (id == u"iso8601")
             return calendar_id::Iso8601;
-#endif
         return std::nullopt;
     }
 

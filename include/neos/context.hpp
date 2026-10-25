@@ -146,6 +146,10 @@ namespace neos
         bool running() const final;
         void run() final;
         int exit_status() const final;
+        // the compilation of source that a program compiles while it runs (see bytecode::vm::compile_service): a program of the context's 
+        // schema's language, compiled by the context's compiler
+        std::optional<neos::text> compile_source(std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
+            std::string const& aOptions, std::string& aError);
         language::data_type evaluate(std::string const& aExpression) final;
         const neolib::i_string& metrics() const final;
     public:

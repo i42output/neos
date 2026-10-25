@@ -1105,17 +1105,18 @@ namespace neos::javascript_runtime
         value date_to_locale_string(value aThis, arguments aArguments, value aNewTarget, function_object& aCallee)
         {
 #if defined(NEOS_JS_ICU)
-            (void)aNewTarget;
-            auto const kind = static_cast<int>(aCallee.nativeId);
-            return intl::date_to_locale_string(this_time_value(aThis), argument(aArguments, 0u), argument(aArguments, 1u), kind, kind);
-#else
+            if (intl::icu_available())
+            {
+                auto const kind = static_cast<int>(aCallee.nativeId);
+                return intl::date_to_locale_string(this_time_value(aThis), argument(aArguments, 0u), argument(aArguments, 1u), kind, kind);
+            }
+#endif
             switch (aCallee.nativeId)
             {
             case 1u: return date_to_date_string(aThis, aArguments, aNewTarget, aCallee);
             case 2u: return date_to_time_string(aThis, aArguments, aNewTarget, aCallee);
             default: return date_to_string(aThis, aArguments, aNewTarget, aCallee);
             }
-#endif
         }
 
         value date_to_utc_string(value aThis, arguments, value, function_object&)

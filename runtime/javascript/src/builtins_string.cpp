@@ -374,7 +374,8 @@ namespace neos::javascript_runtime
             auto const s = this_string(aThis, "localeCompare");
             auto const that = to_string(argument(aArguments, 0u));
 #if defined(NEOS_JS_ICU)
-            return intl::locale_compare(s, that, argument(aArguments, 1u), argument(aArguments, 2u));
+            if (intl::icu_available())
+                return intl::locale_compare(s, that, argument(aArguments, 1u), argument(aArguments, 2u));
 #endif
             auto const a = utf8(normalize_string(s, u"NFC"));
             auto const b = utf8(normalize_string(that, u"NFC"));
@@ -516,22 +517,22 @@ namespace neos::javascript_runtime
         {
             auto const s = this_string(aThis, "toLocaleLowerCase");
 #if defined(NEOS_JS_ICU)
-            return intl::to_locale_case(s, argument(aArguments, 0u), false);
-#else
+            if (intl::icu_available())
+                return intl::to_locale_case(s, argument(aArguments, 0u), false);
+#endif
             (void)aArguments;
             return make_string(case_map(text_of(s), false));
-#endif
         }
 
         value string_to_locale_upper_case(value aThis, arguments aArguments, value, function_object&)
         {
             auto const s = this_string(aThis, "toLocaleUpperCase");
 #if defined(NEOS_JS_ICU)
-            return intl::to_locale_case(s, argument(aArguments, 0u), true);
-#else
+            if (intl::icu_available())
+                return intl::to_locale_case(s, argument(aArguments, 0u), true);
+#endif
             (void)aArguments;
             return make_string(case_map(text_of(s), true));
-#endif
         }
 
         value string_to_string(value aThis, arguments, value, function_object&)

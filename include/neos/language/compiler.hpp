@@ -323,6 +323,8 @@ namespace neos::language
         bool parsable_source(std::string const& aLanguage, std::string_view aSource, std::string& aResult, std::vector<std::uint32_t>& aPositions) const; ///< (see 
                                                                         ///< i_language_compiler; false: the source as written)
         void set_quiet(bool aQuiet) { iQuiet = aQuiet; }    ///< (syntax errors are not reported on the standard error stream: only thrown)
+        std::set<std::string> const& source_files() const { return iSourceFiles; } ///< (the files of the source fragments that the program 
+                                                                        ///< compiled last is compiled from (e.g. its packages): see neos --cache)
         bool compile(program& aProgram, translation_unit& aUnit);
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         bool compile(const i_source_fragment& aFragment) final;
@@ -505,6 +507,7 @@ namespace neos::language
         bool iPreparse = true;
         bool iTrapOnOverflow = false;
         bool iQuiet = false;
+        std::set<std::string> iSourceFiles;
         std::optional<bool> iBigintPromotion;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;

@@ -860,11 +860,13 @@ namespace neos::javascript_runtime::intl
 
         std::u16string date_field_type(std::int32_t aField)
         {
+            // (UDAT_RELATED_YEAR_FIELD: ICU's internal API, which the Windows SDK's icu.h does not have)
+            constexpr std::int32_t relatedYearField = 34;
             switch (aField)
             {
             case UDAT_ERA_FIELD: return u"era";
             case UDAT_YEAR_FIELD: case UDAT_EXTENDED_YEAR_FIELD: case UDAT_YEAR_WOY_FIELD: return u"year";
-            case UDAT_RELATED_YEAR_FIELD: return u"relatedYear";
+            case relatedYearField: return u"relatedYear";
             case UDAT_YEAR_NAME_FIELD: return u"yearName";
             case UDAT_MONTH_FIELD: case UDAT_STANDALONE_MONTH_FIELD: return u"month";
             case UDAT_DATE_FIELD: return u"day";
@@ -939,6 +941,7 @@ namespace neos::javascript_runtime::intl
             return k.intervalFormat.get();
         }
 
+#if !defined(NEOS_JS_WINDOWS_ICU)
         calendar_ptr proleptic_calendar(date_time_format_data const& d, kind aKind, double x)
         {
             std::u16string const zone = is_plain(aKind) ? std::u16string{ u"UTC" } : d.icuTimeZone;
@@ -948,6 +951,7 @@ namespace neos::javascript_runtime::intl
             ucal_setMillis(c.get(), x, &status);
             return c;
         }
+#endif
 
         // (a range's parts (its ends practically equal: the format's parts, shared))
         std::vector<part> format_range_parts(date_time_format_data& d, formattable const& x, formattable const& y)
@@ -955,9 +959,14 @@ namespace neos::javascript_runtime::intl
             auto* f = interval_format(d, x.k);
             UErrorCode status = U_ZERO_ERROR;
             formatted_date_interval_ptr result{ udtitvfmt_openResult(&status) };
+#if defined(NEOS_JS_WINDOWS_ICU)
+            // (Windows' ICU does not export udtitvfmt_formatCalendarToResult: the format's own calendar (Julian before 1582))
+            udtitvfmt_formatToResult(f, x.ms, y.ms, result.get(), &status);
+#else
             auto const from = proleptic_calendar(d, x.k, x.ms);
             auto const to = proleptic_calendar(d, y.k, y.ms);
             udtitvfmt_formatCalendarToResult(f, from.get(), to.get(), result.get(), &status);
+#endif
             if (U_FAILURE(status))
                 throw_range_error("Intl.DateTimeFormat: the range cannot be formatted");
             auto const* v = udtitvfmt_resultAsValue(result.get(), &status);

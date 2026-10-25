@@ -275,48 +275,51 @@ namespace neos
         // (source that the program compiles while it runs (e.g. Python's exec): its program (a translation unit of the 
         // context's schema), compiled by the context's compiler)
         bytecode::vm::set_compile_service([this](std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
-            std::string const& aOptions, std::string& aError) -> std::optional<neos::text>
-            {
-                if (!schema_loaded() || schema().meta().language != aLanguage)
-                {
-                    aError = "no schema for language '" + aLanguage + "'";
-                    return {};
-                }
-                program_t compiled;
-                neolib::string source{ aSource };
-                if (!source.empty() && source.to_std_string_view().back() != '\n')
-                    source.append("\n", 1u);
-                compiled.translationUnits.push_back(translation_unit_t{ iSchema, { language::source_fragment{ neolib::string{ aSourceName }, source } },
-                    language::ast{ compiled.symbolTable } });
-                compiler().set_language_options(aLanguage, aOptions);
-                compiler().set_quiet(true);
-                struct reset { context& c; std::string const& language; ~reset() { c.compiler().set_language_options(language, {}); c.compiler().set_quiet(false); } } const resetOptions{ *this, aLanguage };
-                try
-                {
-                    if (!compiler().compile(compiled))
-                    {
-                        aError = "compilation failed";
-                        return {};
-                    }
-                }
-                catch (language::compiler_error const& e)
-                {
-                    // (a compile error of the source: its location and message)
-                    aError = e.diagnostic.empty() ? std::string{ e.what() } : e.diagnostic;
-                    return {};
-                }
-                catch (std::exception const& e)
-                {
-                    aError = e.what();
-                    return {};
-                }
-                return compiled.text;
-            });
+            std::string const& aOptions, std::string& aError) { return compile_source(aLanguage, aSource, aSourceName, aOptions, aError); });
         // (the program's arguments and the compile service above: the VM thread takes them from this thread (so that contexts that 
         // run programs at the same time each have their own))
         bytecode::vm::set_program_arguments(iArguments);
         iThreads.push_back(std::make_unique<bytecode::vm::thread>(text(), cout(), cin(), cerr(), iRestricted));
         iThreads.back()->join(); // run to completion: the program reads cin(), so the console must not read it concurrently
+    }
+
+    std::optional<neos::text> context::compile_source(std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
+        std::string const& aOptions, std::string& aError)
+    {
+        if (!schema_loaded() || schema().meta().language != aLanguage)
+        {
+            aError = "no schema for language '" + aLanguage + "'";
+            return {};
+        }
+        program_t compiled;
+        neolib::string source{ aSource };
+        if (!source.empty() && source.to_std_string_view().back() != '\n')
+            source.append("\n", 1u);
+        compiled.translationUnits.push_back(translation_unit_t{ iSchema, { language::source_fragment{ neolib::string{ aSourceName }, source } },
+            language::ast{ compiled.symbolTable } });
+        compiler().set_language_options(aLanguage, aOptions);
+        compiler().set_quiet(true);
+        struct reset { context& c; std::string const& language; ~reset() { c.compiler().set_language_options(language, {}); c.compiler().set_quiet(false); } } const resetOptions{ *this, aLanguage };
+        try
+        {
+            if (!compiler().compile(compiled))
+            {
+                aError = "compilation failed";
+                return {};
+            }
+        }
+        catch (language::compiler_error const& e)
+        {
+            // (a compile error of the source: its location and message)
+            aError = e.diagnostic.empty() ? std::string{ e.what() } : e.diagnostic;
+            return {};
+        }
+        catch (std::exception const& e)
+        {
+            aError = e.what();
+            return {};
+        }
+        return compiled.text;
     }
 
     int context::exit_status() const

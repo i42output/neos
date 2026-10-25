@@ -245,6 +245,10 @@ namespace neos::javascript_runtime::intl
     std::vector<part> format_list_to_parts(std::string const& aLocale, std::string const& aType, std::string const& aStyle,
         std::vector<std::u16string> const& aList);
 
+    // (whether ICU can be used (Windows: whether Windows' icu.dll, delay-loaded, has every ICU function the runtime calls); if not there
+    // is no Intl, as without ICU)
+    bool icu_available();
+
     // (the locale-sensitive methods of ECMA-262 (ECMA-402's definitions of them))
     value locale_compare(value aThis, value aThat, value aLocales, value aOptions);         ///< (String.prototype.localeCompare)
     value to_locale_case(value aString, value aLocales, bool aUpper);                       ///< (String.prototype.toLocaleUpper/LowerCase)

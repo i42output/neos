@@ -39,6 +39,8 @@
 #include <neolib/core/string_utils.hpp>
 #include <neolib/file/file.hpp>
 #include <neos/language/schema.hpp>
+#include <neos/cache.hpp>
+#include <map>
 
 namespace neos::language::schema_parser
 {
@@ -413,6 +415,64 @@ namespace neos::language
 
     namespace
     {
+        // --cache (see neos/cache.hpp): the stages' grammars as parsed (their ASTs), so that loading the schema again does not parse 
+        // them; a node: its conceptIndex (an index in a table of them, 0: none), its value (its position and size in the stage's grammar) 
+        // and its children (the key of the entry: a hash of the schema's source and of this file's build (its parser's rules))
+        using schema_ast_node = neolib::parser<schema_parser::symbol>::ast_node;
+
+        std::uint64_t constexpr SchemaCacheVersion = 1u;
+        std::uint64_t constexpr NoValue = ~std::uint64_t{};
+
+        bool encode_ast(schema_ast_node const& aNode, std::string_view aGrammar, std::map<std::string, std::uint64_t>& aConcepts, cache::writer& aWriter)
+        {
+            std::uint64_t conceptIndex = 0u;
+            if (aNode.c)
+                conceptIndex = aConcepts.try_emplace(*aNode.c, aConcepts.size() + 1u).first->second;
+            aWriter.u64(conceptIndex).u64(aNode.c ? static_cast<std::uint64_t>(aNode.c->association) : 0u);
+            if (aNode.value.data() == nullptr)
+                aWriter.u64(NoValue).u64(0u);
+            else if (aNode.value.data() >= aGrammar.data() && aNode.value.data() + aNode.value.size() <= aGrammar.data() + aGrammar.size())
+                aWriter.u64(static_cast<std::uint64_t>(aNode.value.data() - aGrammar.data())).u64(aNode.value.size());
+            else
+                return false; // (a value that is not of the grammar's text: not cached)
+            aWriter.u64(aNode.children.size());
+            for (auto const& child : aNode.children)
+                if (!encode_ast(*child, aGrammar, aConcepts, aWriter))
+                    return false;
+            return true;
+        }
+
+        bool decode_ast(cache::reader& aReader, std::string_view aGrammar, std::vector<std::string> const& aConcepts, schema_ast_node* aParent, schema_ast_node& aNode)
+        {
+            auto const conceptIndex = aReader.u64();
+            auto const association = aReader.u64();
+            auto const position = aReader.u64();
+            auto const size = aReader.u64();
+            auto const children = aReader.u64();
+            if (!aReader.ok() || conceptIndex > aConcepts.size() || association > static_cast<std::uint64_t>(neolib::concept_association::Infix))
+                return false;
+            aNode.parent = aParent;
+            if (conceptIndex != 0u)
+            {
+                auto const& name = aConcepts[static_cast<std::size_t>(conceptIndex - 1u)];
+                aNode.c.emplace(name.data(), name.size()); // (_concept: std::string's constructors)
+                aNode.c->association = static_cast<neolib::concept_association>(association);
+            }
+            if (position != NoValue)
+            {
+                if (position > aGrammar.size() || size > aGrammar.size() - position)
+                    return false;
+                aNode.value = aGrammar.substr(static_cast<std::size_t>(position), static_cast<std::size_t>(size));
+            }
+            for (std::uint64_t child = 0u; child < children; ++child)
+            {
+                auto& node = *aNode.children.emplace_back(std::make_shared<schema_ast_node>(&aNode, nullptr, nullptr, std::string_view{}));
+                if (!decode_ast(aReader, aGrammar, aConcepts, &aNode, node))
+                    return false;
+            }
+            return true;
+        }
+
         std::vector<std::filesystem::path> schema_folders()
         {
             // (relative to where neos is installed, e.g. /usr/local/bin/neos -> /usr/local/share/neos/languages, else side-by-side with the neos binary
@@ -566,6 +626,37 @@ namespace neos::language
             iPipeline.back()->parser->set_max_level(3072u);
         }
 
+        // (--cache: the stages' ASTs from the cache, if they are in it)
+        std::optional<std::uint64_t> cacheKey;
+        if (cache::folder())
+        {
+            cacheKey = cache::hasher{}.add("schema").add(SchemaCacheVersion).add(__FILE__ " " __DATE__ " " __TIME__).add(iSource).value();
+            if (auto const entry = cache::load("schema", *cacheKey))
+            {
+                cache::reader reader{ *entry };
+                std::vector<std::string> concepts;
+                for (auto count = reader.u64(); reader.ok() && count != 0u; --count)
+                    concepts.emplace_back(reader.str());
+                std::vector<std::shared_ptr<schema_ast_node>> asts;
+                bool ok = reader.ok() && reader.u64() == iPipeline.size();
+                for (auto const& stagePtr : iPipeline)
+                    if (ok)
+                        ok = decode_ast(reader, stagePtr->grammar, concepts, nullptr, 
+                            *asts.emplace_back(std::make_shared<schema_ast_node>(nullptr, nullptr, nullptr, std::string_view{})));
+                if (ok && reader.at_end())
+                {
+                    neolib::parser<schema_parser::symbol> const parser{ schema_parser::parserRules };
+                    for (std::size_t stage = 0u; stage < iPipeline.size(); ++stage)
+                        walk_ast(parser, *asts[stage], *iPipeline[stage]);
+                    return;
+                }
+            }
+        }
+
+        std::map<std::string, std::uint64_t> concepts;
+        cache::writer nodes;
+        bool cacheable = cacheKey.has_value();
+        nodes.u64(iPipeline.size());
         for (auto const& stagePtr : iPipeline)
         {
             auto& stage = *stagePtr;
@@ -576,7 +667,20 @@ namespace neos::language
             parser.parse(schema_parser::symbol::Grammar, stage.grammar);
             iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
             parser.create_ast();
+            if (cacheable)
+                cacheable = encode_ast(parser.ast(), stage.grammar, concepts, nodes);
             walk_ast(parser, parser.ast(), stage);
+        }
+        if (cacheable)
+        {
+            std::vector<std::string_view> table(concepts.size());
+            for (auto const& [name, index] : concepts)
+                table[static_cast<std::size_t>(index - 1u)] = name;
+            cache::writer entry;
+            entry.u64(table.size());
+            for (auto const& name : table)
+                entry.str(name);
+            cache::store("schema", *cacheKey, entry.data() + nodes.data());
         }
     }
 

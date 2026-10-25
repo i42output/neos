@@ -855,12 +855,14 @@ namespace neos::javascript_runtime
         value duration_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_duration(aThis, "Temporal.Duration.prototype.toLocaleString");
-            return intl::duration_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_duration(aThis, "Temporal.Duration.prototype.toLocaleString");
+                return intl::duration_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(duration_to_string(this_duration(aThis, "Temporal.Duration.prototype.toLocaleString"), -1));
-#endif
         }
 
         // --- Temporal.Instant
@@ -1040,12 +1042,14 @@ namespace neos::javascript_runtime
         value instant_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_instant(aThis, "Temporal.Instant.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_instant(aThis, "Temporal.Instant.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             return string_value(temporal_instant_to_string(this_instant(aThis, "Temporal.Instant.prototype.toLocaleString"), {}, -1));
-#endif
         }
 
         value instant_to_zoned_date_time_iso(value aThis, arguments aArguments, value, function_object&)

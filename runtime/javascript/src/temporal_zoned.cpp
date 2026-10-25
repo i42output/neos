@@ -370,13 +370,15 @@ namespace neos::javascript_runtime::temporal
         value zoned_to_locale_string(value aThis, arguments aArguments, value, function_object&)
         {
 #if defined(NEOS_JS_ICU)
-            this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toLocaleString");
-            return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
-#else
+            if (intl::icu_available())
+            {
+                this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toLocaleString");
+                return intl::temporal_to_locale_string(aThis, argument(aArguments, 0u), argument(aArguments, 1u));
+            }
+#endif
             (void)aArguments;
             auto const& z = this_zoned(aThis, "Temporal.ZonedDateTime.prototype.toLocaleString");
             return string_value(zoned_to_string(z.epochNs, z.timeZone, z.calendar, -1, show_calendar::Auto, show_time_zone::Auto, true));
-#endif
         }
 
         value zoned_start_of_day(value aThis, arguments, value, function_object&)
