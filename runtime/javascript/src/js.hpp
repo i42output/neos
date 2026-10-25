@@ -144,7 +144,7 @@ namespace neos::javascript_runtime
     // --- the region: the heap's address space (gc.cpp), which compiled code reads as an external memory (see
     // neos::language::javascript::layout): its cells, and storage that is not a cell's but that compiled code reads (region_vector)
 
-    inline std::byte* gRegionBase = nullptr;
+    extern std::byte* gRegionBase;                      ///< (gc.cpp: the region's address (one definition: not an inline variable))
     void* region_allocate(std::size_t aSize);           ///< (gc.cpp: storage in the region that is not a cell)
     void region_release(void* aMemory) noexcept;
     void publish_heap();                                ///< (the region, as the host's external memory (see layout::Memory))

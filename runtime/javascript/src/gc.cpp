@@ -57,6 +57,8 @@
 
 namespace neos::javascript_runtime
 {
+    std::byte* gRegionBase = nullptr;
+
     namespace
     {
         // --- the cells' memory: pages (of one size of slot each, or a large cell's) of one reserved region of address space, so that

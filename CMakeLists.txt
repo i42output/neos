@@ -48,6 +48,10 @@ set(NEOS_PLUGIN_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}/plugins")
 # dependencies
 
 # neonumeric and neolib: installed (find_package) or, if their source folders are given, built here
+# (an installed package's build for this build's configuration: RelWithDebInfo and MinSizeRel use its own, else its Release build, 
+# never its Debug build (e.g. neolibd.lib: CMake's default is the first configuration it was installed with))
+set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO RelWithDebInfo Release MinSizeRel "")
+set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL MinSizeRel Release RelWithDebInfo "")
 set(NEOS_NEONUMERIC_SOURCE_DIR "" CACHE PATH "neonumeric source folder (else an installed neonumeric is used)")
 set(NEOS_NEOLIB_SOURCE_DIR "" CACHE PATH "neolib source folder (else an installed neolib is used)")
 
