@@ -118,7 +118,18 @@ namespace neos::javascript_runtime
                 offsetof(property, attributes) == jsl::PropertyAttributes &&
                 AttributeWritable == jsl::AttributeWritable &&
                 AttributeAccessor == jsl::AttributeAccessor;
-            if (!ok)
+            environment const probe{ Undefined, 1u };
+            auto const field = [](auto const& aCell, void const* aField)
+            {
+                return static_cast<std::size_t>(static_cast<std::byte const*>(aField) - reinterpret_cast<std::byte const*>(&aCell));
+            };
+            function_object const f{ Undefined, function_kind::Native };
+            bool const environmentOk = field(probe, &probe.parent) == jsl::EnvironmentParent &&
+                field(probe, &probe.slots) == jsl::EnvironmentSlots && field(f, &f.environment) == jsl::FunctionEnvironment;
+            if (!environmentOk)
+                std::fprintf(stderr, "JavaScript runtime: environment parent %zu, slots %zu; function environment %zu\n", field(probe, &probe.parent),
+                    field(probe, &probe.slots), field(f, &f.environment));
+            if (!ok || !environmentOk)
             {
                 std::fputs("JavaScript runtime: the heap's layout is not the one compiled code reads (neos::language::javascript::layout)\n", stderr);
                 std::abort();
@@ -200,6 +211,10 @@ namespace neos::javascript_runtime
     void set_host(neos_rt_host const* aHost)
     {
         sHost = aHost;
+        // (the heap's region, as the external memory that compiled code reads: before the programs that use it are compiled (they 
+        // use its address and size as constants))
+        if (aHost != nullptr)
+            publish_heap();
     }
 
     void* current_program()
@@ -635,7 +650,7 @@ namespace neos::javascript_runtime
         {
             auto& source = cell_of<environment>(aEnvironment);
             auto& e = the_heap().make<environment>(source.parent, static_cast<std::uint32_t>(source.slots.size()));
-            e.slots = source.slots;
+            std::copy(source.slots.begin(), source.slots.end(), e.slots.begin());
             e.names = source.names;
             e.withObject = source.withObject;
             return TagInternal | e.handle;
@@ -788,6 +803,7 @@ namespace neos::javascript_runtime
             value_list argument_list(std::int32_t aCount, value a0, value a1, value a2, value a3, std::int32_t aBase)
             {
                 value_list result;
+                result.reserve(static_cast<std::size_t>(std::max(aCount, 0)));
                 value const registers[] = { a0, a1, a2, a3 };
                 for (std::int32_t i = 0; i < aCount; ++i)
                     result.push_back(i < 4 ? registers[i] : tExtraArguments[static_cast<std::size_t>(aBase + i - 4)]);
@@ -799,6 +815,12 @@ namespace neos::javascript_runtime
         {
             return guard([&]() -> value
             {
+                if (aCount <= 4)
+                {
+                    // (the arguments: on the native stack (which the collector scans))
+                    value const registers[] = { a0, a1, a2, a3 };
+                    return javascript_runtime::call(aCallee, aThis, arguments{ registers, static_cast<std::size_t>(std::max(aCount, 0)) });
+                }
                 auto const base = static_cast<std::int32_t>(tExtraArguments.size()) - std::max(0, aCount - 4);
                 auto const list = argument_list(aCount, a0, a1, a2, a3, base);
                 return javascript_runtime::call(aCallee, aThis, list);
@@ -879,7 +901,15 @@ namespace neos::javascript_runtime
                 // (its properties' storage: as much as the object it made last has (allocated once))
                 if (is_object(f.lastConstructed))
                     f.constructedProperties = std::max<std::uint32_t>(f.constructedProperties, static_cast<std::uint32_t>(obj(f.lastConstructed).properties.size()));
-                auto const thisValue = ordinary_create_from_constructor(aCallee, &realm::objectPrototype);
+                // (OrdinaryCreateFromConstructor: its prototype (its own data property: found in its table))
+                value prototype;
+                if (auto const* p = f.properties.find(the_names().prototype); p != nullptr && !p->accessor())
+                    prototype = p->data;
+                else
+                    prototype = javascript_runtime::get(aCallee, the_names().prototype);
+                if (!is_object(prototype))
+                    prototype = function_realm(aCallee).objectPrototype;
+                auto const thisValue = value_of(the_heap().make<object>(prototype));
                 if (f.constructedProperties != 0u)
                     obj(thisValue).properties.reserve(f.constructedProperties);
                 f.lastConstructed = thisValue;
@@ -1091,7 +1121,7 @@ namespace neos::javascript_runtime
                 std::int32_t number;            ///< (... whose number this is (for the dispatcher); else -1)
                 std::uint32_t reserved2;
             };
-            static_assert(std::is_standard_layout_v<site> && sizeof(site) == jsl::SiteSize);
+            static_assert(std::is_standard_layout_v<site> && sizeof(site) == jsl::SiteEntrySize);
             static_assert(offsetof(site, key) == jsl::SiteKey && offsetof(site, shape) == jsl::SiteShape);
             static_assert(offsetof(site, kind) == jsl::SiteKind && offsetof(site, depth) == jsl::SiteDepth);
             static_assert(offsetof(site, position) == jsl::SitePosition && offsetof(site, prototypes) == jsl::SitePrototype);
@@ -1139,8 +1169,26 @@ namespace neos::javascript_runtime
                     t.lastProgram = program;
                     t.lastTable = &existing->second;
                 }
-                auto const index = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
+                auto const index = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite)) * jsl::SiteEntries;
                 return index < t.lastTable->size() ? &(*t.lastTable)[index] : nullptr;
+            }
+
+            // (an entry remembered: it replaces the site's entry for the same receiver's shape and key, else it is the first (the
+            // others move down: the last is forgotten))
+            void remember(std::int32_t aSite, site const& aEntry)
+            {
+                auto* const entries = site_of(aSite);
+                if (entries == nullptr)
+                    return;
+                // (a call's site (no key): its entries are by function)
+                bool const call = aEntry.key == 0u;
+                std::size_t i = 0u;
+                while (i + 1u < jsl::SiteEntries && !(call ? entries[i].function == aEntry.function : 
+                    (entries[i].shape == aEntry.shape && entries[i].key == aEntry.key)))
+                    ++i;
+                for (; i > 0u; --i)
+                    entries[i] = entries[i - 1u];
+                entries[0] = aEntry;
             }
 
             // (the receiver's prototypes are the site's (the objects, their types ordinary and (those that do not have the property)
@@ -1249,9 +1297,61 @@ namespace neos::javascript_runtime
                     e.function = aResult;
                     e.number = number;
                 }
-                if (auto* s = site_of(aSite))
-                    *s = e;
+                if (e.kind != jsl::SiteNone || e.function != 0u)
+                    remember(aSite, e);
             }
+
+            // (a site's entry that fits a get (the receiver's shape and the key): its property's value)
+            bool cached_get(site const* aEntries, value aObject, value aKey, value& aResult)
+            {
+                if (aEntries == nullptr)
+                    return false;
+                for (std::size_t i = 0u; i < jsl::SiteEntries; ++i)
+                {
+                    auto const& e = aEntries[i];
+                    if (e.key != aKey || e.kind == jsl::SiteNone)
+                        continue;
+                    if (is_object(aObject))
+                    {
+                        auto& o = obj(aObject);
+                        if (shape_word(o.properties.layout()) != e.shape || e.shape == 0u)
+                            continue;
+                        property const* p = nullptr;
+                        if (e.kind == jsl::SiteOwn)
+                            p = &o.properties.at(e.position);
+                        else if (e.kind == jsl::SiteHolder && prototypes_match(o, e, true))
+                            p = holder_property(obj(e.prototypes[e.depth - 1u].object), e.position, aKey);
+                        if (p != nullptr && p->key == aKey && !p->accessor())
+                        {
+                            aResult = p->data;
+                            return true;
+                        }
+                    }
+                    else if (is_string(aObject) && e.kind == jsl::SiteString && e.prototypes[0].object == the_realm().stringPrototype)
+                    {
+                        if (auto const* p = holder_property(obj(e.prototypes[0].object), e.position, aKey))
+                        {
+                            aResult = p->data;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+
+        std::int32_t callee_number_cached(value aCallee, std::int32_t aSite)
+        {
+            // (callee_number, remembered in a call's site (its entries have only functions and their numbers))
+            auto const number = callee_number(aCallee);
+            if (number >= 0)
+            {
+                site e{};
+                e.function = aCallee;
+                e.number = number;
+                remember(aSite, e);
+            }
+            return number;
         }
 
         value property_sites(std::int32_t aCount, std::int32_t aGlobal)
@@ -1262,7 +1362,7 @@ namespace neos::javascript_runtime
                 auto& t = the_site_tables();
                 auto& table = t.tables[current_program()];
                 table.clear();
-                table.resize(static_cast<std::size_t>(std::max(aCount, 1)), site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
+                table.resize(static_cast<std::size_t>(std::max(aCount, 1)) * jsl::SiteEntries, site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
                 t.lastProgram = nullptr;
                 t.lastTable = nullptr;
                 *program_word(aGlobal) = region_offset(table.data());
@@ -1273,30 +1373,23 @@ namespace neos::javascript_runtime
 
         value get_named_cached(value aObject, value aKey, std::int32_t aSite)
         {
-            if (auto const* e = site_of(aSite); e != nullptr && e->key == aKey && e->kind != jsl::SiteNone)
-            {
-                if (is_object(aObject))
-                {
-                    auto& o = obj(aObject);
-                    if (shape_word(o.properties.layout()) == e->shape && e->shape != 0u)
-                    {
-                        property const* p = nullptr;
-                        if (e->kind == jsl::SiteOwn)
-                            p = &o.properties.at(e->position);
-                        else if (e->kind == jsl::SiteHolder && prototypes_match(o, *e, true))
-                            p = holder_property(obj(e->prototypes[e->depth - 1u].object), e->position, aKey);
-                        if (p != nullptr && p->key == aKey && !p->accessor())
-                            return p->data;
-                    }
-                }
-                else if (is_string(aObject) && e->kind == jsl::SiteString && e->prototypes[0].object == the_realm().stringPrototype)
-                {
-                    if (auto const* p = holder_property(obj(e->prototypes[0].object), e->position, aKey))
-                        return p->data;
-                }
-            }
-            auto const result = get_named(aObject, aKey);
+            value result;
+            if (cached_get(site_of(aSite), aObject, aKey, result))
+                return result;
+            result = get_named(aObject, aKey);
             if (result != Exception)
+                remember_get(aSite, aObject, aKey, result);
+            return result;
+        }
+
+        value get_cached(value aObject, value aKey, std::int32_t aSite)
+        {
+            // (o[k]: as get_named_cached if the key is an interned string (a property key, as a site's entry has); else as get)
+            value result;
+            if (cached_get(site_of(aSite), aObject, aKey, result))
+                return result;
+            result = get(aObject, aKey);
+            if (result != Exception && is_string(aKey) && cell_of<javascript_runtime::string>(aKey).interned)
                 remember_get(aSite, aObject, aKey, result);
             return result;
         }
@@ -1311,8 +1404,12 @@ namespace neos::javascript_runtime
                 if (layout != nullptr && ordinary_type(o) && !o.mirrored)
                 {
                     before = layout;
-                    if (auto const* e = site_of(aSite); e != nullptr && e->key == aKey && e->shape == shape_word(layout))
+                    auto const* entries = site_of(aSite);
+                    for (std::size_t i = 0u; entries != nullptr && i < jsl::SiteEntries; ++i)
                     {
+                        auto const* e = &entries[i];
+                        if (e->key != aKey || e->shape != shape_word(layout))
+                            continue;
                         if (e->kind == jsl::SiteOwn)
                         {
                             auto& p = o.properties.at(e->position);
@@ -1373,8 +1470,7 @@ namespace neos::javascript_runtime
                 e.position = static_cast<std::uint32_t>(o.properties.entries().size() - 1u);
                 e.added = shape_word(after);
             }
-            if (auto* s = site_of(aSite))
-                *s = e;
+            remember(aSite, e);
             return result;
         }
 
@@ -1936,6 +2032,8 @@ namespace neos::javascript_runtime
             { "get_named", NEOS_RT_FUNCTION(get_named), I64, 2u, { I64, I64 }, 0u },
             { "get_named_cached", NEOS_RT_FUNCTION(get_named_cached), I64, 3u, { I64, I64, I32 }, 0u },
             { "property_sites", NEOS_RT_FUNCTION(property_sites), I64, 2u, { I32, I32 }, 0u },
+            { "get_cached", NEOS_RT_FUNCTION(get_cached), I64, 3u, { I64, I64, I32 }, 0u },
+            { "callee_number_cached", NEOS_RT_FUNCTION(callee_number_cached), I32, 2u, { I64, I32 }, 0u },
             { "set", NEOS_RT_FUNCTION(set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "set_named", NEOS_RT_FUNCTION(set_named), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "set_named_cached", NEOS_RT_FUNCTION(set_named_cached), I64, 5u, { I64, I64, I64, I32, I32 }, 0u },

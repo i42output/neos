@@ -261,10 +261,16 @@ namespace neos::compilers::javascript
         std::uint32_t cached_get_named();   ///< (object, key -> its value: a get of a named property with a property cache site of its
                                             ///< own (its number): inline if the site fits, else the runtime's get_named_cached)
         void cached_set_named();            ///< (object, key, value, strict -> the result: as cached_get_named, a set)
+        std::uint32_t cached_get(bool aComputed);   ///< (as cached_get_named; aComputed: object, a computed key -> its value (its site's
+                                                    ///< entries also have their keys))
+        void site_entry(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey, std::size_t aSlow);
         void mem_load(opcode aOpcode, std::uint32_t aOffset);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
         void mem_store(opcode aOpcode, std::uint32_t aOffset);
         void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry)
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
+        void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
+        void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
+        static constexpr std::int64_t TailCallDepth = 256;  ///< (tail calls made as calls (nested) before they are made by the caller)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void check_void();          ///< (a call that returned Exception or Undefined (dropped))
         void function_index(function_info& aFunction, bool aBody = false);
@@ -512,6 +518,7 @@ namespace neos::compilers::javascript
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
+        std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t source_line_of(std::string_view aSource) const;
     public:
         std::string_view fragment_source() const { return iSource; }

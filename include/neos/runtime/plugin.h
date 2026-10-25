@@ -122,6 +122,7 @@ struct neos_rt_object
 
 #define NEOS_RT_MAX_PARAMETERS 16
 #define NEOS_RT_EXTERNAL_MEMORIES 8                     /* external memories (memory indices 1 to 8): see neos_rt_host::external_memory_at */
+#define NEOS_RT_EXTERNAL_MEMORY_FIXED 0x01u             /* external_memory_at: the region's address and size never change */
 
 /* function flags */
 #define NEOS_RT_RESTRICTED 0x1u /* can change the host environment: not callable by scripts running in restricted mode */
@@ -290,8 +291,12 @@ typedef struct neos_rt_host
     void (*external_memory)(void* aBase, unsigned long long aSize);
     /* (version 14) an external memory by its index (1 to NEOS_RT_EXTERNAL_MEMORIES; external_memory sets memory 1): as external_memory,
        for code whose memargs have that memory index, so that more than one plugin (e.g. the runtimes of different languages) can each
-       have a region that code uses at once (a language's compiler and runtime agree the index that its code uses) */
-    void (*external_memory_at)(unsigned aIndex, void* aBase, unsigned long long aSize);
+       have a region that code uses at once (a language's compiler and runtime agree the index that its code uses). aFlags: 
+       NEOS_RT_EXTERNAL_MEMORY_FIXED: the region's address and size never change (code compiled after it is set may use them as 
+       constants; set it before the programs that use it are loaded, e.g. when the plugin's host is set): an access within the size
+       is not checked further (an access of an address in it that the plugin has not made accessible (e.g. a reserved page that is not
+       committed) faults) */
+    void (*external_memory_at)(unsigned aIndex, void* aBase, unsigned long long aSize, unsigned aFlags);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

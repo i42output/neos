@@ -249,11 +249,17 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t PropertyKey = 0u;
         inline constexpr std::uint32_t PropertyData = 8u;
         inline constexpr std::uint32_t PropertyAttributes = 24u;    ///< (u8)
+        inline constexpr std::uint32_t EnvironmentParent = 24u;     ///< (value: an environment's parent)
+        inline constexpr std::uint32_t EnvironmentSlots = 32u;      ///< (u64: the offset of its slots (values))
+        inline constexpr std::uint32_t FunctionEnvironment = 208u;   ///< (value: a function's environment (its closure's))
         inline constexpr std::uint32_t AttributeWritable = 0x01u;
         inline constexpr std::uint32_t AttributeAccessor = 0x08u;
-        // (a program's property cache sites (a get or a set of a named property; numbered by the compiler from 0): an entry each, in 
-        // a table that the runtime makes for the program (property_sites), whose offset is in a global of the program's)
-        inline constexpr std::uint32_t SiteSize = 80u;
+        // (a program's property cache sites (a get or a set of a property; numbered by the compiler from 0): SiteEntries entries each 
+        // (the most recently used first), in a table that the runtime makes for the program (property_sites), whose offset is in a 
+        // global of the program's; an entry's fields are at these offsets in it)
+        inline constexpr std::uint32_t SiteEntries = 2u;
+        inline constexpr std::uint32_t SiteEntrySize = 80u;
+        inline constexpr std::uint32_t SiteSize = SiteEntries * SiteEntrySize;
         inline constexpr std::uint32_t SiteKey = 0u;                ///< (value: the property's key)
         inline constexpr std::uint32_t SiteShape = 8u;              ///< (u64: the receiver's shape)
         inline constexpr std::uint32_t SiteKind = 16u;              ///< (u8: SiteOwn, SitePrototype ...)

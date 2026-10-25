@@ -1654,6 +1654,11 @@ namespace neos::compilers::javascript
         return global_index("%jssites", type::I64);
     }
 
+    std::uint32_t compiler::tail_depth_global()
+    {
+        return global_index("%jstaildepth", type::I64);
+    }
+
     std::uint32_t compiler::function_closure(function_info const& aFunction)
     {
         auto const existing = iClosures.find(&aFunction);

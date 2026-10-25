@@ -3780,17 +3780,33 @@ namespace neos
                                 a.mov_rr(false, g, g); // (zero extend)
                             auto const m = alloc(false, keep | (1u << g));
                             auto const e = alloc(false, keep | (1u << g) | (1u << m));
-                            if (aMemory == 0u)
-                                a.load(true, m, R15, ContextMemory);
+                            if (aMemory != 0u && external_memory(aMemory).fixed)
+                            {
+                                // (a fixed external memory: its size and address are constants)
+                                auto const& fixed = external_memory(aMemory);
+                                a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
+                                a.mov_ri(m, fixed.size, true);
+                                a.alu_rr(7, true, e, m); // cmp
+                                a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                release_reg(false, e);
+                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(fixed.base), true);
+                                a.alu_rr(0, true, m, g); // add
+                                release_reg(false, g);
+                            }
                             else
-                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(&external_memory(aMemory)), true);
-                            a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
-                            a.alu_rm(7, true, e, m, MemorySize); // cmp
-                            a.jcc(A, iTrapLabels[TrapOutOfBounds]);
-                            release_reg(false, e);
-                            a.load(true, m, m, MemoryBase);
-                            a.alu_rr(0, true, m, g); // add
-                            release_reg(false, g);
+                            {
+                                if (aMemory == 0u)
+                                    a.load(true, m, R15, ContextMemory);
+                                else
+                                    a.mov_ri(m, reinterpret_cast<std::uint64_t>(&external_memory(aMemory)), true);
+                                a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
+                                a.alu_rm(7, true, e, m, MemorySize); // cmp
+                                a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                release_reg(false, e);
+                                a.load(true, m, m, MemoryBase);
+                                a.alu_rr(0, true, m, g); // add
+                                release_reg(false, g);
+                            }
                             if (store)
                             {
                                 if (is_float(x.type))

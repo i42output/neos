@@ -2427,18 +2427,21 @@ namespace neos
                     return nullptr;
                 }
 
-                void host_external_memory_at(unsigned aIndex, void* aBase, unsigned long long aSize)
+                void host_external_memory_at(unsigned aIndex, void* aBase, unsigned long long aSize, unsigned aFlags)
                 {
                     if (aIndex < 1u || aIndex > NEOS_RT_EXTERNAL_MEMORIES)
                         return;
                     auto& external = jit::external_memory(aIndex);
+                    if (external.fixed)
+                        return;     // (code may have its address and size as constants)
                     external.base = static_cast<std::uint8_t*>(aBase);
                     external.size = aSize;
+                    external.fixed = (aFlags & NEOS_RT_EXTERNAL_MEMORY_FIXED) != 0u;
                 }
 
                 void host_external_memory(void* aBase, unsigned long long aSize)
                 {
-                    host_external_memory_at(1u, aBase, aSize);
+                    host_external_memory_at(1u, aBase, aSize, 0u);
                 }
 
                 void host_unload(void* aContext)

@@ -46,11 +46,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <new>
@@ -160,6 +162,7 @@ namespace neos::javascript_runtime
         static_assert(std::is_trivially_copyable_v<T>);
     public:
         region_vector() = default;
+        region_vector(std::size_t aSize, T const& aValue) { resize(aSize, aValue); }
         region_vector(region_vector const&) = delete;
         region_vector& operator=(region_vector const&) = delete;
         region_vector(region_vector&& aOther) noexcept : iOffset{ aOther.iOffset }, iSize{ aOther.iSize }, iCapacity{ aOther.iCapacity }
@@ -212,6 +215,71 @@ namespace neos::javascript_runtime
             data()[iSize++] = aValue;
         }
         void pop_back() { --iSize; }
+        void emplace_back(T const& aValue) { push_back(aValue); }
+        T& front() { return data()[0]; }
+        T const& front() const { return data()[0]; }
+        T* insert(T* aPosition, T const& aValue)
+        {
+            auto const index = aPosition - begin();
+            if (iSize == iCapacity)
+                reserve(iCapacity < 4u ? 4u : static_cast<std::size_t>(iCapacity) * 2u);
+            std::memmove(static_cast<void*>(data() + index + 1), data() + index, (static_cast<std::size_t>(iSize) - index) * sizeof(T));
+            data()[index] = aValue;
+            ++iSize;
+            return data() + index;
+        }
+        template <typename Iterator>
+        T* insert(T* aPosition, Iterator aFirst, Iterator aLast)
+        {
+            auto const index = aPosition - begin();
+            auto const count = static_cast<std::size_t>(std::distance(aFirst, aLast));
+            if (iSize + count > iCapacity)
+                reserve(std::max<std::size_t>(iSize + count, static_cast<std::size_t>(iCapacity) * 2u));
+            std::memmove(static_cast<void*>(data() + index + count), data() + index, (static_cast<std::size_t>(iSize) - index) * sizeof(T));
+            std::copy(aFirst, aLast, data() + index);
+            iSize += count;
+            return data() + index;
+        }
+        T* erase(T* aFirst, T* aLast)
+        {
+            std::memmove(static_cast<void*>(aFirst), aLast, static_cast<std::size_t>(end() - aLast) * sizeof(T));
+            iSize -= static_cast<std::uint64_t>(aLast - aFirst);
+            return aFirst;
+        }
+        T* erase(T* aPosition) { return erase(aPosition, aPosition + 1); }
+        template <typename Iterator>
+        void assign(Iterator aFirst, Iterator aLast)
+        {
+            auto const count = static_cast<std::size_t>(std::distance(aFirst, aLast));
+            if (count > iCapacity)
+            {
+                // (no copy of the old elements)
+                iSize = 0u;
+                reserve(count);
+            }
+            std::copy(aFirst, aLast, data());
+            iSize = count;
+        }
+        void assign(std::size_t aCount, T const& aValue)
+        {
+            iSize = 0u;
+            resize(aCount, aValue);
+        }
+        void shrink_to_fit()
+        {
+            if (iSize == iCapacity)
+                return;
+            if (iSize == 0u)
+            {
+                release();
+                return;
+            }
+            region_vector smaller;
+            smaller.reserve(static_cast<std::size_t>(iSize));
+            std::memcpy(static_cast<void*>(smaller.data()), data(), static_cast<std::size_t>(iSize) * sizeof(T));
+            smaller.iSize = iSize;
+            *this = std::move(smaller);
+        }
         void resize(std::size_t aSize, T const& aValue = T{})
         {
             reserve(aSize);
@@ -229,6 +297,7 @@ namespace neos::javascript_runtime
             iSize = kept;
         }
         void clear() { iSize = 0u; }
+        operator std::span<T const>() const { return std::span<T const>{ data(), size() }; }
     private:
         void release_storage()
         {
@@ -753,7 +822,7 @@ namespace neos::javascript_runtime
         }
         void push(value aValue);        ///< (a new element at the end; the array is dense, extensible and its length writable)
     public:
-        std::vector<value> elements;
+        region_vector<value> elements;          ///< (in the region)
         std::uint32_t length = 0u;
         bool lengthWritable = true;
         bool sparse = false;
@@ -867,8 +936,9 @@ namespace neos::javascript_runtime
     public:
         void trace(tracer& aTracer) override;
     public:
+        // (compiled code reads the parent and the slots (in the region): see neos::language::javascript::layout)
         value parent;
-        std::vector<value> slots;
+        region_vector<value> slots;
         value withObject = Undefined;   ///< (a with statement's object environment: its object)
         value names = Undefined;        ///< (an environment whose bindings can be found by name (direct eval): an array of their names)
     };

@@ -84,12 +84,13 @@ namespace neos::javascript_runtime
             bool raw = false;               ///< (storage that is not cells (see region_vector))
         };
 
-        // (the region (its committed pages) is the external memory that compiled code reads (see neos::language::javascript::layout))
+        // (the region (all of it: its address and size never change; compiled code reads only the pages that are committed) is the
+        // external memory that compiled code reads (see neos::language::javascript::layout))
         void publish_region(std::byte* aBase, std::size_t aSize)
         {
             auto const* h = host();
             if (h != nullptr && h->version >= 14u && h->external_memory_at != nullptr)
-                h->external_memory_at(neos::language::javascript::layout::Memory, aBase, aSize);
+                h->external_memory_at(neos::language::javascript::layout::Memory, aBase, aSize, NEOS_RT_EXTERNAL_MEMORY_FIXED);
         }
 
         class cell_memory
@@ -170,7 +171,7 @@ namespace neos::javascript_runtime
                 *static_cast<void**>(aMemory) = c.freeList;
                 c.freeList = aMemory;
             }
-            void publish() const { publish_region(iBase, iPages.size() * PageSize); }
+            void publish() const { publish_region(iBase, RegionSize); }
             // (the handle table (with at least aEntries entries committed))
             std::uint64_t* handles(std::size_t aEntries)
             {
@@ -182,6 +183,26 @@ namespace neos::javascript_runtime
                 return reinterpret_cast<std::uint64_t*>(iBase + neos::language::javascript::layout::RegionHandles);
             }
             std::size_t handle_capacity() const { return iHandlePages * PageSize / sizeof(std::uint64_t); }
+            // (each slot of cells (live, free or not used yet), in descending address order (aVisit(slot)))
+            template <typename Visit>
+            void for_each_slot_descending(Visit aVisit)
+            {
+                for (auto page = iPages.size(); page-- > 0u;)
+                {
+                    auto const& info = iPages[page];
+                    if (info.slotSize == 0u || info.raw)
+                        continue;
+                    if (info.largeSize != 0u)
+                    {
+                        if (info.first == page)
+                            aVisit(page_address(page));
+                        continue;
+                    }
+                    auto* const start = page_address(page);
+                    for (auto i = PageSize / info.slotSize; i-- > 0u;)
+                        aVisit(start + i * info.slotSize);
+                }
+            }
             std::size_t size_of(void const* aMemory) const
             {
                 auto const& info = iPages[page_of(aMemory)];
@@ -777,11 +798,14 @@ namespace neos::javascript_runtime
         std::size_t live = 0u;
         std::size_t freed = 0u;
         auto& cells = iHeap.iCells;
-        for (std::size_t h = 1u; h < cells.size(); ++h)
+        // (by address, descending: the free lists' slots are then in ascending order (a new cell's slot is next to the last's))
+        iMemory.for_each_slot_descending([&](std::byte* aSlot)
         {
+            std::uint32_t h;
+            std::memcpy(&h, aSlot + iHandleOffset, sizeof(h));
+            if (h == 0u || h >= cells.size() || cells[h] != reinterpret_cast<cell*>(aSlot))
+                return;     // (free, or not used yet)
             auto* const c = cells[h];
-            if (c == nullptr)
-                continue;
             if (c->marked != 0u)
             {
                 c->marked = 0u;
@@ -789,11 +813,11 @@ namespace neos::javascript_runtime
                 liveBytes += iMemory.size_of(c);
                 if (c->type == cell_type::String)
                     liveBytes += static_cast<string*>(c)->text.capacity() * sizeof(char16_t);
-                continue;
+                return;
             }
-            free_cell(c, static_cast<std::uint32_t>(h));
+            free_cell(c, h);
             ++freed;
-        }
+        });
         iLiveBytes = liveBytes;
         if (iVerbose != 0u)
             std::fprintf(stderr, "[gc %llu: %zu live (%llu KB), %zu freed]\n", static_cast<unsigned long long>(iCollections), live,

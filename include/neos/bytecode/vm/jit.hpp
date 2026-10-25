@@ -114,6 +114,7 @@ namespace neos
                 {
                     std::uint8_t* base = nullptr;
                     std::uint64_t size = 0u;
+                    bool fixed = false;     ///< (an external memory whose base and size never change: code uses them as constants)
                 };
 
                 // the host's objects (see neos/runtime/plugin.h): a handle is the index of a slot (0: no object), which counts the 
