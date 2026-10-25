@@ -66,8 +66,8 @@ namespace neos::javascript_runtime
         constexpr std::size_t PageSize = std::size_t{ 1u } << PageShift;
         constexpr std::size_t RegionSize = std::size_t{ 64u } << 30u;      // (address space only: pages are committed when used)
         constexpr std::size_t MaxSmall = 4096u;
-        constexpr std::size_t HandlePages = 65536u;     // (the handle table's (4 GB: 512M handles): after the first page)
-        static_assert(neos::language::javascript::layout::RegionHandles == PageSize);
+        static_assert(RegionSize >> heap::HandleShift <= std::size_t{ 1u } << 32u);     // (a handle is 32 bits)
+        static_assert(neos::language::javascript::layout::HandleShift == heap::HandleShift);
 
         constexpr std::uint32_t SizeClasses[] =
         {
@@ -118,9 +118,8 @@ namespace neos::javascript_runtime
                 }
                 gRegionBase = iBase;
                 iPages.reserve(4096u);
-                // (the first page is reserved (offset 0 is no cell); the handle table's pages follow it (layout::RegionHandles: 
-                // committed as it grows))
-                iPages.resize(1u + HandlePages);
+                // (the first page is reserved (offset 0 (handle 0) is no cell))
+                iPages.resize(1u);
                 for (auto& p : iPages)
                     p.raw = true;
             }
@@ -176,17 +175,20 @@ namespace neos::javascript_runtime
                 c.freeList = aMemory;
             }
             void publish() const { publish_region(iBase, RegionSize); }
-            // (the handle table (with at least aEntries entries committed))
-            std::uint64_t* handles(std::size_t aEntries)
+            // (the slot that begins at an offset in the region (null if none: it is not the start of a slot of a page of cells))
+            std::byte* slot_starting_at(std::size_t aOffset) const
             {
-                auto const needed = (aEntries * sizeof(std::uint64_t) + PageSize - 1u) / PageSize;
-                if (needed > HandlePages)
-                    throw std::bad_alloc{};
-                for (; iHandlePages < needed; ++iHandlePages)
-                    commit(page_address(1u + iHandlePages), PageSize);     // (zeroed)
-                return reinterpret_cast<std::uint64_t*>(iBase + neos::language::javascript::layout::RegionHandles);
+                auto const page = aOffset >> PageShift;
+                if (page >= iPages.size())
+                    return nullptr;
+                auto const& info = iPages[page];
+                if (info.slotSize == 0u || info.raw)
+                    return nullptr;
+                auto const offset = aOffset & (PageSize - 1u);
+                if (info.largeSize != 0u)
+                    return info.first == page && offset == 0u ? iBase + aOffset : nullptr;
+                return offset % info.slotSize == 0u && offset + info.slotSize <= PageSize ? iBase + aOffset : nullptr;
             }
-            std::size_t handle_capacity() const { return iHandlePages * PageSize / sizeof(std::uint64_t); }
             // (each slot of cells (live, free or not used yet), in descending address order (aVisit(slot)))
             template <typename Visit>
             void for_each_slot_descending(Visit aVisit)
@@ -298,7 +300,6 @@ namespace neos::javascript_runtime
             std::vector<page_info> iPages;
             std::vector<std::pair<std::size_t, std::size_t>> iFreeRuns;  ///< (large cells' pages that were freed: first, count)
             size_class iRawClasses[ClassCount];
-            std::size_t iHandlePages = 0u;      ///< (the handle table's committed pages)
             size_class iClasses[ClassCount];
             std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
         };
@@ -386,6 +387,18 @@ namespace neos::javascript_runtime
                 return false;
             auto const* h = host();
             return h != nullptr && h->version >= 8u && h->values != nullptr && stack_base() != nullptr;
+        }
+        // (the live cell whose handle it is (its slot's handle field is the handle: a free slot's is 0), else null)
+        cell* live_cell(std::uint32_t aHandle) const
+        {
+            if (aHandle == 0u || iHandleOffset == 0u)
+                return nullptr;
+            auto* const slot = iMemory.slot_starting_at(static_cast<std::size_t>(aHandle) << heap::HandleShift);
+            if (slot == nullptr)
+                return nullptr;
+            std::uint32_t h;
+            std::memcpy(&h, slot + iHandleOffset, sizeof(h));
+            return h == aHandle ? reinterpret_cast<cell*>(slot) : nullptr;
         }
         void record_handle_offset(cell& aCell)
         {
@@ -540,8 +553,6 @@ namespace neos::javascript_runtime
 
     heap::heap()
     {
-        iCells.reserve(1u << 16);
-        iCells.push_back(nullptr);  // (handle 0 refers to nothing)
     }
 
     heap::~heap()
@@ -579,30 +590,16 @@ namespace neos::javascript_runtime
         c.record_handle_offset(aCell);
         if (c.collecting())
             aCell.marked = 1u;     // (a cell made while dead cells are freed (e.g. by a weak reference's clearing) lives)
-        if (!iFreeHandles.empty())
-        {
-            aCell.handle = iFreeHandles.back();
-            iFreeHandles.pop_back();
-            iCells[aCell.handle] = &aCell;
-            iHandleTable[aCell.handle] = region_offset(&aCell);
-            return;
-        }
-        if (iCells.size() >= 0xFFFFFFFFu)
-            throw std::bad_alloc{};
-        aCell.handle = static_cast<std::uint32_t>(iCells.size());
-        iCells.push_back(&aCell);
-        // (the handle table (compiled code's): at a fixed offset (its pages are committed as it grows))
-        if (aCell.handle >= iHandleCapacity)
-        {
-            iHandleTable = handle_table(static_cast<std::size_t>(aCell.handle) + 1u);
-            iHandleCapacity = the_collector().memory().handle_capacity();
-        }
-        iHandleTable[aCell.handle] = region_offset(&aCell);
+        // (its handle: its offset in the region (its slot's: a multiple of 16) >> HandleShift)
+        auto const offset = region_offset(&aCell);
+        if ((offset & ((std::uint64_t{ 1u } << HandleShift) - 1u)) != 0u)
+            std::abort();
+        aCell.handle = static_cast<std::uint32_t>(offset >> HandleShift);
     }
 
-    std::uint64_t* handle_table(std::size_t aEntries)
+    cell* heap::find(std::uint32_t aHandle) const
     {
-        return the_collector().memory().handles(aEntries);
+        return the_collector().live_cell(aHandle);
     }
 
     void* region_allocate(std::size_t aSize)
@@ -782,8 +779,7 @@ namespace neos::javascript_runtime
 
     void collector::free_cell(cell* aCell, std::uint32_t aHandle)
     {
-        iHeap.iCells[aHandle] = nullptr;
-        iHeap.iHandleTable[aHandle] = 0u;
+        (void)aHandle;
         auto const size = iMemory.size_of(aCell);
         aCell->~cell();
         auto* const memory = reinterpret_cast<std::byte*>(aCell);
@@ -792,8 +788,6 @@ namespace neos::javascript_runtime
         std::uint32_t const none = 0u;
         std::memcpy(memory + iHandleOffset, &none, sizeof(none));
         iMemory.release(memory, !iQuarantine);
-        if (!iQuarantine)
-            iHeap.iFreeHandles.push_back(aHandle);
     }
 
     void collector::sweep()
@@ -801,15 +795,14 @@ namespace neos::javascript_runtime
         std::uint64_t liveBytes = 0u;
         std::size_t live = 0u;
         std::size_t freed = 0u;
-        auto& cells = iHeap.iCells;
         // (by address, descending: the free lists' slots are then in ascending order (a new cell's slot is next to the last's))
         iMemory.for_each_slot_descending([&](std::byte* aSlot)
         {
             std::uint32_t h;
             std::memcpy(&h, aSlot + iHandleOffset, sizeof(h));
-            if (h == 0u || h >= cells.size() || cells[h] != reinterpret_cast<cell*>(aSlot))
+            if (h == 0u || h != static_cast<std::uint32_t>(region_offset(aSlot) >> heap::HandleShift))
                 return;     // (free, or not used yet)
-            auto* const c = cells[h];
+            auto* const c = reinterpret_cast<cell*>(aSlot);
             if (c->marked != 0u)
             {
                 c->marked = 0u;
