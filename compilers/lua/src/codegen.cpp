@@ -365,8 +365,74 @@ namespace neos::compilers::lua
             return sNames;
         }
 
+        // (a known function that is inlined: one whose body is "return <integer arithmetic of its parameters>" (that cannot raise an 
+        // error when they are integers); its expression)
+            node* inline_expression(function_info const& aFunction)
+        {
+            if (aFunction.vararg || aFunction.method || aFunction.parameters.empty() || aFunction.parameters.size() > function_generator::RegisterArguments ||
+                std::any_of(aFunction.parameters.begin(), aFunction.parameters.end(), [](variable const* p) { return p->captured || p->assigned || p->declaration == nullptr; }))
+                return nullptr;
+            auto* const declaration = aFunction.declaration;
+            auto const statements = compiler::statements_of(declaration, compiler::first_statement(declaration));
+            if (statements.size() != 1u || !statements[0]->is(construct::Return) || statements[0]->size() != 1u)
+                return nullptr;
+            auto* const expression = statements[0]->child(0u);
+            // (its parameters and integer numerals only; // and % by positive numerals only (no errors))
+            std::function<bool(node const*)> safe = [&](node const* aNode) -> bool
+            {
+                while (aNode->is(construct::Parenthesized))
+                    aNode = aNode->child(0u);
+                switch (aNode->kind)
+                {
+                case construct::Number:
+                    return std::holds_alternative<std::int64_t>(number_value(aNode->source));
+                case construct::Identifier:
+                    return aNode->resolved != nullptr && std::find(aFunction.parameters.begin(), aFunction.parameters.end(), aNode->resolved) != aFunction.parameters.end();
+                case construct::Add:
+                case construct::Subtract:
+                case construct::Multiply:
+                    return safe(aNode->child(0u)) && safe(aNode->child(1u));
+                case construct::Negate:
+                    return safe(aNode->child(0u));
+                case construct::FloorDivide:
+                case construct::Modulo:
+                    {
+                        auto const* divisor = aNode->child(1u);
+                        while (divisor->is(construct::Parenthesized))
+                            divisor = divisor->child(0u);
+                        if (!divisor->is(construct::Number))
+                            return false;
+                        auto const value = number_value(divisor->source);
+                        return std::holds_alternative<std::int64_t>(value) && std::get<std::int64_t>(value) > 0 && safe(aNode->child(0u));
+                    }
+                default:
+                    return false;
+                }
+            };
+            return safe(expression) ? expression : nullptr;
+        }
+
+        bool integer_expression(node const* aNode);
+
+        // (a call of a known function that is inlined, whose arguments are integer expressions (its value is an integer): its function)
+        function_info const* inlined_call(node const* aNode)
+        {
+            auto const* target = aNode->child(0u);
+            while (target->is(construct::Parenthesized))
+                target = target->child(0u);
+            if (!target->is(construct::Identifier) || target->resolved == nullptr || target->resolved->constant == nullptr)
+                return nullptr;
+            auto const* f = target->resolved->constant;
+            if (aNode->size() - 1u != f->parameters.size() || inline_expression(*f) == nullptr)
+                return nullptr;
+            for (std::size_t i = 1u; i < aNode->size(); ++i)
+                if (!integer_expression(aNode->child(i)))
+                    return nullptr;
+            return f;
+        }
+
         // (an expression whose value is an integer: an integer numeral, an integer variable or arithmetic of them (the result of + - * of
-        // integers, and of // and % (else an error), is an integer))
+        // integers, and of // and % (else an error), is an integer), or a call that is inlined)
         bool integer_expression(node const* aNode)
         {
             while (aNode->is(construct::Parenthesized))
@@ -385,6 +451,8 @@ namespace neos::compilers::lua
                 return integer_expression(aNode->child(0u)) && integer_expression(aNode->child(1u));
             case construct::Negate:
                 return integer_expression(aNode->child(0u));
+            case construct::Call:
+                return inlined_call(aNode) != nullptr;
             default:
                 return false;
             }
@@ -476,6 +544,8 @@ namespace neos::compilers::lua
                     {
                         assign(targets[i]->resolved, expressions, i);
                         assigned.insert(targets[i]->resolved);
+                        if (targets[i]->resolved != nullptr)
+                            targets[i]->resolved->assigned = true;
                     }
             }
             else if (n->is(construct::LocalFunction))
@@ -1119,6 +1189,386 @@ namespace neos::compilers::lua
 
     // --- variables
 
+    void function_generator::mem_load(std::uint32_t aOffset)
+    {
+        // (i64.load, memory 1 (the external memory: a 64 bit address))
+        op(opcode::I64LoadMem);
+        u32(0x43u);
+        u32(1u);
+        u32(aOffset);
+    }
+
+    void function_generator::mem_store(std::uint32_t aOffset)
+    {
+        op(opcode::I64StoreMem);
+        u32(0x43u);
+        u32(1u);
+        u32(aOffset);
+    }
+
+    void function_generator::payload()
+    {
+        constant(values::PayloadMask);
+        op(opcode::I64And);
+    }
+
+    bool function_generator::short_literal(std::string const& aText) const
+    {
+        // (a string of at most 40 bytes is always interned (the runtime's MaxInternedLength): its value identifies it)
+        return aText.size() <= 40u;
+    }
+
+    void function_generator::upvalue_box(std::uint32_t aIndex)
+    {
+        get(CalleeLocal);
+        payload();
+        mem_load(layout::FunctionUpvalues);
+        mem_load(aIndex * 8u);
+    }
+
+    void function_generator::probe_string(std::uint32_t aTable, std::uint32_t aKey, std::uint32_t aResult, std::optional<std::uint32_t> aNode, std::size_t aMiss,
+        std::size_t aUnknown)
+    {
+        auto const mask = temporary();
+        auto const slot = temporary();
+        auto const nodes = temporary();
+        auto const address = aNode ? *aNode : temporary();
+        get(aTable);
+        mem_load(layout::TableNodesSize);
+        tee(mask);
+        op(opcode::I64Eqz);
+        branch(aMiss, true);
+        get(mask);
+        i64(1);
+        op(opcode::I64Sub);
+        set(mask);
+        get(aKey);
+        payload();
+        mem_load(layout::StringHash);
+        get(mask);
+        op(opcode::I64And);
+        set(slot);
+        get(aTable);
+        mem_load(layout::TableNodes);
+        set(nodes);
+        // (the first ProbeCount slots of its chain (not a loop: the code that it is in is rarely a loop's); a longer chain: a miss (the
+        // runtime finds it))
+        constexpr std::size_t ProbeCount = 4u;
+        begin(control_kind::Block);
+        auto const found = iControls.size() - 1u;
+        for (std::size_t probe = 0u; probe < ProbeCount; ++probe)
+        {
+            if (probe != 0u)
+            {
+                get(slot);
+                i64(1);
+                op(opcode::I64Add);
+                get(mask);
+                op(opcode::I64And);
+                set(slot);
+            }
+            get(slot);
+            i64(4);
+            op(opcode::I64Shl);
+            get(nodes);
+            op(opcode::I64Add);
+            tee(address);
+            mem_load(0u);
+            tee(aResult);
+            get(aKey);
+            op(opcode::I64Eq);
+            begin_if();
+            get(address);
+            mem_load(layout::NodeValue);
+            tee(aResult);
+            constant(values::Nil);
+            op(opcode::I64Eq);
+            branch(aMiss, true);
+            branch(found);
+            end_control();
+            get(aResult);
+            constant(values::Empty);
+            op(opcode::I64Eq);
+            branch(aMiss, true);
+        }
+        // (not found in the first slots: the runtime's)
+        branch(aUnknown);
+        end_control();
+        if (!aNode)
+            release(address);
+        release(nodes);
+        release(slot);
+        release(mask);
+    }
+
+    void function_generator::field_get(std::uint32_t aObject, std::uint32_t aKey, std::function<void()> const& aSlow)
+    {
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        auto const t = temporary();
+        auto const result = temporary();
+        auto const index = temporary();
+        get(aObject);
+        i64(48);
+        op(opcode::I64ShrU);
+        i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+        op(opcode::I64Ne);
+        branch(slow, true);
+        get(aObject);
+        payload();
+        set(t);
+        begin(control_kind::Block);
+        auto const miss = iControls.size() - 1u;
+        probe_string(t, aKey, result, std::nullopt, miss, slow);
+        get(result);
+        branch(done);
+        end_control();
+        // (not in the table: nil if it has no metatable; else its metatable's __index (if it is a table that has it))
+        get(t);
+        mem_load(layout::TableMetatable);
+        tee(index);
+        constant(values::Nil);
+        op(opcode::I64Eq);
+        begin_if();
+        constant(values::Nil);
+        branch(done);
+        end_control();
+        get(index);
+        payload();
+        set(t);
+        literal_string("__index");
+        set(result);
+        begin(control_kind::Block);
+        auto const missIndex = iControls.size() - 1u;
+        probe_string(t, result, index, std::nullopt, missIndex, missIndex);
+        get(index);
+        i64(48);
+        op(opcode::I64ShrU);
+        i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+        op(opcode::I64Ne);
+        branch(missIndex, true);
+        get(index);
+        payload();
+        set(t);
+        probe_string(t, aKey, result, std::nullopt, missIndex, missIndex);
+        get(result);
+        branch(done);
+        end_control();
+        end_control();
+        release(index);
+        release(result);
+        release(t);
+        aSlow();
+        end_control();
+    }
+
+    void function_generator::field_set(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aValue, std::function<void()> const& aSlow)
+    {
+        // (an existing (non-nil) entry: its value replaced)
+        begin(control_kind::Block);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        auto const t = temporary();
+        auto const result = temporary();
+        auto const node = temporary();
+        get(aObject);
+        i64(48);
+        op(opcode::I64ShrU);
+        i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+        op(opcode::I64Ne);
+        branch(slow, true);
+        get(aObject);
+        payload();
+        set(t);
+        probe_string(t, aKey, result, node, slow, slow);
+        get(node);
+        get(aValue);
+        mem_store(layout::NodeValue);
+        branch(done);
+        end_control();
+        release(node);
+        release(result);
+        release(t);
+        aSlow();
+        end_control();
+    }
+
+    void function_generator::element_get(std::uint32_t aObject, std::uint32_t aKey, bool aRaw, std::function<void()> const& aSlow)
+    {
+        // (keys 1 to n: the array part's; a nil element: nil if the table has no metatable)
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        auto const t = temporary();
+        auto const index = temporary();
+        auto const result = temporary();
+        get(aObject);
+        i64(48);
+        op(opcode::I64ShrU);
+        i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+        op(opcode::I64Ne);
+        if (!aRaw)
+        {
+            get(aKey);
+            is_integer();
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+        }
+        branch(slow, true);
+        get(aObject);
+        payload();
+        set(t);
+        get(aKey);
+        if (!aRaw)
+            unbox_integer();
+        i64(1);
+        op(opcode::I64Sub);
+        tee(index);
+        get(t);
+        mem_load(layout::TableArraySize);
+        op(opcode::I64GeU);
+        branch(slow, true);
+        get(t);
+        mem_load(layout::TableArray);
+        get(index);
+        i64(3);
+        op(opcode::I64Shl);
+        op(opcode::I64Add);
+        mem_load(0u);
+        tee(result);
+        constant(values::Nil);
+        op(opcode::I64Ne);
+        begin_if();
+        get(result);
+        branch(done);
+        end_control();
+        get(t);
+        mem_load(layout::TableMetatable);
+        constant(values::Nil);
+        op(opcode::I64Ne);
+        branch(slow, true);
+        constant(values::Nil);
+        branch(done);
+        end_control();
+        release(result);
+        release(index);
+        release(t);
+        aSlow();
+        end_control();
+    }
+
+    void function_generator::element_set(std::uint32_t aObject, std::uint32_t aKey, bool aRaw, std::uint32_t aValue, std::function<void()> const& aSlow)
+    {
+        // (keys 1 to n: the array part's element replaced, if it is not nil or the table has no metatable)
+        begin(control_kind::Block);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        auto const t = temporary();
+        auto const address = temporary();
+        get(aObject);
+        i64(48);
+        op(opcode::I64ShrU);
+        i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+        op(opcode::I64Ne);
+        if (!aRaw)
+        {
+            get(aKey);
+            is_integer();
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+        }
+        branch(slow, true);
+        get(aObject);
+        payload();
+        set(t);
+        auto const size = temporary();
+        get(aKey);
+        if (!aRaw)
+            unbox_integer();
+        i64(1);
+        op(opcode::I64Sub);
+        set(address);
+        get(t);
+        mem_load(layout::TableArraySize);
+        set(size);
+        // (n + 1, if the array part has room for it, the table has no hash part nor metatable and the value is not nil: appended)
+        get(address);
+        get(size);
+        op(opcode::I64Eq);
+        begin_if();
+        get(size);
+        get(t);
+        mem_load(layout::TableArrayCapacity);
+        op(opcode::I64GeU);
+        get(t);
+        mem_load(layout::TableNodesSize);
+        op(opcode::I64Eqz);
+        op(opcode::I32Eqz);
+        op(opcode::I32Ior);
+        get(t);
+        mem_load(layout::TableMetatable);
+        constant(values::Nil);
+        op(opcode::I64Ne);
+        op(opcode::I32Ior);
+        get(aValue);
+        constant(values::Nil);
+        op(opcode::I64Eq);
+        op(opcode::I32Ior);
+        branch(slow, true);
+        get(t);
+        mem_load(layout::TableArray);
+        get(size);
+        i64(3);
+        op(opcode::I64Shl);
+        op(opcode::I64Add);
+        get(aValue);
+        mem_store(0u);
+        get(t);
+        get(size);
+        i64(1);
+        op(opcode::I64Add);
+        mem_store(layout::TableArraySize);
+        branch(done);
+        end_control();
+        get(address);
+        get(size);
+        op(opcode::I64GeU);
+        branch(slow, true);
+        release(size);
+        get(t);
+        mem_load(layout::TableArray);
+        get(address);
+        i64(3);
+        op(opcode::I64Shl);
+        op(opcode::I64Add);
+        set(address);
+        get(address);
+        mem_load(0u);
+        constant(values::Nil);
+        op(opcode::I64Eq);
+        begin_if();
+        get(t);
+        mem_load(layout::TableMetatable);
+        constant(values::Nil);
+        op(opcode::I64Ne);
+        branch(slow, true);
+        end_control();
+        get(address);
+        get(aValue);
+        mem_store(0u);
+        branch(done);
+        end_control();
+        release(address);
+        release(t);
+        aSlow();
+        end_control();
+    }
+
     void function_generator::to_raw_integer()
     {
         auto const v = temporary();
@@ -1136,7 +1586,7 @@ namespace neos::compilers::lua
 
     void function_generator::declare(variable* aVariable)
     {
-        aVariable->local = local();
+        aVariable->local = local(aVariable->floating ? F64 : I64);
         if (aVariable->integer)
         {
             to_raw_integer();
@@ -1145,6 +1595,7 @@ namespace neos::compilers::lua
         }
         if (aVariable->floating)
         {
+            op(opcode::F64ReinterpretI64);
             set(aVariable->local);
             return;
         }
@@ -1175,18 +1626,23 @@ namespace neos::compilers::lua
         if (aVariable->floating)
         {
             get(aVariable->local);
+            op(opcode::I64ReinterpretF64);
             return;
         }
         if (aVariable->function != &iFunction)
         {
-            get(CalleeLocal);
-            i32(static_cast<std::int32_t>(compiler::upvalue_index(iFunction, aVariable)));
-            runtime("upval_get", { I64, I32 }, I64);
+            // (an upvalue: its box's value)
+            upvalue_box(compiler::upvalue_index(iFunction, aVariable));
+            payload();
+            mem_load(layout::BoxValue);
             return;
         }
         get(aVariable->local);
         if (aVariable->captured)
-            runtime("box_get", { I64 }, I64);
+        {
+            payload();
+            mem_load(layout::BoxValue);
+        }
     }
 
     void function_generator::store(variable* aVariable)
@@ -1199,6 +1655,12 @@ namespace neos::compilers::lua
         }
         if (aVariable->floating)
         {
+            op(opcode::F64ReinterpretI64);
+            set(aVariable->local);
+            return;
+        }
+        if (aVariable->function == &iFunction && !aVariable->captured)
+        {
             set(aVariable->local);
             return;
         }
@@ -1206,18 +1668,17 @@ namespace neos::compilers::lua
         set(v);
         if (aVariable->function != &iFunction)
         {
-            get(CalleeLocal);
-            i32(static_cast<std::int32_t>(compiler::upvalue_index(iFunction, aVariable)));
+            upvalue_box(compiler::upvalue_index(iFunction, aVariable));
+            payload();
             get(v);
-            runtime("upval_set", { I64, I32, I64 }, I64);
-            drop();
+            mem_store(layout::BoxValue);
         }
         else if (aVariable->captured)
         {
             get(aVariable->local);
+            payload();
             get(v);
-            runtime("box_set", { I64, I64 }, I64);
-            drop();
+            mem_store(layout::BoxValue);
         }
         else
         {
@@ -1231,9 +1692,7 @@ namespace neos::compilers::lua
     {
         if (aVariable->function != &iFunction)
         {
-            get(CalleeLocal);
-            i32(static_cast<std::int32_t>(compiler::upvalue_index(iFunction, aVariable)));
-            runtime("upval_box", { I64, I32 }, I64);
+            upvalue_box(compiler::upvalue_index(iFunction, aVariable));
             return;
         }
         get(aVariable->local);
@@ -1436,6 +1895,14 @@ namespace neos::compilers::lua
             set(variables[0]->local);
             return;
         }
+        if (variables.size() == 1u && expressions.size() == 1u && variables[0]->floating)
+        {
+            // (a float variable: its value's f64)
+            raw_float(expressions[0]);
+            variables[0]->local = local(F64);
+            set(variables[0]->local);
+            return;
+        }
         auto const values = values_of(expressions, variables.size());
         for (std::size_t i = 0u; i < variables.size(); ++i)
         {
@@ -1530,11 +1997,28 @@ namespace neos::compilers::lua
             set(targets->child(0u)->resolved->local);
             return;
         }
+        if (targets->size() == 1u && expressions.size() == 1u && targets->child(0u)->is(construct::Identifier) &&
+            targets->child(0u)->resolved != nullptr && targets->child(0u)->resolved->floating)
+        {
+            // (a float variable: its value's f64)
+            raw_float(expressions[0]);
+            set(targets->child(0u)->resolved->local);
+            return;
+        }
+        if (targets->size() == 1u && expressions.size() == 1u && targets->child(0u)->is(construct::Identifier) &&
+            targets->child(0u)->resolved != nullptr && targets->child(0u)->resolved->function == &iFunction && !targets->child(0u)->resolved->captured)
+        {
+            // (a local variable: its value)
+            expression(expressions[0]);
+            store(targets->child(0u)->resolved);
+            return;
+        }
         struct target_info
         {
             node* target;
             std::uint32_t object = 0u;
             std::uint32_t key = 0u;
+            bool field = false;     ///< (its key is a short string literal)
         };
         std::vector<target_info> infos;
         for (auto* t : targets->children)
@@ -1547,7 +2031,15 @@ namespace neos::compilers::lua
                 set(info.object);
                 info.key = temporary();
                 if (t->is(construct::Dot))
+                {
                     literal_string(t->child(1u)->text());
+                    info.field = short_literal(t->child(1u)->text());
+                }
+                else if (t->child(1u)->is(construct::String) && short_literal(string_value(iCompiler, t->child(1u)->source)))
+                {
+                    literal_string(string_value(iCompiler, t->child(1u)->source));
+                    info.field = true;
+                }
                 else
                     expression(t->child(1u));
                 set(info.key);
@@ -1584,21 +2076,59 @@ namespace neos::compilers::lua
                 }
                 else
                 {
-                    get(CalleeLocal);
-                    literal_string(t->text());
-                    get(values[i]);
-                    runtime("setglobal", { I64, I64, I64 }, I64);
-                    check_drop();
+                    auto const name = t->text();
+                    auto const slow = [&]()
+                    {
+                        get(CalleeLocal);
+                        literal_string(name);
+                        get(values[i]);
+                        runtime("setglobal", { I64, I64, I64 }, I64);
+                        check_drop();
+                    };
+                    if (!short_literal(name))
+                        slow();
+                    else
+                    {
+                        // (the function's environment (its box's value), else (none: the globals) the runtime's)
+                        auto const environment = temporary();
+                        auto const key = temporary();
+                        get(CalleeLocal);
+                        payload();
+                        mem_load(layout::FunctionEnvironment);
+                        tee(environment);
+                        constant(values::Nil);
+                        op(opcode::I64Eq);
+                        begin_if();
+                        slow();
+                        else_();
+                        get(environment);
+                        payload();
+                        mem_load(layout::BoxValue);
+                        set(environment);
+                        literal_string(name);
+                        set(key);
+                        field_set(environment, key, values[i], slow);
+                        end_control();
+                        release(key);
+                        release(environment);
+                    }
                 }
             }
             else
             {
-                get(info.object);
-                get(info.key);
-                get(values[i]);
-                description(describe(t->child(0u)));
-                runtime("setindex", { I64, I64, I64, I64 }, I64);
-                check_drop();
+                auto const slow = [&]()
+                {
+                    get(info.object);
+                    get(info.key);
+                    get(values[i]);
+                    description(describe(t->child(0u)));
+                    runtime("setindex", { I64, I64, I64, I64 }, I64);
+                    check_drop();
+                };
+                if (info.field)
+                    field_set(info.object, info.key, values[i], slow);
+                else
+                    element_set(info.object, info.key, false, values[i], slow);
                 release(info.object);
                 release(info.key);
             }
@@ -1799,9 +2329,15 @@ namespace neos::compilers::lua
         // (the variable: a new one each iteration (an integer variable's loop is an integer loop: its start and step are integers))
         if (v->integer)
         {
-            v->local = local();
-            get(ivar);
-            set(v->local);
+            // (its variable is the loop's, unless the body assigns it)
+            if (v->assigned)
+            {
+                v->local = local();
+                get(ivar);
+                set(v->local);
+            }
+            else
+                v->local = ivar;
         }
         else
         {
@@ -1818,15 +2354,28 @@ namespace neos::compilers::lua
             declare(v);
         }
         block(aNode, compiler::statements_of(aNode, first), first, true);
-        // (the next iteration)
+        // (the next iteration (an integer variable's loop is an integer loop))
         if (v->integer)
-            i32(1);
-        else
         {
-            get(mode);
-            i32(1);
-            op(opcode::I32Eq);
+            get(icount);
+            op(opcode::I64Eqz);
+            branch(exit, true);
+            get(icount);
+            i64(1);
+            op(opcode::I64Sub);
+            set(icount);
+            get(ivar);
+            get(istep);
+            op(opcode::I64Add);
+            set(ivar);
+            branch(loop);
+            end_control();
+            end_control();
+            return;
         }
+        get(mode);
+        i32(1);
+        op(opcode::I32Eq);
         begin_if();
         get(icount);
         op(opcode::I64Eqz);
@@ -2272,15 +2821,47 @@ namespace neos::compilers::lua
             check();
             return;
         }
-        get(CalleeLocal);
         if (aNode->text() == "_ENV")
         {
+            get(CalleeLocal);
             runtime("getenv", { I64 }, I64);
             return;
         }
-        literal_string(aNode->text());
-        runtime("getglobal", { I64, I64 }, I64);
-        check();
+        auto const name = aNode->text();
+        auto const slow = [&]()
+        {
+            get(CalleeLocal);
+            literal_string(name);
+            runtime("getglobal", { I64, I64 }, I64);
+            check();
+        };
+        if (!short_literal(name))
+        {
+            slow();
+            return;
+        }
+        // (the function's environment (its box's value), else (none: the globals) the runtime's)
+        auto const environment = temporary();
+        auto const key = temporary();
+        get(CalleeLocal);
+        payload();
+        mem_load(layout::FunctionEnvironment);
+        tee(environment);
+        constant(values::Nil);
+        op(opcode::I64Eq);
+        begin_if(I64);
+        slow();
+        else_();
+        get(environment);
+        payload();
+        mem_load(layout::BoxValue);
+        set(environment);
+        literal_string(name);
+        set(key);
+        field_get(environment, key, slow);
+        end_control();
+        release(key);
+        release(environment);
     }
 
     void function_generator::literal(node* aNode)
@@ -2348,11 +2929,7 @@ namespace neos::compilers::lua
             if (u.parentLocal)
                 get(u.target->local);
             else
-            {
-                get(CalleeLocal);
-                i32(static_cast<std::int32_t>(u.parentIndex));
-                runtime("upval_box", { I64, I32 }, I64);
-            }
+                upvalue_box(u.parentIndex);
             runtime("closure_upval", { I64, I32, I64 }, I64);
             drop();
         }
@@ -2384,31 +2961,168 @@ namespace neos::compilers::lua
         std::vector<std::pair<std::int32_t, std::uint32_t>> pending;
         auto const flush = [&]()
         {
+            // (four at a time)
+            for (std::size_t first = 0u; first < pending.size(); first += 4u)
+            {
+                auto const count = std::min<std::size_t>(4u, pending.size() - first);
+                get(t);
+                i32(pending[first].first);
+                i32(static_cast<std::int32_t>(count));
+                for (std::size_t k = 0u; k < 4u; ++k)
+                {
+                    if (k < count)
+                        get(pending[first + k].second);
+                    else
+                        nil();
+                }
+                runtime("table_seti4", { I64, I32, I32, I64, I64, I64, I64 }, I64);
+                check_drop();
+            }
             for (auto const& [i, v] : pending)
+                release(v);
+            pending.clear();
+        };
+        // (consecutive named fields: three at a time)
+        std::vector<std::pair<std::string, std::uint32_t>> fields;
+        auto const flush_fields = [&]()
+        {
+            // (short names: inserted inline (the new table's hash part has room for its named fields); others by the runtime)
+            std::erase_if(fields, [&](auto const& aField)
+            {
+                if (!short_literal(aField.first))
+                    return false;
+                auto const tp = temporary();
+                auto const key = temporary();
+                auto const mask = temporary();
+                auto const slot = temporary();
+                auto const nodes = temporary();
+                auto const address = temporary();
+                auto const k = temporary();
+                get(aField.second);
+                constant(values::Nil);
+                op(opcode::I64Ne);
+                begin_if();
+                get(t);
+                payload();
+                set(tp);
+                literal_string(aField.first);
+                set(key);
+                get(tp);
+                mem_load(layout::TableNodesSize);
+                i64(1);
+                op(opcode::I64Sub);
+                set(mask);
+                get(tp);
+                mem_load(layout::TableNodes);
+                set(nodes);
+                get(key);
+                payload();
+                mem_load(layout::StringHash);
+                get(mask);
+                op(opcode::I64And);
+                set(slot);
+                // (the first slots of its chain (not a loop); a longer chain: the runtime's)
+                begin(control_kind::Block);
+                auto const inserted = iControls.size() - 1u;
+                for (std::size_t probe = 0u; probe < 4u; ++probe)
+                {
+                    if (probe != 0u)
+                    {
+                        get(slot);
+                        i64(1);
+                        op(opcode::I64Add);
+                        get(mask);
+                        op(opcode::I64And);
+                        set(slot);
+                    }
+                    get(slot);
+                    i64(4);
+                    op(opcode::I64Shl);
+                    get(nodes);
+                    op(opcode::I64Add);
+                    tee(address);
+                    mem_load(0u);
+                    tee(k);
+                    constant(values::Empty);
+                    op(opcode::I64Eq);
+                    begin_if();
+                    get(address);
+                    get(key);
+                    mem_store(0u);
+                    get(address);
+                    get(aField.second);
+                    mem_store(layout::NodeValue);
+                    get(tp);
+                    get(tp);
+                    mem_load(layout::TableUsed);
+                    i64(1);
+                    op(opcode::I64Add);
+                    mem_store(layout::TableUsed);
+                    branch(inserted);
+                    end_control();
+                    get(k);
+                    get(key);
+                    op(opcode::I64Eq);
+                    begin_if();
+                    get(address);
+                    get(aField.second);
+                    mem_store(layout::NodeValue);
+                    branch(inserted);
+                    end_control();
+                }
+                get(t);
+                literal_string(aField.first);
+                get(aField.second);
+                runtime("table_set", { I64, I64, I64 }, I64);
+                check_drop();
+                end_control();
+                else_();
+                // (nil: the runtime's (it removes an earlier field of the name))
+                get(t);
+                literal_string(aField.first);
+                get(aField.second);
+                runtime("table_set", { I64, I64, I64 }, I64);
+                check_drop();
+                end_control();
+                for (auto l : { tp, key, mask, slot, nodes, address, k })
+                    release(l);
+                release(aField.second);
+                return true;
+            });
+            for (std::size_t first = 0u; first < fields.size(); first += 3u)
             {
                 get(t);
-                i32(i);
-                get(v);
-                runtime("table_seti", { I64, I32, I64 }, I64);
+                for (std::size_t k = 0u; k < 3u; ++k)
+                {
+                    if (first + k < fields.size())
+                    {
+                        literal_string(fields[first + k].first);
+                        get(fields[first + k].second);
+                    }
+                    else
+                    {
+                        constant(values::Empty);
+                        nil();
+                    }
+                }
+                runtime("table_fields", { I64, I64, I64, I64, I64, I64, I64 }, I64);
                 check_drop();
-                release(v);
             }
-            pending.clear();
+            for (auto const& [k, v] : fields)
+                release(v);
+            fields.clear();
         };
         for (std::size_t i = 0u; i < aNode->size(); ++i)
         {
             auto* c = aNode->child(i);
+            if (!c->is(construct::FieldNamed))
+                flush_fields();
             if (c->is(construct::FieldNamed))
             {
                 auto const v = temporary();
                 expression(c->child(1u));
                 set(v);
-                get(t);
-                literal_string(c->child(0u)->text());
-                get(v);
-                runtime("table_set", { I64, I64, I64 }, I64);
-                check_drop();
-                release(v);
+                fields.emplace_back(c->child(0u)->text(), v);
             }
             else if (c->is(construct::FieldKeyed))
             {
@@ -2449,6 +3163,7 @@ namespace neos::compilers::lua
                     flush();
             }
         }
+        flush_fields();
         flush();
         get(t);
         release(t);
@@ -2460,16 +3175,45 @@ namespace neos::compilers::lua
         expression(aNode->child(0u));
         set(object);
         auto const key = temporary();
-        if (aNode->is(construct::Dot))
-            literal_string(aNode->child(1u)->text());
+        auto* keyNode = aNode->is(construct::Dot) ? aNode->child(1u) : aNode->child(1u);
+        while (aNode->is(construct::Index) && keyNode->is(construct::Parenthesized))
+            keyNode = keyNode->child(0u);
+        auto const slow = [&]()
+        {
+            get(object);
+            get(key);
+            description(describe(aNode->child(0u)));
+            runtime("index", { I64, I64, I64 }, I64);
+            check();
+        };
+        if (aNode->is(construct::Dot) || (keyNode->is(construct::String) && short_literal(string_value(iCompiler, keyNode->source))))
+        {
+            // (a field: a short string)
+            auto const name = aNode->is(construct::Dot) ? aNode->child(1u)->text() : string_value(iCompiler, keyNode->source);
+            literal_string(name);
+            set(key);
+            if (short_literal(name))
+                field_get(object, key, slow);
+            else
+                slow();
+        }
+        else if (integer_expression(keyNode))
+        {
+            // (an integer key: its i64 (the slow path boxes it))
+            auto const raw = temporary();
+            raw_integer(keyNode, {}, std::nullopt);
+            tee(raw);
+            box_integer();
+            set(key);
+            element_get(object, raw, true, slow);
+            release(raw);
+        }
         else
+        {
             expression(aNode->child(1u));
-        set(key);
-        get(object);
-        get(key);
-        description(describe(aNode->child(0u)));
-        runtime("index", { I64, I64, I64 }, I64);
-        check();
+            set(key);
+            element_get(object, key, false, slow);
+        }
         release(object);
         release(key);
     }
@@ -2497,16 +3241,65 @@ namespace neos::compilers::lua
 
     void function_generator::call_expression(node* aNode)
     {
+        if (inlined_call(aNode) != nullptr)
+        {
+            // (an inlined call of integers: its expression)
+            raw_integer(aNode, {}, std::nullopt);
+            box_integer();
+            set_results(1u);
+            return;
+        }
         auto const callee = temporary();
         expression(aNode->child(0u));
         set(callee);
         std::optional<std::uint32_t> multiple;
-        auto const arguments = arguments_of(std::vector<node*>{ aNode->children.begin() + 1, aNode->children.end() }, multiple);
+        auto arguments = arguments_of(std::vector<node*>{ aNode->children.begin() + 1, aNode->children.end() }, multiple);
         auto* target = aNode->child(0u);
         while (target->is(construct::Parenthesized))
             target = target->child(0u);
         function_info const* known = target->is(construct::Identifier) && target->resolved != nullptr ? target->resolved->constant : nullptr;
-        call_value(callee, arguments, multiple, describe(aNode->child(0u)), known);
+        node* inlined = known != nullptr && !multiple && known != &iFunction && arguments.size() == known->parameters.size() ? inline_expression(*known) : nullptr;
+
+        if (inlined != nullptr)
+        {
+            // (its arguments are (inline) integers: its expression, inline (its parameters are their i64s); else a call)
+            bool firstCheck = true;
+            for (auto a : arguments)
+            {
+                get(a);
+                is_integer();
+                if (!firstCheck)
+                    op(opcode::I32And);
+                firstCheck = false;
+            }
+            begin_if(I64);
+            std::vector<std::tuple<variable*, std::uint32_t, bool>> saved;
+            for (std::size_t i = 0u; i < arguments.size(); ++i)
+            {
+                auto* p = known->parameters[i];
+                auto const raw = temporary();
+                get(arguments[i]);
+                unbox_integer();
+                set(raw);
+                saved.emplace_back(p, p->local, p->integer);
+                p->local = raw;
+                p->integer = true;
+            }
+            raw_integer(inlined, {}, std::nullopt);
+            box_integer();
+            set_results(1u);
+            for (auto const& [p, l, integer] : saved)
+            {
+                release(p->local);
+                p->local = l;
+                p->integer = integer;
+            }
+            else_();
+            call_value(callee, arguments, multiple, describe(aNode->child(0u)), known);
+            end_control();
+        }
+        else
+            call_value(callee, arguments, multiple, describe(aNode->child(0u)), known);
         release(callee);
         for (auto a : arguments)
             release(a);
@@ -2521,11 +3314,25 @@ namespace neos::compilers::lua
         expression(aNode->child(0u));
         set(object);
         auto const callee = temporary();
-        get(object);
-        literal_string(aNode->child(1u)->text());
-        description(describe(aNode->child(0u)));
-        runtime("index", { I64, I64, I64 }, I64);
-        check();
+        {
+            auto const name = aNode->child(1u)->text();
+            auto const key = temporary();
+            literal_string(name);
+            set(key);
+            auto const slow = [&]()
+            {
+                get(object);
+                get(key);
+                description(describe(aNode->child(0u)));
+                runtime("index", { I64, I64, I64 }, I64);
+                check();
+            };
+            if (short_literal(name))
+                field_get(object, key, slow);
+            else
+                slow();
+            release(key);
+        }
         set(callee);
         std::optional<std::uint32_t> multiple;
         auto arguments = arguments_of(std::vector<node*>{ aNode->children.begin() + 2, aNode->children.end() }, multiple);
@@ -2825,6 +3632,36 @@ namespace neos::compilers::lua
             raw_integer(aNode->child(0u), aLeaves, aSlow);
             op(opcode::I64Sub);
             return;
+        case construct::Call:
+            {
+                // (an inlined call (of integers): its expression, its parameters its arguments' i64s)
+                auto const* f = inlined_call(aNode);
+                std::vector<std::uint32_t> raws;
+                for (std::size_t i = 1u; i < aNode->size(); ++i)
+                {
+                    auto const raw = temporary();
+                    raw_integer(aNode->child(i), aLeaves, aSlow);
+                    set(raw);
+                    raws.push_back(raw);
+                }
+                std::vector<std::tuple<variable*, std::uint32_t, bool>> saved;
+                for (std::size_t i = 0u; i < raws.size(); ++i)
+                {
+                    auto* p = f->parameters[i];
+                    saved.emplace_back(p, p->local, p->integer);
+                    p->local = raws[i];
+                    p->integer = true;
+                }
+                raw_integer(inline_expression(*f), aLeaves, aSlow);
+                for (auto const& [p, l, integer] : saved)
+                {
+                    p->local = l;
+                    p->integer = integer;
+                }
+                for (auto r : raws)
+                    release(r);
+                return;
+            }
         case construct::Add:
         case construct::Subtract:
         case construct::Multiply:
@@ -2845,13 +3682,29 @@ namespace neos::compilers::lua
         std::optional<std::int64_t> literal;
         if (divisor->is(construct::Number))
             literal = std::get<std::int64_t>(number_value(divisor->source));
-        auto const left = temporary();
-        auto const right = temporary();
-        auto const remainder = temporary();
-        raw_integer(aNode->child(0u), aLeaves, aSlow);
-        set(left);
-        // (a numeral divisor is a constant (division by a constant is a multiplication))
+        // (an integer variable's operand is its local; others' values are in temporaries)
+        auto const variable_local = [](node* aOperand) -> std::optional<std::uint32_t>
+        {
+            while (aOperand->is(construct::Parenthesized))
+                aOperand = aOperand->child(0u);
+            if (aOperand->is(construct::Identifier) && aOperand->resolved != nullptr && aOperand->resolved->integer)
+                return aOperand->resolved->local;
+            return std::nullopt;
+        };
+        auto const leftVariable = variable_local(aNode->child(0u));
+        auto const rightVariable = variable_local(divisor);
         bool const constantDivisor = literal && *literal > 0;
+        bool const negativeDivisor = !aSlow && (!literal || *literal < 0);
+        auto const left = leftVariable ? *leftVariable : temporary();
+        // (a divisor of -1 is replaced (see below): it is in a temporary)
+        auto const right = rightVariable && !(negativeDivisor && !modulo) ? *rightVariable : temporary();
+        auto const remainder = temporary();
+        if (!leftVariable)
+        {
+            raw_integer(aNode->child(0u), aLeaves, aSlow);
+            set(left);
+        }
+        // (a numeral divisor is a constant (division by a constant is a multiplication))
         auto const push_divisor = [&]()
         {
             if (constantDivisor)
@@ -2859,7 +3712,7 @@ namespace neos::compilers::lua
             else
                 get(right);
         };
-        if (!constantDivisor)
+        if (!constantDivisor && right != (rightVariable ? *rightVariable : ~0u))
         {
             if (literal)
                 i64(*literal);
@@ -2893,7 +3746,7 @@ namespace neos::compilers::lua
                 end_control();
             }
         }
-        bool const negative = !aSlow && (!literal || *literal < 0);
+        bool const negative = negativeDivisor;
         std::optional<std::uint32_t> minusOne;
         if (negative && !modulo)
         {
@@ -2971,8 +3824,10 @@ namespace neos::compilers::lua
             }
         }
         release(remainder);
-        release(right);
-        release(left);
+        if (!rightVariable || right != *rightVariable)
+            release(right);
+        if (!leftVariable)
+            release(left);
     }
 
     void function_generator::raw_float(node* aNode)
@@ -2992,7 +3847,6 @@ namespace neos::compilers::lua
             return;
         case construct::Identifier:
             get(aNode->resolved->local);
-            op(opcode::F64ReinterpretI64);
             return;
         case construct::Negate:
             raw_float(aNode->child(0u));
@@ -3396,9 +4250,68 @@ namespace neos::compilers::lua
         }
         else
         {
-            get(a);
-            description(describe(aNode->child(0u)));
-            runtime(aNode->is(construct::Length) ? "len" : "bnot", { I64, I64 }, I64);
+            if (aNode->is(construct::Length))
+            {
+                // (a table without a metatable or a hash part whose last element (n) is not nil: n)
+                begin(control_kind::Block, I64);
+                auto const done = iControls.size() - 1u;
+                begin(control_kind::Block);
+                auto const slow = iControls.size() - 1u;
+                auto const t = temporary();
+                auto const n = temporary();
+                get(a);
+                i64(48);
+                op(opcode::I64ShrU);
+                i64(static_cast<std::int64_t>(values::TagTable >> 48u));
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(a);
+                payload();
+                set(t);
+                get(t);
+                mem_load(layout::TableMetatable);
+                constant(values::Nil);
+                op(opcode::I64Ne);
+                get(t);
+                mem_load(layout::TableNodesSize);
+                op(opcode::I64Eqz);
+                op(opcode::I32Eqz);
+                op(opcode::I32Ior);
+                get(t);
+                mem_load(layout::TableArraySize);
+                tee(n);
+                op(opcode::I64Eqz);
+                op(opcode::I32Ior);
+                branch(slow, true);
+                get(t);
+                mem_load(layout::TableArray);
+                get(n);
+                i64(1);
+                op(opcode::I64Sub);
+                i64(3);
+                op(opcode::I64Shl);
+                op(opcode::I64Add);
+                mem_load(0u);
+                constant(values::Nil);
+                op(opcode::I64Eq);
+                branch(slow, true);
+                get(n);
+                box_integer();
+                branch(done);
+                end_control();
+                release(n);
+                release(t);
+                get(a);
+                description(describe(aNode->child(0u)));
+                runtime("len", { I64, I64 }, I64);
+                end_control();
+            }
+            else
+            {
+                get(a);
+                description(describe(aNode->child(0u)));
+                runtime("bnot", { I64, I64 }, I64);
+            }
             check();
         }
         release(a);

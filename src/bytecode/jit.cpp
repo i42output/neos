@@ -1302,6 +1302,7 @@ namespace neos
                             for (auto r : ScratchXmms)
                                 iXmmOwner[r] = Free;
                             iTemps.clear();
+                            iTeeCache.reset();
                             iMaxDepth = 0u;
                             iOutgoing = 0;
                             iReachable = true;
@@ -1323,9 +1324,13 @@ namespace neos
                                 if (owner(aXmm, regs[i]) == Free && (aAvoid & (1u << regs[i])) == 0u)
                                 {
                                     owner(aXmm, regs[i]) = Locked;
+                                    if (!aXmm && iTeeCache && iTeeCache->reg == regs[i])
+                                        iTeeCache.reset();
                                     return regs[i];
                                 }
                             // spill the deepest register entry
+                            if (!aXmm)
+                                iTeeCache.reset();
                             for (std::size_t i = 0u; i < iStack.size(); ++i)
                                 if (iStack[i].k == kind::Reg && is_float(iStack[i].type) == aXmm && (aAvoid & (1u << iStack[i].reg)) == 0u)
                                 {
@@ -3731,8 +3736,11 @@ namespace neos
                             return true;
                         }
                         // a load or store: [address + offset, address + offset + width) must be within linear memory
-                        void memory_access(std::uint8_t aOp, std::uint64_t aOffset)
+                        void memory_access(std::uint8_t aOp, std::uint64_t aOffset, std::uint32_t aMemory)
                         {
+                            // (memory 0: the module's (a 32 bit address); memory 1: the external memory (a 64 bit address))
+                            if (aMemory > 1u)
+                                throw unsupported{ "memory index" };
                             struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
                             static access const sAccesses[] =
                             {
@@ -3764,10 +3772,14 @@ namespace neos
                             std::uint32_t const keep = (!store || is_float(x.type)) ? 0u : (1u << v);
                             auto const address = pop();
                             auto const g = to_gpr(address, keep);
-                            a.mov_rr(false, g, g); // (zero extend)
+                            if (aMemory == 0u)
+                                a.mov_rr(false, g, g); // (zero extend)
                             auto const m = alloc(false, keep | (1u << g));
                             auto const e = alloc(false, keep | (1u << g) | (1u << m));
-                            a.load(true, m, R15, ContextMemory);
+                            if (aMemory == 0u)
+                                a.load(true, m, R15, ContextMemory);
+                            else
+                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(&external_memory()), true);
                             a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
                             a.alu_rm(7, true, e, m, MemorySize); // cmp
                             a.jcc(A, iTrapLabels[TrapOutOfBounds]);
@@ -3978,6 +3990,9 @@ namespace neos
                                 e.bits = aBits;
                                 push(e);
                             };
+                            // (the tee cache survives only constants, integer equality comparisons, conditional branches and local.gets)
+                            if (iTeeCache && !(aOp == 0x41 || aOp == 0x42 || aOp == 0x46 || aOp == 0x47 || aOp == 0x51 || aOp == 0x52 || aOp == 0x0D || aOp == 0x20))
+                                iTeeCache.reset();
                             switch (aOp)
                             {
                             case 0x00:
@@ -4142,6 +4157,17 @@ namespace neos
                                     auto const l = static_cast<std::uint32_t>(aImmediate(0));
                                     if (l >= iLocals.size())
                                         throw unsupported{ "invalid local index" };
+                                    if (iTeeCache && iTeeCache->local == l && iReachable)
+                                    {
+                                        auto const r = iTeeCache->reg;
+                                        iTeeCache.reset();
+                                        if (owner(false, r) == Free)
+                                        {
+                                            owner(false, r) = Locked;
+                                            push_reg(iLocals[l].type, r);
+                                            break;
+                                        }
+                                    }
                                     entry e;
                                     e.k = kind::Local;
                                     e.type = iLocals[l].type;
@@ -4154,6 +4180,9 @@ namespace neos
                                 break;
                             case 0x22:
                                 set_local(static_cast<std::uint32_t>(aImmediate(0)), true);
+                                if (auto const l = static_cast<std::uint32_t>(aImmediate(0)); !iLocals[l].pinned && !is_float(iLocals[l].type) && !iStack.empty() &&
+                                    iStack.back().k == kind::Reg)
+                                    iTeeCache = tee_cache{ l, iStack.back().reg };
                                 break;
                             case 0x23:
                                 get_global(static_cast<std::uint32_t>(aImmediate(0)));
@@ -4167,7 +4196,7 @@ namespace neos
                             case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x2E: case 0x2F:
                             case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
                             case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
-                                memory_access(static_cast<std::uint8_t>(aOp), aImmediate(1));
+                                memory_access(static_cast<std::uint8_t>(aOp), aImmediate(1), static_cast<std::uint32_t>(aImmediate(0) >> 32u));
                                 break;
                             case 0x42:
                                 constant(I64, aImmediate(0));
@@ -4405,6 +4434,15 @@ namespace neos
                         int iGprOwner[16] = {};
                         int iXmmOwner[16] = {};
                         std::vector<std::pair<bool, int>> iTemps;
+                        // (a local (not pinned) that local.tee set from a scratch register, while the register still holds its value: 
+                        // a local.get of it that follows (with only comparisons, constants and conditional branches between) takes the 
+                        // register rather than loading the local, e.g. a call's result that is checked and then used)
+                        struct tee_cache
+                        {
+                            std::uint32_t local;
+                            int reg;
+                        };
+                        std::optional<tee_cache> iTeeCache;
                         std::size_t iMaxDepth = 0u;
                         std::int32_t iSlotsBase = 0;
                         std::int32_t iOutgoing = 0;
@@ -4733,6 +4771,12 @@ namespace neos
                 }
 
 #endif
+
+                memory& external_memory()
+                {
+                    static memory sExternal;
+                    return sExternal;
+                }
             }
         }
     }

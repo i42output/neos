@@ -72,7 +72,7 @@ namespace neos::lua_runtime
             u.metatable = tIo[0];
             u.data = new lua_file{ aFile, aStream, false };
             u.destroy = &destroy_file;
-            return TagOther | u.handle;
+            return value_of(u);
         }
 
         lua_file* file_of(value aValue)
@@ -511,7 +511,7 @@ namespace neos::lua_runtime
             f.name = "lines";
             f.qualified = "io.lines";
             f.upvalues.assign(upvalues.begin(), upvalues.end());
-            return TagFunction | f.handle;
+            return value_of(f);
         }
 
         void io_lines(native_call& c)

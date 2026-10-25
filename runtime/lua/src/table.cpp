@@ -59,7 +59,7 @@ namespace neos::lua_runtime
     value make_table(std::size_t aArray, std::size_t aHash)
     {
         auto& t = the_heap().make<table>();
-        auto const v = TagTable | t.handle;
+        auto const v = value_of(t);
         if (aArray > 0u)
             t.array.reserve(aArray);
         if (aHash > 0u)

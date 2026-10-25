@@ -306,6 +306,63 @@ namespace neos::lua_runtime
         }
     }
 
+    namespace
+    {
+        // --- fast versions (see fast_native)
+
+        value fast_floor(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 1u)
+                return Empty;
+            auto const n = aArguments[0];
+            if (is_inline_integer(n))
+                return n;
+            if (is_float(n))
+                return float_or_integer(std::floor(float_of(n)));
+            return Empty;
+        }
+
+        value fast_abs(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 1u)
+                return Empty;
+            auto const n = aArguments[0];
+            if (is_inline_integer(n))
+                return make_integer(std::abs(inline_integer(n)));
+            if (is_float(n))
+                return make_float(std::fabs(float_of(n)));
+            return Empty;
+        }
+
+        value fast_sqrt(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 1u)
+                return Empty;
+            auto const n = aArguments[0];
+            if (is_inline_integer(n))
+                return make_float(std::sqrt(static_cast<double>(inline_integer(n))));
+            if (is_float(n))
+                return make_float(std::sqrt(float_of(n)));
+            return Empty;
+        }
+
+        value fast_min_max(value const* aArguments, std::size_t aCount, bool aMax)
+        {
+            if (aCount != 2u)
+                return Empty;
+            auto const a = aArguments[0];
+            auto const b = aArguments[1];
+            if (is_inline_integer(a) && is_inline_integer(b))
+                return (aMax ? inline_integer(b) > inline_integer(a) : inline_integer(b) < inline_integer(a)) ? b : a;
+            if (is_float(a) && is_float(b) && !std::isnan(float_of(a)) && !std::isnan(float_of(b)))
+                return (aMax ? float_of(b) > float_of(a) : float_of(b) < float_of(a)) ? b : a;
+            return Empty;
+        }
+
+        value fast_max(value const* aArguments, std::size_t aCount, value&) { return fast_min_max(aArguments, aCount, true); }
+        value fast_min(value const* aArguments, std::size_t aCount, value&) { return fast_min_max(aArguments, aCount, false); }
+    }
+
     void open_math()
     {
         auto const t = library_table("math");
@@ -334,6 +391,11 @@ namespace neos::lua_runtime
             { "min", &math_min },
             { "random", &math_random },
             { "randomseed", &math_randomseed } });
+        set_fast(t, "floor", &fast_floor);
+        set_fast(t, "abs", &fast_abs);
+        set_fast(t, "sqrt", &fast_sqrt);
+        set_fast(t, "max", &fast_max);
+        set_fast(t, "min", &fast_min);
         raw_set(t, intern("pi"), make_float(std::numbers::pi));
         raw_set(t, intern("huge"), make_float(std::numeric_limits<double>::infinity()));
         raw_set(t, intern("maxinteger"), make_integer(std::numeric_limits<std::int64_t>::max()));

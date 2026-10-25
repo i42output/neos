@@ -166,4 +166,23 @@ namespace neos::language::lua
         inline constexpr std::int64_t MinInline = -(std::int64_t{ 1 } << 47);
         inline constexpr std::int64_t MaxInline = (std::int64_t{ 1 } << 47) - 1;
     }
+
+    // the runtime's cells as generated code reads them: a cell's value's payload is its offset in the runtime's heap, which is the
+    // external memory (memory 1: see neos_rt_host::external_memory); the offsets of the fields that code reads (the runtime checks them)
+    namespace layout
+    {
+        inline constexpr std::uint32_t StringHash = 16u;            ///< (u64: an interned string's hash)
+        inline constexpr std::uint32_t TableArray = 16u;            ///< (u64: the offset of the array part's values (the keys 1 to n))
+        inline constexpr std::uint32_t TableArraySize = 24u;        ///< (u64: n)
+        inline constexpr std::uint32_t TableArrayCapacity = 32u;    ///< (u64: its capacity (values))
+        inline constexpr std::uint32_t TableMetatable = 40u;        ///< (value)
+        inline constexpr std::uint32_t TableNodes = 48u;            ///< (u64: the offset of the hash part's nodes)
+        inline constexpr std::uint32_t TableNodesSize = 56u;        ///< (u64: the number of nodes (a power of 2, or 0))
+        inline constexpr std::uint32_t TableUsed = 136u;            ///< (u64: the number of nodes whose keys are not Empty)
+        inline constexpr std::uint32_t NodeSize = 16u;              ///< (a node: its key (value) and its value (value))
+        inline constexpr std::uint32_t NodeValue = 8u;
+        inline constexpr std::uint32_t BoxValue = 16u;              ///< (value: an upvalue's)
+        inline constexpr std::uint32_t FunctionUpvalues = 16u;      ///< (u64: the offset of a Lua function's upvalues (boxes))
+        inline constexpr std::uint32_t FunctionEnvironment = 40u;   ///< (value: its environment (a box), or nil)
+    }
 }

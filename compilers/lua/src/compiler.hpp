@@ -65,6 +65,7 @@ namespace neos::compilers::lua
     using language::lua::construct;
     using bytecode::opcode;
     namespace values = language::lua::values;
+    namespace layout = language::lua::layout;
 
     // --- the syntax tree
 
@@ -120,7 +121,8 @@ namespace neos::compilers::lua
         bool captured = false;              ///< (an inner function uses it: its value is in a box (a runtime cell) that its local holds)
         bool parameter = false;
         bool integer = false;               ///< (its values are all integers (see compiler::infer_integers): its local holds an i64)
-        bool floating = false;              ///< (its values are all floats (see compiler::infer_integers): arithmetic of it is inline)
+        bool floating = false;              ///< (its values are all floats (see compiler::infer_integers): its local holds an f64)
+        bool assigned = false;              ///< (an assignment statement assigns it)
         function_info* constant = nullptr;  ///< (a local function that is never assigned another value: its function (calls of it are direct))
         std::uint32_t local = 0u;           ///< (its local (while its function's code is generated))
         std::uint32_t tbcDepth = 0u;        ///< (a to-be-closed variable: the number of its function's to-be-closed variables before it)
@@ -291,6 +293,24 @@ namespace neos::compilers::lua
         // none: an integer expression's (see compiler::infer_integers))
         void raw_integer(node* aNode, std::map<variable*, std::uint32_t> const& aLeaves, std::optional<std::size_t> aSlow);
         void to_raw_integer();                  ///< (an integer value (inline or boxed by the runtime) as an i64)
+        // the runtime's heap (the external memory: see neos::language::lua::layout): its cells read and written inline
+        void mem_load(std::uint32_t aOffset);   ///< ([address (i64)] -> i64: the word at the address + aOffset)
+        void mem_store(std::uint32_t aOffset);  ///< ([address (i64), value (i64)] -> ())
+        void payload();                         ///< ([value] -> its cell's offset)
+        // (a table's (its cell's offset in aTable) hash part's entry of the interned string aKey: its value in aResult (and its node's
+        // address in aNode), else (absent, or nil) a branch to aMiss, or (not found in the first slots of its chain) to aUnknown)
+        void probe_string(std::uint32_t aTable, std::uint32_t aKey, std::uint32_t aResult, std::optional<std::uint32_t> aNode, std::size_t aMiss,
+            std::size_t aUnknown);
+        // (a field (aKey: a short string literal's value) of a value: inline if it is a table that has it (or whose metatable's __index
+        // table has it), else aSlow() (its value))
+        void field_get(std::uint32_t aObject, std::uint32_t aKey, std::function<void()> const& aSlow);
+        void field_set(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aValue, std::function<void()> const& aSlow);
+        // (an element (aKey: a value, or an i64 if aRaw) of a table's array part: inline if it is there, else aSlow())
+        void element_get(std::uint32_t aObject, std::uint32_t aKey, bool aRaw, std::function<void()> const& aSlow);
+        void element_set(std::uint32_t aObject, std::uint32_t aKey, bool aRaw, std::uint32_t aValue, std::function<void()> const& aSlow);
+        void upvalue_box(std::uint32_t aIndex);  ///< (the box of the running function's upvalue)
+        bool short_literal(std::string const& aText) const;     ///< (a literal key that generated code looks up (an interned string))
+
         void raw_float(node* aNode);            ///< (a float expression's (see float_expression) value as an f64)
         bool integer_comparison(node* aNode);   ///< (a comparison of integer expressions: an i32 (else false: nothing))
         void to_float(std::uint32_t aValue);    ///< (an integer or float value as an f64)

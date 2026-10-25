@@ -123,11 +123,32 @@ namespace neos::lua_runtime
             return result;
         }
 
+        // (the cells' fields that generated code reads (see neos::language::lua::layout) are where it reads them)
+        void check_layout()
+        {
+            auto const at = [](void const* aCell, void const* aField) { return static_cast<std::uint32_t>(static_cast<std::byte const*>(aField) - static_cast<std::byte const*>(aCell)); };
+            string_cell const s{ std::string{} };
+            table const t;
+            box_cell const b{ Nil };
+            function_cell const f;
+            bool const ok = at(&s, &s.hashValue) == layout::StringHash &&
+                at(&t, &t.array) == layout::TableArray && at(&t, &t.metatable) == layout::TableMetatable &&
+                at(&t, &t.nodes) == layout::TableNodes && at(&t, &t.used) == layout::TableUsed && sizeof(table::node) == layout::NodeSize &&
+                sizeof(t.used) == 8u && at(&b, &b.v) == layout::BoxValue &&
+                at(&f, &f.upvalues) == layout::FunctionUpvalues && at(&f, &f.environment) == layout::FunctionEnvironment;
+            if (!ok)
+            {
+                std::fputs("Lua runtime: its cells' layout is not the compiler's\n", stderr);
+                std::abort();
+            }
+        }
+
         void initialize()
         {
             auto& s = the_state();
             if (s.initialized)
                 return;
+            check_layout();
             gc_pause const paused;
             char const* const names[] = { "__index", "__newindex", "__gc", "__mode", "__len", "__eq", "__add", "__sub", "__mul", "__mod", "__pow",
                 "__div", "__idiv", "__band", "__bor", "__bxor", "__shl", "__shr", "__unm", "__bnot", "__lt", "__le", "__concat", "__call",
@@ -182,7 +203,7 @@ namespace neos::lua_runtime
             return guard([&]() -> value
             {
                 auto& f = the_heap().make<function_cell>();
-                auto const result = TagFunction | f.handle;
+                auto const result = value_of(f);
                 value_list keep{ result };
                 f.number = static_cast<std::uint32_t>(aNumber);
                 f.index = static_cast<std::uint32_t>(aIndex);
@@ -266,7 +287,7 @@ namespace neos::lua_runtime
             {
                 value const registers[] = { a0, a1, a2, a3 };
                 auto& v = the_heap().make<varargs_cell>();
-                auto const result = TagOther | v.handle;
+                auto const result = value_of(v);
                 for (auto i = aParameters; i < aCount; ++i)
                     v.values.push_back(i < 4 ? registers[i] : stacks().extra[static_cast<std::size_t>(aBase + i - 4)]);
                 return result;
@@ -434,8 +455,31 @@ namespace neos::lua_runtime
             if (is_function(aCallee))
             {
                 auto const& f = fun(aCallee);
-                if (!f.native && reinterpret_cast<std::uintptr_t>(f.program) == aProgram)
-                    return Dispatch | f.number;
+                if (!f.native)
+                {
+                    if (reinterpret_cast<std::uintptr_t>(f.program) == aProgram)
+                        return Dispatch | f.number;
+                }
+                else if (f.fast != nullptr && aCount <= 4)
+                {
+                    // (a native function's fast version (if it does not decline): its results (one or two))
+                    value const arguments[] = { a0, a1, a2, a3 };
+                    value second = Empty;
+                    auto const result = f.fast(arguments, static_cast<std::size_t>(aCount), second);
+                    if (result != Empty)
+                    {
+                        if (second == Empty)
+                            set_results_count(1u, reinterpret_cast<void*>(aProgram));
+                        else
+                        {
+                            auto& r = stacks().results;
+                            r.clear();
+                            r.push_back(second);
+                            set_results_count(2u, reinterpret_cast<void*>(aProgram));
+                        }
+                        return result;
+                    }
+                }
             }
             return call_(aCallee, aCount, a0, a1, a2, a3, aDescription);
         }
@@ -474,7 +518,7 @@ namespace neos::lua_runtime
                 f.program = current_program();
                 f.upvalues.resize(static_cast<std::size_t>(aUpvalues), Nil);
                 f.environment = fun(aParent).environment;
-                return TagFunction | f.handle;
+                return value_of(f);
             });
         }
 
@@ -735,6 +779,30 @@ namespace neos::lua_runtime
             return guard([&]() -> value { return make_table(static_cast<std::size_t>(aArray), static_cast<std::size_t>(aHash)); });
         }
 
+        value table_fields(value aTable, value aKey1, value aValue1, value aKey2, value aValue2, value aKey3, value aValue3)
+        {
+            // (a table constructor's fields (a key Empty: none))
+            return guard([&]() -> value
+            {
+                for (auto const& [k, v] : { std::pair{ aKey1, aValue1 }, std::pair{ aKey2, aValue2 }, std::pair{ aKey3, aValue3 } })
+                    if (k != Empty)
+                        raw_set(aTable, k, v);
+                return Nil;
+            });
+        }
+
+        value table_seti4(value aTable, std::int32_t aIndex, std::int32_t aCount, value aValue1, value aValue2, value aValue3, value aValue4)
+        {
+            return guard([&]() -> value
+            {
+                auto& t = tab(aTable);
+                value const values[] = { aValue1, aValue2, aValue3, aValue4 };
+                for (std::int32_t i = 0; i < aCount; ++i)
+                    t.set_integer(aIndex + i, values[i]);
+                return Nil;
+            });
+        }
+
         value table_set(value aTable, value aKey, value aValue)
         {
             return guard([&]() -> value
@@ -846,6 +914,8 @@ namespace neos::lua_runtime
             { "callee_number", NEOS_RT_FUNCTION(api::callee_number), I32, 1u, { I64 }, 0u },
             { "call", NEOS_RT_FUNCTION(api::call_), I64, 7u, { I64, I32, I64, I64, I64, I64, I64 }, 0u },
             { "invoke", NEOS_RT_FUNCTION(api::invoke), I64, 8u, { I64, I64, I32, I64, I64, I64, I64, I64 }, 0u },
+            { "table_fields", NEOS_RT_FUNCTION(api::table_fields), I64, 7u, { I64, I64, I64, I64, I64, I64, I64 }, 0u },
+            { "table_seti4", NEOS_RT_FUNCTION(api::table_seti4), I64, 7u, { I64, I32, I32, I64, I64, I64, I64 }, 0u },
             { "closure", NEOS_RT_FUNCTION(api::closure), I64, 4u, { I32, I32, I32, I64 }, 0u },
             { "closure_upval", NEOS_RT_FUNCTION(api::closure_upval), I64, 3u, { I64, I32, I64 }, 0u },
             { "box_new", NEOS_RT_FUNCTION(api::box_new), I64, 1u, { I64 }, 0u },

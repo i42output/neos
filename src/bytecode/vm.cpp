@@ -792,14 +792,28 @@ namespace neos
                             case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35:
                                 {
                                     static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
-                                    code.u();
+                                    auto const memoryIndex = code.u() >> 32u;
                                     auto const offset = code.u();
                                     auto const width = sWidths[op - 0x28u];
-                                    auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
-                                    if (address + width > iMemory.size())
-                                        throw trap{ "out of bounds memory access" };
+                                    std::uint8_t const* source;
+                                    if (memoryIndex == 0u)
+                                    {
+                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                        if (address + width > iMemory.size())
+                                            throw trap{ "out of bounds memory access" };
+                                        source = &iMemory[address];
+                                    }
+                                    else
+                                    {
+                                        // (the external memory: a 64 bit address)
+                                        auto const& external = jit::external_memory();
+                                        auto const address = pop() + offset;
+                                        if (memoryIndex != 1u || address + width > external.size || address + width < address)
+                                            throw trap{ "out of bounds memory access" };
+                                        source = external.base + address;
+                                    }
                                     std::uint64_t bits = 0u;
-                                    std::memcpy(&bits, &iMemory[address], width);
+                                    std::memcpy(&bits, source, width);
                                     switch (op)
                                     {
                                     case 0x2C: bits = of_i32(static_cast<std::int8_t>(bits)); break;
@@ -815,14 +829,25 @@ namespace neos
                             case 0x36: case 0x37: case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x3E:
                                 {
                                     static std::uint8_t const sWidths[] = { 4, 8, 4, 8, 1, 2, 1, 2, 4 };
-                                    code.u();
+                                    auto const memoryIndex = code.u() >> 32u;
                                     auto const offset = code.u();
                                     auto const width = sWidths[op - 0x36u];
                                     auto const bits = pop();
-                                    auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
-                                    if (address + width > iMemory.size())
-                                        throw trap{ "out of bounds memory access" };
-                                    std::memcpy(&iMemory[address], &bits, width);
+                                    if (memoryIndex == 0u)
+                                    {
+                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                        if (address + width > iMemory.size())
+                                            throw trap{ "out of bounds memory access" };
+                                        std::memcpy(&iMemory[address], &bits, width);
+                                    }
+                                    else
+                                    {
+                                        auto& external = jit::external_memory();
+                                        auto const address = pop() + offset;
+                                        if (memoryIndex != 1u || address + width > external.size || address + width < address)
+                                            throw trap{ "out of bounds memory access" };
+                                        std::memcpy(external.base + address, &bits, width);
+                                    }
                                 }
                                 break;
                             case 0x20: stack.push_back(locals.at(code.u())); break;
@@ -1295,7 +1320,11 @@ namespace neos
                             default:
                                 if (op >= 0x28u && op <= 0x3Eu)
                                 {
-                                    token(r.u());
+                                    // (a memarg: its flags (alignment), memory index (multi-memory: if flag 0x40) and offset; the
+                                    // flags token's high 32 bits: the memory index)
+                                    auto const flags = r.u();
+                                    std::uint64_t const memoryIndex = (flags & 0x40u) != 0u ? r.u() : 0u;
+                                    token((flags & ~std::uint64_t{ 0x40u } & 0xFFFFFFFFull) | (memoryIndex << 32u));
                                     token(r.u());
                                 }
                                 break;
@@ -2398,6 +2427,13 @@ namespace neos
                     return nullptr;
                 }
 
+                void host_external_memory(void* aBase, unsigned long long aSize)
+                {
+                    auto& external = jit::external_memory();
+                    external.base = static_cast<std::uint8_t*>(aBase);
+                    external.size = aSize;
+                }
+
                 void host_unload(void* aContext)
                 {
                     // (a program that load compiled, that is no longer needed: nothing refers to its code (its context is then no longer
@@ -2638,7 +2674,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload };
+                    host_std_flush, host_global, host_unload, host_external_memory };
             }
 
             void const* runtime::host()
@@ -2740,4 +2776,4 @@ namespace neos
             }
         }
     }
-}
+}

@@ -76,6 +76,13 @@ namespace neos::lua_runtime
         }
     }
 
+    void set_fast(value aTable, char const* aName, fast_native aFast)
+    {
+        auto const f = raw_get(aTable, intern(aName));
+        if (is_function(f))
+            fun(f).fast = aFast;
+    }
+
     void register_library(value aTable, std::initializer_list<std::pair<char const*, native_function>> aFunctions)
     {
         register_library(aTable, nullptr, aFunctions);
@@ -239,6 +246,8 @@ namespace neos::lua_runtime
             c.ret(v);
         }
 
+        value fast_ipairs_iterator(value const* aArguments, std::size_t aCount, value& aSecond);
+
         void lua_ipairs(native_call& c)
         {
             check_any(c, 0u);
@@ -246,6 +255,7 @@ namespace neos::lua_runtime
             if (tIterator.empty())
             {
                 tIterator.push_back(make_native(&lua_ipairs_iterator, "ipairs_iterator"));
+                fun(tIterator[0]).fast = &fast_ipairs_iterator;
             }
             c.ret(tIterator[0]);
             c.ret(c.arg(0u));
@@ -630,6 +640,100 @@ namespace neos::lua_runtime
         }
     }
 
+    namespace
+    {
+        // --- fast versions (see fast_native)
+
+        value fast_setmetatable(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 2u || !is_table(aArguments[0]) || (!is_nil(aArguments[1]) && !is_table(aArguments[1])))
+                return Empty;
+            auto& t = tab(aArguments[0]);
+            if (is_table(t.metatable) && !is_nil(tab(t.metatable).get_string(name(NameMetatable))))
+                return Empty;
+            if (is_table(aArguments[1]) && !is_nil(tab(aArguments[1]).get_string(name(NameMode))))
+                return Empty;
+            t.metatable = aArguments[1];
+            t.weakKeys = 0u;
+            t.weakValues = 0u;
+            return aArguments[0];
+        }
+
+        value fast_getmetatable(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 1u || !is_table(aArguments[0]))
+                return Empty;
+            auto const mt = tab(aArguments[0]).metatable;
+            if (is_table(mt) && !is_nil(tab(mt).get_string(name(NameMetatable))))
+                return Empty;
+            return mt;
+        }
+
+        value fast_type(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 1u)
+                return Empty;
+            static static_values sNames;
+            if (sNames.empty())
+                for (char const* n : { "nil", "boolean", "number", "string", "table", "function", "thread", "userdata" })
+                    sNames.push_back(intern(n, true));
+            auto const v = aArguments[0];
+            if (is_nil(v)) return sNames[0];
+            if (is_boolean(v)) return sNames[1];
+            if (is_number(v)) return sNames[2];
+            if (is_string(v)) return sNames[3];
+            if (is_table(v)) return sNames[4];
+            if (is_function(v)) return sNames[5];
+            return Empty;
+        }
+
+        value fast_rawget(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 2u || !is_table(aArguments[0]))
+                return Empty;
+            return tab(aArguments[0]).get(aArguments[1]);
+        }
+
+        value fast_rawequal(value const* aArguments, std::size_t aCount, value&)
+        {
+            if (aCount != 2u)
+                return Empty;
+            return boolean(raw_equal(aArguments[0], aArguments[1]));
+        }
+
+        value fast_next(value const* aArguments, std::size_t aCount, value& aSecond)
+        {
+            if (aCount < 1u || aCount > 2u || !is_table(aArguments[0]))
+                return Empty;
+            value key = aCount > 1u ? aArguments[1] : Nil;
+            value v = Nil;
+            // (an invalid key: the native function's error)
+            try
+            {
+                if (!tab(aArguments[0]).next(key, v))
+                    return Nil;
+            }
+            catch (...)
+            {
+                return Empty;
+            }
+            aSecond = v;
+            return key;
+        }
+
+        value fast_ipairs_iterator(value const* aArguments, std::size_t aCount, value& aSecond)
+        {
+            if (aCount != 2u || !is_table(aArguments[0]) || is_table(tab(aArguments[0]).metatable) || !is_inline_integer(aArguments[1]))
+                return Empty;
+            auto const i = inline_integer(aArguments[1]) + 1;
+            auto const v = tab(aArguments[0]).get_integer(i);
+            if (is_nil(v))
+                return Nil;
+            aSecond = v;
+            return make_integer(i);
+        }
+    }
+
     void open_base()
     {
         auto& s = the_state();
@@ -658,6 +762,12 @@ namespace neos::lua_runtime
             { "loadfile", &lua_loadfile },
             { "dofile", &lua_dofile },
             { "warn", &lua_warn } });
+        set_fast(g, "setmetatable", &fast_setmetatable);
+        set_fast(g, "getmetatable", &fast_getmetatable);
+        set_fast(g, "type", &fast_type);
+        set_fast(g, "rawget", &fast_rawget);
+        set_fast(g, "rawequal", &fast_rawequal);
+        set_fast(g, "next", &fast_next);
         raw_set(g, intern("_G", true), g);
         raw_set(g, intern("_VERSION", true), intern("Lua 5.4", true));
         raw_set(s.loaded, intern("_G", true), g);

@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 12
+#define NEOS_RUNTIME_PLUGIN_VERSION 13
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -282,6 +282,12 @@ typedef struct neos_rt_host
        eval code that made no functions): its memory and native code are released, and aContext is no longer valid. A program that
        is running (on the calling thread) is not unloaded */
     void (*unload)(void* aContext);
+    /* (version 13) the external memory: a region of a plugin's (e.g. a language runtime's heap) that programs' code reads and writes
+       as memory 1 (a memory access whose memarg has a memory index (flag 0x40) of 1, with a 64 bit address (an offset in the region)),
+       so that the code a language's compiler generates can use the runtime's objects without calling it. aBase: the region's address;
+       aSize: its size (an access beyond it traps). Process-wide (one external memory, the last set); set again when the region
+       grows */
+    void (*external_memory)(void* aBase, unsigned long long aSize);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

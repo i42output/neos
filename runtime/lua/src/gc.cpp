@@ -84,7 +84,20 @@ namespace neos::lua_runtime
             std::uint32_t slotSize = 0u;    ///< (0: not in use)
             std::uint32_t first = 0u;       ///< (a large cell's: its first page)
             std::size_t largeSize = 0u;     ///< (a large cell's: its size (0: the page has slots))
+            bool raw = false;               ///< (storage that is not cells (see region_vector))
         };
+
+        // (a slot's cell type (a free slot's: cell_type::Free): the byte after its cell's vtable pointer)
+        constexpr std::size_t CellTypeOffset = 8u;
+        inline cell_type slot_type(std::byte const* aSlot) { return static_cast<cell_type>(aSlot[CellTypeOffset]); }
+
+        // (the host's external memory: the region (its committed pages), which generated code reads as memory 1)
+        void publish_region(std::byte* aBase, std::size_t aSize)
+        {
+            auto const* h = host();
+            if (h != nullptr && h->version >= 13u && h->external_memory != nullptr)
+                h->external_memory(aBase, aSize);
+        }
 
         class cell_memory
         {
@@ -109,25 +122,31 @@ namespace neos::lua_runtime
                     std::fputs("Lua runtime: cannot reserve the heap's address space\n", stderr);
                     std::abort();
                 }
+                gCellBase = iBase;
                 iPages.reserve(4096u);
+                // (offset 0 is no cell: the first page is reserved)
+                iPages.resize(1u);
             }
         public:
-            void* allocate(std::size_t aSize)
+            // (a cell's memory, or (aRaw) storage that is not a cell)
+            void* allocate(std::size_t aSize, bool aRaw = false)
             {
                 if (aSize > MaxSmall)
-                    return allocate_large(aSize);
-                auto& c = iClasses[iClassOf[(aSize + 15u) / 16u]];
+                    return allocate_large(aSize, aRaw);
+                auto* const classes = aRaw ? iRawClasses : iClasses;
+                auto& c = classes[iClassOf[(aSize + 15u) / 16u]];
                 if (c.freeList != nullptr)
                 {
                     auto* const result = c.freeList;
                     c.freeList = *static_cast<void**>(result);
                     return result;
                 }
-                auto const slotSize = SizeClasses[&c - iClasses];
+                auto const slotSize = SizeClasses[&c - classes];
                 if (c.bump == c.bumpEnd)
                 {
                     auto const page = new_pages(1u);
                     iPages[page].slotSize = slotSize;
+                    iPages[page].raw = aRaw;
                     c.bump = page_address(page);
                     c.bumpEnd = c.bump + (PageSize / slotSize) * slotSize;
                 }
@@ -139,6 +158,8 @@ namespace neos::lua_runtime
             {
                 auto const page = page_of(aMemory);
                 auto& info = iPages[page];
+                if (!info.raw)
+                    static_cast<std::byte*>(aMemory)[CellTypeOffset] = static_cast<std::byte>(cell_type::Free);
                 if (info.largeSize != 0u)
                 {
                     auto const count = (info.largeSize + PageSize - 1u) / PageSize;
@@ -148,9 +169,30 @@ namespace neos::lua_runtime
                     iFreeRuns.emplace_back(page, count);
                     return;
                 }
-                auto& c = iClasses[iClassOf[info.slotSize / 16u]];
+                auto& c = (info.raw ? iRawClasses : iClasses)[iClassOf[info.slotSize / 16u]];
                 *static_cast<void**>(aMemory) = c.freeList;
                 c.freeList = aMemory;
+            }
+            // (each cell's slot, live or free (aVisit(slot))
+            template <typename Visit>
+            void for_each_slot(Visit aVisit)
+            {
+                for (std::size_t page = 0u; page < iPages.size(); ++page)
+                {
+                    auto const& info = iPages[page];
+                    if (info.slotSize == 0u || info.raw)
+                        continue;
+                    if (info.largeSize != 0u)
+                    {
+                        if (info.first == page)
+                            aVisit(page_address(page));
+                        continue;
+                    }
+                    auto* const start = page_address(page);
+                    auto const count = PageSize / info.slotSize;
+                    for (std::size_t i = 0u; i < count; ++i)
+                        aVisit(start + i * info.slotSize);
+                }
             }
             std::size_t size_of(void const* aMemory) const
             {
@@ -167,7 +209,7 @@ namespace neos::lua_runtime
                 if (page >= iPages.size())
                     return nullptr;
                 auto const& info = iPages[page];
-                if (info.slotSize == 0u)
+                if (info.slotSize == 0u || info.raw)
                     return nullptr;
                 if (info.largeSize != 0u)
                 {
@@ -182,6 +224,8 @@ namespace neos::lua_runtime
             }
             std::uintptr_t begin() const { return reinterpret_cast<std::uintptr_t>(iBase); }
             std::uintptr_t end() const { return reinterpret_cast<std::uintptr_t>(iBase) + iPages.size() * PageSize; }
+            std::uint64_t committed() const { return iPages.size() * PageSize; }
+            void publish() const { publish_region(iBase, iPages.size() * PageSize); }
         private:
             std::byte* page_address(std::size_t aPage) const { return iBase + aPage * PageSize; }
             std::size_t page_of(void const* aMemory) const
@@ -203,14 +247,15 @@ namespace neos::lua_runtime
                     throw std::bad_alloc{};
                 commit(page_address(page), aCount * PageSize);
                 iPages.resize(page + aCount);
+                publish();
                 return page;
             }
-            void* allocate_large(std::size_t aSize)
+            void* allocate_large(std::size_t aSize, bool aRaw)
             {
                 auto const count = (aSize + PageSize - 1u) / PageSize;
                 auto const page = new_pages(count);
                 for (std::size_t p = page; p < page + count; ++p)
-                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize };
+                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize, aRaw };
                 return page_address(page);
             }
             static void commit(void* aAddress, std::size_t aSize)
@@ -242,6 +287,7 @@ namespace neos::lua_runtime
             std::vector<page_info> iPages;
             std::vector<std::pair<std::size_t, std::size_t>> iFreeRuns;
             size_class iClasses[ClassCount];
+            size_class iRawClasses[ClassCount];
             std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
         };
 
@@ -315,11 +361,6 @@ namespace neos::lua_runtime
             auto const* h = host();
             return h != nullptr && h->version >= 8u && h->values != nullptr && stack_base() != nullptr;
         }
-        void record_handle_offset(cell& aCell)
-        {
-            if (iHandleOffset == 0u)
-                iHandleOffset = static_cast<std::size_t>(reinterpret_cast<std::byte const*>(&aCell.handle) - reinterpret_cast<std::byte const*>(&aCell));
-        }
         void collect();
         // marking
         void push(cell& aCell)
@@ -330,32 +371,40 @@ namespace neos::lua_runtime
         void mark_value(value aValue)
         {
             if (is_cell(aValue))
-                mark_handle(handle_of(aValue));
+            {
+                auto& c = cell_of<cell>(aValue);
+                if (c.marked == 0u)
+                    push(c);
+            }
         }
-        void mark_handle(std::uint32_t aHandle)
+        // (the live cell at an offset in the region, if there is one)
+        cell* find(std::uint64_t aOffset) const
         {
-            if (auto* const c = iHeap.find(aHandle); c != nullptr && c->marked == 0u)
-                push(*c);
+            if (aOffset >= iMemory.committed())
+                return nullptr;
+            auto const address = iMemory.begin() + aOffset;
+            auto const* const slot = iMemory.slot_at(address);
+            if (slot == nullptr || reinterpret_cast<std::uintptr_t>(slot) != address || slot_type(slot) == cell_type::Free)
+                return nullptr;
+            return reinterpret_cast<cell*>(const_cast<std::byte*>(slot));
         }
         void mark_word(std::uint64_t aWord)
         {
+            // (a value (of a live cell), or an address in a live cell)
             auto const tag = aWord & TagMask;
             if (tag >= TagString && tag <= TagOther)
             {
-                if ((aWord & 0x0000FFFF00000000ull) != 0u)
-                    return;
-                auto* const c = iHeap.find(handle_of(aWord));
+                auto* const c = find(handle_of(aWord));
                 if (c == nullptr || c->marked != 0u || value_of(*c) != aWord)
                     return;
                 push(*c);
                 return;
             }
             if (aWord >= iMemory.begin() && aWord < iMemory.end())
-                if (auto const* const slot = iMemory.slot_at(static_cast<std::uintptr_t>(aWord)))
+                if (auto const* const slot = iMemory.slot_at(static_cast<std::uintptr_t>(aWord)); slot != nullptr && slot_type(slot) != cell_type::Free)
                 {
-                    std::uint32_t handle;
-                    std::memcpy(&handle, slot + iHandleOffset, sizeof(handle));
-                    if (auto* const c = iHeap.find(handle); c != nullptr && reinterpret_cast<std::byte const*>(c) == slot && c->marked == 0u)
+                    auto* const c = reinterpret_cast<cell*>(const_cast<std::byte*>(slot));
+                    if (c->marked == 0u)
                         push(*c);
                 }
         }
@@ -373,8 +422,7 @@ namespace neos::lua_runtime
         {
             if (!is_cell(aValue))
                 return true;
-            auto const* const c = iHeap.find(handle_of(aValue));
-            return c != nullptr && c->marked != 0u;
+            return cell_of<cell>(aValue).marked != 0u;
         }
         void drain(tracer& aTracer)
         {
@@ -395,12 +443,11 @@ namespace neos::lua_runtime
         void mark_and_sweep();
         void scan_stacks();
         void sweep();
-        void free_cell(cell* aCell, std::uint32_t aHandle);
+        void free_cell(cell* aCell);
     private:
         heap& iHeap;
         cell_memory iMemory;
         std::vector<cell*> iWork;
-        std::size_t iHandleOffset = 0u;
         std::uint64_t iStress = 0u;
         std::uint64_t iVerbose = 0u;
         int iPauses = 0;
@@ -433,8 +480,6 @@ namespace neos::lua_runtime
 
     heap::heap()
     {
-        iCells.reserve(1u << 16);
-        iCells.push_back(nullptr);  // (handle 0 refers to nothing)
     }
 
     heap::~heap()
@@ -466,24 +511,29 @@ namespace neos::lua_runtime
 
     void heap::add(cell& aCell, void* aMemory)
     {
-        // (a cell is the start of its memory (its type has single inheritance))
-        if (static_cast<void*>(&aCell) != aMemory)
+        // (a cell is the start of its memory (its type has single inheritance), and its type follows its vtable pointer)
+        if (static_cast<void*>(&aCell) != aMemory ||
+            reinterpret_cast<std::byte const*>(&aCell.type) - reinterpret_cast<std::byte const*>(&aCell) != static_cast<std::ptrdiff_t>(CellTypeOffset))
             std::abort();
-        auto& c = the_collector();
-        c.record_handle_offset(aCell);
-        if (c.collecting())
+        if (the_collector().collecting())
             aCell.marked = 1u;
-        if (!iFreeHandles.empty())
-        {
-            aCell.handle = iFreeHandles.back();
-            iFreeHandles.pop_back();
-            iCells[aCell.handle] = &aCell;
-            return;
-        }
-        if (iCells.size() >= 0xFFFFFFFFu)
-            throw std::bad_alloc{};
-        aCell.handle = static_cast<std::uint32_t>(iCells.size());
-        iCells.push_back(&aCell);
+    }
+
+    cell* heap::find(std::uint64_t aOffset) const
+    {
+        return the_collector().find(aOffset);
+    }
+
+    void* heap::allocate_raw(std::size_t aSize)
+    {
+        // (no collection: the cell whose storage it is may be changing)
+        iAllocatedBytes += aSize;
+        return the_collector().memory().allocate(aSize, true);
+    }
+
+    void heap::release_raw(void* aMemory) noexcept
+    {
+        the_collector().memory().release(aMemory);
     }
 
     void heap::collect()
@@ -732,15 +782,10 @@ namespace neos::lua_runtime
                 conservative(r.low, r.high);
     }
 
-    void collector::free_cell(cell* aCell, std::uint32_t aHandle)
+    void collector::free_cell(cell* aCell)
     {
-        iHeap.iCells[aHandle] = nullptr;
         aCell->~cell();
-        auto* const memory = reinterpret_cast<std::byte*>(aCell);
-        std::uint32_t const none = 0u;
-        std::memcpy(memory + iHandleOffset, &none, sizeof(none));
-        iMemory.release(memory);
-        iHeap.iFreeHandles.push_back(aHandle);
+        iMemory.release(aCell);
     }
 
     void collector::sweep()
@@ -748,12 +793,11 @@ namespace neos::lua_runtime
         std::uint64_t liveBytes = 0u;
         std::size_t live = 0u;
         std::size_t freed = 0u;
-        auto& cells = iHeap.iCells;
-        for (std::size_t h = 1u; h < cells.size(); ++h)
+        iMemory.for_each_slot([&](std::byte* aSlot)
         {
-            auto* const c = cells[h];
-            if (c == nullptr)
-                continue;
+            if (slot_type(aSlot) == cell_type::Free)
+                return;
+            auto* const c = reinterpret_cast<cell*>(aSlot);
             if (c->marked != 0u)
             {
                 c->marked = 0u;
@@ -763,11 +807,11 @@ namespace neos::lua_runtime
                     liveBytes += static_cast<string_cell*>(c)->text.capacity();
                 else if (c->type == cell_type::Table)
                     liveBytes += static_cast<table*>(c)->array.capacity() * sizeof(value) + static_cast<table*>(c)->nodes.capacity() * sizeof(table::node);
-                continue;
+                return;
             }
-            free_cell(c, static_cast<std::uint32_t>(h));
+            free_cell(c);
             ++freed;
-        }
+        });
         iLiveBytes = liveBytes;
         if (iVerbose != 0u)
             std::fprintf(stderr, "[lua gc %llu: %zu live (%llu KB), %zu freed]\n", static_cast<unsigned long long>(iCollections), live,

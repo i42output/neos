@@ -180,7 +180,7 @@ namespace neos::lua_runtime
         s.pinned = aPinned;
         s.hashValue = hash;
         s.hashed = true;
-        auto const result = TagString | s.handle;
+        auto const result = value_of(s);
         if (aPinned)
             table.pinned.push_back(result);
         table.insert(result, hash);
@@ -193,7 +193,7 @@ namespace neos::lua_runtime
             return intern(aText);
         the_heap().account(aText.size());
         auto& s = the_heap().make<string_cell>(std::string{ aText });
-        return TagString | s.handle;
+        return value_of(s);
     }
 
     value make_string(std::string&& aText)
@@ -202,14 +202,14 @@ namespace neos::lua_runtime
             return intern(aText);
         the_heap().account(aText.size());
         auto& s = the_heap().make<string_cell>(std::move(aText));
-        return TagString | s.handle;
+        return value_of(s);
     }
 
     // --- other cells
 
     value make_box(value aValue)
     {
-        return TagOther | the_heap().make<box_cell>(aValue).handle;
+        return value_of(the_heap().make<box_cell>(aValue));
     }
 
     value make_native(native_function aFunction, char const* aName, std::initializer_list<value> aUpvalues)
@@ -220,7 +220,7 @@ namespace neos::lua_runtime
         f.function = aFunction;
         f.name = aName;
         f.upvalues.assign(aUpvalues.begin(), aUpvalues.end());
-        return TagFunction | f.handle;
+        return value_of(f);
     }
 
     // --- numbers
@@ -229,7 +229,7 @@ namespace neos::lua_runtime
     {
         if (fits_inline(aValue))
             return TagInteger | (static_cast<value>(aValue) & PayloadMask);
-        return TagOther | the_heap().make<integer_cell>(aValue).handle;
+        return value_of(the_heap().make<integer_cell>(aValue));
     }
 
     bool float_to_integer(double aValue, std::int64_t& aResult)

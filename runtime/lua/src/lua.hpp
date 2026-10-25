@@ -47,6 +47,7 @@
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <span>
 #include <string>
@@ -63,6 +64,7 @@ namespace neos::lua_runtime
 
     using value = std::uint64_t;
     namespace tags = neos::language::lua::values;
+    namespace layout = neos::language::lua::layout;
 
     inline constexpr value TagMask = tags::TagMask;
     inline constexpr value TagSpecial = tags::TagSpecial;
@@ -89,8 +91,8 @@ namespace neos::lua_runtime
     inline bool is_string(value aValue) { return tag_of(aValue) == TagString; }
     inline bool is_table(value aValue) { return tag_of(aValue) == TagTable; }
     inline bool is_function(value aValue) { return tag_of(aValue) == TagFunction; }
-    inline bool is_cell(value aValue) { return aValue >= TagString && aValue <= (TagOther | 0xFFFFFFFFull); }
-    inline std::uint32_t handle_of(value aValue) { return static_cast<std::uint32_t>(aValue); }
+    inline bool is_cell(value aValue) { return aValue >= TagString && aValue <= (TagOther | PayloadMask); }
+    inline std::uint64_t handle_of(value aValue) { return aValue & PayloadMask; }     ///< (a cell's offset in the heap's region)
     inline std::int64_t inline_integer(value aValue) { return static_cast<std::int64_t>(aValue << 16) >> 16; }
     inline bool fits_inline(std::int64_t aValue) { return aValue >= tags::MinInline && aValue <= tags::MaxInline; }
     inline double float_of(value aValue) { double d; std::memcpy(&d, &aValue, sizeof(d)); return d; }
@@ -110,6 +112,7 @@ namespace neos::lua_runtime
 
     enum class cell_type : std::uint8_t
     {
+        Free,       ///< (not a cell: a free slot of the heap's memory)
         String,
         Table,
         Function,
@@ -122,15 +125,18 @@ namespace neos::lua_runtime
 
     class tracer;
 
+    // (a cell: its type is at offset 8 (after its vtable pointer); its fields begin at offset 16 (see neos::language::lua::layout))
     struct cell
     {
         cell_type type;
         std::uint8_t marked = 0u;
-        std::uint32_t handle = 0u;
         explicit cell(cell_type aType) : type{ aType } {}
         virtual ~cell() = default;
         virtual void trace(tracer&) {}
     };
+
+    // (the heap's region: the cells, and the storage that generated code reads (see region_vector); its base)
+    inline std::byte* gCellBase = nullptr;
 
     class heap
     {
@@ -160,18 +166,18 @@ namespace neos::lua_runtime
             return *result;
         }
         void account(std::size_t aBytes) { iAllocatedBytes += aBytes; }
-        cell* find(std::uint32_t aHandle) const { return aHandle < iCells.size() ? iCells[aHandle] : nullptr; }
-        cell* at(std::uint32_t aHandle) const { return iCells[aHandle]; }   ///< (a handle that a value refers to)
+        cell* find(std::uint64_t aOffset) const;    ///< (the live cell at the offset, if there is one)
         void collect();
         std::size_t live_bytes() const;
+        // (storage in the region that is not a cell (see region_vector))
+        void* allocate_raw(std::size_t aSize);
+        void release_raw(void* aMemory) noexcept;
     private:
         void* allocate(std::size_t aSize);
         void deallocate(void* aMemory) noexcept;
         void allocating();
         void add(cell& aCell, void* aMemory);
     private:
-        std::vector<cell*> iCells;
-        std::vector<std::uint32_t> iFreeHandles;
         std::uint64_t iAllocations = 0u;
         std::uint64_t iAllocationTrigger = 4096u;
         std::uint64_t iAllocatedBytes = 0u;
@@ -199,26 +205,99 @@ namespace neos::lua_runtime
         }
     }
 
-    inline value value_of(cell const& aCell) { return tag_for(aCell.type) | aCell.handle; }
+    inline std::uint64_t offset_of(void const* aAddress) { return static_cast<std::uint64_t>(static_cast<std::byte const*>(aAddress) - gCellBase); }
+    inline value value_of(cell const& aCell) { return tag_for(aCell.type) | offset_of(&aCell); }
 
     template <typename T>
     inline T& cell_of(value aValue)
     {
-        return *static_cast<T*>(the_heap().at(handle_of(aValue)));
+        return *reinterpret_cast<T*>(gCellBase + handle_of(aValue));
     }
 
     inline cell* cell_at(value aValue)
     {
-        return is_cell(aValue) ? the_heap().find(handle_of(aValue)) : nullptr;
+        return is_cell(aValue) ? &cell_of<cell>(aValue) : nullptr;
     }
 
     inline bool is_type(value aValue, cell_type aType)
     {
-        if (tag_of(aValue) != TagOther)
-            return false;
-        auto* c = the_heap().find(handle_of(aValue));
-        return c != nullptr && c->type == aType;
+        return tag_of(aValue) == TagOther && cell_of<cell>(aValue).type == aType;
     }
+
+    // (a vector of trivially copyable elements in the heap's region, that generated code can read: its storage's offset (in the region),
+    // its size and its capacity (in elements))
+    template <typename T>
+    class region_vector
+    {
+    public:
+        region_vector() = default;
+        region_vector(region_vector const&) = delete;
+        region_vector& operator=(region_vector const&) = delete;
+        ~region_vector() { release(); }
+    public:
+        std::size_t size() const { return static_cast<std::size_t>(iSize); }
+        std::size_t capacity() const { return static_cast<std::size_t>(iCapacity); }
+        bool empty() const { return iSize == 0u; }
+        T* data() { return reinterpret_cast<T*>(gCellBase + iOffset); }
+        T const* data() const { return reinterpret_cast<T const*>(gCellBase + iOffset); }
+        T& operator[](std::size_t aIndex) { return data()[aIndex]; }
+        T const& operator[](std::size_t aIndex) const { return data()[aIndex]; }
+        T* begin() { return data(); }
+        T* end() { return data() + iSize; }
+        T const* begin() const { return data(); }
+        T const* end() const { return data() + iSize; }
+        operator std::span<T const>() const { return std::span<T const>{ data(), size() }; }
+        void reserve(std::size_t aCapacity)
+        {
+            if (aCapacity <= iCapacity)
+                return;
+            auto* const storage = static_cast<T*>(the_heap().allocate_raw(aCapacity * sizeof(T)));
+            if (iSize != 0u)
+                std::memcpy(storage, data(), static_cast<std::size_t>(iSize) * sizeof(T));
+            release_storage();
+            iOffset = offset_of(storage);
+            iCapacity = aCapacity;
+        }
+        void push_back(T const& aValue)
+        {
+            if (iSize == iCapacity)
+                reserve(iCapacity < 4u ? 4u : static_cast<std::size_t>(iCapacity) * 2u);
+            data()[iSize++] = aValue;
+        }
+        void resize(std::size_t aSize, T const& aValue = T{})
+        {
+            reserve(aSize);
+            for (auto i = iSize; i < aSize; ++i)
+                data()[i] = aValue;
+            iSize = aSize;
+        }
+        template <typename Iterator>
+        void assign(Iterator aBegin, Iterator aEnd)
+        {
+            iSize = 0u;
+            reserve(static_cast<std::size_t>(std::distance(aBegin, aEnd)));
+            for (auto i = aBegin; i != aEnd; ++i)
+                data()[iSize++] = *i;
+        }
+        void clear() { iSize = 0u; }
+    private:
+        void release_storage()
+        {
+            if (iCapacity != 0u)
+                the_heap().release_raw(data());
+        }
+        void release()
+        {
+            release_storage();
+            iOffset = 0u;
+            iSize = 0u;
+            iCapacity = 0u;
+        }
+    private:
+        std::uint64_t iOffset = 0u;
+        std::uint64_t iSize = 0u;
+        std::uint64_t iCapacity = 0u;
+    };
 
     // --- rooted containers: a value_list is a root while it exists (a C++ local, temporary or static)
 
@@ -289,6 +368,7 @@ namespace neos::lua_runtime
         void mark(cell const* aCell);
         void mark(std::span<value const> aValues) { for (auto v : aValues) mark(v); }
         void mark(std::vector<value> const& aValues) { for (auto v : aValues) mark(v); }
+        void mark(region_vector<value> const& aValues) { for (auto v : aValues) mark(v); }
         void conservative(void const* aBegin, void const* aEnd);
         bool alive(value aValue) const;
         void after_marking(cell& aCell, void (*aFunction)(cell& aCell, tracer& aTracer));
@@ -345,8 +425,8 @@ namespace neos::lua_runtime
     struct string_cell : cell
     {
         explicit string_cell(std::string aText) : cell{ cell_type::String }, text{ std::move(aText) } {}
+        std::uint64_t hashValue = 0u;   ///< (layout::StringHash)
         std::string text;
-        std::size_t hashValue = 0u;
         bool hashed = false;
         bool interned = false;
         bool pinned = false;            ///< (an interned string that lives as long as the program, e.g. a literal)
@@ -404,7 +484,8 @@ namespace neos::lua_runtime
             void reset(std::size_t aSize)   ///< (aSize free slots (the slots there were are discarded))
             {
                 release();
-                iData = aSize <= InlineCount ? iInline : new node[aSize];
+                iData = aSize <= InlineCount ? iInline : static_cast<node*>(the_heap().allocate_raw(aSize * sizeof(node)));
+                iOffset = offset_of(iData);
                 iSize = aSize;
                 for (std::size_t i = 0u; i < aSize; ++i)
                     iData[i] = node{};
@@ -412,20 +493,23 @@ namespace neos::lua_runtime
         private:
             void release()
             {
-                if (iData != iInline)
-                    delete[] iData;
+                if (iData != iInline && iData != nullptr)
+                    the_heap().release_raw(iData);
                 iData = nullptr;
+                iOffset = 0u;
                 iSize = 0u;
             }
         private:
+            // (layout::TableNodes, layout::TableNodesSize)
+            std::uint64_t iOffset = 0u;
+            std::uint64_t iSize = 0u;
             node* iData = nullptr;
-            std::size_t iSize = 0u;
             node iInline[InlineCount];
         };
-        std::vector<value> array;   ///< (the values of the keys 1 to n)
+        region_vector<value> array; ///< (the values of the keys 1 to n: layout::TableArray, layout::TableArraySize)
+        value metatable = Nil;      ///< (layout::TableMetatable)
         node_storage nodes;         ///< (the others: open addressing (a power of 2 slots, or none))
-        std::size_t used = 0u;      ///< (the slots whose keys are not Empty)
-        value metatable = Nil;
+        std::uint64_t used = 0u;    ///< (the slots whose keys are not Empty: layout::TableUsed)
         std::uint8_t weakKeys = 0u;
         std::uint8_t weakValues = 0u;
         value get(value aKey) const;
@@ -453,20 +537,24 @@ namespace neos::lua_runtime
 
     struct native_call;
     using native_function = void (*)(native_call& aCall);
+    // (a native function's fast version, for the common case: its first result (Empty: it declines; its native function is called), 
+    // and its second (Empty: none); it raises no errors)
+    using fast_native = value (*)(value const* aArguments, std::size_t aCount, value& aSecond);
 
     struct function_cell : cell
     {
         function_cell() : cell{ cell_type::Function } {}
+        // (a Lua function: its upvalues (boxes: layout::FunctionUpvalues), its chunk's environment (a box: layout::FunctionEnvironment),
+        // its number (the dispatcher's), its WebAssembly function and its program)
+        region_vector<value> upvalues;
+        value environment = Nil;
         bool native = false;
-        // (a Lua function: its number (the dispatcher's), its WebAssembly function, its program, its upvalues (boxes) and its chunk's
-        // environment (a box))
         std::uint32_t number = 0u;
         std::uint32_t index = 0u;
         void* program = nullptr;
-        std::vector<value> upvalues;
-        value environment = Nil;
-        // (a native function: its C++ function and its name (for error messages))
+        // (a native function: its C++ function (and its fast version) and its name (for error messages))
         native_function function = nullptr;
+        fast_native fast = nullptr;
         char const* name = "?";
         char const* qualified = "?";        ///< (its name with its library's, e.g. "string.rep")
         void trace(tracer& aTracer) override
@@ -676,6 +764,7 @@ namespace neos::lua_runtime
     value call_compiled(function_cell& aFunction, std::span<value const> aArguments);   ///< (its first result; the others in the thread's results (see results_count))
     std::size_t results_count();                                    ///< (the number of results of the compiled call that returned last)
     void set_results_count(std::size_t aCount);
+    void set_results_count(std::size_t aCount, void* aProgram);
     neos_rt_host const* host();
     void* current_program();
 
@@ -705,6 +794,7 @@ namespace neos::lua_runtime
     value library_table(char const* aName);
     void register_library(value aTable, std::initializer_list<std::pair<char const*, native_function>> aFunctions);
     void register_library(value aTable, char const* aLibrary, std::initializer_list<std::pair<char const*, native_function>> aFunctions);
+    void set_fast(value aTable, char const* aName, fast_native aFast);     ///< (a library function's fast version)
     std::string chunk_display_name(std::string const& aChunkName);     ///< (a chunk's name as Lua shows it, e.g. [string "..."])
     std::string read_source_file(std::string const& aPath, bool& aOk);
 

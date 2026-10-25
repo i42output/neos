@@ -38,6 +38,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include "lua.hpp"
 #include "api.hpp"
 
@@ -48,9 +49,10 @@ namespace neos::lua_runtime
         neos_rt_host const* sHost = nullptr;
 
         // (the programs (the main program and the chunks that load compiled): their dispatchers and their %lua.nret globals)
-        std::vector<program_info>& programs()
+        // (a deque: their information stays where it is (it is cached))
+        std::deque<program_info>& programs()
         {
-            static std::vector<program_info> sPrograms;
+            static std::deque<program_info> sPrograms;
             return sPrograms;
         }
 
@@ -125,9 +127,18 @@ namespace neos::lua_runtime
 
     void set_results_count(std::size_t aCount)
     {
+        set_results_count(aCount, current_program());
+    }
+
+    void set_results_count(std::size_t aCount, void* aProgram)
+    {
+        // (the program's information: the last's (cached))
+        static program_info* sLast = nullptr;
         tResultsCount = aCount;
-        if (auto* p = find_program(current_program()))
-            *p->results = aCount;
+        if (sLast == nullptr || sLast->program != aProgram)
+            sLast = find_program(aProgram);
+        if (sLast != nullptr)
+            *sLast->results = aCount;
     }
 
     void set_program_results(std::span<value const> aResults)
@@ -486,7 +497,7 @@ namespace neos::lua_runtime
         auto& t = the_heap().make<thread_cell>();
         t.function = aFunction;
         t.program = current_program();
-        return TagOther | t.handle;
+        return value_of(t);
     }
 
     bool resume(thread_cell& co, std::span<value const> aArguments, value_list& aResults)
