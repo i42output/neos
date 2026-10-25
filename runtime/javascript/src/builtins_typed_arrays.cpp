@@ -1152,7 +1152,7 @@ namespace neos::javascript_runtime
         }
 
         // (FromBase64)
-        decode_result from_base64(std::u16string const& aString, bool aUrl, last_chunk_handling aHandling, std::size_t aMaxLength)
+        decode_result from_base64(std::u16string_view aString, bool aUrl, last_chunk_handling aHandling, std::size_t aMaxLength)
         {
             decode_result result;
             if (aMaxLength == 0u)
@@ -1277,7 +1277,7 @@ namespace neos::javascript_runtime
         }
 
         // (FromHex)
-        decode_result from_hex(std::u16string const& aString, std::size_t aMaxLength)
+        decode_result from_hex(std::u16string_view aString, std::size_t aMaxLength)
         {
             decode_result result;
             auto const length = aString.size();
@@ -1483,8 +1483,8 @@ namespace neos::javascript_runtime
         method(tap, "toLocaleString", 0u, typed_array_to_locale_string);
         method(tap, "toReversed", 0u, typed_array_to_reversed);
         method(tap, "toSorted", 1u, typed_array_to_sorted);
-        if (auto const* toString = obj(aRealm.arrayPrototype).own(the_names().toString))
-            obj(tap).put(the_names().toString, toString->data);
+        if (auto const toString = obj(aRealm.arrayPrototype).own(the_names().toString))
+            obj(tap).put(the_names().toString, toString->data());
         auto const values = method(tap, "values", 0u, typed_array_values);
         method(tap, "with", 2u, typed_array_with);
         obj(tap).put(aRealm.symIterator, values);

@@ -330,11 +330,11 @@ namespace neos::javascript_runtime
                 return f->sourceText;
             // (NativeFunction syntax: function [get|set] [PropertyName] (): a name that is not a property name (e.g. "bound f", "$&") is
             // left out)
-            auto const* name = f->own(the_names().name);
+            auto const name = f->own(the_names().name);
             std::u16string text = u"function ";
-            if (name != nullptr && !name->accessor() && is_string(name->data))
+            if (name != nullptr && !name->accessor() && is_string(name->data()))
             {
-                std::u16string n{ str(name->data) };
+                std::u16string n{ str(name->data()) };
                 if (n.starts_with(u"get ") || n.starts_with(u"set "))
                 {
                     text += n.substr(0u, 4u);
@@ -394,8 +394,8 @@ namespace neos::javascript_runtime
         // (%ThrowTypeError%: frozen, nameless)
         aRealm.throwTypeError = make_native(the_names().empty, 0u, throw_type_error_function);
         auto& t = obj(aRealm.throwTypeError);
-        t.own(the_names().length)->attributes = 0u;
-        t.own(the_names().name)->attributes = 0u;
+        t.own(the_names().length)->set_attributes(0u);
+        t.own(the_names().name)->set_attributes(0u);
         t.extensible = false;
         fp.put_accessor(the_names().caller, aRealm.throwTypeError, aRealm.throwTypeError, AttributeConfigurable);
         fp.put_accessor(the_names().arguments, aRealm.throwTypeError, aRealm.throwTypeError, AttributeConfigurable);

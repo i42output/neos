@@ -105,7 +105,7 @@ namespace neos::javascript_runtime::intl
         }
 
         // (SingularRelativeTimeUnit)
-        std::pair<URelativeDateTimeUnit, char const*> singular_unit(std::u16string const& aUnit)
+        std::pair<URelativeDateTimeUnit, char const*> singular_unit(std::u16string_view aUnit)
         {
             static std::pair<char const*, URelativeDateTimeUnit> const sUnits[] = { { "second", UDAT_REL_UNIT_SECOND },
                 { "minute", UDAT_REL_UNIT_MINUTE }, { "hour", UDAT_REL_UNIT_HOUR }, { "day", UDAT_REL_UNIT_DAY }, { "week", UDAT_REL_UNIT_WEEK },

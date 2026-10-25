@@ -214,7 +214,7 @@ namespace neos::compilers::javascript
         void generate();
         // (the program's property cache stubs: functions that the sites call (their code shared): get (object, key, site -> value),
         // set (object, key, value, strict, site -> result), callee numbers (callee, site -> number))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, Count };
         void generate_stub(stub aStub);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
     private:
@@ -275,6 +275,8 @@ namespace neos::compilers::javascript
         void set_computed();                ///< (object, a computed key, value, strict -> the result: as runtime's set (a call of its stub))
         void set_computed_stub();
         void get_length_stub();
+        void char_code_at_stub();
+        void to_boolean_stub();
         void array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss); ///< (an array's dense
                                                     ///< element (the key a number): its address (in aAddress), else to aMiss)
         void callee_number_stub(bool aCallSite);
@@ -535,6 +537,7 @@ namespace neos::compilers::javascript
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
+        std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
         std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t source_line_of(std::string_view aSource) const;
     public:

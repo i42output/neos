@@ -472,7 +472,9 @@ namespace neos::compilers::javascript
                     { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
                     { "%js.callee_number", { I64, I32 }, I32 },
                     { "%js.method_number", { I64, I32 }, I32 },
-                    { "%js.get_length", { I64 }, I64 }
+                    { "%js.get_length", { I64 }, I64 },
+                    { "%js.char_code_at", { I64, I64, I64, I32 }, I64 },
+                    { "%js.to_boolean", { I64 }, I32 }
                 };
                 static_assert(std::size(stubs) == static_cast<std::size_t>(function_generator::stub::Count));
                 for (std::size_t i = 0u; i < std::size(stubs); ++i)
@@ -570,6 +572,13 @@ namespace neos::compilers::javascript
                 put_s64(code, static_cast<std::int32_t>(property_sites_global()));
                 call("javascript::property_sites", { I32, I32 }, I64);
                 put_op(code, opcode::Drop);
+            }
+            if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::CharCodeAt)])
+            {
+                // (%String.prototype.charCodeAt%: the charCodeAt stub compares callees with it)
+                call("javascript::char_code_at_function", {}, I64);
+                put_op(code, opcode::GlobalSet);
+                put_u32(code, char_code_at_global());
             }
             std::optional<std::uint32_t> moduleDescriptor;
             if (iModule)
@@ -952,6 +961,7 @@ namespace neos::compilers::javascript
         auto const entry = temporary();
         auto const cell = temporary();
         auto const word = temporary();
+        auto const holderShape = temporary();
         begin(control_kind::Block, I64);
         auto const done = iControls.size() - 1u;
         begin(control_kind::Block);
@@ -1024,20 +1034,22 @@ namespace neos::compilers::javascript
             iCode.push_back(0x7Eu);
             iControls.push_back(control{ control_kind::Block });
             {
-                // (its own property at the position (the shape's))
+                // (its own property: its value at the position (its shape's: a data property))
                 get(cell);
-                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+                mem_load(opcode::I64LoadMem, layout::ObjectValues);
                 get(word);
                 i64(32);
                 op(opcode::I64ShrU);
-                i64(5);
+                i64(3);
                 op(opcode::I64Shl);
                 op(opcode::I64Add);
+                mem_load(opcode::I64LoadMem, 0u);
             }
             op(opcode::Else);
             {
                 // (its prototype's (depth 1), (SiteSelf) its own (it has no shape) or (SiteString: the receiver a string) 
-                // %String.prototype%'s: the holder is the entry's and has the key's property at the position)
+                // %String.prototype%'s: the holder is the entry's; if the entry has the holder's shape, the holder (of that shape) 
+                // has the property's value at the position, else (a dictionary) the key's data property is at the position)
                 get(word);
                 i64(0xFFFF);
                 op(opcode::I64And);
@@ -1081,36 +1093,64 @@ namespace neos::compilers::javascript
                 op(opcode::I64Ne);
                 branch(slow, true);
                 cell_of(cell);
-                tee(cell);
-                mem_load(opcode::I64LoadMem, layout::ObjectPropertyCount);
+                set(cell);
                 get(word);
                 i64(32);
                 op(opcode::I64ShrU);
-                tee(word);
-                op(opcode::I64LeU);
-                branch(slow, true);
-                get(cell);
-                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
-                get(word);
-                i64(5);
-                op(opcode::I64Shl);
-                op(opcode::I64Add);
-                tee(cell);
-                mem_load(opcode::I64LoadMem, layout::PropertyKey);
-                get(keyValue);
+                set(word);
+                get(entry);
+                mem_load(opcode::I64LoadMem, layout::SitePrototype + 8u);
+                tee(holderShape);
+                i64(0);
                 op(opcode::I64Ne);
-                branch(slow, true);
-                get(cell);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                {
+                    // (a holder of the entry's shape: its value at the position)
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, layout::ObjectShape);
+                    get(holderShape);
+                    op(opcode::I64Ne);
+                    branch(slow, true);
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, layout::ObjectValues);
+                    get(word);
+                    i64(3);
+                    op(opcode::I64Shl);
+                    op(opcode::I64Add);
+                    mem_load(opcode::I64LoadMem, 0u);
+                }
+                op(opcode::Else);
+                {
+                    // (a dictionary: the key's data property at the position)
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, layout::ObjectEntryCount);
+                    get(word);
+                    op(opcode::I64LeU);
+                    branch(slow, true);
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, layout::ObjectEntries);
+                    get(word);
+                    i64(5);
+                    op(opcode::I64Shl);
+                    op(opcode::I64Add);
+                    tee(cell);
+                    mem_load(opcode::I64LoadMem, layout::PropertyKey);
+                    get(keyValue);
+                    op(opcode::I64Ne);
+                    get(cell);
+                    mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
+                    i32(layout::AttributeAccessor);
+                    op(opcode::I32And);
+                    op(opcode::I32Ior);
+                    branch(slow, true);
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, layout::PropertyData);
+                }
+                end_control();
             }
             end_control();
-            // (a data property: its value)
-            tee(cell);
-            mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
-            i32(layout::AttributeAccessor);
-            op(opcode::I32And);
-            branch(slow, true);
-            get(cell);
-            mem_load(opcode::I64LoadMem, layout::PropertyData);
             branch(done, false);
         }
         end_control();
@@ -1119,6 +1159,7 @@ namespace neos::compilers::javascript
         get(site);
         runtime(aComputed ? "get_cached" : "get_named_cached", { I64, I64, I32 }, I64);
         end_control();
+        release(holderShape);
         release(word);
         release(cell);
         release(entry);
@@ -1169,25 +1210,17 @@ namespace neos::compilers::javascript
             iCode.push_back(0x40u);
             iControls.push_back(control{ control_kind::Block });
             {
-                // (SiteOwn: it has the property at the position: a writable data property)
+                // (SiteOwn: it has the property at the position (its shape's: a writable data property): its value)
                 get(cell);
-                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+                mem_load(opcode::I64LoadMem, layout::ObjectValues);
                 get(word);
                 i64(32);
                 op(opcode::I64ShrU);
-                i64(5);
+                i64(3);
                 op(opcode::I64Shl);
                 op(opcode::I64Add);
-                tee(address);
-                mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
-                i32(layout::AttributeAccessor | layout::AttributeWritable);
-                op(opcode::I32And);
-                i32(layout::AttributeWritable);
-                op(opcode::I32Ne);
-                branch(slow, true);
-                get(address);
                 get(value);
-                mem_store(opcode::I64StoreMem, layout::PropertyData);
+                mem_store(opcode::I64StoreMem, 0u);
                 get(value);
                 branch(done, false);
             }
@@ -1243,35 +1276,25 @@ namespace neos::compilers::javascript
             op(opcode::I32Eqz);
             branch(slow, true);
             get(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectPropertyCount);
+            mem_load(opcode::I64LoadMem, layout::ObjectValueCount);
             tee(word);
             get(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectPropertyCapacity);
+            mem_load(opcode::I64LoadMem, layout::ObjectValueCapacity);
             op(opcode::I64GeU);
             branch(slow, true);
             get(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+            mem_load(opcode::I64LoadMem, layout::ObjectValues);
             get(word);
-            i64(5);
+            i64(3);
             op(opcode::I64Shl);
             op(opcode::I64Add);
-            tee(address);
-            get(keyValue);
-            mem_store(opcode::I64StoreMem, layout::PropertyKey);
-            get(address);
             get(value);
-            mem_store(opcode::I64StoreMem, layout::PropertyData);
-            get(address);
-            constant(values::Undefined);
-            mem_store(opcode::I64StoreMem, layout::PropertySetter);
-            get(address);
-            i64(layout::AttributesDefault);
-            mem_store(opcode::I64StoreMem, layout::PropertyAttributes);
+            mem_store(opcode::I64StoreMem, 0u);
             get(cell);
             get(word);
             i64(1);
             op(opcode::I64Add);
-            mem_store(opcode::I64StoreMem, layout::ObjectPropertyCount);
+            mem_store(opcode::I64StoreMem, layout::ObjectValueCount);
             get(cell);
             get(entry);
             mem_load(opcode::I64LoadMem, layout::SiteAdded);
@@ -1334,7 +1357,8 @@ namespace neos::compilers::javascript
 
     void function_generator::get_length_stub()
     {
-        // (the length stub's code (its parameter: object): x.length: an array's (not sparse), else the runtime's get_length)
+        // (the length stub's code (its parameter: object): x.length: a string's, an array's (not sparse), else the runtime's 
+        // get_length)
         std::uint32_t const object = 0u;
         auto const cell = temporary();
         begin(control_kind::Block, I64);
@@ -1342,6 +1366,20 @@ namespace neos::compilers::javascript
         begin(control_kind::Block);
         {
             auto const miss = iControls.size() - 1u;
+            get(object);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagString);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            cell_of(object);
+            mem_load(opcode::I32LoadMem, layout::StringLength);
+            op(opcode::F64UConvertI32);
+            op(opcode::I64ReinterpretF64);
+            branch(done, false);
+            end_control();
             get(object);
             constant(0xFFFF000000000000ull);
             op(opcode::I64And);
@@ -1367,6 +1405,168 @@ namespace neos::compilers::javascript
         get(object);
         runtime("get_length", { I64 }, I64);
         end_control();
+        release(cell);
+    }
+
+    void function_generator::to_boolean_stub()
+    {
+        // (the ToBoolean stub's code (its parameter: a value)): a boolean's, a number's (not 0, -0 or NaN), a string's (not empty) and
+        // an object's (not [[IsHTMLDDA]]) here, else the runtime's (e.g. a bigint's)
+        std::uint32_t const v = 0u;
+        auto const tag = temporary();
+        begin(control_kind::Block, I32);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            // (a number)
+            get(v);
+            constant(values::TagSpecial);
+            op(opcode::I64LtU);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            get(v);
+            op(opcode::F64ReinterpretI64);
+            op(opcode::F64Abs);
+            f64(0.0);
+            op(opcode::F64Gt);
+            branch(done, false);
+            end_control();
+            // (true, false, undefined, null)
+            get(v);
+            constant(values::True);
+            op(opcode::I64Eq);
+            get(v);
+            constant(values::False);
+            op(opcode::I64Eq);
+            get(v);
+            constant(values::Undefined);
+            op(opcode::I64Eq);
+            op(opcode::I32Ior);
+            get(v);
+            constant(values::Null);
+            op(opcode::I64Eq);
+            op(opcode::I32Ior);
+            op(opcode::I32Ior);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            get(v);
+            constant(values::True);
+            op(opcode::I64Eq);
+            branch(done, false);
+            end_control();
+            get(v);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            tee(tag);
+            constant(values::TagString);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            cell_of(v);
+            mem_load(opcode::I32LoadMem, layout::StringLength);
+            i32(0);
+            op(opcode::I32Ne);
+            branch(done, false);
+            end_control();
+            get(tag);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(v);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass);
+            i32(layout::ClassHTMLDDA);
+            op(opcode::I32Eq);
+            branch(miss, true);
+            i32(1);
+            branch(done, false);
+        }
+        end_control();
+        get(v);
+        runtime("to_boolean", { I64 }, I32);
+        end_control();
+        release(tag);
+    }
+
+    void function_generator::char_code_at_stub()
+    {
+        // (the charCodeAt stub's code (its parameters: callee, this, position, tail): s.charCodeAt(i): if the callee is the realm's
+        // %String.prototype.charCodeAt%, s a flat string and i a number in [0, its length): its code unit; else the runtime's 
+        // char_code_at (the built-in's result, else the callee called) or (tail: a tail call) char_code_at_tail)
+        std::uint32_t const callee = 0u, thisValue = 1u, position = 2u, tail = 3u;
+        auto const cell = temporary();
+        auto const chars = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            get(callee);
+            op(opcode::GlobalGet);
+            u32(iCompiler.char_code_at_global());
+            op(opcode::I64Ne);
+            get(thisValue);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagString);
+            op(opcode::I64Ne);
+            op(opcode::I32Ior);
+            get(position);
+            constant(values::TagSpecial);
+            op(opcode::I64GeU);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            cell_of(thisValue);
+            tee(cell);
+            mem_load(opcode::I64LoadMem, layout::StringChars);
+            tee(chars);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            get(position);
+            op(opcode::F64ReinterpretI64);
+            f64(0.0);
+            op(opcode::F64Ge);
+            get(position);
+            op(opcode::F64ReinterpretI64);
+            get(cell);
+            mem_load(opcode::I32LoadMem, layout::StringLength);
+            op(opcode::F64UConvertI32);
+            op(opcode::F64Lt);
+            op(opcode::I32And);
+            op(opcode::I32Eqz);
+            branch(miss, true);
+            get(chars);
+            get(position);
+            op(opcode::F64ReinterpretI64);
+            op(opcode::I64SConvertF64);
+            i64(1);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I32LoadMem16U, 0u);
+            op(opcode::F64UConvertI32);
+            op(opcode::I64ReinterpretF64);
+            branch(done, false);
+        }
+        end_control();
+        get(tail);
+        op(opcode::If);
+        iCode.push_back(0x7Eu);
+        iControls.push_back(control{ control_kind::Block });
+        get(callee);
+        get(thisValue);
+        get(position);
+        runtime("char_code_at_tail", { I64, I64, I64 }, I64);
+        op(opcode::Else);
+        get(callee);
+        get(thisValue);
+        get(position);
+        runtime("char_code_at", { I64, I64, I64 }, I64);
+        end_control();
+        end_control();
+        release(chars);
         release(cell);
     }
 
@@ -1457,13 +1657,21 @@ namespace neos::compilers::javascript
             iParameterCount = 1u;
             get_length_stub();
             break;
+        case stub::CharCodeAt:
+            iParameterCount = 4u;
+            char_code_at_stub();
+            break;
+        case stub::ToBoolean:
+            iParameterCount = 1u;
+            to_boolean_stub();
+            break;
         case stub::CalleeNumber:
         case stub::MethodNumber:
             iParameterCount = 2u;
             callee_number_stub(aStub == stub::CalleeNumber);
             break;
         default:
-            if (aStub == stub::CalleeNumber || aStub == stub::MethodNumber)
+            if (aStub == stub::CalleeNumber || aStub == stub::MethodNumber || aStub == stub::ToBoolean)
                 i32(0);
             else
                 i64(0);
@@ -3046,7 +3254,7 @@ namespace neos::compilers::javascript
         op(opcode::I64Eq);
         op(opcode::Else);
         get(iScratch);
-        runtime("to_boolean", { I64 }, I32);
+        call_stub(stub::ToBoolean);
         op(opcode::End);
     }
 
@@ -4988,7 +5196,8 @@ namespace neos::compilers::javascript
             get(thisValue);
             get(position);
             bool const tail = tail_call(aNode);
-            runtime(tail ? "char_code_at_tail" : "char_code_at", { I64, I64, I64 }, I64);
+            i32(tail ? 1 : 0);
+            call_stub(stub::CharCodeAt);
             if (!tail)
                 check();
             release(position);
@@ -5702,7 +5911,7 @@ namespace neos::compilers::javascript
         }
         else
         {
-            runtime("to_boolean", { I64 }, I32);
+            call_stub(stub::ToBoolean);
             if (aNode->is(construct::Or))
                 op(opcode::I32Eqz);
         }
@@ -6046,7 +6255,7 @@ namespace neos::compilers::javascript
             }
             else
             {
-                runtime("to_boolean", { I64 }, I32);
+                call_stub(stub::ToBoolean);
                 if (oper == "||=")
                     op(opcode::I32Eqz);
             }
@@ -6316,7 +6525,9 @@ namespace neos::compilers::javascript
 
     void function_generator::object_literal(node* aNode)
     {
-        runtime("object", {}, I64);
+        // (its object: with room in its cell for its properties' values)
+        i32(static_cast<std::int32_t>(aNode->size()));
+        runtime("object_with", { I32 }, I64);
         auto const object = temporary();
         set(object);
         for (auto* p : aNode->children)

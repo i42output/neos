@@ -211,7 +211,7 @@ namespace neos::javascript_runtime
         inline bool is_trail(char16_t aChar) { return aChar >= 0xDC00u && aChar <= 0xDFFFu; }
 
         // (AdvanceStringIndex)
-        double advance_string_index(std::u16string const& aText, double aIndex, bool aUnicode)
+        double advance_string_index(std::u16string_view aText, double aIndex, bool aUnicode)
         {
             if (!aUnicode || aIndex + 1.0 >= static_cast<double>(aText.size()))
                 return aIndex + 1.0;
@@ -219,7 +219,7 @@ namespace neos::javascript_runtime
             return is_lead(aText[i]) && is_trail(aText[i + 1u]) ? aIndex + 2.0 : aIndex + 1.0;
         }
 
-        value substring(std::u16string const& aText, std::int32_t aStart, std::int32_t aEnd)
+        value substring(std::u16string_view aText, std::int32_t aStart, std::int32_t aEnd)
         {
             if (aEnd <= aStart)
                 return the_names().empty;
@@ -371,8 +371,8 @@ namespace neos::javascript_runtime
                 return false;
             if (r->own(sKeys.exec) != nullptr || r->proto != the_realm().regexpPrototype)
                 return false;
-            auto const* const exec = obj(r->proto).own(sKeys.exec);
-            return exec != nullptr && !exec->accessor() && exec->data == sKeys.execFunction;
+            auto const exec = obj(r->proto).own(sKeys.exec);
+            return exec != nullptr && !exec->accessor() && exec->data() == sKeys.execFunction;
         }
 
         // (RegExpExec)
@@ -713,7 +713,7 @@ namespace neos::javascript_runtime
         }
 
         // (for the global loops: an empty match advances lastIndex)
-        void advance_after_empty_match(value aR, value aMatch, std::u16string const& aText, bool aFullUnicode)
+        void advance_after_empty_match(value aR, value aMatch, std::u16string_view aText, bool aFullUnicode)
         {
             auto const matchStr = to_string(get(aMatch, index_key(0u)));
             if (string_length(matchStr) == 0u)

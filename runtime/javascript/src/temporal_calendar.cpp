@@ -81,9 +81,9 @@ namespace neos::javascript_runtime::temporal
         return sCanonicalNames[static_cast<std::size_t>(aCalendar)];
     }
 
-    std::optional<calendar_id> available_calendar(std::u16string const& aId)
+    std::optional<calendar_id> available_calendar(std::u16string_view aId)
     {
-        auto const id = ascii_lowercase(aId);
+        auto const id = ascii_lowercase(std::u16string{ aId });
 #if defined(NEOS_JS_ICU)
         if (intl::icu_available())
         {

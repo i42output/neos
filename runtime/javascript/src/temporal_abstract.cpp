@@ -359,7 +359,7 @@ namespace neos::javascript_runtime::temporal
         char const* const sUnitSingular[] = { "year", "month", "week", "day", "hour", "minute", "second", "millisecond", "microsecond", "nanosecond" };
         char const* const sUnitPlural[] = { "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
 
-        bool equals_ascii(std::u16string const& aText, char const* aAscii)
+        bool equals_ascii(std::u16string_view aText, char const* aAscii)
         {
             auto const n = std::strlen(aAscii);
             if (aText.size() != n)

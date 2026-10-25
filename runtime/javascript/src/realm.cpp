@@ -106,8 +106,8 @@ namespace neos::javascript_runtime
         if (auto const b = aRealm.lexicals.find(aName); b != aRealm.lexicals.end())
             v = b->second.get();
         else if (auto& g = obj(aRealm.global); g.cls == object_class::Ordinary)
-            if (auto const* p = g.own(aName); p != nullptr && !p->accessor())
-                v = p->data;
+            if (auto const p = g.own(aName); p != nullptr && !p->accessor())
+                v = p->data();
         for (auto* word : m->second)
             *word = v;
     }

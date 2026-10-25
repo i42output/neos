@@ -170,7 +170,7 @@ namespace neos::javascript_runtime
             return std::string{ "\x1b[" } + aStart + "m" + aText + "\x1b[" + aEnd + "m";
         }
 
-        std::string quote(std::u16string const& aText)
+        std::string quote(std::u16string_view aText)
         {
             // (as util.inspect quotes a string: single quotes unless it has them (then double quotes, then backticks))
             char q = '\'';
@@ -213,7 +213,7 @@ namespace neos::javascript_runtime
             return std::string(1u, q) + wtf8(escaped) + std::string(1u, q);
         }
 
-        bool identifier(std::u16string const& aText)
+        bool identifier(std::u16string_view aText)
         {
             if (aText.empty())
                 return false;
@@ -245,8 +245,8 @@ namespace neos::javascript_runtime
                 auto* f = as_function(aFunction);
                 value name = Undefined;
                 if (f != nullptr)
-                    if (auto const* p = f->own(the_names().name); p != nullptr && !p->accessor())
-                        name = p->data;
+                    if (auto const p = f->own(the_names().name); p != nullptr && !p->accessor())
+                        name = p->data();
                 if (!is_string(name) || string_length(name) == 0u)
                     return {};
                 return utf8(name);
@@ -258,9 +258,9 @@ namespace neos::javascript_runtime
                 for (auto o = aObject; o != Null;)
                 {
                     auto& object = obj(o);
-                    if (auto const* p = object.own(the_names().constructor); p != nullptr && !p->accessor() && is_callable(p->data))
+                    if (auto const p = object.own(the_names().constructor); p != nullptr && !p->accessor() && is_callable(p->data()))
                     {
-                        auto const name = function_name(p->data);
+                        auto const name = function_name(p->data());
                         if (!name.empty())
                             return name;
                     }
@@ -346,8 +346,8 @@ namespace neos::javascript_runtime
                 if (o.cls == object_class::Error)
                 {
                     auto const stack = o.own(the_names().stack);
-                    if (stack != nullptr && !stack->accessor() && is_string(stack->data))
-                        return utf8(stack->data);
+                    if (stack != nullptr && !stack->accessor() && is_string(stack->data()))
+                        return utf8(stack->data());
                     try
                     {
                         return utf8(to_string(aValue));

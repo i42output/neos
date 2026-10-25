@@ -437,7 +437,7 @@ namespace neos::javascript_runtime
             {
                 if (!is_string(aKey))
                     return false;
-                auto const& k = str(aKey);
+                std::u16string_view const k = str(aKey);
                 return std::binary_search(exports.begin(), exports.end(), k);
             }
             value get_prototype_of() override { return Null; }
@@ -521,7 +521,7 @@ namespace neos::javascript_runtime
             {
                 auto const resolution = resolve_export(aModule, n);
                 if (resolution.kind == resolved_binding::Binding || resolution.kind == resolved_binding::Namespace)
-                    unambiguous.push_back(str(make_string(utf16(n))));
+                    unambiguous.push_back(std::u16string{ str(make_string(utf16(n))) });
             }
             std::sort(unambiguous.begin(), unambiguous.end());
             auto& ns = the_heap().make<namespace_object>(aModule, std::move(unambiguous));

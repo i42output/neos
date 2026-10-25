@@ -334,9 +334,9 @@ namespace neos::javascript_runtime::temporal
         std::chrono::time_zone const* zone = nullptr;
     };
 
-    std::optional<named_zone_record> get_available_named_time_zone(std::u16string const& aName);
+    std::optional<named_zone_record> get_available_named_time_zone(std::u16string_view aName);
     std::vector<std::u16string> available_primary_time_zones();                 ///< (AvailableNamedTimeZoneIdentifiers' primary identifiers)
-    time_zone time_zone_from_identifier(std::u16string const& aIdentifier);     ///< (an available identifier (as it is stored))
+    time_zone time_zone_from_identifier(std::u16string_view aIdentifier);     ///< (an available identifier (as it is stored))
     time_zone system_time_zone();
     time_zone to_temporal_time_zone_identifier(value aValue);
     time_zone parse_time_zone_identifier_checked(value aString);   ///< (the ZonedDateTime constructor's: identifier syntax only)
@@ -377,12 +377,12 @@ namespace neos::javascript_runtime::temporal
         std::optional<std::u16string> calendar;
     };
 
-    iso_parse_result parse_iso_date_time(std::u16string const& aText, std::initializer_list<parse_goal> aGoals);
-    bool parse_time_zone_identifier(std::u16string const& aText, std::u16string& aName, int& aOffsetMinutes, bool& aIsOffset);
-    std::optional<std::int64_t> parse_date_time_utc_offset(std::u16string const& aText, bool* aSubMinute = nullptr);   ///< (ns)
-    duration_fields parse_duration_string(std::u16string const& aText);
-    bool parse_month_code(std::u16string const& aText, int& aMonth, bool& aLeap);
-    std::u16string parse_temporal_calendar_string(std::u16string const& aText);
+    iso_parse_result parse_iso_date_time(std::u16string_view aText, std::initializer_list<parse_goal> aGoals);
+    bool parse_time_zone_identifier(std::u16string_view aText, std::u16string& aName, int& aOffsetMinutes, bool& aIsOffset);
+    std::optional<std::int64_t> parse_date_time_utc_offset(std::u16string_view aText, bool* aSubMinute = nullptr);   ///< (ns)
+    duration_fields parse_duration_string(std::u16string_view aText);
+    bool parse_month_code(std::u16string_view aText, int& aMonth, bool& aLeap);
+    std::u16string parse_temporal_calendar_string(std::u16string_view aText);
     bool is_annotation_value(std::u16string const& aText);
     std::u16string ascii_lowercase(std::u16string aText);
 
@@ -410,7 +410,7 @@ namespace neos::javascript_runtime::temporal
     };
 
     char const* calendar_identifier(calendar_id aCalendar);                 ///< (its canonical identifier, e.g. "islamic-civil")
-    std::optional<calendar_id> available_calendar(std::u16string const& aId);   ///< (AvailableCalendars (ASCII case-insensitive; aliases too))
+    std::optional<calendar_id> available_calendar(std::u16string_view aId);   ///< (AvailableCalendars (ASCII case-insensitive; aliases too))
     value calendar_value(calendar_id aCalendar);
     calendar_id canonicalize_calendar(value aId);   ///< (CanonicalizeCalendar: a RangeError if it is not available)
     calendar_id to_temporal_calendar_identifier(value aValue);

@@ -294,7 +294,7 @@ namespace neos::javascript_runtime
 
     std::u16string to_u16string(value aValue)
     {
-        return str(to_string(aValue));
+        return std::u16string{ str(to_string(aValue)) };
     }
 
     value to_object(value aValue)
@@ -396,7 +396,7 @@ namespace neos::javascript_runtime
         // (ToString(n) must be the key)
         if (text.empty() || (std::isnan(n) && text != u"NaN"))
             return Undefined;
-        if (number_to_u16string(n) != text)
+        if (number_to_u16string(n) != std::u16string_view{ text })
             return Undefined;
         return number(n);
     }
@@ -424,9 +424,9 @@ namespace neos::javascript_runtime
         {
             if (auto const* f = as_function(aValue))
             {
-                auto const* name = const_cast<function_object*>(f)->own(the_names().name);
-                if (name != nullptr && !name->accessor() && is_string(name->data) && string_length(name->data) != 0u)
-                    return "function " + utf8(name->data);
+                auto const name = const_cast<function_object*>(f)->own(the_names().name);
+                if (name != nullptr && !name->accessor() && is_string(name->data()) && string_length(name->data()) != 0u)
+                    return "function " + utf8(name->data());
                 return "function";
             }
             if (is_array(aValue))

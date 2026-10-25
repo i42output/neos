@@ -39,6 +39,7 @@
 #include <stdexcept>
 #include <exception>
 #include <algorithm>
+#include <bit>
 #include <optional>
 #include <string>
 #include <initializer_list>
@@ -798,6 +799,7 @@ namespace neos
                         return aReg == RAX || aReg == RCX || aReg == RDX || (aReg >= R8 && aReg <= R11) || (!Windows && (aReg == RSI || aReg == RDI));
                     }
                     constexpr int ScratchXmms[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+                    constexpr int MemoryBaseRegister = R14;     ///< (a fixed external memory's address, in a function that accesses it)
                     constexpr int PinnedXmms[] = { 8, 9, 10, 11, 12, 13, 14, 15 };
 
                     constexpr int Free = -1;
@@ -1292,6 +1294,8 @@ namespace neos
                             iUsedPinnedGprs.clear();
                             iNativeVolatilePinnedGprs.clear();
                             iUsedPinnedXmms.clear();
+                            iMemoryBase = -1;
+                            iMemoryBaseIndex = 0u;
                             for (int r = 0; r < 16; ++r)
                             {
                                 iGprOwner[r] = Unavailable;
@@ -1881,6 +1885,13 @@ namespace neos
                                 return {};
                             return childEnd;
                         }
+                        // (the next of PinnedGprs that may hold a local (not the fixed external memory's address))
+                        std::size_t& skip_memory_base(std::size_t& aGprs) const
+                        {
+                            while (aGprs < std::size(PinnedGprs) && PinnedGprs[aGprs] == iMemoryBase)
+                                ++aGprs;
+                            return aGprs;
+                        }
                         void choose_pinned_locals(std::size_t aBegin, std::size_t aEnd)
                         {
                             // (locals by their (static) uses, weighted by loop depth (and less within ifs), outside cold code; registers 
@@ -1964,7 +1975,7 @@ namespace neos
                                         iUsedPinnedXmms.push_back(local.reg);
                                     }
                                 }
-                                else if (gprs < std::size(PinnedGprs) && (!native_volatile(PinnedGprs[gprs]) || tScore[l] > 2u * calls))
+                                else if (skip_memory_base(gprs) < std::size(PinnedGprs) && (!native_volatile(PinnedGprs[gprs]) || tScore[l] > 2u * calls))
                                 {
                                     local.pinned = true;
                                     local.reg = PinnedGprs[gprs++];
@@ -2046,7 +2057,24 @@ namespace neos
                                 iLocals.push_back(local_info{ t });
                             for (auto t : *f.locals)
                                 iLocals.push_back(local_info{ t });
+                            // (a fixed external memory that its code accesses (the first): its address in a register (callee saved: 
+                            // the function saves it))
+                            for (std::size_t p = f.codeBegin; p < f.codeEnd;)
+                            {
+                                auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                if (op >= 0x28u && op <= 0x3Eu)
+                                    if (auto const memory = static_cast<std::uint32_t>(iTokens[p + 1u] >> 32u);
+                                        memory != 0u && memory <= NEOS_RT_EXTERNAL_MEMORIES && external_memory(memory).fixed)
+                                    {
+                                        iMemoryBase = MemoryBaseRegister;
+                                        iMemoryBaseIndex = memory;
+                                        break;
+                                    }
+                                p += 1u + immediate_count(op, iTokens, p);
+                            }
                             choose_pinned_locals(f.codeBegin, f.codeEnd);
+                            if (iMemoryBase >= 0)
+                                iUsedPinnedGprs.push_back(iMemoryBase);
                             // (a parameter's home is its argument's slot (the caller's outgoing arguments, which are the callee's): it is not
                             // copied)
                             std::int32_t frameLocals = 0;
@@ -2066,6 +2094,8 @@ namespace neos
                             a.barrier(); // (it is patched: it does not move)
                             a.alu_rm(7, true, RSP, R15, ContextStackLimit);
                             a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            if (iMemoryBase >= 0)
+                                a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
                             for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
                                 a.movf_store(true, RBP, xmm_save_disp(i), iUsedPinnedXmms[i]);
                             auto const zero = locals_to_zero(f.codeBegin, f.codeEnd, f.parameters->size());
@@ -3782,15 +3812,38 @@ namespace neos
                             auto const e = alloc(false, keep | (1u << g) | (1u << m));
                             if (aMemory != 0u && external_memory(aMemory).fixed)
                             {
-                                // (a fixed external memory: its size and address are constants)
+                                // (a fixed external memory: its size and address are constants (its address in a register, if the 
+                                // function has it in one); [address, address + disp + width) within it: address + disp + width - 1 (without
+                                // carry) below its size)
                                 auto const& fixed = external_memory(aMemory);
-                                a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
-                                a.mov_ri(m, fixed.size, true);
-                                a.alu_rr(7, true, e, m); // cmp
-                                a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                auto const last = disp + static_cast<std::int32_t>(x.width) - 1;
+                                a.mov_rr(true, e, g);
+                                if (last != 0)
+                                {
+                                    a.alu_ri(0, true, e, last); // add
+                                    a.jcc(B, iTrapLabels[TrapOutOfBounds]);
+                                }
+                                auto const size = static_cast<std::uint64_t>(fixed.size);
+                                if ((size & (size - 1u)) == 0u && size != 0u)
+                                {
+                                    a.shift_ri(5, true, e, static_cast<std::uint8_t>(std::countr_zero(size))); // shr
+                                    a.jcc(NE, iTrapLabels[TrapOutOfBounds]);
+                                }
+                                else
+                                {
+                                    a.mov_ri(m, fixed.size, true);
+                                    a.alu_rr(7, true, e, m); // cmp
+                                    a.jcc(AE, iTrapLabels[TrapOutOfBounds]);
+                                }
+                                a.mov_rr(true, m, g);
+                                if (iMemoryBase >= 0 && aMemory == iMemoryBaseIndex)
+                                    a.alu_rr(0, true, m, iMemoryBase); // add
+                                else
+                                {
+                                    a.mov_ri(e, reinterpret_cast<std::uint64_t>(fixed.base), true);
+                                    a.alu_rr(0, true, m, e); // add
+                                }
                                 release_reg(false, e);
-                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(fixed.base), true);
-                                a.alu_rr(0, true, m, g); // add
                                 release_reg(false, g);
                             }
                             else
@@ -4451,6 +4504,8 @@ namespace neos
                         std::vector<int> iUsedPinnedGprs;               ///< (those that native code preserves: saved by the function)
                         std::vector<int> iNativeVolatilePinnedGprs;     ///< (those that native code does not preserve: saved around calls)
                         std::vector<int> iUsedPinnedXmms;
+                        int iMemoryBase = -1;                           ///< (the register that holds a fixed external memory's address (else -1)...)
+                        std::uint32_t iMemoryBaseIndex = 0u;            ///< (... that memory's index)
                         int iGprOwner[16] = {};
                         int iXmmOwner[16] = {};
                         std::vector<std::pair<bool, int>> iTemps;

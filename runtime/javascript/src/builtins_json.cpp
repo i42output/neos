@@ -231,8 +231,8 @@ namespace neos::javascript_runtime
                                 child = &aRecord->entries.emplace_back(key, parse_record{}).second;
                         }
                         auto const v = parse_value(child);
-                        if (auto* existing = o.own(key))
-                            existing->data = v;
+                        if (auto existing = o.own(key))
+                            existing->set_data(v);
                         else
                             o.properties.add(key, v, Undefined, AttributesDefault);
                         skip_whitespace();
@@ -630,8 +630,8 @@ namespace neos::javascript_runtime
                 auto& h = obj(aHolder);
                 if (h.cls == object_class::Ordinary)
                 {
-                    if (auto const* p = h.own(aKey); p != nullptr && !p->accessor())
-                        return p->data;
+                    if (auto const p = h.own(aKey); p != nullptr && !p->accessor())
+                        return p->data();
                 }
                 else if (h.cls == object_class::Array)
                 {

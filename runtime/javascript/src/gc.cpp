@@ -132,7 +132,17 @@ namespace neos::javascript_runtime
                 if (aSize > MaxSmall)
                     return allocate_large(aSize, aRaw);
                 auto* const classes = aRaw ? iRawClasses : iClasses;
-                auto& c = classes[iClassOf[(aSize + 15u) / 16u]];
+                auto const ci = iClassOf[(aSize + 15u) / 16u];
+                auto& c = classes[ci];
+                // (cells' pages that the last collection has not swept yet: swept (their free slots made the free list's) when it is 
+                // empty)
+                if (!aRaw)
+                    while (c.freeList == nullptr && !iUnswept[ci].empty())
+                    {
+                        auto const page = iUnswept[ci].back();
+                        iUnswept[ci].pop_back();
+                        iSweeper(iSweeperData, page);
+                    }
                 if (c.freeList != nullptr)
                 {
                     // (the next one is fetched now: it is the next allocation's (a free slot is usually not in the cache))
@@ -177,6 +187,73 @@ namespace neos::javascript_runtime
                 c.freeList = aMemory;
             }
             void publish() const { publish_region(iBase, RegionSize); }
+            // (lazy sweeping: a collection's pages of small cells, swept later (aSweeper(page)) as their size classes' cells are
+            // allocated (or all of them by finish_sweeping))
+            void set_sweeper(void (*aSweeper)(void*, std::size_t), void* aData)
+            {
+                iSweeper = aSweeper;
+                iSweeperData = aData;
+            }
+            void begin_sweeping()
+            {
+                for (std::size_t ci = 0u; ci < ClassCount; ++ci)
+                {
+                    iClasses[ci].freeList = nullptr;
+                    iClasses[ci].bump = iClasses[ci].bumpEnd;   // (its slots that are not used yet: free slots of its page)
+                    iUnswept[ci].clear();
+                }
+                for (auto page = iPages.size(); page-- > 0u;)
+                {
+                    auto const& info = iPages[page];
+                    if (info.slotSize != 0u && !info.raw && info.largeSize == 0u)
+                        iUnswept[iClassOf[info.slotSize / 16u]].push_back(page);
+                }
+            }
+            void finish_sweeping()
+            {
+                for (std::size_t ci = 0u; ci < ClassCount; ++ci)
+                    while (!iUnswept[ci].empty())
+                    {
+                        auto const page = iUnswept[ci].back();
+                        iUnswept[ci].pop_back();
+                        iSweeper(iSweeperData, page);
+                    }
+            }
+            // (a page's slots (of cells (live, free or not used yet)), in descending address order (aVisit(slot)))
+            template <typename Visit>
+            void for_each_slot_of(std::size_t aPage, Visit aVisit)
+            {
+                auto const& info = iPages[aPage];
+                auto* const start = page_address(aPage);
+                for (auto i = PageSize / info.slotSize; i-- > 0u;)
+                    aVisit(start + i * info.slotSize);
+            }
+            // (a page of small cells: its first slot, its slots' size and its size class's free list)
+            void page_slots(std::size_t aPage, std::byte*& aStart, std::uint32_t& aSlotSize, void**& aFreeList)
+            {
+                auto const& info = iPages[aPage];
+                aStart = page_address(aPage);
+                aSlotSize = info.slotSize;
+                aFreeList = &iClasses[iClassOf[info.slotSize / 16u]].freeList;
+            }
+            // (a free slot of a cells' page: its size class's)
+            void free_slot(void* aSlot)
+            {
+                auto& c = iClasses[iClassOf[iPages[page_of(aSlot)].slotSize / 16u]];
+                *static_cast<void**>(aSlot) = c.freeList;
+                c.freeList = aSlot;
+            }
+            // (large cells' pages (their first), in descending address order (aVisit(cell)))
+            template <typename Visit>
+            void for_each_large_descending(Visit aVisit)
+            {
+                for (auto page = iPages.size(); page-- > 0u;)
+                {
+                    auto const& info = iPages[page];
+                    if (info.slotSize != 0u && !info.raw && info.largeSize != 0u && info.first == page)
+                        aVisit(page_address(page));
+                }
+            }
             // (the slot that begins at an offset in the region (null if none: it is not the start of a slot of a page of cells))
             std::byte* slot_starting_at(std::size_t aOffset) const
             {
@@ -191,26 +268,7 @@ namespace neos::javascript_runtime
                     return info.first == page && offset == 0u ? iBase + aOffset : nullptr;
                 return offset % info.slotSize == 0u && offset + info.slotSize <= PageSize ? iBase + aOffset : nullptr;
             }
-            // (each slot of cells (live, free or not used yet), in descending address order (aVisit(slot)))
-            template <typename Visit>
-            void for_each_slot_descending(Visit aVisit)
-            {
-                for (auto page = iPages.size(); page-- > 0u;)
-                {
-                    auto const& info = iPages[page];
-                    if (info.slotSize == 0u || info.raw)
-                        continue;
-                    if (info.largeSize != 0u)
-                    {
-                        if (info.first == page)
-                            aVisit(page_address(page));
-                        continue;
-                    }
-                    auto* const start = page_address(page);
-                    for (auto i = PageSize / info.slotSize; i-- > 0u;)
-                        aVisit(start + i * info.slotSize);
-                }
-            }
+            bool raw(void const* aMemory) const { return iPages[page_of(aMemory)].raw; }   ///< (storage that is not cells')
             std::size_t size_of(void const* aMemory) const
             {
                 auto const& info = iPages[page_of(aMemory)];
@@ -303,6 +361,9 @@ namespace neos::javascript_runtime
             std::vector<std::pair<std::size_t, std::size_t>> iFreeRuns;  ///< (large cells' pages that were freed: first, count)
             size_class iRawClasses[ClassCount];
             size_class iClasses[ClassCount];
+            std::vector<std::size_t> iUnswept[ClassCount];     ///< (pages of small cells that are not swept yet (the last first))
+            void (*iSweeper)(void*, std::size_t) = nullptr;
+            void* iSweeperData = nullptr;
             std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
         };
 
@@ -355,10 +416,12 @@ namespace neos::javascript_runtime
             if (environment_flag("NEOS_JS_GC", flag) && flag == 0u)
                 iPauses = 1;
             environment_flag("NEOS_JS_GC_VERBOSE", iVerbose);
+            iMemory.set_sweeper([](void* aCollector, std::size_t aPage) { static_cast<collector*>(aCollector)->sweep_page(aPage); }, this);
             triggers();
         }
     public:
         cell_memory& memory() { return iMemory; }
+        std::uint64_t epoch() const { return iCollections + 1u; }   ///< (the collection's number (shapes' epochs start at 0: none))
         bool quarantine() const { return iQuarantine; }
         bool collecting() const { return iCollecting; }
         void pause() { ++iPauses; }
@@ -440,8 +503,13 @@ namespace neos::javascript_runtime
         }
         void mark_handle(std::uint32_t aHandle)
         {
-            if (auto* const c = iHeap.find(aHandle); c != nullptr && c->marked == 0u)
-                push(*c);
+            // (a value's handle (a value that a cell, or a root, has refers to a cell that lives: it is not checked (a word that may 
+            // be a value is: see mark_word)))
+            if (aHandle == 0u)
+                return;
+            auto& c = iHeap.at(aHandle);
+            if (c.marked == 0u)
+                push(c);
         }
         void mark_word(std::uint64_t aWord)
         {
@@ -504,6 +572,10 @@ namespace neos::javascript_runtime
                 {
                     auto* const c = iWork.back();
                     iWork.pop_back();
+                    ++iMarked;
+                    iMarkedBytes += iMemory.size_of(c);
+                    if (c->type == cell_type::String)
+                        iMarkedBytes += static_cast<string*>(c)->text.capacity() * sizeof(char16_t);
                     c->trace(aTracer);
                 }
                 else if (!iEphemeronValues.empty())
@@ -528,6 +600,7 @@ namespace neos::javascript_runtime
         void mark_and_sweep();
         void scan_stacks();
         void sweep();
+        void sweep_page(std::size_t aPage);
     private:
         heap& iHeap;
         cell_memory iMemory;
@@ -539,6 +612,8 @@ namespace neos::javascript_runtime
         int iPauses = 0;
         bool iCollecting = false;
         std::uint64_t iLiveBytes = 0u;
+        std::uint64_t iMarkedBytes = 0u;    ///< (the collection's marked cells' bytes (and their count))
+        std::size_t iMarked = 0u;
         std::uint64_t iCollections = 0u;
     };
 
@@ -571,6 +646,11 @@ namespace neos::javascript_runtime
     void* heap::allocate(std::size_t aSize)
     {
         return the_collector().memory().allocate(aSize);
+    }
+
+    std::size_t heap::slot_size(void const* aMemory)
+    {
+        return the_collector().memory().size_of(aMemory);
     }
 
     void heap::deallocate(void* aMemory) noexcept
@@ -610,9 +690,17 @@ namespace neos::javascript_runtime
         return the_collector().memory().allocate(aSize, true);
     }
 
+    bool region_raw(void const* aMemory)
+    {
+        return the_collector().memory().raw(aMemory);
+    }
+
     void region_release(void* aMemory) noexcept
     {
-        the_collector().memory().release(aMemory, true);
+        // (storage in a cell (e.g. a table's values in its object's) is the cell's)
+        auto& memory = the_collector().memory();
+        if (memory.raw(aMemory))
+            memory.release(aMemory, true);
     }
 
     void publish_heap()
@@ -675,6 +763,11 @@ namespace neos::javascript_runtime
                 }, this);
     }
 
+    std::uint64_t tracer::epoch() const
+    {
+        return iCollector.epoch();
+    }
+
     bool tracer::alive(value aValue) const
     {
         return iCollector.marked(aValue);
@@ -720,7 +813,11 @@ namespace neos::javascript_runtime
 
     void collector::mark_and_sweep()
     {
+        // (the last collection's pages that are not swept yet: swept (the cells' marks are clear))
+        iMemory.finish_sweeping();
         iCollecting = true;
+        iMarked = 0u;
+        iMarkedBytes = 0u;
         // (the registers' values (the callers' values that are in registers) are in this frame: scan_stacks scans from below it)
         NEOS_JS_SPILL_REGISTERS();
         tracer t{ *this };
@@ -783,7 +880,10 @@ namespace neos::javascript_runtime
     {
         (void)aHandle;
         auto const size = iMemory.size_of(aCell);
-        aCell->~cell();
+        // (a plain object that owns nothing outside its cell (its properties' values in it): nothing to destroy)
+        if (!(typeid(*aCell) == typeid(object) && static_cast<object*>(aCell)->properties.owns_nothing() &&
+            static_cast<object*>(aCell)->privateElements.empty()))
+            aCell->~cell();
         auto* const memory = reinterpret_cast<std::byte*>(aCell);
         if (iQuarantine)
             std::memset(memory, 0xDB, size);
@@ -794,33 +894,71 @@ namespace neos::javascript_runtime
 
     void collector::sweep()
     {
-        std::uint64_t liveBytes = 0u;
-        std::size_t live = 0u;
+        // (large cells now; the pages of small cells as their cells are allocated (see cell_memory::begin_sweeping))
         std::size_t freed = 0u;
-        // (by address, descending: the free lists' slots are then in ascending order (a new cell's slot is next to the last's))
-        iMemory.for_each_slot_descending([&](std::byte* aSlot)
+        iMemory.for_each_large_descending([&](std::byte* aCell)
         {
             std::uint32_t h;
-            std::memcpy(&h, aSlot + iHandleOffset, sizeof(h));
-            if (h == 0u || h != static_cast<std::uint32_t>(region_offset(aSlot) >> heap::HandleShift))
-                return;     // (free, or not used yet)
-            auto* const c = reinterpret_cast<cell*>(aSlot);
-            if (c->marked != 0u)
-            {
-                c->marked = 0u;
-                ++live;
-                liveBytes += iMemory.size_of(c);
-                if (c->type == cell_type::String)
-                    liveBytes += static_cast<string*>(c)->text.capacity() * sizeof(char16_t);
+            std::memcpy(&h, aCell + iHandleOffset, sizeof(h));
+            if (h == 0u || h != static_cast<std::uint32_t>(region_offset(aCell) >> heap::HandleShift))
                 return;
+            auto* const c = reinterpret_cast<cell*>(aCell);
+            if (c->marked != 0u)
+                c->marked = 0u;
+            else
+            {
+                free_cell(c, h);
+                ++freed;
             }
-            free_cell(c, h);
-            ++freed;
         });
-        iLiveBytes = liveBytes;
+        iMemory.begin_sweeping();
+        iLiveBytes = iMarkedBytes;
         if (iVerbose != 0u)
-            std::fprintf(stderr, "[gc %llu: %zu live (%llu KB), %zu freed]\n", static_cast<unsigned long long>(iCollections), live,
-                static_cast<unsigned long long>(liveBytes / 1024u), freed);
+            std::fprintf(stderr, "[gc %llu: %zu live (%llu KB), %zu large freed]\n", static_cast<unsigned long long>(iCollections), iMarked,
+                static_cast<unsigned long long>(iMarkedBytes / 1024u), freed);
+    }
+
+    void collector::sweep_page(std::size_t aPage)
+    {
+        // (by address, descending: the free list's slots are then in ascending order (a new cell's slot is next to the last's)): its 
+        // live cells unmarked, its dead ones freed, its free slots (free, or not used yet) the free list's
+        std::byte* start;
+        std::uint32_t slotSize;
+        void** freeList;
+        iMemory.page_slots(aPage, start, slotSize, freeList);
+        auto const first = static_cast<std::uint32_t>(region_offset(start) >> heap::HandleShift);
+        auto const step = slotSize >> heap::HandleShift;
+        for (auto i = PageSize / slotSize; i-- > 0u;)
+        {
+            auto* const slot = start + i * slotSize;
+            auto const handle = first + static_cast<std::uint32_t>(i) * step;
+            std::uint32_t h;
+            std::memcpy(&h, slot + iHandleOffset, sizeof(h));
+            if (h == handle)
+            {
+                auto* const c = reinterpret_cast<cell*>(slot);
+                if (c->marked != 0u)
+                {
+                    c->marked = 0u;
+                    continue;
+                }
+                if (iQuarantine)
+                {
+                    free_cell(c, h);
+                    continue;
+                }
+                // (a dead cell: destroyed (unless it is a plain object that owns nothing outside its cell), then free)
+                if (!(typeid(*c) == typeid(object) && static_cast<object*>(c)->properties.owns_nothing() &&
+                    static_cast<object*>(c)->privateElements.empty()))
+                    c->~cell();
+                std::uint32_t const none = 0u;
+                std::memcpy(slot + iHandleOffset, &none, sizeof(none));
+            }
+            else if (iQuarantine)
+                continue;
+            *reinterpret_cast<void**>(slot) = *freeList;
+            *freeList = slot;
+        }
     }
 
     // --- rooted memory
@@ -978,9 +1116,7 @@ namespace neos::javascript_runtime
     void object::trace(tracer& aTracer)
     {
         aTracer.mark(proto);
-        for (auto const& p : properties.entries())
-            if (p.key != 0u)
-                aTracer.mark(p);
+        properties.trace(aTracer);
         if (cls == object_class::WeakRef)
         {
             // (a WeakRef: its target is weak (cleared when it dies))

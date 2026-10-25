@@ -120,7 +120,7 @@ namespace neos::javascript_runtime::intl
         }
 
         // (CanonicalCodeForDisplayNames: RangeError if the code is not of the type's syntax)
-        std::string canonical_code(std::string const& aType, std::u16string const& aCode)
+        std::string canonical_code(std::string const& aType, std::u16string_view aCode)
         {
             auto const code = to_ascii(aCode);
             bool const ascii = std::all_of(aCode.begin(), aCode.end(), [](char16_t c) { return c < 0x80u; });

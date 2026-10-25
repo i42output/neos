@@ -44,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
 
 namespace neos::javascript_runtime::regexp
 {
@@ -148,6 +149,16 @@ namespace neos::javascript_runtime::regexp
         character_class firstSet;                               ///< (the code units that a match can start with)
         std::u16string prefix;                                  ///< (the literal text that a match starts with (if two or more code units))
         std::array<std::uint16_t, 256> prefixSkip = {};         ///< (its Horspool skips, by the low byte of a code unit)
+        // (a pattern that is ^(?:word|word|...)$ (no flags that change it): a match is the whole input, one of the words)
+        struct word_hash
+        {
+            using is_transparent = void;
+            std::size_t operator()(std::u16string_view aWord) const { return std::hash<std::u16string_view>{}(aWord); }
+        };
+        bool wordSet = false;
+        std::unordered_set<std::u16string, word_hash, std::equal_to<>> words;
+        std::size_t shortestWord = 0u;
+        std::size_t longestWord = 0u;
     };
 
     // (a SyntaxError (as syntax_error) if the pattern is not one)

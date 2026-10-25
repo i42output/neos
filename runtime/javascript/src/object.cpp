@@ -48,6 +48,12 @@ namespace neos::javascript_runtime
         constexpr std::size_t MaxShapes = 1u << 18;         // (then tables that add properties have none)
         constexpr std::size_t FewKeys = 8u;                 // (keys that are found by searching them; more are indexed)
         std::size_t sShapes = 0u;
+
+        // (a transition's key: the key and the attributes (a key's payload is its low 32 bits))
+        value transition_key(value aKey, std::uint8_t aAttributes)
+        {
+            return aKey ^ (static_cast<value>(aAttributes) << 40u);
+        }
     }
 
     shape* root_shape()
@@ -56,17 +62,18 @@ namespace neos::javascript_runtime
         return sRoot;
     }
 
-    shape* shape::transition(value aKey)
+    shape* shape::transition(value aKey, std::uint8_t aAttributes)
     {
+        auto const k = transition_key(aKey, aAttributes);
         if (iManyTransitions)
         {
-            auto const existing = iManyTransitions->find(aKey);
+            auto const existing = iManyTransitions->find(k);
             if (existing != iManyTransitions->end())
                 return existing->second;
         }
         else
             for (auto const& t : iTransitions)
-                if (t.first == aKey)
+                if (t.first == k)
                     return t.second;
         if (count >= MaxShapeKeys || sShapes >= MaxShapes)
             return nullptr;
@@ -74,12 +81,13 @@ namespace neos::javascript_runtime
         ++sShapes;
         next->parent = this;
         next->key = aKey;
+        next->attributes = aAttributes;
         next->count = count + 1u;
         if (iManyTransitions)
-            iManyTransitions->emplace(aKey, next);
+            iManyTransitions->emplace(k, next);
         else
         {
-            iTransitions.emplace_back(aKey, next);
+            iTransitions.emplace_back(k, next);
             if (iTransitions.size() > FewKeys)
             {
                 iManyTransitions = std::make_unique<std::unordered_map<value, shape*>>(iTransitions.begin(), iTransitions.end());
@@ -92,6 +100,15 @@ namespace neos::javascript_runtime
 
     std::optional<std::uint32_t> shape::position(value aKey)
     {
+        if (count <= FewKeys)
+        {
+            // (its slots (contiguous): searched)
+            auto const all = slots();
+            for (std::uint32_t i = 0u; i < all.size(); ++i)
+                if (all[i].key == aKey)
+                    return i;
+            return {};
+        }
         if (!iIndex)
         {
             iIndex = std::make_unique<std::unordered_map<value, std::uint32_t>>();
@@ -105,74 +122,182 @@ namespace neos::javascript_runtime
         return existing->second;
     }
 
+    std::span<shape::slot const> shape::slots()
+    {
+        if (iSlots.size() != count)
+        {
+            iSlots.resize(count);
+            for (auto const* s = this; s->parent != nullptr; s = s->parent)
+                iSlots[s->count - 1u] = slot{ s->key, s->attributes };
+        }
+        return iSlots;
+    }
+
+    void accessor_pair::trace(tracer& aTracer)
+    {
+        aTracer.mark(getter);
+        aTracer.mark(setter);
+    }
+
     // --- property tables
 
-    property* property_table::find(value aKey)
+    value property_ref::key() const
     {
-        if (iEntries.size() > FewKeys)
+        auto const& t = *iTable;
+        return t.iShape != nullptr ? t.iShape->slots()[iPosition].key : t.iEntries[iPosition].key;
+    }
+
+    std::uint8_t property_ref::attributes() const
+    {
+        auto const& t = *iTable;
+        return t.iShape != nullptr ? t.iShape->slots()[iPosition].attributes : t.iEntries[iPosition].attributes;
+    }
+
+    value property_ref::data() const
+    {
+        auto const& t = *iTable;
+        if (t.iShape == nullptr)
+            return t.iEntries[iPosition].data;
+        auto const v = t.iValues[iPosition];
+        return (t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u ? cell_of<accessor_pair>(v).getter : v;
+    }
+
+    value property_ref::setter() const
+    {
+        auto const& t = *iTable;
+        if (t.iShape == nullptr)
+            return t.iEntries[iPosition].setter;
+        return (t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u ? cell_of<accessor_pair>(t.iValues[iPosition]).setter : Undefined;
+    }
+
+    void property_ref::set_data(value aData)
+    {
+        auto& t = *iTable;
+        if (t.iShape == nullptr)
+            t.iEntries[iPosition].data = aData;
+        else if ((t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u)
+            cell_of<accessor_pair>(t.iValues[iPosition]).getter = aData;
+        else
+            t.iValues[iPosition] = aData;
+    }
+
+    void property_ref::set(value aData, value aSetter, std::uint8_t aAttributes)
+    {
+        // (attributes that change: its layout is its own from now on (no shape))
+        auto& t = *iTable;
+        if (t.iShape != nullptr && t.iShape->slots()[iPosition].attributes != aAttributes)
+            t.make_dictionary();
+        if (t.iShape == nullptr)
         {
-            if (iShape != nullptr)
-            {
-                auto const position = iShape->position(aKey);
-                return position ? &iEntries[*position] : nullptr;
-            }
-            if (iIndex)
-            {
-                auto const existing = iIndex->find(aKey);
-                return existing != iIndex->end() ? &iEntries[existing->second] : nullptr;
-            }
+            auto& e = t.iEntries[iPosition];
+            e.data = aData;
+            e.setter = aSetter;
+            e.attributes = aAttributes;
+            return;
         }
-        for (auto& e : iEntries)
-            if (e.key == aKey)
-                return &e;
-        return nullptr;
+        if ((aAttributes & AttributeAccessor) != 0u)
+        {
+            auto& pair = cell_of<accessor_pair>(t.iValues[iPosition]);
+            pair.getter = aData;
+            pair.setter = aSetter;
+        }
+        else
+            t.iValues[iPosition] = aData;
+    }
+
+    property_ref property_table::find(value aKey)
+    {
+        if (iShape != nullptr)
+        {
+            if (iValues.size() == 0u)
+                return {};
+            auto const position = iShape->position(aKey);
+            return position ? property_ref{ *this, *position } : property_ref{};
+        }
+        if (iEntries.size() > FewKeys && iIndex)
+        {
+            auto const existing = iIndex->find(aKey);
+            return existing != iIndex->end() ? property_ref{ *this, existing->second } : property_ref{};
+        }
+        for (std::uint32_t i = 0u; i < iEntries.size(); ++i)
+            if (iEntries[i].key == aKey)
+                return property_ref{ *this, i };
+        return {};
+    }
+
+    void property_table::reserve(std::size_t aCapacity)
+    {
+        if (iShape != nullptr)
+            iValues.reserve(aCapacity);
+        else
+            iEntries.reserve(aCapacity);
     }
 
     void property_table::make_dictionary()
     {
         if (iShape == nullptr)
             return;
+        // (its entries: its shape's keys and attributes, and its values (an accessor's getter and setter))
+        auto const slots = iShape->slots();
+        iEntries.reserve(iValues.size());
+        for (std::uint32_t i = 0u; i < iValues.size(); ++i)
+        {
+            property e{ slots[i].key, iValues[i], Undefined, slots[i].attributes };
+            if (e.accessor())
+            {
+                auto const& pair = cell_of<accessor_pair>(iValues[i]);
+                e.data = pair.getter;
+                e.setter = pair.setter;
+            }
+            iEntries.push_back(e);
+        }
+        iValues = region_vector<value>{};
         iShape = nullptr;
         if (iEntries.size() > FewKeys)
             reindex();
     }
 
-    property& property_table::add(value aKey, value aData, value aSetter, std::uint8_t aAttributes)
+    property_ref property_table::add(value aKey, value aData, value aSetter, std::uint8_t aAttributes)
     {
-        iEntries.push_back(property{ aKey, aData, aSetter, aAttributes });
         if (iShape != nullptr)
         {
-            iShape = iShape->transition(aKey);
-            if (iShape == nullptr && iEntries.size() > FewKeys)
-                reindex();
+            if (auto* const next = iShape->transition(aKey, aAttributes))
+            {
+                // (an accessor's value: its getter and setter (a pair))
+                iValues.push_back((aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData);
+                iShape = next;
+                return property_ref{ *this, static_cast<std::uint32_t>(iValues.size() - 1u) };
+            }
+            make_dictionary();
         }
-        else if (iIndex)
+        iEntries.push_back(property{ aKey, aData, aSetter, aAttributes });
+        if (iIndex)
             iIndex->emplace(aKey, static_cast<std::uint32_t>(iEntries.size() - 1u));
         else if (iEntries.size() > FewKeys)
             reindex();
-        return iEntries.back();
+        return property_ref{ *this, static_cast<std::uint32_t>(iEntries.size() - 1u) };
     }
 
-    property& property_table::add(value aKey, value aData, std::uint8_t aAttributes, shape* aShape)
+    void property_table::add(value aData, shape* aShape)
     {
-        iEntries.push_back(property{ aKey, aData, Undefined, aAttributes });
+        iValues.push_back(aData);
         iShape = aShape;
-        return iEntries.back();
     }
 
     void property_table::remove(value aKey)
     {
-        auto* const p = find(aKey);
-        if (p == nullptr)
+        auto const p = find(aKey);
+        if (!p)
             return;
         make_dictionary();      // (its layout is its own from now on)
+        auto const position = p.position();
         if (iIndex)
             iIndex->erase(aKey);
-        if (p == &iEntries.back())
+        if (position + 1u == iEntries.size())
             iEntries.pop_back();
         else
         {
-            p->key = 0u;
+            iEntries[position].key = 0u;
             ++iDeleted;
         }
         if (iDeleted > 8u && iDeleted > iEntries.size() / 2u)
@@ -182,6 +307,50 @@ namespace neos::javascript_runtime
             if (iIndex)
                 reindex();
         }
+    }
+
+    bool property_table::cached_value(std::uint64_t aShape, std::uint32_t aPosition, value aKey, value& aResult) const
+    {
+        if (aShape != 0u)
+        {
+            if (reinterpret_cast<std::uintptr_t>(iShape) != aShape || aPosition >= iValues.size())
+                return false;
+            aResult = iValues[aPosition];
+            return true;
+        }
+        if (iShape != nullptr || aPosition >= iEntries.size())
+            return false;
+        auto const& e = iEntries[aPosition];
+        if (e.key != aKey || e.accessor())
+            return false;
+        aResult = e.data;
+        return true;
+    }
+
+    bool property_table::cached_store(std::uint64_t aShape, std::uint32_t aPosition, value aValue)
+    {
+        if (aShape == 0u || reinterpret_cast<std::uintptr_t>(iShape) != aShape || aPosition >= iValues.size())
+            return false;
+        iValues[aPosition] = aValue;
+        return true;
+    }
+
+    void property_table::trace(tracer& aTracer) const
+    {
+        if (iShape != nullptr)
+        {
+            // (its shape's keys (once a collection: the shapes that it shares with others were marked by them))
+            auto const epoch = aTracer.epoch();
+            for (auto* s = iShape; s != nullptr && s->epoch != epoch; s = s->parent)
+            {
+                s->epoch = epoch;
+                aTracer.mark(s->key);
+            }
+            aTracer.mark(std::span<value const>{ iValues.data(), iValues.size() });
+        }
+        else
+            for (auto const& e : iEntries)
+                aTracer.mark(e);
     }
 
     void property_table::reindex()
@@ -208,12 +377,8 @@ namespace neos::javascript_runtime
 
     void object::put(value aKey, value aValue, std::uint8_t aAttributes)
     {
-        if (auto* existing = properties.find(aKey))
-        {
-            existing->data = aValue;
-            existing->setter = Undefined;
-            existing->attributes = aAttributes;
-        }
+        if (auto existing = properties.find(aKey))
+            existing->set(aValue, Undefined, aAttributes);
         else
             properties.add(aKey, aValue, Undefined, aAttributes);
         if (mirrored) [[unlikely]]
@@ -223,12 +388,8 @@ namespace neos::javascript_runtime
     void object::put_accessor(value aKey, value aGetter, value aSetter, std::uint8_t aAttributes)
     {
         aAttributes = static_cast<std::uint8_t>((aAttributes & ~AttributeWritable) | AttributeAccessor);
-        if (auto* existing = properties.find(aKey))
-        {
-            existing->data = aGetter;
-            existing->setter = aSetter;
-            existing->attributes = aAttributes;
-        }
+        if (auto existing = properties.find(aKey))
+            existing->set(aGetter, aSetter, aAttributes);
         else
             properties.add(aKey, aGetter, aSetter, aAttributes);
         if (mirrored) [[unlikely]]
@@ -280,7 +441,7 @@ namespace neos::javascript_runtime
 
     std::optional<property_descriptor> object::ordinary_get_own_property(value aKey)
     {
-        auto const* p = properties.find(aKey);
+        auto const p = properties.find(aKey);
         if (p == nullptr)
             return {};
         return p->descriptor();
@@ -367,7 +528,7 @@ namespace neos::javascript_runtime
         }
         if (aObject != nullptr)
         {
-            auto* p = aObject->properties.find(aKey);
+            auto p = aObject->properties.find(aKey);
             if (p == nullptr)
                 return true;    // (an exotic object's own property that is not in its table: it applies the descriptor itself)
             if (current.is_data() && aDescriptor.is_accessor())
@@ -377,9 +538,7 @@ namespace neos::javascript_runtime
                     attributes |= AttributeConfigurable;
                 if (aDescriptor.enumerable ? *aDescriptor.enumerable : p->enumerable())
                     attributes |= AttributeEnumerable;
-                p->data = aDescriptor.getter.value_or(Undefined);
-                p->setter = aDescriptor.setter.value_or(Undefined);
-                p->attributes = attributes;
+                p->set(aDescriptor.getter.value_or(Undefined), aDescriptor.setter.value_or(Undefined), attributes);
             }
             else if (current.is_accessor() && aDescriptor.is_data())
             {
@@ -390,27 +549,29 @@ namespace neos::javascript_runtime
                     attributes |= AttributeEnumerable;
                 if (aDescriptor.writable.value_or(false))
                     attributes |= AttributeWritable;
-                p->data = aDescriptor.valueField.value_or(Undefined);
-                p->setter = Undefined;
-                p->attributes = attributes;
+                p->set(aDescriptor.valueField.value_or(Undefined), Undefined, attributes);
             }
             else
             {
+                auto data = p->data();
+                auto setter = p->setter();
+                auto attributes = p->attributes();
                 if (aDescriptor.valueField)
-                    p->data = *aDescriptor.valueField;
+                    data = *aDescriptor.valueField;
                 if (aDescriptor.getter)
-                    p->data = *aDescriptor.getter;
+                    data = *aDescriptor.getter;
                 if (aDescriptor.setter)
-                    p->setter = *aDescriptor.setter;
+                    setter = *aDescriptor.setter;
                 auto const flag = [&](std::optional<bool> const& aField, std::uint8_t aAttribute)
                 {
                     if (aField)
-                        p->attributes = static_cast<std::uint8_t>(*aField ? (p->attributes | aAttribute) : (p->attributes & ~aAttribute));
+                        attributes = static_cast<std::uint8_t>(*aField ? (attributes | aAttribute) : (attributes & ~aAttribute));
                 };
-                if (!p->accessor())
+                if ((attributes & AttributeAccessor) == 0u)
                     flag(aDescriptor.writable, AttributeWritable);
                 flag(aDescriptor.enumerable, AttributeEnumerable);
                 flag(aDescriptor.configurable, AttributeConfigurable);
+                p->set(data, setter, attributes);
             }
         }
         return true;
@@ -426,7 +587,7 @@ namespace neos::javascript_runtime
     bool object::define_own_property(value aKey, property_descriptor const& aDescriptor)
     {
         // (ordinary: the table is the object's own properties)
-        auto const* p = properties.find(aKey);
+        auto const p = properties.find(aKey);
         std::optional<property_descriptor> current;
         if (p != nullptr)
             current = p->descriptor();
@@ -472,13 +633,14 @@ namespace neos::javascript_runtime
         // (ordinary: own properties are the table's; the prototype chain is followed while it is ordinary)
         for (object* o = this;;)
         {
-            if (auto const* p = o->properties.find(aKey))
+            if (auto const p = o->properties.find(aKey))
             {
                 if (!p->accessor())
-                    return p->data;
-                if (p->data == Undefined)
+                    return p->data();
+                auto const getter = p->data();
+                if (getter == Undefined)
                     return Undefined;
-                return javascript_runtime::call(p->data, aReceiver);
+                return javascript_runtime::call(getter, aReceiver);
             }
             auto const parent = o->get_prototype_of();
             if (parent == Null)
@@ -538,13 +700,13 @@ namespace neos::javascript_runtime
     bool object::set(value aKey, value aValue, value aReceiver)
     {
         // (fast path: an ordinary receiver that is this object and has the property as a writable data property)
-        if (auto* p = properties.find(aKey))
+        if (auto p = properties.find(aKey))
         {
             if (!p->accessor() && aReceiver == value_of(*this))
             {
                 if (!p->writable())
                     return false;
-                p->data = aValue;
+                p->set_data(aValue);
                 if (mirrored) [[unlikely]]
                     global_object_changed(*this, aKey);
                 return true;
@@ -592,7 +754,7 @@ namespace neos::javascript_runtime
 
     bool object::delete_property(value aKey)
     {
-        auto const* p = properties.find(aKey);
+        auto const p = properties.find(aKey);
         if (p == nullptr)
             return true;
         if (p->configurable())
@@ -685,6 +847,7 @@ namespace neos::javascript_runtime
         sparse = true;
         // (the elements become ordinary properties: indices first (they are ordered by index anyway))
         property_table table;
+        table.set_root(type_root_shape<array_object>());   // (an array's shapes are its own)
         for (std::size_t i = 0u; i < elements.size(); ++i)
             if (elements[i] != Empty)
                 table.add(index_key(i), elements[i], Undefined, AttributesDefault);
@@ -759,7 +922,7 @@ namespace neos::javascript_runtime
         for (auto const index : indices)
         {
             auto const key = index_key(index);
-            auto const* p = properties.find(key);
+            auto const p = properties.find(key);
             if (p != nullptr && !p->configurable())
             {
                 length = index + 1u;
@@ -995,8 +1158,8 @@ namespace neos::javascript_runtime
         if (aPrefix != nullptr)
             name = concat(concat(ascii(aPrefix), ascii(" ")), name);
         auto& f = obj(aFunction);
-        if (auto* existing = f.own(the_names().name))
-            existing->data = name;
+        if (auto existing = f.own(the_names().name))
+            existing->set_data(name);
         else
             f.properties.add(the_names().name, name, Undefined, AttributeConfigurable);
     }
@@ -1004,8 +1167,8 @@ namespace neos::javascript_runtime
     void set_function_length(value aFunction, double aLength)
     {
         auto& f = obj(aFunction);
-        if (auto* existing = f.own(the_names().length))
-            existing->data = number(aLength);
+        if (auto existing = f.own(the_names().length))
+            existing->set_data(number(aLength));
         else
             f.properties.add(the_names().length, number(aLength), Undefined, AttributeConfigurable);
     }

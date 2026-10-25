@@ -143,7 +143,7 @@ namespace neos::javascript_runtime::intl
                     iterator_close_on_throw(record);
                     throw_type_error("Iterable yielded a value which is not a string");
                 }
-                list.push_back(str(*next));
+                list.push_back(std::u16string{ str(*next) });
             }
             return list;
         }

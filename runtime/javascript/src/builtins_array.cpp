@@ -558,7 +558,7 @@ namespace neos::javascript_runtime
             auto const o = to_object(aThis);
             auto const len = length_of_array_like(o);
             auto const separator = argument(aArguments, 0u);
-            std::u16string const sep = separator == Undefined ? std::u16string{ u"," } : str(to_string(separator));
+            std::u16string const sep = separator == Undefined ? std::u16string{ u"," } : std::u16string{ str(to_string(separator)) };
             // (cycles: an array being joined joins as the empty string)
             static thread_local value_list tJoining;
             if (std::find(tJoining.begin(), tJoining.end(), o) != tJoining.end())
@@ -645,14 +645,16 @@ namespace neos::javascript_runtime
                 return false;
             static std::size_t sEntries = static_cast<std::size_t>(-1);
             static bool sPlain = false;
-            auto const& entries = obj(r.objectPrototype).properties.entries();
-            if (entries.size() != sEntries)
+            auto const& properties = obj(r.objectPrototype).properties;
+            if (properties.slots() != sEntries)
             {
-                sEntries = entries.size();
+                sEntries = properties.slots();
                 sPlain = true;
-                for (auto const& e : entries)
-                    if (e.key != 0u && is_string(e.key) && array_index(e.key))
+                properties.for_each([&](property const& e)
+                {
+                    if (is_string(e.key) && array_index(e.key))
                         sPlain = false;
+                });
             }
             return sPlain;
         }

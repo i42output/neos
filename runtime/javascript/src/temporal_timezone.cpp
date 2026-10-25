@@ -519,10 +519,10 @@ namespace neos::javascript_runtime::temporal
         }
     }
 
-    std::optional<named_zone_record> get_available_named_time_zone(std::u16string const& aName)
+    std::optional<named_zone_record> get_available_named_time_zone(std::u16string_view aName)
     {
         auto const& table = zones().byLowercase;
-        auto const it = table.find(ascii_lowercase(aName));
+        auto const it = table.find(ascii_lowercase(std::u16string{ aName }));
         if (it == table.end())
             return {};
         return it->second;
@@ -538,7 +538,7 @@ namespace neos::javascript_runtime::temporal
         return result;
     }
 
-    time_zone time_zone_from_identifier(std::u16string const& aIdentifier)
+    time_zone time_zone_from_identifier(std::u16string_view aIdentifier)
     {
         std::u16string name;
         int offsetMinutes = 0;

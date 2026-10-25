@@ -65,17 +65,18 @@ namespace neos::javascript_runtime
 
     // --- strings
 
-    std::u16string const& string::flat()
+    region_u16string const& string::flat()
     {
         if (smallText)
         {
             text.assign(small, length);
             smallText = false;
+            charsOffset = region_offset(text.data());
         }
         if (left == 0u)
             return text;
         // (a rope: its leaves in order (iteratively: a rope made by repeated concatenation is deep))
-        std::u16string result;
+        region_u16string result;
         result.reserve(length);
         thread_local std::vector<value> tPending;
         tPending.clear();
@@ -94,6 +95,7 @@ namespace neos::javascript_runtime
             }
         }
         text = std::move(result);
+        charsOffset = region_offset(text.data());
         left = 0u;
         right = 0u;
         return text;
@@ -400,7 +402,7 @@ namespace neos::javascript_runtime
         return make_string(std::move(text));
     }
 
-    std::u16string const& str(value aString)
+    region_u16string const& str(value aString)
     {
         return cell_of<string>(aString).flat();
     }

@@ -533,7 +533,7 @@ namespace neos::javascript_runtime::intl
         }
 
         // (a time zone: its identifier (case-normalized; an offset as +HH:MM) and ICU's)
-        void set_time_zone(std::u16string const& aName, date_time_format_data& d)
+        void set_time_zone(std::u16string_view aName, date_time_format_data& d)
         {
             std::u16string zone;
             int offsetMinutes = 0;
@@ -1152,7 +1152,7 @@ namespace neos::javascript_runtime::intl
         }
         if (obj(aTemporal).cls == object_class::TemporalZonedDateTime)
         {
-            auto const dtf = create_date_time_format(r.intlDateTimeFormat, aLocales, aOptions, req, def, str(t.timeZone.id));
+            auto const dtf = create_date_time_format(r.intlDateTimeFormat, aLocales, aOptions, req, def, std::u16string{ str(t.timeZone.id) });
             auto& d = data_of<date_time_format_data>(static_cast<intl_object&>(obj(dtf)));
             auto const c = temporal_calendar(t);
             if (c != d.calendar && c != "iso8601")

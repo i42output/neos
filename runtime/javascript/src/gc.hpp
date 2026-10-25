@@ -87,8 +87,10 @@ namespace neos::javascript_runtime
     public:
         void mark(value aValue)
         {
-            if (aValue >= TagString && aValue < (TagInternal | 0xFFFFFFFFFFFFull))
-                mark_handle(handle_of(aValue));
+            // (a value's cell (a value that a cell, or a root, has refers to a cell that lives))
+            if (aValue >= TagString && aValue < (TagInternal | 0xFFFFFFFFFFFFull) && handle_of(aValue) != 0u)
+                if (auto& c = the_heap().at(handle_of(aValue)); c.marked == 0u)
+                    push(c);
         }
         void mark(cell const* aCell)
         {
@@ -101,6 +103,7 @@ namespace neos::javascript_runtime
             for (auto const v : aValues)
                 mark(v);
         }
+        std::uint64_t epoch() const;    ///< (the collection's number)
         void mark(property const& aProperty)
         {
             mark(aProperty.key);

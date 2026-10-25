@@ -2576,6 +2576,35 @@ namespace neos::javascript_runtime::regexp
         bool const unicode = p.unicode_mode();
         code_generator{ *result, unicode }.generate(root);
         result->anchored = anchored_at_start(root);
+        // (^(?:word|word|...)$: a set of words (e.g. a language's keywords))
+        if ((aFlags & (FlagIgnoreCase | FlagMultiline)) == 0u && result->captureCount == 0u && aPattern.size() > 6u &&
+            aPattern.starts_with(u"^(?:") && aPattern.ends_with(u")$"))
+        {
+            auto const body = aPattern.substr(4u, aPattern.size() - 6u);
+            bool words = !body.empty();
+            for (auto c : body)
+                if (!((c >= u'a' && c <= u'z') || (c >= u'A' && c <= u'Z') || (c >= u'0' && c <= u'9') || c == u'_' || c == u'|'))
+                    words = false;
+            if (words)
+            {
+                std::u16string_view const text{ body };
+                result->shortestWord = text.size();
+                for (std::size_t start = 0u; start <= text.size();)
+                {
+                    auto end = text.find(u'|', start);
+                    if (end == std::u16string_view::npos)
+                        end = text.size();
+                    if (end == start)
+                        words = false;
+                    auto const word = text.substr(start, end - start);
+                    result->words.emplace(word);
+                    result->shortestWord = std::min(result->shortestWord, word.size());
+                    result->longestWord = std::max(result->longestWord, word.size());
+                    start = end + 1u;
+                }
+                result->wordSet = words;
+            }
+        }
         literal_prefix(root, result->prefix);
         if (result->prefix.size() > 255u)
             result->prefix.resize(255u);
@@ -2616,6 +2645,15 @@ namespace neos::javascript_runtime::regexp
     {
         if (aStart > aInput.size())
             return match_result::NoMatch;
+        if (aProgram.wordSet)
+        {
+            // (one of its words: the whole input (from the start))
+            if (aStart != 0u || aInput.size() < aProgram.shortestWord || aInput.size() > aProgram.longestWord || !aProgram.words.contains(aInput))
+                return match_result::NoMatch;
+            aCaptures.assign(2u, 0);
+            aCaptures[1] = static_cast<std::int32_t>(aInput.size());
+            return match_result::Match;
+        }
         auto& state = tState;
         state.slots.assign((aProgram.captureCount + 1u) * 2u, -1);
         state.registers.assign(aProgram.registers * 2u, 0);

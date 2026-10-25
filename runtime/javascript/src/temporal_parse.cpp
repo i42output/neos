@@ -634,15 +634,15 @@ namespace neos::javascript_runtime::temporal
         }
     }
 
-    iso_parse_result parse_iso_date_time(std::u16string const& aText, std::initializer_list<parse_goal> aGoals)
+    iso_parse_result parse_iso_date_time(std::u16string_view aText, std::initializer_list<parse_goal> aGoals)
     {
-        auto const result = try_parse(aText, aGoals);
+        auto const result = try_parse(std::u16string{ aText }, aGoals);
         if (!result)
             throw_range_error("invalid ISO 8601 string: " + utf8(make_string(aText)));
         return *result;
     }
 
-    bool parse_time_zone_identifier(std::u16string const& aText, std::u16string& aName, int& aOffsetMinutes, bool& aIsOffset)
+    bool parse_time_zone_identifier(std::u16string_view aText, std::u16string& aName, int& aOffsetMinutes, bool& aIsOffset)
     {
         parser const ps{ aText };
         std::size_t p = 0u;
@@ -663,7 +663,7 @@ namespace neos::javascript_runtime::temporal
         return false;
     }
 
-    std::optional<std::int64_t> parse_date_time_utc_offset(std::u16string const& aText, bool* aSubMinute)
+    std::optional<std::int64_t> parse_date_time_utc_offset(std::u16string_view aText, bool* aSubMinute)
     {
         parser const ps{ aText };
         std::size_t p = 0u;
@@ -692,7 +692,7 @@ namespace neos::javascript_runtime::temporal
                 if (i < aText.size())
                 {
                     ++i;
-                    std::u16string digits = aText.substr(i) + u"000000000";
+                    std::u16string digits = std::u16string{ aText.substr(i) } + u"000000000";
                     for (std::size_t k = 0u; k < 9u; ++k)
                         nanoseconds = nanoseconds * 10 + (digits[k] - u'0');
                 }
@@ -701,7 +701,7 @@ namespace neos::javascript_runtime::temporal
         return sign * (((hours * 60 + minutes) * 60 + seconds) * 1000000000LL + nanoseconds);
     }
 
-    duration_fields parse_duration_string(std::u16string const& aText)
+    duration_fields parse_duration_string(std::u16string_view aText)
     {
         auto const fail = [&]() { throw_range_error("invalid duration string: " + utf8(make_string(aText))); };
         parser const ps{ aText };
@@ -829,7 +829,7 @@ namespace neos::javascript_runtime::temporal
         return f;
     }
 
-    bool parse_month_code(std::u16string const& aText, int& aMonth, bool& aLeap)
+    bool parse_month_code(std::u16string_view aText, int& aMonth, bool& aLeap)
     {
         if (aText.size() < 3u || aText.size() > 4u || aText[0] != u'M')
             return false;
@@ -851,12 +851,12 @@ namespace neos::javascript_runtime::temporal
         return ps.annotation_value(p) && ps.at_end(p);
     }
 
-    std::u16string parse_temporal_calendar_string(std::u16string const& aText)
+    std::u16string parse_temporal_calendar_string(std::u16string_view aText)
     {
-        if (auto const result = try_parse(aText, { GoalDateTimeZoned, GoalDateTime, GoalInstant, GoalTime, GoalMonthDay, GoalYearMonth }))
+        if (auto const result = try_parse(std::u16string{ aText }, { GoalDateTimeZoned, GoalDateTime, GoalInstant, GoalTime, GoalMonthDay, GoalYearMonth }))
             return result->calendar.value_or(u"iso8601");
-        if (!is_annotation_value(aText))
+        if (!is_annotation_value(std::u16string{ aText }))
             throw_range_error("invalid calendar: " + utf8(make_string(aText)));
-        return aText;
+        return std::u16string{ aText };
     }
 }

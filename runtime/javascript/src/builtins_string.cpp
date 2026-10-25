@@ -143,7 +143,7 @@ namespace neos::javascript_runtime
             return to_string(aThis);
         }
 
-        std::u16string const& text_of(value aString)
+        region_u16string const& text_of(value aString)
         {
             return str(aString);
         }
@@ -153,7 +153,7 @@ namespace neos::javascript_runtime
             return std::clamp(aValue, 0.0, aLength);
         }
 
-        char32_t code_point_at(std::u16string const& aText, std::size_t aIndex, std::size_t& aUnits)
+        char32_t code_point_at(std::u16string_view aText, std::size_t aIndex, std::size_t& aUnits)
         {
             auto const first = aText[aIndex];
             aUnits = 1u;
@@ -374,8 +374,7 @@ namespace neos::javascript_runtime
             auto const s = this_string(aThis, "localeCompare");
             auto const that = to_string(argument(aArguments, 0u));
 #if defined(NEOS_JS_ICU)
-            if (intl::icu_available())
-                return intl::locale_compare(s, that, argument(aArguments, 1u), argument(aArguments, 2u));
+            return intl::locale_compare(s, that, argument(aArguments, 1u), argument(aArguments, 2u));
 #endif
             auto const a = utf8(normalize_string(s, u"NFC"));
             auto const b = utf8(normalize_string(that, u"NFC"));
@@ -386,7 +385,7 @@ namespace neos::javascript_runtime
         {
             auto const s = this_string(aThis, "normalize");
             auto const form = argument(aArguments, 0u);
-            std::u16string const f = form == Undefined ? std::u16string{ u"NFC" } : str(to_string(form));
+            std::u16string const f = form == Undefined ? std::u16string{ u"NFC" } : std::u16string{ str(to_string(form)) };
             if (f != u"NFC" && f != u"NFD" && f != u"NFKC" && f != u"NFKD")
                 throw_range_error("The normalization form should be one of NFC, NFD, NFKC, NFKD.");
             return normalize_string(s, f);
@@ -413,7 +412,7 @@ namespace neos::javascript_runtime
             while (fill.size() < fillLen)
                 fill += filler;
             fill.resize(fillLen);
-            return make_string(aStart ? fill + text : text + fill);
+            return make_string(aStart ? fill + std::u16string{ text } : std::u16string{ text } + fill);
         }
 
         value string_pad_end(value aThis, arguments aArguments, value, function_object&) { return pad(aThis, aArguments, false); }
@@ -517,22 +516,22 @@ namespace neos::javascript_runtime
         {
             auto const s = this_string(aThis, "toLocaleLowerCase");
 #if defined(NEOS_JS_ICU)
-            if (intl::icu_available())
-                return intl::to_locale_case(s, argument(aArguments, 0u), false);
-#endif
+            return intl::to_locale_case(s, argument(aArguments, 0u), false);
+#else
             (void)aArguments;
             return make_string(case_map(text_of(s), false));
+#endif
         }
 
         value string_to_locale_upper_case(value aThis, arguments aArguments, value, function_object&)
         {
             auto const s = this_string(aThis, "toLocaleUpperCase");
 #if defined(NEOS_JS_ICU)
-            if (intl::icu_available())
-                return intl::to_locale_case(s, argument(aArguments, 0u), true);
-#endif
+            return intl::to_locale_case(s, argument(aArguments, 0u), true);
+#else
             (void)aArguments;
             return make_string(case_map(text_of(s), true));
+#endif
         }
 
         value string_to_string(value aThis, arguments, value, function_object&)
@@ -557,8 +556,8 @@ namespace neos::javascript_runtime
         value string_trim_end(value aThis, arguments, value, function_object&) { return trim(aThis, false, true, "trimEnd"); }
 
         // (GetSubstitution: $$ $& $` $' $n $nn $<name>)
-        std::u16string get_substitution(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-            std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
+        std::u16string get_substitution(std::u16string_view aMatched, std::u16string_view aString, std::size_t aPosition,
+            std::span<value const> aCaptures, value aNamedCaptures, std::u16string_view aReplacement)
         {
             std::u16string result;
             auto const m = aCaptures.size();
@@ -812,7 +811,7 @@ namespace neos::javascript_runtime
                         escaped.push_back(c);
                 p1 += u" " + utf16_ascii(aAttribute) + u"=\"" + escaped + u"\"";
             }
-            p1 += u">" + str(s) + u"</" + utf16_ascii(aTag) + u">";
+            p1 += u">" + std::u16string{ str(s) } + u"</" + utf16_ascii(aTag) + u">";
             return make_string(std::move(p1));
         }
 
@@ -893,8 +892,8 @@ namespace neos::javascript_runtime
         return true;
     }
 
-    std::u16string get_substitution_text(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-        std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
+    std::u16string get_substitution_text(std::u16string_view aMatched, std::u16string_view aString, std::size_t aPosition,
+        std::span<value const> aCaptures, value aNamedCaptures, std::u16string_view aReplacement)
     {
         return get_substitution(aMatched, aString, aPosition, aCaptures, aNamedCaptures, aReplacement);
     }
@@ -915,7 +914,7 @@ namespace neos::javascript_runtime
         auto const pr = aRealm.stringPrototype;
         method(pr, "at", 1u, string_at);
         method(pr, "charAt", 1u, string_char_at);
-        method(pr, "charCodeAt", 1u, string_char_code_at);
+        aRealm.charCodeAt = method(pr, "charCodeAt", 1u, string_char_code_at);
         method(pr, "codePointAt", 1u, string_code_point_at);
         method(pr, "concat", 1u, string_concat);
         method(pr, "endsWith", 1u, string_ends_with);

@@ -146,12 +146,28 @@ namespace neos::javascript_runtime
 
     extern std::byte* gRegionBase;                      ///< (gc.cpp: the region's address (one definition: not an inline variable))
     void* region_allocate(std::size_t aSize);           ///< (gc.cpp: storage in the region that is not a cell)
-    void region_release(void* aMemory) noexcept;
+    void region_release(void* aMemory) noexcept;      ///< (storage that region_allocate allocated (else (e.g. a cell's) nothing))
+    bool region_raw(void const* aMemory);             ///< (gc.cpp: storage that region_allocate allocated (not a cell's))
     void publish_heap();                                ///< (the region, as the host's external memory (see layout::Memory))
     inline std::uint64_t region_offset(void const* aAddress)
     {
         return static_cast<std::uint64_t>(static_cast<std::byte const*>(aAddress) - gRegionBase);
     }
+
+    // (an allocator of storage in the region (e.g. strings' text, that compiled code reads))
+    template <typename T>
+    struct region_allocator
+    {
+        using value_type = T;
+        region_allocator() noexcept = default;
+        template <typename U>
+        region_allocator(region_allocator<U> const&) noexcept {}
+        T* allocate(std::size_t aCount) { return static_cast<T*>(region_allocate(aCount * sizeof(T))); }
+        void deallocate(T* aMemory, std::size_t) noexcept { region_release(aMemory); }
+        template <typename U>
+        bool operator==(region_allocator<U> const&) const noexcept { return true; }
+    };
+    using region_u16string = std::basic_string<char16_t, std::char_traits<char16_t>, region_allocator<char16_t>>;
 
     // (a vector of trivially copyable elements in the region, that compiled code can read: its storage's offset (in the region), its
     // size and its capacity (in elements))
@@ -186,6 +202,14 @@ namespace neos::javascript_runtime
         std::size_t size() const { return static_cast<std::size_t>(iSize); }
         std::size_t capacity() const { return static_cast<std::size_t>(iCapacity); }
         void const* offset_field() const { return &iOffset; }   ///< (compiled code reads its offset (u64), then its size (u64))
+        // (storage that it does not own (it has none): e.g. in a cell (region_release does not free memory in cells))
+        void use_storage(T* aStorage, std::size_t aCapacity)
+        {
+            if (iCapacity != 0u || aCapacity == 0u)
+                return;
+            iOffset = region_offset(aStorage);
+            iCapacity = aCapacity;
+        }
         bool empty() const { return iSize == 0u; }
         T* data() { return iCapacity != 0u ? reinterpret_cast<T*>(gRegionBase + iOffset) : nullptr; }
         T const* data() const { return iCapacity != 0u ? reinterpret_cast<T const*>(gRegionBase + iOffset) : nullptr; }
@@ -331,6 +355,8 @@ namespace neos::javascript_runtime
     template <typename T>
     shape* type_root_shape();   ///< (the shape of no properties of objects of type T (other than object and function_object))
 
+    inline constexpr std::uint32_t MaxCellValues = 32u;     ///< (property values that an object is made with room for in its cell)
+
     class heap
     {
     public:
@@ -340,10 +366,21 @@ namespace neos::javascript_runtime
         template <typename T, typename... Args>
         T& make(Args&&... aArguments)
         {
-            iAllocatedBytes += sizeof(T);
+            return make_with<T>(0u, std::forward<Args>(aArguments)...);
+        }
+        // (a cell with room for (at least) aValues of its properties' values in it (an object's: see property_table::use_storage); its
+        // slot's room after it is used for them anyway)
+        template <typename T, typename... Args>
+        T& make_with(std::size_t aValues, Args&&... aArguments)
+        {
+            constexpr std::size_t base = (sizeof(T) + 7u) & ~std::size_t{ 7u };
+            std::size_t size = sizeof(T);
+            if constexpr (requires (T& t) { t.properties.use_storage(nullptr, 0u); })
+                size = base + aValues * sizeof(value);
+            iAllocatedBytes += size;
             if (++iAllocations >= iAllocationTrigger || iAllocatedBytes >= iByteTrigger)
                 allocating();
-            void* const memory = allocate(sizeof(T));
+            void* const memory = allocate(size);
             T* result;
             try
             {
@@ -355,6 +392,12 @@ namespace neos::javascript_runtime
                 throw;
             }
             add(*result, memory);
+            if constexpr (requires (T& t) { t.properties.use_storage(nullptr, 0u); })
+            {
+                auto const room = (slot_size(memory) - base) / sizeof(value);
+                if (room != 0u)
+                    result->properties.use_storage(reinterpret_cast<value*>(static_cast<std::byte*>(memory) + base), room);
+            }
             // (an object of another type than object and function_object has shapes of its own type's (see shape); one whose [[Get]]
             // is not the ordinary one has none (the property caches do not use it), except an array (its get of a key that is not
             // "length" or an index is the ordinary one: the get caches use it for such keys))
@@ -385,6 +428,7 @@ namespace neos::javascript_runtime
     private:
         void* allocate(std::size_t aSize);
         void deallocate(void* aMemory) noexcept;
+        static std::size_t slot_size(void const* aMemory);  ///< (the size of the slot that a cell's memory is (its size or more))
         void allocating();
         void add(cell& aCell, void* aMemory);
     private:
@@ -452,26 +496,34 @@ namespace neos::javascript_runtime
     class string : public cell
     {
     public:
-        string() : cell{ cell_type::String } {}
-        explicit string(std::u16string aText) : cell{ cell_type::String }, text{ std::move(aText) }, length{ static_cast<std::uint32_t>(text.size()) } {}
-        string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, left{ aLeft }, right{ aRight }, length{ aLength } {}
+        string() : cell{ cell_type::String } { charsOffset = region_offset(text.data()); }
+        explicit string(std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, text{ aText }
+        {
+            charsOffset = region_offset(text.data());
+        }
+        string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, length{ aLength }, left{ aLeft }, right{ aRight } {}
         struct small_tag {};
         string(small_tag, std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, smallText{ true }
         {
             std::copy(aText.begin(), aText.end(), small);
+            charsOffset = region_offset(small);
         }
     public:
         void trace(tracer& aTracer) override;
     public:
-        std::u16string const& flat();
+        region_u16string const& flat();
         std::u16string_view chars() { return smallText ? std::u16string_view{ small, length } : std::u16string_view{ flat() }; }  ///< (its code units (flat))
         std::size_t hash();
         std::int64_t array_index();     ///< (-1: not an array index)
     public:
-        std::u16string text;            ///< (none while it is a rope: its parts (left and right) are concatenated when it is flattened)
+        // (compiled code reads its length and its code units' offset (they precede its text: their offsets are the same whatever the
+        // C++ library))
+        std::uint32_t length = 0u;
+        std::uint64_t charsOffset = 0u; ///< (compiled code reads it: the offset of its code units (text.s, or small.s), if it is flat (else
+                                        ///< 0: a rope))
+        region_u16string text;          ///< (none while it is a rope: its parts (left and right) are concatenated when it is flattened)
         value left = 0u;
         value right = 0u;
-        std::uint32_t length = 0u;
         std::size_t hashValue = 0u;
         bool hashed = false;
         bool interned = false;
@@ -495,7 +547,7 @@ namespace neos::javascript_runtime
     value intern(value aString);                                ///< (a string (that lives while it is referred to) as an interned string)
     value intern(std::u16string_view aText);                    ///< (an interned string that lives as long as the program (pinned))
     value concat(value aLeft, value aRight);                    ///< (strings)
-    std::u16string const& str(value aString);                   ///< (a string's code units (flattened))
+    region_u16string const& str(value aString);                 ///< (a string's code units (flattened))
     std::string utf8(value aString);                            ///< (lone surrogates: U+FFFD)
     std::string wtf8(std::u16string_view aText);
     std::u16string utf16(std::string_view aUtf8);               ///< (WTF-8 as make_string_utf8)
@@ -621,62 +673,143 @@ namespace neos::javascript_runtime
         }
     };
 
-    // (the layout of objects' own properties: their keys, in the order they were added (their values and attributes are the objects'
-    // own); objects whose properties were added in the same order share one (the shapes are a tree: a shape and a key added to it
-    // make its transition). A shape is immutable: an object that adds a property moves to the shape's transition; one whose layout
-    // changes otherwise (a property deleted) has no shape (its table is its own: "dictionary" mode). The property caches (api.cpp)
-    // compare objects' shapes. Shapes are never freed (their number is limited); their keys are not kept alive: a shape's keys are
-    // those of the objects that have it (they keep them alive), so a key that is freed (and its handle reused) cannot be confused)
+    // (the layout of objects' own properties: their keys and attributes, in the order they were added (their values are the objects'
+    // own: a value per property, at its position); objects whose properties were added in the same order (with the same attributes)
+    // share one (the shapes are a tree: a shape and a key added to it (with its attributes) make its transition). A shape is 
+    // immutable: an object that adds a property moves to the shape's transition; one whose layout changes otherwise (a property 
+    // deleted, or its attributes changed) has no shape (its table is its own: "dictionary" mode). The property caches (api.cpp) 
+    // compare objects' shapes. Shapes are never freed (their number is limited); a shape's keys are kept alive by the objects that
+    // have it (their traces mark them), so a key that is freed (and its handle reused) cannot be confused)
     struct shape
     {
+        struct slot
+        {
+            value key;
+            std::uint8_t attributes;
+        };
         shape* parent = nullptr;
         value key = 0u;                 ///< (the key that its parent's transition to it added)
+        std::uint8_t attributes = 0u;   ///< (... and its attributes)
         std::uint32_t count = 0u;       ///< (its keys)
-        shape* transition(value aKey);  ///< (the shape with aKey added; null if there are no more shapes (the table has none))
+        std::uint64_t epoch = 0u;       ///< (the collection that last marked its keys (see mark_keys))
+        shape* transition(value aKey, std::uint8_t aAttributes);  ///< (the shape with aKey added; null if there are no more shapes)
         std::optional<std::uint32_t> position(value aKey);  ///< (a key's position)
+        std::span<slot const> slots();  ///< (its keys and their attributes, by position)
     private:
         std::vector<std::pair<value, shape*>> iTransitions;
         std::unique_ptr<std::unordered_map<value, shape*>> iManyTransitions;
         std::unique_ptr<std::unordered_map<value, std::uint32_t>> iIndex;   ///< (built when a key is found in a shape of many keys)
+        std::vector<slot> iSlots;       ///< (built when they are wanted)
     };
     shape* root_shape();    ///< (the shape of no properties)
 
-    // (an object's own properties, in the order they were created: in the region (compiled code reads them: layout::ObjectShape,
-    // layout::ObjectProperties and layout::ObjectPropertyCount are its first members'))
+    // (an accessor property's getter and setter (in a table that has a shape, its value is the pair))
+    class accessor_pair : public cell
+    {
+    public:
+        accessor_pair(value aGetter, value aSetter) : cell{ cell_type::Internal }, getter{ aGetter }, setter{ aSetter } {}
+    public:
+        void trace(tracer& aTracer) override;
+    public:
+        value getter;
+        value setter;
+    };
+
+    class property_table;
+
+    // (a property of a table (by its position): its key, value and attributes are the table's (its shape's and its values, or its 
+    // entries); it refers to the property while the table has it)
+    class property_ref
+    {
+    public:
+        property_ref() = default;
+        property_ref(property_table& aTable, std::uint32_t aPosition) : iTable{ &aTable }, iPosition{ aPosition } {}
+    public:
+        explicit operator bool() const { return iTable != nullptr; }
+        bool operator==(std::nullptr_t) const { return iTable == nullptr; }
+        property_ref* operator->() { return this; }
+        property_ref const* operator->() const { return this; }
+        std::uint32_t position() const { return iPosition; }
+        value key() const;
+        value data() const;             ///< (a data property's value; an accessor's getter)
+        value setter() const;
+        std::uint8_t attributes() const;
+        bool accessor() const { return (attributes() & AttributeAccessor) != 0u; }
+        bool writable() const { return (attributes() & AttributeWritable) != 0u; }
+        bool enumerable() const { return (attributes() & AttributeEnumerable) != 0u; }
+        bool configurable() const { return (attributes() & AttributeConfigurable) != 0u; }
+        property_descriptor descriptor() const
+        {
+            return accessor() ? property_descriptor::accessor(data(), setter(), attributes()) : property_descriptor::data(data(), attributes());
+        }
+        property get() const { return property{ key(), data(), setter(), attributes() }; }
+        void set_data(value aData);     ///< (a data property's value; an accessor's getter)
+        void set(value aData, value aSetter, std::uint8_t aAttributes);   ///< (its value (or getter), setter and attributes)
+        void set_attributes(std::uint8_t aAttributes) { set(data(), setter(), aAttributes); }
+    private:
+        property_table* iTable = nullptr;
+        std::uint32_t iPosition = 0u;
+    };
+
+    // (an object's own properties, in the order they were created: their shape and values (compiled code reads them: 
+    // layout::ObjectShape, layout::ObjectValues ...), or (no shape: "dictionary" mode) their entries (layout::ObjectEntries ...);
+    // in the region. A table's values may be in its object's cell (see use_storage))
     class property_table
     {
+        friend class property_ref;
     public:
         property_table() = default;
         property_table(property_table&&) noexcept = default;
         property_table& operator=(property_table&&) noexcept = default;
     public:
-        property* find(value aKey);
-        property const* find(value aKey) const { return const_cast<property_table*>(this)->find(aKey); }
-        property& add(value aKey, value aData, value aSetter, std::uint8_t aAttributes);
-        property& add(value aKey, value aData, std::uint8_t aAttributes, shape* aShape);  ///< (aShape: its shape's transition for aKey)
+        property_ref find(value aKey);
+        property_ref find(value aKey) const { return const_cast<property_table*>(this)->find(aKey); }
+        property_ref add(value aKey, value aData, value aSetter, std::uint8_t aAttributes);
+        void add(value aData, shape* aShape);   ///< (a data property (writable, enumerable and configurable): aShape is its shape's
+                                                ///< transition for its key)
         void remove(value aKey);
-        void reserve(std::size_t aCapacity) { iEntries.reserve(aCapacity); }
-        void make_dictionary();                     ///< (no shape (its layout its own) from now on)
+        void reserve(std::size_t aCapacity);
+        void use_storage(value* aStorage, std::size_t aCapacity) { iValues.use_storage(aStorage, aCapacity); }  ///< (its values' (it has
+                                                ///< none): storage that is not its own (e.g. in its object's cell))
+        void make_dictionary();                 ///< (no shape (its layout its own) from now on)
         void set_root(shape* aRoot) { iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
-        std::size_t size() const { return iEntries.size() - iDeleted; }
+        std::size_t size() const { return iShape != nullptr ? iValues.size() : iEntries.size() - iDeleted; }
+        std::size_t slots() const { return iShape != nullptr ? iValues.size() : iEntries.size(); }   ///< (its positions (a dictionary's 
+                                                ///< include deleted ones))
+        property_ref at(std::uint32_t aPosition) { return property_ref{ *this, aPosition }; }   ///< (a property by its position)
         template <typename F>
         void for_each(F&& aFunction) const
         {
-            for (auto const& e : iEntries)
-                if (e.key != 0u)
-                    aFunction(e);
+            if (iShape != nullptr)
+            {
+                for (std::uint32_t i = 0u; i < iValues.size(); ++i)
+                    aFunction(const_cast<property_table*>(this)->at(i).get());
+            }
+            else
+                for (auto const& e : iEntries)
+                    if (e.key != 0u)
+                        aFunction(e);
         }
-        std::span<property const> entries() const { return std::span<property const>{ iEntries.data(), iEntries.size() }; }
-        property& at(std::uint32_t aPosition) { return iEntries[aPosition]; }   ///< (a property by its position (its shape's))
+        void trace(tracer& aTracer) const;
+        bool owns_nothing() const   ///< (it has no storage of its own (outside its object's cell))
+        {
+            return iEntries.capacity() == 0u && !iIndex && (iValues.capacity() == 0u || !region_raw(iValues.data()));
+        }
+        // (the property caches': a data property's value at a position (aShape: its shape (it has the shape), else (0: a dictionary)
+        // the key's at the position), and a writable data property's (its shape's) value set)
+        bool cached_value(std::uint64_t aShape, std::uint32_t aPosition, value aKey, value& aResult) const;
+        bool cached_store(std::uint64_t aShape, std::uint32_t aPosition, value aValue);
         shape* layout() const { return iShape; }       ///< (its shape (null: none))
         // (the members that compiled code reads (the runtime checks their offsets: see layout::ObjectShape))
         void const* shape_field() const { return &iShape; }
-        void const* entries_field() const { return &iEntries; }   ///< (its offset (u64), then its size (u64))
+        void const* values_field() const { return iValues.offset_field(); }     ///< (its offset (u64), size (u64) and capacity (u64))
+        void const* entries_field() const { return iEntries.offset_field(); }   ///< (its offset (u64) and size (u64))
     private:
         void reindex();
     private:
         shape* iShape = root_shape();
-        region_vector<property> iEntries;
+        region_vector<value> iValues;           ///< (a shape: its properties' values (an accessor's: its accessor_pair))
+        region_vector<property> iEntries;       ///< (no shape: its properties)
         std::unique_ptr<std::unordered_map<value, std::uint32_t>> iIndex;   ///< (no shape: its keys' positions (if it has many))
         std::uint32_t iDeleted = 0u;
     };
@@ -785,7 +918,7 @@ namespace neos::javascript_runtime
         // (a property that the object is created with (or one known not to exist yet): no checks)
         void put(value aKey, value aValue, std::uint8_t aAttributes = AttributesHidden);
         void put_accessor(value aKey, value aGetter, value aSetter, std::uint8_t aAttributes = AttributeConfigurable);
-        property* own(value aKey) { return properties.find(aKey); }
+        property_ref own(value aKey) { return properties.find(aKey); }
     public:
         // (compiled code reads the prototype and the properties (see neos::language::javascript::layout): their offsets are checked 
         // when the runtime starts)
@@ -799,7 +932,25 @@ namespace neos::javascript_runtime
         value internal = Undefined;     ///< ([[BooleanData]], [[NumberData]], [[StringData]], [[SymbolData]], [[BigIntData]], [[DateValue]],
                                         ///< [[ErrorData]] (its stack) ... as the class has)
         std::uint32_t privateBrand = 0u;
-        std::vector<std::pair<value, property>> privateElements;    ///< (private names (symbols) -> fields, methods and accessors)
+        // (private names (symbols) -> fields, methods and accessors (a pointer: the size of an object's members that precede those 
+        // of its types' that compiled code reads is the same whatever the C++ library))
+        struct private_elements
+        {
+            using element = std::pair<value, property>;
+            std::unique_ptr<std::vector<element>> items;
+            bool empty() const { return !items || items->empty(); }
+            template <typename... Args>
+            element& emplace_back(Args&&... aArguments)
+            {
+                if (!items)
+                    items = std::make_unique<std::vector<element>>();
+                return items->emplace_back(std::forward<Args>(aArguments)...);
+            }
+            element* begin() { return items ? items->data() : nullptr; }
+            element* end() { return items ? items->data() + items->size() : nullptr; }
+            element const* begin() const { return items ? items->data() : nullptr; }
+            element const* end() const { return items ? items->data() + items->size() : nullptr; }
+        } privateElements;
     };
 
     value make_object(value aPrototype);                ///< (an ordinary object)
@@ -1044,6 +1195,7 @@ namespace neos::javascript_runtime
             intlFallbackSymbol = Undefined;
         value throwTypeError = Undefined;       ///< (%ThrowTypeError%)
         value arrayProtoValues = Undefined;     ///< (%Array.prototype.values%)
+        value charCodeAt = Undefined;           ///< (%String.prototype.charCodeAt% (compiled code compares callees with it))
         value eval = Undefined;
         // well-known symbols
         value symAsyncIterator = Undefined, symHasInstance = Undefined, symIsConcatSpreadable = Undefined, symIterator = Undefined,
@@ -1302,9 +1454,9 @@ namespace neos::javascript_runtime
 
     // strings (builtins_string.cpp, unicode.cpp)
     value make_string_iterator(value aString);
-    std::u16string get_substitution_text(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
-        std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement);   ///< (GetSubstitution)
-    std::u16string case_map(std::u16string const& aText, bool aUpper);      ///< (toUpperCase/toLowerCase: full case mapping)
+    std::u16string get_substitution_text(std::u16string_view aMatched, std::u16string_view aString, std::size_t aPosition,
+        std::span<value const> aCaptures, value aNamedCaptures, std::u16string_view aReplacement);   ///< (GetSubstitution)
+    std::u16string case_map(std::u16string_view aText, bool aUpper);        ///< (toUpperCase/toLowerCase: full case mapping)
     value normalize_string(value aString, std::u16string const& aForm);     ///< (NFC, NFD, NFKC or NFKD)
 
     // exotic objects

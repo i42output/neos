@@ -63,7 +63,7 @@ namespace neos::javascript_runtime
             auto const key = to_string(argument(aArguments, 0u));
             auto& registry = the_realm().registry;
             auto const& text = str(key);
-            if (auto const existing = registry.find(text); existing != registry.end())
+            if (auto const existing = registry.find(std::u16string{ text }); existing != registry.end())
                 return existing->second;
             auto const s = make_symbol(key);
             cell_of<symbol>(s).registered = true;

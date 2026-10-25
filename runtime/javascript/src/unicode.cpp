@@ -372,7 +372,7 @@ namespace neos::javascript_runtime
 
 #if !defined(NEOS_JAVASCRIPT_COMPILER)
     // (the runtime's: the compiler (which uses the Unicode data for regular expression literals' patterns) has none)
-    std::u16string case_map(std::u16string const& aText, bool aUpper)
+    std::u16string case_map(std::u16string_view aText, bool aUpper)
     {
         std::u16string result;
         result.reserve(aText.size());
@@ -420,7 +420,7 @@ namespace neos::javascript_runtime
             aForm == u"NFKD" ? unicode::normalization_form::NFKD : unicode::normalization_form::NFC;
         auto const& text = str(aString);
         auto normalized = unicode::normalize(text, form);
-        if (normalized == text)
+        if (normalized == std::u16string_view{ text })
             return aString;
         return make_string(std::move(normalized));
     }
