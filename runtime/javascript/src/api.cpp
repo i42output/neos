@@ -35,6 +35,7 @@
 // value Exception, with the exception pending (javascript::catch takes it)
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -51,8 +52,6 @@ namespace neos::javascript_runtime
     namespace
     {
         neos_rt_host const* sHost = nullptr;
-        std::uint32_t sDispatcher = 0u;
-        void* sMainProgram = nullptr;
         thread_local value tPending = Undefined;
         thread_local std::vector<value> tExtraArguments;
 
@@ -97,10 +96,9 @@ namespace neos::javascript_runtime
         // (the layout of the heap that compiled code reads (neos::language::javascript::layout) is the runtime's)
         void check_layout()
         {
-            static bool sChecked = false;
-            if (sChecked)
+            static std::atomic<bool> sChecked = false;     // (once (an isolate that checks it at the same time as another checks it too))
+            if (sChecked.exchange(true))
                 return;
-            sChecked = true;
             namespace jsl = neos::language::javascript::layout;
             auto const& o = obj(the_realm().objectPrototype);
             auto const at = [&](void const* aField)
@@ -316,9 +314,11 @@ namespace neos::javascript_runtime
         {
             return guard([&]()
             {
-                sDispatcher = static_cast<std::uint32_t>(aDispatcher);
-                if (sMainProgram == nullptr)
-                    sMainProgram = current_program();
+                (void)aDispatcher;
+                // (the thread's isolate (made now if it has none): its program is the first that uses it (programs that it compiles
+                // (e.g. eval's) are run by it, on its thread))
+                if (auto& h = the_heap(); h.mainProgram == nullptr)
+                    h.mainProgram = current_program();
                 if (!realm_initialized())
                     initialize_realm();
                 check_layout();
@@ -608,8 +608,8 @@ namespace neos::javascript_runtime
         };
         std::vector<program_word_use>& program_words()
         {
-            static std::vector<program_word_use> sWords;
-            return sWords;
+            static isolate_local<std::vector<program_word_use>> sWords;
+            return *sWords;
         }
         root_tracer const sWordRoots{ [](tracer& aTracer)
         {
@@ -1163,7 +1163,7 @@ namespace neos::javascript_runtime
             };
             site_tables& the_site_tables()
             {
-                static site_tables* sTables = new site_tables{};
+                static isolate_local<site_tables> sTables;
                 return *sTables;
             }
             root_tracer const sSiteRoots{ [](tracer& aTracer)
@@ -2180,25 +2180,30 @@ namespace neos::javascript_runtime
     namespace
     {
         // (the programs whose code something refers to (a function they made, or a template object of theirs): they stay loaded)
-        std::unordered_set<void*>& retained_programs()
+        struct retained
         {
-            static std::unordered_set<void*> sPrograms;
-            return sPrograms;
+            std::unordered_set<void*> programs;
+            void* last = nullptr;   // (retained: (one that is retained is not unloaded while its isolate lives, so its address is not reused))
+        };
+        retained& retained_programs()
+        {
+            static isolate_local<retained> sPrograms;
+            return *sPrograms;
         }
-        void* sLastRetained = nullptr; // (retained: (one that is retained is never unloaded, so its address is not reused))
     }
 
     void retain_program(void* aProgram)
     {
-        if (aProgram == sLastRetained)
+        auto& r = retained_programs();
+        if (aProgram == r.last)
             return;
-        retained_programs().insert(aProgram);
-        sLastRetained = aProgram;
+        r.programs.insert(aProgram);
+        r.last = aProgram;
     }
 
     bool program_retained(void* aProgram)
     {
-        return retained_programs().contains(aProgram);
+        return retained_programs().programs.contains(aProgram);
     }
 
     std::span<neos_rt_function const> api_functions()
@@ -2208,7 +2213,20 @@ namespace neos::javascript_runtime
 
     void program_ended()
     {
-        program_ended(current_program());
+        auto* const program = current_program();
+        program_ended(program);
+        // (the end of the program whose isolate it is: the isolate ends (its cells, its state, its pages), and with it the thread's state
+        // that refers to it)
+        if (auto* const h = current_isolate(); h != nullptr && h->mainProgram == program)
+        {
+            tPending = Undefined;
+            tExtraArguments.clear();
+            tExtraArguments.shrink_to_fit();
+            tTail = {};
+            tDeferTail = false;
+            isolate_ending();
+            end_isolate();
+        }
     }
 
     void program_ended(void* aProgram)

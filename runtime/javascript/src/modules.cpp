@@ -115,19 +115,30 @@ namespace neos::javascript_runtime
             std::map<std::string, std::uint32_t> slots;     ///< (the slots of its environment's bindings, by name)
         };
 
+        // (the isolate's modules (they live as long as it does))
+        struct module_registry : std::map<std::string, module_record*>
+        {
+            module_registry() = default;
+            module_registry(module_registry const&) = delete;
+            ~module_registry()
+            {
+                for (auto const& m : *this)
+                    delete m.second;
+            }
+        };
         std::map<std::string, module_record*>& registry()
         {
-            static std::map<std::string, module_record*> sRegistry;
-            return sRegistry;
+            static isolate_local<module_registry> sRegistry;
+            return *sRegistry;
         }
 
         std::map<void*, module_record*>& by_program()
         {
-            static std::map<void*, module_record*> sModules;
-            return sModules;
+            static isolate_local<std::map<void*, module_record*>> sModules;
+            return *sModules;
         }
 
-        module_record* tLoading = nullptr;          // (the module whose program is being run to define it)
+        thread_local module_record* tLoading = nullptr;          // (the module whose program is being run to define it)
 
         // (the modules live as long as the program)
         root_tracer const sModuleRoots{ [](tracer& aTracer)

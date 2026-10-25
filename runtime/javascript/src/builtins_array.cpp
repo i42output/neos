@@ -643,20 +643,25 @@ namespace neos::javascript_runtime
             auto* ap = as_array(r.arrayPrototype);
             if (ap == nullptr || ap->sparse || !ap->elements.empty() || obj(r.arrayPrototype).proto != r.objectPrototype)
                 return false;
-            static std::size_t sEntries = static_cast<std::size_t>(-1);
-            static bool sPlain = false;
-            auto const& properties = obj(r.objectPrototype).properties;
-            if (properties.slots() != sEntries)
+            struct plain_cache
             {
-                sEntries = properties.slots();
-                sPlain = true;
+                std::size_t entries = static_cast<std::size_t>(-1);
+                bool plain = false;
+            };
+            static isolate_local<plain_cache> sCache;
+            auto& cache = *sCache;
+            auto const& properties = obj(r.objectPrototype).properties;
+            if (properties.slots() != cache.entries)
+            {
+                cache.entries = properties.slots();
+                cache.plain = true;
                 properties.for_each([&](property const& e)
                 {
                     if (is_string(e.key) && array_index(e.key))
-                        sPlain = false;
+                        cache.plain = false;
                 });
             }
-            return sPlain;
+            return cache.plain;
         }
 
         value array_push(value aThis, arguments aArguments, value, function_object&)

@@ -96,7 +96,8 @@ namespace neos::javascript_runtime
             value source, flags, exec, global, ignoreCase, multiline, dotAll, unicode, unicodeSets, sticky, hasIndices;
             value execFunction;     ///< (%RegExp.prototype.exec%)
         };
-        keys sKeys;
+        isolate_local<keys> sKeysLocal;
+        keys& the_keys() { return *sKeysLocal; }
 
         // (the legacy static properties of %RegExp% (RegExp.$1, lastMatch, ...): the last match of a RegExp with
         // [[LegacyFeaturesEnabled]] (its substrings are made when they are read))
@@ -108,36 +109,37 @@ namespace neos::javascript_runtime
             std::int32_t captures[20] = {}; ///< (the match and $1-$9: start and end (-1: undefined))
             std::int32_t lastParen[2] = { -1, -1 };
         };
-        legacy_statics sLegacy;
+        isolate_local<legacy_statics> sLegacyLocal;
+        legacy_statics& the_legacy() { return *sLegacyLocal; }
 
         root_tracer const sRegExpRoots{ [](tracer& aTracer)
         {
-            aTracer.conservative(&sKeys, &sKeys + 1);
-            aTracer.mark(sLegacy.input);
-            aTracer.mark(sLegacy.subject);
+            aTracer.conservative(&the_keys(), &the_keys() + 1);
+            aTracer.mark(the_legacy().input);
+            aTracer.mark(the_legacy().subject);
         } };
 
         void update_legacy_statics(value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
         {
-            sLegacy.valid = true;
-            sLegacy.input = aSubject;
-            sLegacy.subject = aSubject;
-            sLegacy.captures[0] = aStart;
-            sLegacy.captures[1] = aCaptures[1];
+            the_legacy().valid = true;
+            the_legacy().input = aSubject;
+            the_legacy().subject = aSubject;
+            the_legacy().captures[0] = aStart;
+            the_legacy().captures[1] = aCaptures[1];
             for (std::uint32_t i = 1u; i <= 9u; ++i)
             {
-                sLegacy.captures[i * 2u] = i <= aCount ? aCaptures[i * 2u] : -1;
-                sLegacy.captures[i * 2u + 1u] = i <= aCount ? aCaptures[i * 2u + 1u] : -1;
+                the_legacy().captures[i * 2u] = i <= aCount ? aCaptures[i * 2u] : -1;
+                the_legacy().captures[i * 2u + 1u] = i <= aCount ? aCaptures[i * 2u + 1u] : -1;
             }
-            sLegacy.lastParen[0] = aCount > 0u ? aCaptures[aCount * 2u] : -1;
-            sLegacy.lastParen[1] = aCount > 0u ? aCaptures[aCount * 2u + 1u] : -1;
+            the_legacy().lastParen[0] = aCount > 0u ? aCaptures[aCount * 2u] : -1;
+            the_legacy().lastParen[1] = aCount > 0u ? aCaptures[aCount * 2u + 1u] : -1;
         }
 
         // (compiled patterns, by flags and pattern)
         std::unordered_map<std::u16string, std::shared_ptr<regexp::program const>>& program_cache()
         {
-            static std::unordered_map<std::u16string, std::shared_ptr<regexp::program const>> sCache;
-            return sCache;
+            static isolate_local<std::unordered_map<std::u16string, std::shared_ptr<regexp::program const>>> sCache;
+            return *sCache;
         }
 
         std::shared_ptr<regexp::program const> compile_pattern(value aPattern, value aFlags, std::uint32_t aFlagBits)
@@ -277,7 +279,7 @@ namespace neos::javascript_runtime
             if (aR.legacyFeaturesEnabled)
                 update_legacy_statics(aS, captures, index, program->captureCount);
             else
-                sLegacy.valid = false;
+                the_legacy().valid = false;
             captures[0] = index;
             return true;
         }
@@ -369,10 +371,10 @@ namespace neos::javascript_runtime
             auto* const r = as_regexp(aR);
             if (r == nullptr || !r->matcher)
                 return false;
-            if (r->own(sKeys.exec) != nullptr || r->proto != the_realm().regexpPrototype)
+            if (r->own(the_keys().exec) != nullptr || r->proto != the_realm().regexpPrototype)
                 return false;
-            auto const exec = obj(r->proto).own(sKeys.exec);
-            return exec != nullptr && !exec->accessor() && exec->data() == sKeys.execFunction;
+            auto const exec = obj(r->proto).own(the_keys().exec);
+            return exec != nullptr && !exec->accessor() && exec->data() == the_keys().execFunction;
         }
 
         // (RegExpExec)
@@ -380,7 +382,7 @@ namespace neos::javascript_runtime
         {
             if (has_builtin_exec(aR))
                 return builtin_exec(*as_regexp(aR), aR, aS, aKind);
-            auto const exec = get(aR, sKeys.exec);
+            auto const exec = get(aR, the_keys().exec);
             if (is_callable(exec))
             {
                 value const args[] = { aS };
@@ -422,8 +424,8 @@ namespace neos::javascript_runtime
             }
             else if (patternIsRegExp)
             {
-                p = get(pattern, sKeys.source);
-                f = flags == Undefined ? get(pattern, sKeys.flags) : flags;
+                p = get(pattern, the_keys().source);
+                f = flags == Undefined ? get(pattern, the_keys().flags) : flags;
             }
             else
             {
@@ -529,8 +531,8 @@ namespace neos::javascript_runtime
         value regexp_prototype_to_string(value aThis, arguments, value, function_object&)
         {
             require_object(aThis, "toString");
-            auto const pattern = to_string(get(aThis, sKeys.source));
-            auto const flags = to_string(get(aThis, sKeys.flags));
+            auto const pattern = to_string(get(aThis, the_keys().source));
+            auto const flags = to_string(get(aThis, the_keys().flags));
             return concat(concat(concat(ascii("/"), pattern), ascii("/")), flags);
         }
 
@@ -563,14 +565,14 @@ namespace neos::javascript_runtime
                 if (to_boolean(get(aThis, aKey)))
                     result.push_back(aFlag);
             };
-            flag(sKeys.hasIndices, u'd');
-            flag(sKeys.global, u'g');
-            flag(sKeys.ignoreCase, u'i');
-            flag(sKeys.multiline, u'm');
-            flag(sKeys.dotAll, u's');
-            flag(sKeys.unicode, u'u');
-            flag(sKeys.unicodeSets, u'v');
-            flag(sKeys.sticky, u'y');
+            flag(the_keys().hasIndices, u'd');
+            flag(the_keys().global, u'g');
+            flag(the_keys().ignoreCase, u'i');
+            flag(the_keys().multiline, u'm');
+            flag(the_keys().dotAll, u's');
+            flag(the_keys().unicode, u'u');
+            flag(the_keys().unicodeSets, u'v');
+            flag(the_keys().sticky, u'y');
             return make_string(std::move(result));
         }
 
@@ -678,22 +680,22 @@ namespace neos::javascript_runtime
         {
             if (aThis != the_realm().regexp)
                 throw_type_error("RegExp legacy static property getter called on an incompatible receiver");
-            if (!sLegacy.valid)
+            if (!the_legacy().valid)
                 throw_type_error("RegExp legacy static property is not available");
             if constexpr (Which == 13)
-                return sLegacy.input == Undefined ? the_names().empty : sLegacy.input;
+                return the_legacy().input == Undefined ? the_names().empty : the_legacy().input;
             else
             {
-                if (sLegacy.subject == Undefined)
+                if (the_legacy().subject == Undefined)
                     return the_names().empty;
-                auto const& text = str(sLegacy.subject);
+                auto const& text = str(the_legacy().subject);
                 if constexpr (Which == 11)
-                    return substring(text, 0, sLegacy.captures[0]);
+                    return substring(text, 0, the_legacy().captures[0]);
                 else if constexpr (Which == 12)
-                    return substring(text, sLegacy.captures[1], static_cast<std::int32_t>(text.size()));
+                    return substring(text, the_legacy().captures[1], static_cast<std::int32_t>(text.size()));
                 else
                 {
-                    auto const* const c = Which == 10 ? sLegacy.lastParen : sLegacy.captures + Which * 2;
+                    auto const* const c = Which == 10 ? the_legacy().lastParen : the_legacy().captures + Which * 2;
                     return c[0] == -1 ? the_names().empty : substring(text, c[0], c[1]);
                 }
             }
@@ -703,7 +705,7 @@ namespace neos::javascript_runtime
         {
             if (aThis != the_realm().regexp)
                 throw_type_error("RegExp.input setter called on an incompatible receiver");
-            sLegacy.input = to_string(argument(aArguments, 0u));
+            the_legacy().input = to_string(argument(aArguments, 0u));
             return Undefined;
         }
 
@@ -728,7 +730,7 @@ namespace neos::javascript_runtime
         {
             require_object(aThis, "[Symbol.match]");
             auto const s = to_string(argument(aArguments, 0u));
-            auto const flags = to_string(get(aThis, sKeys.flags));
+            auto const flags = to_string(get(aThis, the_keys().flags));
             if (!flags_contain(flags, u'g'))
                 return regexp_exec(aThis, s);
             bool const fullUnicode = flags_contain(flags, u'u') || flags_contain(flags, u'v');
@@ -773,7 +775,7 @@ namespace neos::javascript_runtime
             require_object(aThis, "[Symbol.matchAll]");
             auto const s = to_string(argument(aArguments, 0u));
             auto const c = species_constructor(aThis, the_realm().regexp);
-            auto const flags = to_string(get(aThis, sKeys.flags));
+            auto const flags = to_string(get(aThis, the_keys().flags));
             value const args[] = { aThis, flags };
             auto const matcher = construct(c, args);
             auto const lastIndex = to_length(get(aThis, the_names().lastIndex));
@@ -820,7 +822,7 @@ namespace neos::javascript_runtime
             bool const functionalReplace = is_callable(replaceValue);
             if (!functionalReplace)
                 replaceValue = to_string(replaceValue);
-            auto const flags = to_string(get(aThis, sKeys.flags));
+            auto const flags = to_string(get(aThis, the_keys().flags));
             bool const global = flags_contain(flags, u'g');
             bool fullUnicode = false;
             if (global)
@@ -954,7 +956,7 @@ namespace neos::javascript_runtime
             require_object(aThis, "[Symbol.split]");
             auto const s = to_string(argument(aArguments, 0u));
             auto const c = species_constructor(aThis, the_realm().regexp);
-            auto const flags = to_string(get(aThis, sKeys.flags));
+            auto const flags = to_string(get(aThis, the_keys().flags));
             bool const unicodeMatching = flags_contain(flags, u'u') || flags_contain(flags, u'v');
             auto const newFlags = flags_contain(flags, u'y') ? flags : concat(flags, ascii("y"));
             value const args[] = { aThis, newFlags };
@@ -1055,17 +1057,17 @@ namespace neos::javascript_runtime
 
     void init_regexp(realm& aRealm)
     {
-        sKeys.source = ascii("source");
-        sKeys.flags = ascii("flags");
-        sKeys.exec = ascii("exec");
-        sKeys.global = ascii("global");
-        sKeys.ignoreCase = ascii("ignoreCase");
-        sKeys.multiline = ascii("multiline");
-        sKeys.dotAll = ascii("dotAll");
-        sKeys.unicode = ascii("unicode");
-        sKeys.unicodeSets = ascii("unicodeSets");
-        sKeys.sticky = ascii("sticky");
-        sKeys.hasIndices = ascii("hasIndices");
+        the_keys().source = ascii("source");
+        the_keys().flags = ascii("flags");
+        the_keys().exec = ascii("exec");
+        the_keys().global = ascii("global");
+        the_keys().ignoreCase = ascii("ignoreCase");
+        the_keys().multiline = ascii("multiline");
+        the_keys().dotAll = ascii("dotAll");
+        the_keys().unicode = ascii("unicode");
+        the_keys().unicodeSets = ascii("unicodeSets");
+        the_keys().sticky = ascii("sticky");
+        the_keys().hasIndices = ascii("hasIndices");
 
         aRealm.regexpPrototype = make_object(aRealm.objectPrototype);
         auto const p = aRealm.regexpPrototype;
@@ -1076,25 +1078,25 @@ namespace neos::javascript_runtime
         getter(c, aRealm.symSpecies, regexp_species);
         method(c, "escape", 1u, regexp_escape);
 
-        sKeys.execFunction = method(p, "exec", 1u, regexp_prototype_exec);
+        the_keys().execFunction = method(p, "exec", 1u, regexp_prototype_exec);
         method(p, "compile", 2u, regexp_prototype_compile);
-        getter(p, sKeys.dotAll, regexp_prototype_dot_all);
-        getter(p, sKeys.flags, regexp_prototype_flags);
-        getter(p, sKeys.global, regexp_prototype_global);
-        getter(p, sKeys.hasIndices, regexp_prototype_has_indices);
-        getter(p, sKeys.ignoreCase, regexp_prototype_ignore_case);
+        getter(p, the_keys().dotAll, regexp_prototype_dot_all);
+        getter(p, the_keys().flags, regexp_prototype_flags);
+        getter(p, the_keys().global, regexp_prototype_global);
+        getter(p, the_keys().hasIndices, regexp_prototype_has_indices);
+        getter(p, the_keys().ignoreCase, regexp_prototype_ignore_case);
         method(p, aRealm.symMatch, 1u, regexp_prototype_match);
         method(p, aRealm.symMatchAll, 1u, regexp_prototype_match_all);
-        getter(p, sKeys.multiline, regexp_prototype_multiline);
+        getter(p, the_keys().multiline, regexp_prototype_multiline);
         method(p, aRealm.symReplace, 2u, regexp_prototype_replace);
         method(p, aRealm.symSearch, 1u, regexp_prototype_search);
-        getter(p, sKeys.source, regexp_prototype_source);
+        getter(p, the_keys().source, regexp_prototype_source);
         method(p, aRealm.symSplit, 2u, regexp_prototype_split);
-        getter(p, sKeys.sticky, regexp_prototype_sticky);
+        getter(p, the_keys().sticky, regexp_prototype_sticky);
         method(p, "test", 1u, regexp_prototype_test);
         method(p, "toString", 0u, regexp_prototype_to_string);
-        getter(p, sKeys.unicode, regexp_prototype_unicode);
-        getter(p, sKeys.unicodeSets, regexp_prototype_unicode_sets);
+        getter(p, the_keys().unicode, regexp_prototype_unicode);
+        getter(p, the_keys().unicodeSets, regexp_prototype_unicode_sets);
 
         aRealm.regexpStringIteratorPrototype = make_object(aRealm.iteratorPrototype);
         method(aRealm.regexpStringIteratorPrototype, "next", 0u, regexp_string_iterator_next);

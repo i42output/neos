@@ -1100,9 +1100,13 @@ namespace neos::javascript_runtime::intl
         }
 
         // (Date.prototype.toLocale*String's formats of the default locale and options (made once per realm and kind): roots)
-        value sDefaultFormats[3] = { Undefined, Undefined, Undefined };
-        realm const* sDefaultFormatsRealm = nullptr;
-        root_tracer const sDefaultFormatsRoot{ [](tracer& aTracer) { for (auto v : sDefaultFormats) aTracer.mark(v); } };
+        struct default_formats
+        {
+            value formats[3] = { Undefined, Undefined, Undefined };
+            realm const* formatsRealm = nullptr;
+        };
+        isolate_local<default_formats> sDefaults;
+        root_tracer const sDefaultFormatsRoot{ [](tracer& aTracer) { for (auto v : sDefaults->formats) aTracer.mark(v); } };
     }
 
     value date_to_locale_string(double aTime, value aLocales, value aOptions, int aRequired, int aDefaults)
@@ -1114,13 +1118,14 @@ namespace neos::javascript_runtime::intl
         value dtf;
         if (is_undefined(aLocales) && is_undefined(aOptions))
         {
-            if (sDefaultFormatsRealm != &r)
+            auto& d = *sDefaults;
+            if (d.formatsRealm != &r)
             {
-                for (auto& f : sDefaultFormats)
+                for (auto& f : d.formats)
                     f = Undefined;
-                sDefaultFormatsRealm = &r;
+                d.formatsRealm = &r;
             }
-            auto& cached = sDefaultFormats[aRequired];
+            auto& cached = d.formats[aRequired];
             if (is_undefined(cached))
                 cached = create_date_time_format(r.intlDateTimeFormat, Undefined, Undefined, static_cast<required>(aRequired), static_cast<defaults>(aDefaults));
             dtf = cached;

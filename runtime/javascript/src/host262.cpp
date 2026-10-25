@@ -119,17 +119,17 @@ namespace neos::javascript_runtime
 
         std::vector<std::unique_ptr<agent>>& agents()
         {
-            static std::vector<std::unique_ptr<agent>> sAgents;
-            return sAgents;
+            static isolate_local<std::vector<std::unique_ptr<agent>>> sAgents;
+            return *sAgents;
         }
 
         std::deque<value>& reports()
         {
-            static std::deque<value> sReports;
-            return sReports;
+            static isolate_local<std::deque<value>> sReports;
+            return *sReports;
         }
 
-        agent* tAgent = nullptr;
+        thread_local agent* tAgent = nullptr;
 
         void agent_entry(void* aData)
         {
@@ -229,9 +229,9 @@ namespace neos::javascript_runtime
         value agent_start(value, arguments aArguments, value, function_object&)
         {
             // (agents run on coroutines whose stacks the collector does not scan: while there are agents, no garbage is collected)
-            static std::optional<gc_pause> sNoCollection;
-            if (!sNoCollection)
-                sNoCollection.emplace();
+            static isolate_local<std::optional<gc_pause>> sNoCollection;
+            if (!*sNoCollection)
+                sNoCollection->emplace();
             auto a = std::make_unique<agent>();
             a->source = to_string(argument(aArguments, 0u));
             {

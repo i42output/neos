@@ -140,7 +140,7 @@ namespace neos::javascript_runtime
 
         intern_table& interned()
         {
-            static intern_table* sTable = new intern_table{};
+            static isolate_local<intern_table> sTable;
             return *sTable;
         }
 
@@ -184,8 +184,12 @@ namespace neos::javascript_runtime
         // (single code unit strings (ASCII) are shared)
         if (aCharacter < 0x80u)
         {
-            static value sStrings[0x80] = {};
-            auto& s = sStrings[aCharacter];
+            struct ascii_strings
+            {
+                value strings[0x80] = {};
+            };
+            static isolate_local<ascii_strings> sStrings;
+            auto& s = sStrings->strings[aCharacter];
             if (s == 0u)
                 s = intern(std::u16string_view{ &aCharacter, 1u });
             return s;
@@ -430,12 +434,14 @@ namespace neos::javascript_runtime
 
     value index_key(std::uint64_t aIndex)
     {
-        static std::vector<value> sSmall;
         if (aIndex < 1024u)
         {
-            if (sSmall.empty())
-                sSmall.resize(1024u, 0u);
-            auto& k = sSmall[static_cast<std::size_t>(aIndex)];
+            struct small_keys
+            {
+                value keys[1024u] = {};
+            };
+            static isolate_local<small_keys> sSmall;
+            auto& k = sSmall->keys[static_cast<std::size_t>(aIndex)];
             if (k == 0u)
             {
                 char digits[24];

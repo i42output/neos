@@ -223,8 +223,8 @@ namespace neos::javascript_runtime
         // (the names of environments (environment_names), by their descriptors (interned literals))
         std::unordered_map<value, value>& names_cache()
         {
-            static std::unordered_map<value, value> sCache;
-            return sCache;
+            static isolate_local<std::unordered_map<value, value>> sCache;
+            return *sCache;
         }
 
         root_tracer const sEvalRoots{ [](tracer& aTracer)
@@ -248,22 +248,22 @@ namespace neos::javascript_runtime
         using program_cache = std::map<std::pair<std::string, std::string>, void*>;
         program_cache& programs()
         {
-            static program_cache sPrograms;
-            return sPrograms;
+            static isolate_local<program_cache> sPrograms;
+            return *sPrograms;
         }
         // (the cache's entries, by program)
         std::unordered_map<void*, program_cache::iterator>& cached_programs()
         {
-            static std::unordered_map<void*, program_cache::iterator> sPrograms;
-            return sPrograms;
+            static isolate_local<std::unordered_map<void*, program_cache::iterator>> sPrograms;
+            return *sPrograms;
         }
 
         // (programs compiled for code that made no functions (nothing refers to their code once they have run): the latest (that the
         // cache keeps) stay loaded, the others are unloaded (so that code that evaluates many sources does not keep them all))
         std::deque<void*>& transient_programs()
         {
-            static std::deque<void*> sPrograms;
-            return sPrograms;
+            static isolate_local<std::deque<void*>> sPrograms;
+            return *sPrograms;
         }
         std::size_t constexpr TransientPrograms = 64u;
 

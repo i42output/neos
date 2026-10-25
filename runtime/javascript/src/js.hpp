@@ -352,16 +352,27 @@ namespace neos::javascript_runtime
     class array_object;
     struct shape;
     struct property_descriptor;
+    struct realm;
+    struct names;
+    class collector;
     template <typename T>
     shape* type_root_shape();   ///< (the shape of no properties of objects of type T (other than object and function_object))
+    std::size_t new_shape_type();   ///< (gc.cpp: a number for a type's root shapes (see type_root_shape))
 
     inline constexpr std::uint32_t MaxCellValues = 32u;     ///< (property values that an object is made with room for in its cell)
 
+    // (an isolate: a heap and the state of the runtime that refers to its cells (its realms, interned strings, shapes ...). Programs that
+    // run at the same time (on different threads) each have their own (a thread runs one at a time: the_heap()); all of them are in the
+    // one region (its address never changes: compiled code uses it as a constant), each in pages of its own. A program's isolate is made
+    // when the runtime is first used on its thread (see api::init) and destroyed when the program ends (end_isolate). The runtime's
+    // per-isolate state that is not the heap's own members is isolate_local's)
     class heap
     {
     public:
         heap();
         ~heap();
+        heap(heap const&) = delete;
+        heap& operator=(heap const&) = delete;
     public:
         template <typename T, typename... Args>
         T& make(Args&&... aArguments)
@@ -419,16 +430,44 @@ namespace neos::javascript_runtime
         }
         static constexpr unsigned HandleShift = 4u;     ///< (a handle: its cell's offset in the region >> HandleShift)
         cell* find(std::uint32_t aHandle) const;        ///< (gc.cpp: the live cell whose handle it is (null if none))
-        cell& at(std::uint32_t aHandle) const
+        static cell& at(std::uint32_t aHandle)
         {
             return *reinterpret_cast<cell*>(gRegionBase + (static_cast<std::size_t>(aHandle) << HandleShift));
         }
         void account(std::size_t aBytes) { iAllocatedBytes += aBytes; }    ///< (memory that a new cell owns (e.g. a string's text))
         void collect();                                                     ///< (a full collection now (unless collection is disabled))
+    public:
+        // --- the isolate's state
+        collector& the_collector() const { return *iCollector; }
+        shape* root_shape() const { return iRootShape; }
+        shape* root_shape_of(std::size_t aType)
+        {
+            if (aType < iTypeRootShapes.size() && iTypeRootShapes[aType] != nullptr)
+                return iTypeRootShapes[aType];
+            return new_type_root_shape(aType);
+        }
+        std::size_t& shape_count() { return iShapes; }
+        // (an isolate_local's object (made when it is first used))
+        template <typename T>
+        T& local(std::size_t aIndex)
+        {
+            if (aIndex < iLocals.size() && iLocals[aIndex].object != nullptr)
+                return *static_cast<T*>(iLocals[aIndex].object);
+            return *static_cast<T*>(new_local(aIndex, []() -> void* { return new T{}; }, [](void* aObject) { delete static_cast<T*>(aObject); }));
+        }
+        realm* mainRealm = nullptr;     ///< (the first realm: the program's)
+        names* commonNames = nullptr;   ///< (see the_names)
+        void* mainProgram = nullptr;    ///< (the program whose end ends the isolate (see end_isolate))
+    private:
+        friend void end_isolate();
+        friend heap& new_isolate();
+        shape* new_type_root_shape(std::size_t aType);
+        void* new_local(std::size_t aIndex, void* (*aMake)(), void (*aDestroy)(void*));
+        void destroy_locals() noexcept;
     private:
         void* allocate(std::size_t aSize);
         void deallocate(void* aMemory) noexcept;
-        static std::size_t slot_size(void const* aMemory);  ///< (the size of the slot that a cell's memory is (its size or more))
+        std::size_t slot_size(void const* aMemory);         ///< (the size of the slot that a cell's memory is (its size or more))
         void allocating();
         void add(cell& aCell, void* aMemory);
     private:
@@ -437,9 +476,47 @@ namespace neos::javascript_runtime
         std::uint64_t iAllocationTrigger = ~std::uint64_t{};
         std::uint64_t iAllocatedBytes = 0u;
         std::uint64_t iByteTrigger = ~std::uint64_t{};
+        collector* iCollector = nullptr;
+        shape* iRootShape = nullptr;
+        std::vector<shape*> iTypeRootShapes;
+        std::size_t iShapes = 0u;
+        struct local_object
+        {
+            void* object = nullptr;
+            void (*destroy)(void*) = nullptr;
+        };
+        std::vector<local_object> iLocals;
+        std::vector<std::size_t> iLocalOrder;   ///< (the order they were made: they are destroyed in the reverse order)
     };
 
-    heap& the_heap();
+    // (the calling thread's isolate (gc.cpp: one is made if it has none))
+    extern thread_local heap* tHeap;
+    heap& new_isolate();
+    inline heap& the_heap()
+    {
+        auto* const h = tHeap;
+        return h != nullptr ? *h : new_isolate();
+    }
+    inline heap* current_isolate() { return tHeap; }    ///< (null if the calling thread has none)
+    void end_isolate();         ///< (gc.cpp: the calling thread's isolate is destroyed (its program has ended): its cells, state and pages)
+
+    // (state of the runtime's that each isolate has its own of (a static of the runtime's that refers to cells, or that the runtime
+    // changes as a program runs): an object of T per isolate, made (T{}) when the isolate first uses it and destroyed with the isolate (in
+    // the reverse order that they were made, after its cells are))
+    std::size_t new_isolate_local();     ///< (gc.cpp: a number for an isolate_local)
+    template <typename T>
+    class isolate_local
+    {
+    public:
+        isolate_local() : iIndex{ new_isolate_local() } {}
+        isolate_local(isolate_local const&) = delete;
+        isolate_local& operator=(isolate_local const&) = delete;
+    public:
+        T& operator*() const { return the_heap().template local<T>(iIndex); }
+        T* operator->() const { return &**this; }
+    private:
+        std::size_t iIndex;
+    };
 
     // --- rooted containers: the values in a container that is not a cell's (e.g. a C++ local, or a static) are kept alive by the 
     // garbage collector only if its memory is rooted (the collector scans the native stacks, not the C++ heap): a container of values 
@@ -486,7 +563,7 @@ namespace neos::javascript_runtime
     template <typename T>
     inline T& cell_of(value aValue)
     {
-        return static_cast<T&>(the_heap().at(handle_of(aValue)));
+        return static_cast<T&>(heap::at(handle_of(aValue)));
     }
 
     bool valid(value aValue);   ///< (a value from compiled code refers to a cell of the heap of its type (if it refers to one))
@@ -700,8 +777,13 @@ namespace neos::javascript_runtime
         std::unique_ptr<std::unordered_map<value, shape*>> iManyTransitions;
         std::unique_ptr<std::unordered_map<value, std::uint32_t>> iIndex;   ///< (built when a key is found in a shape of many keys)
         std::vector<slot> iSlots;       ///< (built when they are wanted)
+    public:
+        shape() = default;
+        shape(shape const&) = delete;
+        shape& operator=(shape const&) = delete;
+        ~shape();                       ///< (object.cpp: and the shapes that it transitions to (its isolate's end: see end_isolate))
     };
-    shape* root_shape();    ///< (the shape of no properties)
+    inline shape* root_shape() { return the_heap().root_shape(); }   ///< (the shape of no properties)
 
     // (an accessor property's getter and setter (in a table that has a shape, its value is the pair))
     class accessor_pair : public cell
@@ -1094,8 +1176,8 @@ namespace neos::javascript_runtime
     template <typename T>
     shape* type_root_shape()
     {
-        static shape* sRoot = new shape{};
-        return sRoot;
+        static std::size_t const sType = new_shape_type();
+        return the_heap().root_shape_of(sType);
     }
 
     value make_native(value aName, std::uint32_t aLength, native_function aFunction, bool aConstructor = false, value aPrototype = 0u);
@@ -1228,6 +1310,7 @@ namespace neos::javascript_runtime
     bool is_object_prototype(object const& aObject);    ///< (a realm's %Object.prototype% (an immutable prototype exotic object))
     void initialize_realm();
     bool realm_initialized();
+    void isolate_ending();                  ///< (realm.cpp: the thread's isolate is about to end: the thread's state that refers to it is reset)
     realm* create_realm();                  ///< (a new realm ($262.createRealm))
     realm* exchange_realm(realm* aRealm);   ///< (the running realm is aRealm: the previous one (e.g. for a coroutine switch))
     realm* exchange_caller_realm(realm* aRealm);    ///< (likewise the realm of the running function's caller (see caller_realm))
@@ -1263,7 +1346,7 @@ namespace neos::javascript_runtime
             then, errors, error, suppressed, stack, empty, undefined, null, true_, false_, object, function, string, number, boolean,
             symbol, bigint, default_, join, raw, size, has, add, keys, values, entries;
     };
-    names const& the_names();
+    inline names const& the_names() { return *the_heap().commonNames; }   ///< (the isolate's (see initialize_realm))
 
     // --- the running program (see api.cpp)
 

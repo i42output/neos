@@ -89,7 +89,7 @@ namespace neos::javascript_runtime
         {
             // (a value's cell (a value that a cell, or a root, has refers to a cell that lives))
             if (aValue >= TagString && aValue < (TagInternal | 0xFFFFFFFFFFFFull) && handle_of(aValue) != 0u)
-                if (auto& c = the_heap().at(handle_of(aValue)); c.marked == 0u)
+                if (auto& c = heap::at(handle_of(aValue)); c.marked == 0u)
                     push(c);
         }
         void mark(cell const* aCell)

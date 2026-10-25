@@ -35,8 +35,11 @@
 // cells that js.hpp defines
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstdio>
+#include <map>
+#include <mutex>
 #include <neos/language/javascript.hpp>
 #include "js.hpp"
 #include "gc.hpp"
@@ -58,6 +61,7 @@
 namespace neos::javascript_runtime
 {
     std::byte* gRegionBase = nullptr;
+    thread_local heap* tHeap = nullptr;
 
     namespace
     {
@@ -67,6 +71,7 @@ namespace neos::javascript_runtime
         constexpr std::size_t PageShift = 16u;
         constexpr std::size_t PageSize = std::size_t{ 1u } << PageShift;
         constexpr std::size_t RegionSize = std::size_t{ 64u } << 30u;      // (address space only: pages are committed when used)
+        constexpr std::size_t PageCount = RegionSize / PageSize;
         constexpr std::size_t MaxSmall = 4096u;
         static_assert(RegionSize >> heap::HandleShift <= std::size_t{ 1u } << 32u);     // (a handle is 32 bits)
         static_assert(neos::language::javascript::layout::HandleShift == heap::HandleShift);
@@ -83,6 +88,7 @@ namespace neos::javascript_runtime
             std::uint32_t slotSize = 0u;    ///< (0: not in use)
             std::uint32_t first = 0u;       ///< (a large cell's: its first page)
             std::size_t largeSize = 0u;     ///< (a large cell's: its size (0: the page has slots))
+            std::uint32_t owner = 0u;       ///< (the isolate whose page it is (see cell_memory::owner): 0: none)
             bool raw = false;               ///< (storage that is not cells (see region_vector))
         };
 
@@ -95,10 +101,156 @@ namespace neos::javascript_runtime
                 h->external_memory_at(neos::language::javascript::layout::Memory, aBase, aSize, NEOS_RT_EXTERNAL_MEMORY_FIXED);
         }
 
+        void commit(void* aAddress, std::size_t aSize)
+        {
+#if defined(_WIN32)
+            if (::VirtualAlloc(aAddress, aSize, MEM_COMMIT, PAGE_READWRITE) == nullptr)
+                throw std::bad_alloc{};
+#else
+            if (::mprotect(aAddress, aSize, PROT_READ | PROT_WRITE) != 0)
+                throw std::bad_alloc{};
+#endif
+        }
+        void decommit(void* aAddress, std::size_t aSize) noexcept
+        {
+#if defined(_WIN32)
+            ::VirtualFree(aAddress, aSize, MEM_DECOMMIT);
+#else
+            ::madvise(aAddress, aSize, MADV_DONTNEED);
+#endif
+        }
+        std::byte* reserve(std::size_t aSize, std::size_t aAlignment)
+        {
+            std::byte* result = nullptr;
+#if defined(_WIN32)
+            (void)aAlignment;   // (VirtualAlloc's are aligned to 64 KB)
+            result = static_cast<std::byte*>(::VirtualAlloc(nullptr, aSize, MEM_RESERVE, PAGE_NOACCESS));
+#else
+            auto const address = ::mmap(nullptr, aSize + aAlignment, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (address != MAP_FAILED)
+                result = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(address) + aAlignment - 1u) & ~(aAlignment - 1u));
+#endif
+            if (result == nullptr)
+            {
+                std::fputs("JavaScript runtime: cannot reserve the heap's address space\n", stderr);
+                std::abort();
+            }
+            return result;
+        }
+
+        // (the region: reserved once, for the process (its address and size never change); its pages are the isolates' (each page's
+        // information says whose it is: an isolate's collector uses only its own); pages are taken from it (the ones that were given
+        // back first) and given back (an isolate's large cell that is freed, an isolate's pages when it ends))
+        class region
+        {
+        public:
+            static region& instance()
+            {
+                static region sRegion;
+                return sRegion;
+            }
+            region()
+            {
+                iBase = reserve(RegionSize, PageSize);
+                gRegionBase = iBase;
+                iPages = reinterpret_cast<page_info*>(reserve(PageCount * sizeof(page_info), PageSize));
+                commit_information(1u);
+                // (the first page is reserved (offset 0 (handle 0) is no cell))
+                iPages[0].raw = true;
+            }
+        public:
+            std::byte* base() const { return iBase; }
+            page_info* pages() const { return iPages; }
+            std::size_t high() const { return iHigh.load(std::memory_order_acquire); }  ///< (the pages that have been used: [0, high))
+            std::size_t take(std::size_t aCount)
+            {
+                std::lock_guard<std::mutex> lock{ iMutex };
+                for (auto r = iFree.begin(); r != iFree.end(); ++r)
+                    if (r->second >= aCount)
+                    {
+                        auto const page = r->first;
+                        auto const rest = r->second - aCount;
+                        iFree.erase(r);
+                        if (rest != 0u)
+                            iFree.emplace(page + aCount, rest);
+                        commit(iBase + page * PageSize, aCount * PageSize);
+                        return page;
+                    }
+                auto const page = iHigh.load(std::memory_order_relaxed);
+                if ((page + aCount) * PageSize > RegionSize)
+                    throw std::bad_alloc{};
+                commit(iBase + page * PageSize, aCount * PageSize);
+                commit_information(page + aCount);
+                iHigh.store(page + aCount, std::memory_order_release);
+                return page;
+            }
+            void give_back(std::size_t aPage, std::size_t aCount) noexcept
+            {
+                for (auto p = aPage; p < aPage + aCount; ++p)
+                    iPages[p] = page_info{};
+                decommit(iBase + aPage * PageSize, aCount * PageSize);
+                std::lock_guard<std::mutex> lock{ iMutex };
+                try
+                {
+                    // (merged with the runs next to it)
+                    auto page = aPage;
+                    auto count = aCount;
+                    if (auto const next = iFree.find(page + count); next != iFree.end())
+                    {
+                        count += next->second;
+                        iFree.erase(next);
+                    }
+                    if (auto previous = iFree.lower_bound(page); previous != iFree.begin())
+                    {
+                        --previous;
+                        if (previous->first + previous->second == page)
+                        {
+                            page = previous->first;
+                            count += previous->second;
+                            iFree.erase(previous);
+                        }
+                    }
+                    iFree.emplace(page, count);
+                }
+                catch (...)
+                {
+                    // (not reused)
+                }
+            }
+            void publish() const { publish_region(iBase, RegionSize); }
+        private:
+            void commit_information(std::size_t aPages)
+            {
+                // (the pages' information (its address space is reserved for all of them): committed as pages are used)
+                constexpr std::size_t chunk = 32768u;   // (pages' information committed at a time: a multiple of the pages' size, in bytes)
+                static_assert(chunk * sizeof(page_info) % PageSize == 0u && PageCount % chunk == 0u);
+                auto const wanted = (aPages + chunk - 1u) / chunk * chunk;
+                if (wanted <= iInformation)
+                    return;
+                commit(reinterpret_cast<std::byte*>(iPages + iInformation), (wanted - iInformation) * sizeof(page_info));
+                iInformation = wanted;
+            }
+        private:
+            std::byte* iBase = nullptr;
+            page_info* iPages = nullptr;
+            std::size_t iInformation = 0u;
+            std::atomic<std::size_t> iHigh = 1u;
+            std::mutex iMutex;
+            std::map<std::size_t, std::size_t> iFree;   ///< (pages given back: first, count)
+        };
+
+        std::uint32_t new_owner()
+        {
+            static std::atomic<std::uint32_t> sOwners = 0u;
+            for (;;)
+                if (auto const owner = ++sOwners; owner != 0u)
+                    return owner;
+        }
+
         class cell_memory
         {
         public:
-            cell_memory()
+            cell_memory() : iRegion{ region::instance() }, iBase{ iRegion.base() }, iPages{ iRegion.pages() }, iOwner{ new_owner() }
             {
                 for (std::size_t c = 0u, size = 0u; size <= MaxSmall; size += 16u)
                 {
@@ -106,25 +258,25 @@ namespace neos::javascript_runtime
                         ++c;
                     iClassOf[size / 16u] = static_cast<std::uint8_t>(c);
                 }
-#if defined(_WIN32)
-                iBase = static_cast<std::byte*>(::VirtualAlloc(nullptr, RegionSize, MEM_RESERVE, PAGE_NOACCESS));
-#else
-                auto const address = ::mmap(nullptr, RegionSize + PageSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (address != MAP_FAILED)
-                    iBase = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(address) + PageSize - 1u) & ~(PageSize - 1u));
-#endif
-                if (iBase == nullptr)
-                {
-                    std::fputs("JavaScript runtime: cannot reserve the heap's address space\n", stderr);
-                    std::abort();
-                }
-                gRegionBase = iBase;
-                iPages.reserve(4096u);
-                // (the first page is reserved (offset 0 (handle 0) is no cell))
-                iPages.resize(1u);
-                for (auto& p : iPages)
-                    p.raw = true;
             }
+            ~cell_memory()
+            {
+                // (the isolate has ended: its pages are given back)
+                for (std::size_t page = 1u, high = iRegion.high(); page < high;)
+                {
+                    if (iPages[page].owner != iOwner)
+                    {
+                        ++page;
+                        continue;
+                    }
+                    auto const first = page;
+                    while (page < high && iPages[page].owner == iOwner)
+                        ++page;
+                    iRegion.give_back(first, page - first);
+                }
+            }
+            cell_memory(cell_memory const&) = delete;
+            cell_memory& operator=(cell_memory const&) = delete;
         public:
             // (a cell's memory, or (aRaw) storage that is not a cell)
             void* allocate(std::size_t aSize, bool aRaw = false)
@@ -156,9 +308,8 @@ namespace neos::javascript_runtime
                 auto const slotSize = SizeClasses[&c - classes];
                 if (c.bump == c.bumpEnd)
                 {
-                    auto const page = new_pages(1u);
-                    iPages[page].slotSize = slotSize;
-                    iPages[page].raw = aRaw;
+                    auto const page = iRegion.take(1u);
+                    iPages[page] = page_info{ slotSize, 0u, 0u, iOwner, aRaw };
                     c.bump = page_address(page);
                     c.bumpEnd = c.bump + (PageSize / slotSize) * slotSize;
                 }
@@ -173,11 +324,14 @@ namespace neos::javascript_runtime
                 if (info.largeSize != 0u)
                 {
                     auto const count = (info.largeSize + PageSize - 1u) / PageSize;
-                    for (std::size_t p = page; p < page + count; ++p)
-                        iPages[p] = page_info{};
-                    decommit(page_address(page), count * PageSize);
                     if (aReuse)
-                        iFreeRuns.emplace_back(page, count);
+                        iRegion.give_back(page, count);
+                    else
+                    {
+                        for (std::size_t p = page; p < page + count; ++p)
+                            iPages[p] = page_info{};
+                        decommit(page_address(page), count * PageSize);
+                    }
                     return;
                 }
                 if (!aReuse)
@@ -186,7 +340,6 @@ namespace neos::javascript_runtime
                 *static_cast<void**>(aMemory) = c.freeList;
                 c.freeList = aMemory;
             }
-            void publish() const { publish_region(iBase, RegionSize); }
             // (lazy sweeping: a collection's pages of small cells, swept later (aSweeper(page)) as their size classes' cells are
             // allocated (or all of them by finish_sweeping))
             void set_sweeper(void (*aSweeper)(void*, std::size_t), void* aData)
@@ -202,10 +355,10 @@ namespace neos::javascript_runtime
                     iClasses[ci].bump = iClasses[ci].bumpEnd;   // (its slots that are not used yet: free slots of its page)
                     iUnswept[ci].clear();
                 }
-                for (auto page = iPages.size(); page-- > 0u;)
+                for (auto page = iRegion.high(); page-- > 0u;)
                 {
                     auto const& info = iPages[page];
-                    if (info.slotSize != 0u && !info.raw && info.largeSize == 0u)
+                    if (info.owner == iOwner && info.slotSize != 0u && !info.raw && info.largeSize == 0u)
                         iUnswept[iClassOf[info.slotSize / 16u]].push_back(page);
                 }
             }
@@ -247,10 +400,10 @@ namespace neos::javascript_runtime
             template <typename Visit>
             void for_each_large_descending(Visit aVisit)
             {
-                for (auto page = iPages.size(); page-- > 0u;)
+                for (auto page = iRegion.high(); page-- > 0u;)
                 {
                     auto const& info = iPages[page];
-                    if (info.slotSize != 0u && !info.raw && info.largeSize != 0u && info.first == page)
+                    if (info.owner == iOwner && info.slotSize != 0u && !info.raw && info.largeSize != 0u && info.first == page)
                         aVisit(page_address(page));
                 }
             }
@@ -258,10 +411,10 @@ namespace neos::javascript_runtime
             std::byte* slot_starting_at(std::size_t aOffset) const
             {
                 auto const page = aOffset >> PageShift;
-                if (page >= iPages.size())
+                if (page >= iRegion.high())
                     return nullptr;
                 auto const& info = iPages[page];
-                if (info.slotSize == 0u || info.raw)
+                if (info.owner != iOwner || info.slotSize == 0u || info.raw)
                     return nullptr;
                 auto const offset = aOffset & (PageSize - 1u);
                 if (info.largeSize != 0u)
@@ -281,10 +434,10 @@ namespace neos::javascript_runtime
                 if (aAddress < base)
                     return nullptr;
                 auto const page = (aAddress - base) >> PageShift;
-                if (page >= iPages.size())
+                if (page >= iRegion.high())
                     return nullptr;
                 auto const& info = iPages[page];
-                if (info.slotSize == 0u || info.raw)
+                if (info.owner != iOwner || info.slotSize == 0u || info.raw)
                     return nullptr;
                 if (info.largeSize != 0u)
                 {
@@ -298,56 +451,20 @@ namespace neos::javascript_runtime
                 return page_address(page) + index * info.slotSize;
             }
             std::uintptr_t begin() const { return reinterpret_cast<std::uintptr_t>(iBase); }
-            std::uintptr_t end() const { return reinterpret_cast<std::uintptr_t>(iBase) + iPages.size() * PageSize; }
+            std::uintptr_t end() const { return reinterpret_cast<std::uintptr_t>(iBase) + iRegion.high() * PageSize; }
         private:
             std::byte* page_address(std::size_t aPage) const { return iBase + aPage * PageSize; }
             std::size_t page_of(void const* aMemory) const
             {
                 return static_cast<std::size_t>((static_cast<std::byte const*>(aMemory) - iBase) >> PageShift);
             }
-            std::size_t new_pages(std::size_t aCount)
-            {
-                for (auto r = iFreeRuns.begin(); r != iFreeRuns.end(); ++r)
-                    if (r->second == aCount)
-                    {
-                        auto const page = r->first;
-                        iFreeRuns.erase(r);
-                        commit(page_address(page), aCount * PageSize);
-                        return page;
-                    }
-                auto const page = iPages.size();
-                if ((page + aCount) * PageSize > RegionSize)
-                    throw std::bad_alloc{};
-                commit(page_address(page), aCount * PageSize);
-                iPages.resize(page + aCount);
-                publish();
-                return page;
-            }
             void* allocate_large(std::size_t aSize, bool aRaw)
             {
                 auto const count = (aSize + PageSize - 1u) / PageSize;
-                auto const page = new_pages(count);
+                auto const page = iRegion.take(count);
                 for (std::size_t p = page; p < page + count; ++p)
-                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize, aRaw };
+                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize, iOwner, aRaw };
                 return page_address(page);
-            }
-            static void commit(void* aAddress, std::size_t aSize)
-            {
-#if defined(_WIN32)
-                if (::VirtualAlloc(aAddress, aSize, MEM_COMMIT, PAGE_READWRITE) == nullptr)
-                    throw std::bad_alloc{};
-#else
-                if (::mprotect(aAddress, aSize, PROT_READ | PROT_WRITE) != 0)
-                    throw std::bad_alloc{};
-#endif
-            }
-            static void decommit(void* aAddress, std::size_t aSize) noexcept
-            {
-#if defined(_WIN32)
-                ::VirtualFree(aAddress, aSize, MEM_DECOMMIT);
-#else
-                ::madvise(aAddress, aSize, MADV_DONTNEED);
-#endif
             }
         private:
             struct size_class
@@ -356,9 +473,10 @@ namespace neos::javascript_runtime
                 std::byte* bump = nullptr;
                 std::byte* bumpEnd = nullptr;
             };
-            std::byte* iBase = nullptr;
-            std::vector<page_info> iPages;
-            std::vector<std::pair<std::size_t, std::size_t>> iFreeRuns;  ///< (large cells' pages that were freed: first, count)
+            region& iRegion;
+            std::byte* iBase;
+            page_info* iPages;
+            std::uint32_t iOwner;           ///< (its isolate's number: its pages are those whose owner it is)
             size_class iRawClasses[ClassCount];
             size_class iClasses[ClassCount];
             std::vector<std::size_t> iUnswept[ClassCount];     ///< (pages of small cells that are not swept yet (the last first))
@@ -378,7 +496,20 @@ namespace neos::javascript_runtime
         };
         static_assert(sizeof(root_block) % 16u == 0u);
 
-        root_block sRootBlocks{ &sRootBlocks, &sRootBlocks, 0u, 0u };
+        // (rooted memory (root_allocate): the thread's (the isolate that it runs scans it; a thread_local container's outlives the
+        // isolates that the thread runs, one after another))
+        root_block& root_blocks()
+        {
+            thread_local root_block tBlocks{ &tBlocks, &tBlocks, 0u, 0u };
+            return tBlocks;
+        }
+
+        // (the runtime's own roots (see root_tracer): the same for every isolate (each marks its isolate's state))
+        std::vector<std::pair<root_tracer::function, root_tracer::function>>& root_list()
+        {
+            static std::vector<std::pair<root_tracer::function, root_tracer::function>> sRoots;
+            return sRoots;
+        }
 
         // --- the calling thread's stacks
 
@@ -591,10 +722,15 @@ namespace neos::javascript_runtime
         std::unordered_map<cell*, std::vector<value>> iPendingEphemerons;    ///< (unmarked keys -> their ephemerons' values)
         std::vector<value> iEphemeronValues;                                ///< (the values of ephemerons whose keys have been marked)
         std::vector<std::pair<cell*, void (*)(cell&, tracer&)>> iAfterMarking;
-        std::vector<std::pair<root_tracer::function, root_tracer::function>>& roots()
+        std::vector<std::pair<root_tracer::function, root_tracer::function>>& roots() { return root_list(); }
+        // (the isolate has ended: its cells are destroyed (the objects that they own are freed))
+        void destroy_cells() noexcept
         {
-            static std::vector<std::pair<root_tracer::function, root_tracer::function>> sRoots;
-            return sRoots;
+            ++iPauses;
+            iMemory.finish_sweeping();
+            // (no cell is marked: all are freed)
+            sweep();
+            iMemory.finish_sweeping();
         }
     private:
         void mark_and_sweep();
@@ -621,46 +757,112 @@ namespace neos::javascript_runtime
     {
         collector& the_collector()
         {
-            static collector* sCollector = new collector{ the_heap() };
-            return *sCollector;
+            return the_heap().the_collector();
         }
     }
 
-    // --- the heap
+    // --- the heap (an isolate's)
 
-    heap::heap()
+    heap::heap() : iRootShape{ new shape{} }
     {
     }
 
     heap::~heap()
     {
-        // (the process is ending: cells are not destroyed (their destructors could refer to others))
     }
 
-    heap& the_heap()
+    heap& new_isolate()
     {
-        static heap* sHeap = new heap{};
-        return *sHeap;
+        auto* const h = new heap{};
+        tHeap = h;
+        h->iCollector = new collector{ *h };
+        return *h;
+    }
+
+    void end_isolate()
+    {
+        auto* const h = tHeap;
+        if (h == nullptr)
+            return;
+        auto* const c = h->iCollector;
+        // (its cells (their destructors use the isolate's state), then its state, then its memory)
+        c->destroy_cells();
+        h->destroy_locals();
+        delete h->iRootShape;
+        for (auto* s : h->iTypeRootShapes)
+            delete s;
+        delete h->commonNames;
+        delete c;
+        tHeap = nullptr;
+        delete h;
+    }
+
+    std::size_t new_isolate_local()
+    {
+        static std::atomic<std::size_t> sLocals = 0u;
+        return sLocals++;
+    }
+
+    void* heap::new_local(std::size_t aIndex, void* (*aMake)(), void (*aDestroy)(void*))
+    {
+        auto* const object = aMake();   // (it may use others, which are made first)
+        if (aIndex >= iLocals.size())
+            iLocals.resize(aIndex + 1u);
+        if (iLocals[aIndex].object != nullptr)
+        {
+            aDestroy(object);
+            return iLocals[aIndex].object;
+        }
+        iLocalOrder.reserve(iLocalOrder.size() + 1u);
+        iLocals[aIndex] = local_object{ object, aDestroy };
+        iLocalOrder.push_back(aIndex);
+        return object;
+    }
+
+    void heap::destroy_locals() noexcept
+    {
+        // (the last made first (one that is used again while others are destroyed is made again, and destroyed later))
+        while (!iLocalOrder.empty())
+        {
+            auto const index = iLocalOrder.back();
+            iLocalOrder.pop_back();
+            auto const l = iLocals[index];
+            iLocals[index] = local_object{};
+            l.destroy(l.object);
+        }
+    }
+
+    std::size_t new_shape_type()
+    {
+        static std::atomic<std::size_t> sTypes = 0u;
+        return sTypes++;
+    }
+
+    shape* heap::new_type_root_shape(std::size_t aType)
+    {
+        if (aType >= iTypeRootShapes.size())
+            iTypeRootShapes.resize(aType + 1u, nullptr);
+        return iTypeRootShapes[aType] = new shape{};
     }
 
     void* heap::allocate(std::size_t aSize)
     {
-        return the_collector().memory().allocate(aSize);
+        return iCollector->memory().allocate(aSize);
     }
 
     std::size_t heap::slot_size(void const* aMemory)
     {
-        return the_collector().memory().size_of(aMemory);
+        return iCollector->memory().size_of(aMemory);
     }
 
     void heap::deallocate(void* aMemory) noexcept
     {
-        the_collector().memory().release(aMemory, true);
+        iCollector->memory().release(aMemory, true);
     }
 
     void heap::allocating()
     {
-        the_collector().allocating();
+        iCollector->allocating();
     }
 
     void heap::add(cell& aCell, void* aMemory)
@@ -668,7 +870,7 @@ namespace neos::javascript_runtime
         // (a cell is the start of its memory (its type has single inheritance))
         if (static_cast<void*>(&aCell) != aMemory)
             std::abort();
-        auto& c = the_collector();
+        auto& c = *iCollector;
         c.record_handle_offset(aCell);
         if (c.collecting())
             aCell.marked = 1u;     // (a cell made while dead cells are freed (e.g. by a weak reference's clearing) lives)
@@ -681,7 +883,7 @@ namespace neos::javascript_runtime
 
     cell* heap::find(std::uint32_t aHandle) const
     {
-        return the_collector().live_cell(aHandle);
+        return iCollector->live_cell(aHandle);
     }
 
     void* region_allocate(std::size_t aSize)
@@ -705,12 +907,12 @@ namespace neos::javascript_runtime
 
     void publish_heap()
     {
-        the_collector().memory().publish();
+        region::instance().publish();
     }
 
     void heap::collect()
     {
-        the_collector().collect();
+        iCollector->collect();
     }
 
     void collect_garbage()
@@ -730,7 +932,7 @@ namespace neos::javascript_runtime
 
     root_tracer::root_tracer(function aFunction, function aAfterMarking)
     {
-        the_collector().roots().emplace_back(aFunction, aAfterMarking);
+        root_list().emplace_back(aFunction, aAfterMarking);
     }
 
     // --- marking
@@ -829,7 +1031,8 @@ namespace neos::javascript_runtime
                 static_cast<collector*>(aData)->conservative(aValues, aValues + aCount);
             }, this);
         // (rooted memory)
-        for (auto* b = sRootBlocks.next; b != &sRootBlocks; b = b->next)
+        auto& blocks = root_blocks();
+        for (auto* b = blocks.next; b != &blocks; b = b->next)
             conservative(b + 1, reinterpret_cast<std::byte const*>(b + 1) + b->size);
         // (the runtime's own)
         for (auto const& r : roots())
@@ -965,14 +1168,15 @@ namespace neos::javascript_runtime
 
     void* root_allocate(std::size_t aBytes)
     {
+        auto& blocks = root_blocks();
         auto* const b = static_cast<root_block*>(std::malloc(sizeof(root_block) + aBytes));
         if (b == nullptr)
             throw std::bad_alloc{};
         b->size = aBytes;
-        b->previous = &sRootBlocks;
-        b->next = sRootBlocks.next;
-        sRootBlocks.next->previous = b;
-        sRootBlocks.next = b;
+        b->previous = &blocks;
+        b->next = blocks.next;
+        blocks.next->previous = b;
+        blocks.next = b;
         return b + 1;
     }
 
@@ -1041,7 +1245,7 @@ namespace neos::javascript_runtime
 
     namespace
     {
-        js_exception* sExceptions = nullptr;
+        thread_local js_exception* sExceptions = nullptr;     // (the thread's: its isolate's)
 
         root_tracer const sExceptionRoots{ [](tracer& aTracer)
         {
@@ -1083,8 +1287,8 @@ namespace neos::javascript_runtime
     {
         value_list& kept_objects()
         {
-            static value_list sKept;
-            return sKept;
+            static isolate_local<value_list> sKept;
+            return *sKept;
         }
     }
 

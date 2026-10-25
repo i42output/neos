@@ -41,24 +41,33 @@ namespace neos::javascript_runtime
 {
     namespace
     {
-        realm* sRealm = nullptr;            // (the first realm: the program's)
         thread_local realm* tCurrent = nullptr;
         thread_local realm* tCaller = nullptr;
-        names* sNames = nullptr;
 
         std::unordered_map<std::u16string, value>& symbol_registry()
         {
-            static std::unordered_map<std::u16string, value> sRegistry;
-            return sRegistry;
+            static isolate_local<std::unordered_map<std::u16string, value>> sRegistry;
+            return *sRegistry;
         }
 
         void initialize(realm& r);
 
-        // (the realms: they live as long as the program)
+        // (the realms: they live as long as the isolate (the first is the program's: heap::mainRealm))
+        struct realm_list
+        {
+            std::vector<realm*> list;
+            realm_list() = default;
+            realm_list(realm_list const&) = delete;
+            ~realm_list()
+            {
+                for (auto* r : list)
+                    delete r;
+            }
+        };
         std::vector<realm*>& realms()
         {
-            static std::vector<realm*> sRealms;
-            return sRealms;
+            static isolate_local<realm_list> sRealms;
+            return sRealms->list;
         }
 
         root_tracer const sRealmRoots{ [](tracer& aTracer)
@@ -92,7 +101,7 @@ namespace neos::javascript_runtime
 
     realm& the_realm()
     {
-        return tCurrent != nullptr ? *tCurrent : *sRealm;
+        return tCurrent != nullptr ? *tCurrent : *the_heap().mainRealm;
     }
 
     void global_mirror_update(realm& aRealm, value aName)
@@ -124,7 +133,7 @@ namespace neos::javascript_runtime
 
     bool realm_initialized()
     {
-        return sRealm != nullptr;
+        return the_heap().mainRealm != nullptr;
     }
 
     realm_scope::realm_scope(realm* aRealm) : iPrevious{ tCurrent }, iPreviousCaller{ tCaller }
@@ -138,6 +147,12 @@ namespace neos::javascript_runtime
     {
         tCurrent = iPrevious;
         tCaller = iPreviousCaller;
+    }
+
+    void isolate_ending()
+    {
+        tCurrent = nullptr;
+        tCaller = nullptr;
     }
 
     realm* exchange_realm(realm* aRealm)
@@ -192,16 +207,12 @@ namespace neos::javascript_runtime
         return the_realm();
     }
 
-    names const& the_names()
-    {
-        return *sNames;
-    }
-
     void initialize_realm()
     {
         gc_pause const pause;
-        sNames = new names{};
-        auto& n = *sNames;
+        auto& h = the_heap();
+        h.commonNames = new names{};
+        auto& n = *h.commonNames;
         n.length = ascii("length");
         n.prototype = ascii("prototype");
         n.constructor = ascii("constructor");
@@ -255,9 +266,10 @@ namespace neos::javascript_runtime
         n.values = ascii("values");
         n.entries = ascii("entries");
 
-        sRealm = new realm{ .registry = symbol_registry() };
-        realms().push_back(sRealm);
-        initialize(*sRealm);
+        auto* const r = new realm{ .registry = symbol_registry() };
+        realms().push_back(r);
+        h.mainRealm = r;
+        initialize(*r);
     }
 
     namespace
@@ -266,9 +278,9 @@ namespace neos::javascript_runtime
     {
         // (well-known symbols: shared by the realms)
         auto const symbol = [](char const* aDescription) { return make_symbol(ascii(aDescription)); };
-        if (&r != sRealm)
+        if (&r != the_heap().mainRealm)
         {
-            auto const& m = *sRealm;
+            auto const& m = *the_heap().mainRealm;
             r.symAsyncIterator = m.symAsyncIterator, r.symHasInstance = m.symHasInstance, r.symIsConcatSpreadable = m.symIsConcatSpreadable,
                 r.symIterator = m.symIterator, r.symMatch = m.symMatch, r.symMatchAll = m.symMatchAll, r.symReplace = m.symReplace,
                 r.symSearch = m.symSearch, r.symSpecies = m.symSpecies, r.symSplit = m.symSplit, r.symToPrimitive = m.symToPrimitive,

@@ -141,8 +141,8 @@ namespace neos::javascript_runtime
 
         std::deque<job>& jobs()
         {
-            static std::deque<job> sJobs;
-            return sJobs;
+            static isolate_local<std::deque<job>> sJobs;
+            return *sJobs;
         }
 
         void enqueue(void (*aFunction)(value const* aValues), std::initializer_list<value> aValues)
@@ -164,8 +164,8 @@ namespace neos::javascript_runtime
         // (HostPromiseRejectionTracker: the promises rejected that have no handlers (in the order they were rejected))
         value_list& unhandled_rejections()
         {
-            static value_list sRejections;
-            return sRejections;
+            static isolate_local<value_list> sRejections;
+            return *sRejections;
         }
 
         root_tracer const sJobRoots{ [](tracer& aTracer)

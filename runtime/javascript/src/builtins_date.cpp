@@ -274,8 +274,8 @@ namespace neos::javascript_runtime
 
         zone_period const& period_at(std::int64_t aSeconds)
         {
-            static zone_period sCache;
-            static bool sCached = false;
+            thread_local zone_period sCache;
+            thread_local bool sCached = false;
             if (sCached && aSeconds >= sCache.begin && aSeconds < sCache.end)
                 return sCache;
             sCached = true;

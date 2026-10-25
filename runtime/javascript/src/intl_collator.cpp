@@ -47,9 +47,13 @@ namespace neos::javascript_runtime::intl
     namespace
     {
         // (String.prototype.localeCompare's collator of the default locale and options (of the realm that made it last): a root)
-        value sDefaultCollator = Undefined;
-        realm const* sDefaultCollatorRealm = nullptr;
-        root_tracer const sDefaultCollatorRoot{ [](tracer& aTracer) { aTracer.mark(sDefaultCollator); } };
+        struct default_collator
+        {
+            value collator = Undefined;
+            realm const* collatorRealm = nullptr;
+        };
+        isolate_local<default_collator> sDefault;
+        root_tracer const sDefaultCollatorRoot{ [](tracer& aTracer) { aTracer.mark(sDefault->collator); } };
 
         struct collator_data : intl_data
         {
@@ -223,12 +227,13 @@ namespace neos::javascript_runtime::intl
         value collator;
         if (is_undefined(aLocales) && is_undefined(aOptions))
         {
-            if (sDefaultCollatorRealm != &r || is_undefined(sDefaultCollator))
+            auto& d = *sDefault;
+            if (d.collatorRealm != &r || is_undefined(d.collator))
             {
-                sDefaultCollator = construct(r.intlCollator, {});
-                sDefaultCollatorRealm = &r;
+                d.collator = construct(r.intlCollator, {});
+                d.collatorRealm = &r;
             }
-            collator = sDefaultCollator;
+            collator = d.collator;
         }
         else
         {

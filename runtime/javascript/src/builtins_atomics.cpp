@@ -211,8 +211,8 @@ namespace neos::javascript_runtime
 
         std::vector<std::shared_ptr<waiter>>& waiters()
         {
-            static std::vector<std::shared_ptr<waiter>> sWaiters;
-            return sWaiters;
+            static isolate_local<std::vector<std::shared_ptr<waiter>>> sWaiters;
+            return *sWaiters;
         }
 
         root_tracer const sWaiterRoots{ [](tracer& aTracer)

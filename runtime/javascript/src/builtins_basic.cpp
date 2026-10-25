@@ -786,7 +786,7 @@ namespace neos::javascript_runtime
 
         value math_random(value, arguments, value, function_object&)
         {
-            static std::mt19937_64 sGenerator{ std::random_device{}() };
+            thread_local std::mt19937_64 sGenerator{ std::random_device{}() };
             return number(static_cast<double>(sGenerator() >> 11) * (1.0 / 9007199254740992.0));
         }
 

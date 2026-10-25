@@ -47,7 +47,6 @@ namespace neos::javascript_runtime
         constexpr std::uint32_t MaxShapeKeys = 64u;         // (a table with more properties has no shape (e.g. an object used as a map))
         constexpr std::size_t MaxShapes = 1u << 18;         // (then tables that add properties have none)
         constexpr std::size_t FewKeys = 8u;                 // (keys that are found by searching them; more are indexed)
-        std::size_t sShapes = 0u;
 
         // (a transition's key: the key and the attributes (a key's payload is its low 32 bits))
         value transition_key(value aKey, std::uint8_t aAttributes)
@@ -56,10 +55,14 @@ namespace neos::javascript_runtime
         }
     }
 
-    shape* root_shape()
+    shape::~shape()
     {
-        static shape* sRoot = new shape{};
-        return sRoot;
+        // (the shapes that it transitions to: its (a shape's parent is the one that transitions to it))
+        if (iManyTransitions)
+            for (auto const& t : *iManyTransitions)
+                delete t.second;
+        for (auto const& t : iTransitions)
+            delete t.second;
     }
 
     shape* shape::transition(value aKey, std::uint8_t aAttributes)
@@ -75,10 +78,11 @@ namespace neos::javascript_runtime
             for (auto const& t : iTransitions)
                 if (t.first == k)
                     return t.second;
-        if (count >= MaxShapeKeys || sShapes >= MaxShapes)
+        auto& shapes = the_heap().shape_count();
+        if (count >= MaxShapeKeys || shapes >= MaxShapes)
             return nullptr;
         auto* const next = new shape{};
-        ++sShapes;
+        ++shapes;
         next->parent = this;
         next->key = aKey;
         next->attributes = aAttributes;
