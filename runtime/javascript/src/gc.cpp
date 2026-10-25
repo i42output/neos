@@ -134,8 +134,12 @@ namespace neos::javascript_runtime
                 auto& c = classes[iClassOf[(aSize + 15u) / 16u]];
                 if (c.freeList != nullptr)
                 {
+                    // (the next one is fetched now: it is the next allocation's (a free slot is usually not in the cache))
                     auto* const result = c.freeList;
                     c.freeList = *static_cast<void**>(result);
+#if defined(__GNUC__) || defined(__clang__)
+                    __builtin_prefetch(c.freeList, 1);
+#endif
                     return result;
                 }
                 auto const slotSize = SizeClasses[&c - classes];

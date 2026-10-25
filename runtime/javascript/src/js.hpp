@@ -186,6 +186,7 @@ namespace neos::javascript_runtime
     public:
         std::size_t size() const { return static_cast<std::size_t>(iSize); }
         std::size_t capacity() const { return static_cast<std::size_t>(iCapacity); }
+        void const* offset_field() const { return &iOffset; }   ///< (compiled code reads its offset (u64), then its size (u64))
         bool empty() const { return iSize == 0u; }
         T* data() { return iCapacity != 0u ? reinterpret_cast<T*>(gRegionBase + iOffset) : nullptr; }
         T const* data() const { return iCapacity != 0u ? reinterpret_cast<T const*>(gRegionBase + iOffset) : nullptr; }
@@ -282,7 +283,9 @@ namespace neos::javascript_runtime
         }
         void resize(std::size_t aSize, T const& aValue = T{})
         {
-            reserve(aSize);
+            // (growing as push_back does (an element at a time: amortized constant))
+            if (aSize > iCapacity)
+                reserve(std::max<std::size_t>(aSize, static_cast<std::size_t>(iCapacity) * 2u));
             for (auto i = iSize; i < aSize; ++i)
                 data()[i] = aValue;
             iSize = aSize;
@@ -323,6 +326,12 @@ namespace neos::javascript_runtime
     // (the heap: cells, by handle; a mark-sweep garbage collector (gc.cpp) frees the cells that cannot be reached (cells do not move:
     // a handle refers to its cell while the cell lives; freed handles are reused). Compiled code finds a handle's cell by the handle
     // table, in the region (layout::RegionHandles))
+    class array_object;
+    struct shape;
+    struct property_descriptor;
+    template <typename T>
+    shape* type_root_shape();   ///< (the shape of no properties of objects of type T (other than object and function_object))
+
     class heap
     {
     public:
@@ -347,11 +356,23 @@ namespace neos::javascript_runtime
                 throw;
             }
             add(*result, memory);
-            // (an object whose internal methods are not the ordinary ones has no shape (the property caches use only objects that
-            // have one, see shape))
+            // (an object of another type than object and function_object has shapes of its own type's (see shape); one whose [[Get]]
+            // is not the ordinary one has none (the property caches do not use it), except an array (its get of a key that is not
+            // "length" or an index is the ordinary one: the get caches use it for such keys))
             if constexpr (requires { result->properties.make_dictionary(); })
                 if constexpr (!std::is_same_v<T, object> && !std::is_same_v<T, function_object>)
-                    result->properties.make_dictionary();
+                {
+                    constexpr bool ordinaryGet =
+                        std::is_same_v<decltype(&T::get), value (object::*)(value, value)> &&
+                        std::is_same_v<decltype(&T::get_own_property), std::optional<property_descriptor> (object::*)(value)> &&
+                        std::is_same_v<decltype(&T::get_prototype_of), value (object::*)()>;
+                    if constexpr (!ordinaryGet)
+                        result->ordinaryGet = false;
+                    if constexpr (ordinaryGet || std::is_same_v<T, array_object>)
+                        result->properties.set_root(type_root_shape<T>());
+                    else
+                        result->properties.make_dictionary();
+                }
             return *result;
         }
         cell* find(std::uint32_t aHandle) const
@@ -645,6 +666,7 @@ namespace neos::javascript_runtime
         void remove(value aKey);
         void reserve(std::size_t aCapacity) { iEntries.reserve(aCapacity); }
         void make_dictionary();                     ///< (no shape (its layout its own) from now on)
+        void set_root(shape* aRoot) { iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
         std::size_t size() const { return iEntries.size() - iDeleted; }
         template <typename F>
         void for_each(F&& aFunction) const
@@ -782,6 +804,7 @@ namespace neos::javascript_runtime
         bool extensible = true;
         bool mirrored = false;          ///< (a global object whose properties have mirrors: changes to them call global_object_changed;
                                         ///< it has no shape (the property caches do not use it))
+        bool ordinaryGet = true;        ///< (its [[Get]] (and [[GetOwnProperty]] and [[GetPrototypeOf]]) are the ordinary ones)
         value internal = Undefined;     ///< ([[BooleanData]], [[NumberData]], [[StringData]], [[SymbolData]], [[BigIntData]], [[DateValue]],
                                         ///< [[ErrorData]] (its stack) ... as the class has)
         std::uint32_t privateBrand = 0u;
@@ -920,6 +943,17 @@ namespace neos::javascript_runtime
     {
         auto const* const type = &typeid(aObject);
         return type == &typeid(object) || type == &typeid(function_object);
+    }
+    inline bool array_type(object const& aObject)
+    {
+        return &typeid(aObject) == &typeid(array_object);
+    }
+
+    template <typename T>
+    shape* type_root_shape()
+    {
+        static shape* sRoot = new shape{};
+        return sRoot;
     }
 
     value make_native(value aName, std::uint32_t aLength, native_function aFunction, bool aConstructor = false, value aPrototype = 0u);

@@ -431,6 +431,20 @@ namespace neos::compilers::javascript
                     ++number;
                 }
             }
+            // (the program's functions are called directly if their indices are consecutive (their numbers' order: see closure))
+            {
+                std::vector<std::uint32_t> indices;
+                for (auto* f : all)
+                {
+                    indices.push_back(f->index);
+                    if ((f->generator || f->async) && !f->script)
+                        indices.push_back(f->bodyIndex);
+                }
+                iDirectDispatch = !indices.empty() && !all.empty() && all.front() == &iFunctions.front();
+                for (std::size_t i = 1u; iDirectDispatch && i < indices.size(); ++i)
+                    iDirectDispatch = indices[i] == indices[0] + i;
+                iDispatchSignature = generator().indirect_signature(neolib::vector<type>{ I64, I64, I64, I32, I64, I64, I64, I64 }, I64);
+            }
             // (the dispatcher: (function number, callee, this, new.target, count, arguments) -> result)
             {
                 function_signature dispatcher;
@@ -446,6 +460,36 @@ namespace neos::compilers::javascript
                 dispatcher.set_name(neolib::string{ "%js.dispatch" });
                 iDispatcher = generator().define_function(neolib::string{ "%js.dispatch" }, dispatcher, neolib::vector<type>{}, neolib::string{}, 1u);
             }
+            // (the property caches' stubs (see function_generator::stub))
+            {
+                struct stub_signature { char const* name; std::vector<type> parameters; type result; };
+                stub_signature const stubs[] =
+                {
+                    { "%js.get_named", { I64, I64, I32 }, I64 },
+                    { "%js.get_computed", { I64, I64, I32 }, I64 },
+                    { "%js.set_named", { I64, I64, I64, I32, I32 }, I64 },
+                    { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
+                    { "%js.callee_number", { I64, I32 }, I32 },
+                    { "%js.method_number", { I64, I32 }, I32 },
+                    { "%js.get_length", { I64 }, I64 }
+                };
+                static_assert(std::size(stubs) == static_cast<std::size_t>(function_generator::stub::Count));
+                for (std::size_t i = 0u; i < std::size(stubs); ++i)
+                {
+                    function_signature signature;
+                    signature.set_return_type(stubs[i].result);
+                    function_parameters parameters;
+                    for (auto t : stubs[i].parameters)
+                    {
+                        function_parameter p;
+                        p.set_parameter_type(t);
+                        parameters.push_back(p);
+                    }
+                    signature.set_parameters(parameters);
+                    signature.set_name(neolib::string{ stubs[i].name });
+                    iStubs[i] = generator().define_function(neolib::string{ stubs[i].name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+                }
+            }
             // (each function's code)
             for (auto* f : all)
             {
@@ -453,6 +497,8 @@ namespace neos::compilers::javascript
                 if ((f->generator || f->async) && !f->script)
                     function_generator{ *this, *f, true }.generate();
             }
+            for (std::size_t i = 0u; i < static_cast<std::size_t>(function_generator::stub::Count); ++i)
+                function_generator{ *this, *all.front() }.generate_stub(static_cast<function_generator::stub>(i));
             // the dispatcher's code: a binary search of the function numbers (each leaf calls its function and returns)
             {
                 std::vector<std::uint32_t> targets;
@@ -706,13 +752,13 @@ namespace neos::compilers::javascript
     std::uint32_t function_generator::local(type aType)
     {
         iLocals.push_back(aType);
-        return ParameterCount + static_cast<std::uint32_t>(iLocals.size() - 1u);
+        return iParameterCount + static_cast<std::uint32_t>(iLocals.size() - 1u);
     }
 
     std::uint32_t function_generator::temporary(type aType)
     {
         for (auto i = iFreeTemporaries.begin(); i != iFreeTemporaries.end(); ++i)
-            if (iLocals[*i - ParameterCount] == aType)
+            if (iLocals[*i - iParameterCount] == aType)
             {
                 auto const result = *i;
                 iFreeTemporaries.erase(i);
@@ -808,7 +854,10 @@ namespace neos::compilers::javascript
     {
         op(opcode::GlobalGet);
         u32(iCompiler.property_sites_global());
-        i64(static_cast<std::int64_t>(aSite) * layout::SiteSize);
+        get(aSite);
+        op(opcode::I64UConvertI32);
+        i64(layout::SiteSize);
+        op(opcode::I64Mul);
         op(opcode::I64Add);
     }
 
@@ -888,12 +937,18 @@ namespace neos::compilers::javascript
 
     std::uint32_t function_generator::cached_get(bool aComputed)
     {
-        // (a named property's site has its key (a program's sites are its own); a computed key's entry has the key that it found)
+        // (a site of its own (its number): a call of the program's get stub)
         auto const site = iCompiler.iPropertySites++;
-        auto const keyValue = temporary();
-        set(keyValue);
-        auto const object = temporary();
-        set(object);
+        i32(static_cast<std::int32_t>(site));
+        call(iCompiler.iStubs[static_cast<std::size_t>(aComputed ? stub::GetComputed : stub::GetNamed)]);
+        return site;
+    }
+
+    void function_generator::cached_get_stub(bool aComputed)
+    {
+        // (the get stub's code (its parameters: object, key, site): a named property's site has its key (a program's sites are its 
+        // own); a computed key's entry has the key that it found)
+        std::uint32_t const object = 0u, keyValue = 1u, site = 2u;
         auto const entry = temporary();
         auto const cell = temporary();
         auto const word = temporary();
@@ -904,7 +959,8 @@ namespace neos::compilers::javascript
         {
             if (aComputed)
             {
-                // (a key that is not a string (e.g. an array's index): the runtime's get (its entries have strings))
+                // (a key that is not a string (e.g. an array's index): an array's element (one that it has), else the runtime's get
+                // (its entries have strings))
                 get(keyValue);
                 constant(0xFFFF000000000000ull);
                 op(opcode::I64And);
@@ -913,23 +969,48 @@ namespace neos::compilers::javascript
                 op(opcode::If);
                 iCode.push_back(0x40u);
                 iControls.push_back(control{ control_kind::Block });
+                begin(control_kind::Block);
+                {
+                    auto const miss = iControls.size() - 1u;
+                    array_element(object, keyValue, cell, miss);
+                    get(cell);
+                    mem_load(opcode::I64LoadMem, 0u);
+                    tee(word);
+                    constant(values::Empty);
+                    op(opcode::I64Eq);
+                    branch(miss, true);
+                    get(word);
+                    branch(done, false);
+                }
+                end_control();
                 get(object);
                 get(keyValue);
                 runtime("get", { I64, I64 }, I64);
                 branch(done, false);
                 end_control();
             }
-            // (an object whose shape (and key) an entry has)
+            // (an object whose shape (and key) an entry has, or a string (no shape: 0))
             get(object);
             constant(0xFFFF000000000000ull);
             op(opcode::I64And);
+            tee(word);
             constant(values::TagObject);
-            op(opcode::I64Ne);
-            branch(slow, true);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
             cell_of(object);
             tee(cell);
             mem_load(opcode::I64LoadMem, layout::ObjectShape);
             set(word);
+            op(opcode::Else);
+            get(word);
+            constant(values::TagString);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            i64(0);
+            set(word);
+            end_control();
             site_entry(site, word, entry, aComputed ? std::optional<std::uint32_t>{ keyValue } : std::nullopt, slow);
             // (the entry's kind, depth and position (one word))
             get(entry);
@@ -955,7 +1036,35 @@ namespace neos::compilers::javascript
             }
             op(opcode::Else);
             {
-                // (its prototype's (depth 1): the prototype is the entry's and has the key's property at the position)
+                // (its prototype's (depth 1), (SiteSelf) its own (it has no shape) or (SiteString: the receiver a string) 
+                // %String.prototype%'s: the holder is the entry's and has the key's property at the position)
+                get(word);
+                i64(0xFFFF);
+                op(opcode::I64And);
+                i64(layout::SiteSelf);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(object);
+                op(opcode::Else);
+                get(word);
+                i64(0xFFFF);
+                op(opcode::I64And);
+                i64(layout::SiteString);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(object);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                constant(values::TagString);
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(entry);
+                mem_load(opcode::I64LoadMem, layout::SitePrototype);
+                op(opcode::Else);
                 get(word);
                 i64(0xFFFF);
                 op(opcode::I64And);
@@ -964,6 +1073,8 @@ namespace neos::compilers::javascript
                 branch(slow, true);
                 get(cell);
                 mem_load(opcode::I64LoadMem, layout::ObjectProto);
+                end_control();
+                end_control();
                 tee(cell);
                 get(entry);
                 mem_load(opcode::I64LoadMem, layout::SitePrototype);
@@ -1005,37 +1116,37 @@ namespace neos::compilers::javascript
         end_control();
         get(object);
         get(keyValue);
-        i32(static_cast<std::int32_t>(site));
+        get(site);
         runtime(aComputed ? "get_cached" : "get_named_cached", { I64, I64, I32 }, I64);
         end_control();
         release(word);
         release(cell);
         release(entry);
-        release(object);
-        release(keyValue);
-        return site;
     }
 
     void function_generator::cached_set_named()
     {
+        // (a site of its own: a call of the program's set stub)
         auto const site = iCompiler.iPropertySites++;
-        auto const strict = temporary(I32);
-        set(strict);
-        auto const value = temporary();
-        set(value);
-        auto const keyValue = temporary();
-        set(keyValue);
-        auto const object = temporary();
-        set(object);
+        i32(static_cast<std::int32_t>(site));
+        call(iCompiler.iStubs[static_cast<std::size_t>(stub::SetNamed)]);
+    }
+
+    void function_generator::cached_set_stub()
+    {
+        // (the set stub's code (its parameters: object, key, value, strict, site))
+        std::uint32_t const object = 0u, keyValue = 1u, value = 2u, strict = 3u, site = 4u;
         auto const entry = temporary();
-        auto const property = temporary();
+        auto const cell = temporary();
         auto const shape = temporary();
+        auto const word = temporary();
+        auto const address = temporary();
         begin(control_kind::Block, I64);
         auto const done = iControls.size() - 1u;
         begin(control_kind::Block);
         auto const slow = iControls.size() - 1u;
         {
-            // (an object whose shape an entry has, which has the property (SiteOwn) at the position: a writable data property)
+            // (an object whose shape an entry has)
             get(object);
             constant(0xFFFF000000000000ull);
             op(opcode::I64And);
@@ -1043,36 +1154,128 @@ namespace neos::compilers::javascript
             op(opcode::I64Ne);
             branch(slow, true);
             cell_of(object);
-            tee(property);
+            tee(cell);
             mem_load(opcode::I64LoadMem, layout::ObjectShape);
             set(shape);
             site_entry(site, shape, entry, std::nullopt, slow);
             get(entry);
             mem_load(opcode::I64LoadMem, layout::SiteKind);
-            tee(entry);
+            tee(word);
             i64(0xFFFF);
             op(opcode::I64And);
             i64(layout::SiteOwn);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            {
+                // (SiteOwn: it has the property at the position: a writable data property)
+                get(cell);
+                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+                get(word);
+                i64(32);
+                op(opcode::I64ShrU);
+                i64(5);
+                op(opcode::I64Shl);
+                op(opcode::I64Add);
+                tee(address);
+                mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
+                i32(layout::AttributeAccessor | layout::AttributeWritable);
+                op(opcode::I32And);
+                i32(layout::AttributeWritable);
+                op(opcode::I32Ne);
+                branch(slow, true);
+                get(address);
+                get(value);
+                mem_store(opcode::I64StoreMem, layout::PropertyData);
+                get(value);
+                branch(done, false);
+            }
+            end_control();
+            // (SiteAdd: it adds the property (its prototypes, if any (up to two: the entry's depth), the entry's, of the same shapes, the
+            // last's prototype null), if it is extensible and its properties' storage has room: the property, then the shape that the
+            // entry has)
+            get(word);
+            i64(0xFF);
+            op(opcode::I64And);
+            i64(layout::SiteAdd);
             op(opcode::I64Ne);
             branch(slow, true);
-            get(property);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectProto);
+            set(address);
+            for (std::uint32_t depth = 1u; depth <= 2u; ++depth)
+            {
+                // (the prototype at this depth (if the entry's depth is at least that): the entry's, of the same shape)
+                get(word);
+                i64(8);
+                op(opcode::I64ShrU);
+                i64(0xFF);
+                op(opcode::I64And);
+                i64(depth);
+                op(opcode::I64GeU);
+                op(opcode::If);
+                iCode.push_back(0x40u);
+                iControls.push_back(control{ control_kind::Block });
+                get(address);
+                get(entry);
+                mem_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u));
+                op(opcode::I64Ne);
+                branch(slow, true);
+                cell_of(address);
+                tee(address);
+                mem_load(opcode::I64LoadMem, layout::ObjectShape);
+                get(entry);
+                mem_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u) + 8u);
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(address);
+                mem_load(opcode::I64LoadMem, layout::ObjectProto);
+                set(address);
+                end_control();
+            }
+            get(address);
+            constant(values::Null);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectExtensible);
+            op(opcode::I32Eqz);
+            branch(slow, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectPropertyCount);
+            tee(word);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectPropertyCapacity);
+            op(opcode::I64GeU);
+            branch(slow, true);
+            get(cell);
             mem_load(opcode::I64LoadMem, layout::ObjectProperties);
-            get(entry);
-            i64(32);
-            op(opcode::I64ShrU);
+            get(word);
             i64(5);
             op(opcode::I64Shl);
             op(opcode::I64Add);
-            tee(property);
-            mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
-            i32(layout::AttributeAccessor | layout::AttributeWritable);
-            op(opcode::I32And);
-            i32(layout::AttributeWritable);
-            op(opcode::I32Ne);
-            branch(slow, true);
-            get(property);
+            tee(address);
+            get(keyValue);
+            mem_store(opcode::I64StoreMem, layout::PropertyKey);
+            get(address);
             get(value);
             mem_store(opcode::I64StoreMem, layout::PropertyData);
+            get(address);
+            constant(values::Undefined);
+            mem_store(opcode::I64StoreMem, layout::PropertySetter);
+            get(address);
+            i64(layout::AttributesDefault);
+            mem_store(opcode::I64StoreMem, layout::PropertyAttributes);
+            get(cell);
+            get(word);
+            i64(1);
+            op(opcode::I64Add);
+            mem_store(opcode::I64StoreMem, layout::ObjectPropertyCount);
+            get(cell);
+            get(entry);
+            mem_load(opcode::I64LoadMem, layout::SiteAdded);
+            mem_store(opcode::I64StoreMem, layout::ObjectShape);
             get(value);
             branch(done, false);
         }
@@ -1081,16 +1284,212 @@ namespace neos::compilers::javascript
         get(keyValue);
         get(value);
         get(strict);
-        i32(static_cast<std::int32_t>(site));
+        get(site);
         runtime("set_named_cached", { I64, I64, I64, I32, I32 }, I64);
         end_control();
+        release(address);
+        release(word);
         release(shape);
-        release(property);
+        release(cell);
         release(entry);
-        release(object);
-        release(keyValue);
-        release(value);
-        release(strict);
+    }
+
+    void function_generator::set_computed()
+    {
+        call(iCompiler.iStubs[static_cast<std::size_t>(stub::SetComputed)]);
+    }
+
+    void function_generator::set_computed_stub()
+    {
+        // (the set stub's code of computed keys (its parameters: object, key, value, strict): an array's element (one that it has),
+        // else the runtime's set)
+        std::uint32_t const object = 0u, keyValue = 1u, value = 2u, strict = 3u;
+        auto const address = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            array_element(object, keyValue, address, miss);
+            get(address);
+            mem_load(opcode::I64LoadMem, 0u);
+            constant(values::Empty);
+            op(opcode::I64Eq);
+            branch(miss, true);
+            get(address);
+            get(value);
+            mem_store(opcode::I64StoreMem, 0u);
+            get(value);
+            branch(done, false);
+        }
+        end_control();
+        get(object);
+        get(keyValue);
+        get(value);
+        get(strict);
+        runtime("set", { I64, I64, I64, I32 }, I64);
+        end_control();
+        release(address);
+    }
+
+    void function_generator::get_length_stub()
+    {
+        // (the length stub's code (its parameter: object): x.length: an array's (not sparse), else the runtime's get_length)
+        std::uint32_t const object = 0u;
+        auto const cell = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            get(object);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(object);
+            tee(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass);
+            i32(layout::ClassArray);
+            op(opcode::I32Ne);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ArraySparse);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I32LoadMem, layout::ArrayLength);
+            op(opcode::F64UConvertI32);
+            op(opcode::I64ReinterpretF64);
+            branch(done, false);
+        }
+        end_control();
+        get(object);
+        runtime("get_length", { I64 }, I64);
+        end_control();
+        release(cell);
+    }
+
+    void function_generator::array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss)
+    {
+        // (an array (not sparse) and a number that is an index (an integer in [0, 2^32 - 1)) below the number of its elements)
+        auto const index = temporary();
+        get(aKey);
+        constant(values::TagSpecial);
+        op(opcode::I64GeU);
+        branch(aMiss, true);
+        get(aObject);
+        constant(0xFFFF000000000000ull);
+        op(opcode::I64And);
+        constant(values::TagObject);
+        op(opcode::I64Ne);
+        branch(aMiss, true);
+        cell_of(aObject);
+        tee(aAddress);
+        mem_load(opcode::I32LoadMem8U, layout::ObjectClass);
+        i32(layout::ClassArray);
+        op(opcode::I32Ne);
+        get(aAddress);
+        mem_load(opcode::I32LoadMem8U, layout::ArraySparse);
+        op(opcode::I32Ior);
+        branch(aMiss, true);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        f64(0.0);
+        op(opcode::F64Ge);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        f64(4294967295.0);
+        op(opcode::F64Lt);
+        op(opcode::I32And);
+        op(opcode::I32Eqz);
+        branch(aMiss, true);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        op(opcode::I64SConvertF64);
+        tee(index);
+        op(opcode::F64SConvertI64);
+        get(aKey);
+        op(opcode::F64ReinterpretI64);
+        op(opcode::F64Ne);
+        branch(aMiss, true);
+        get(index);
+        get(aAddress);
+        mem_load(opcode::I64LoadMem, layout::ArrayElements + 8u);
+        op(opcode::I64GeU);
+        branch(aMiss, true);
+        get(aAddress);
+        mem_load(opcode::I64LoadMem, layout::ArrayElements);
+        get(index);
+        i64(3);
+        op(opcode::I64Shl);
+        op(opcode::I64Add);
+        set(aAddress);
+        release(index);
+    }
+
+    void function_generator::generate_stub(stub aStub)
+    {
+        // (a stub's code: a function of the program's (see compiler::iStubs) that the property caches' sites call, so that the code is
+        // shared)
+        switch (aStub)
+        {
+        case stub::GetNamed:
+        case stub::GetComputed:
+            iParameterCount = 3u;
+            cached_get_stub(aStub == stub::GetComputed);
+            break;
+        case stub::SetNamed:
+            iParameterCount = 5u;
+            cached_set_stub();
+            break;
+        case stub::SetComputed:
+            iParameterCount = 4u;
+            set_computed_stub();
+            break;
+        case stub::GetLength:
+            iParameterCount = 1u;
+            get_length_stub();
+            break;
+        case stub::CalleeNumber:
+        case stub::MethodNumber:
+            iParameterCount = 2u;
+            callee_number_stub(aStub == stub::CalleeNumber);
+            break;
+        default:
+            break;
+        }
+        fragment code;
+        code.fragmentCode.as_std_vector() = iCode;
+        for (auto const& r : iRelocations)
+            code.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ r.first, r.second });
+        auto const index = iCompiler.iStubs[static_cast<std::size_t>(aStub)];
+        iCompiler.generator().set_function_body(index, code);
+        iCompiler.generator().set_function_locals(index, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
+    }
+
+    void function_generator::dispatch_number(std::uint32_t aNumber)
+    {
+        if (!iCompiler.iDirectDispatch)
+            get(aNumber);
+    }
+
+    void function_generator::dispatch(std::uint32_t aNumber)
+    {
+        // (the program's function whose number it is: called directly (call_indirect: the function whose index is the first's and the
+        // number), else through the dispatcher)
+        if (!iCompiler.iDirectDispatch)
+        {
+            call(iCompiler.iDispatcher);
+            return;
+        }
+        get(aNumber);
+        function_index(iCompiler.iFunctions.front());
+        op(opcode::I32Add);
+        op(opcode::CallIndirect);
+        iRelocations.emplace_back(static_cast<std::uint32_t>(iCode.size()), IndirectSignature | iCompiler.iDispatchSignature);
+        iCode.resize(iCode.size() + 5u);
+        iCode.push_back(0x00u);     // (the table: the functions)
     }
 
     void function_generator::function_index(function_info& aFunction, bool aBody)
@@ -3952,7 +4351,7 @@ namespace neos::compilers::javascript
             if (name_of(aNode->child(1u)) == "length")
             {
                 // (x.length: a string's or an array's directly)
-                runtime("get_length", { I64 }, I64);
+                call(iCompiler.iStubs[static_cast<std::size_t>(stub::GetLength)]);
                 break;
             }
             key(name_of(aNode->child(1u)));
@@ -4082,12 +4481,21 @@ namespace neos::compilers::javascript
         // (-> the callee's number (for the dispatcher) if it is the program's function, else -1: the one that a site's entry has, if 
         // the callee is the entry's function (a method's property cache site, else a site of the call's own (its entries have only 
         // functions and their numbers)), else the runtime's)
-        namespace jsl = neos::language::javascript::layout;
         bool const callSite = !aSite;
         if (callSite)
             aSite = iCompiler.iPropertySites++;
+        get(aCallee);
+        i32(static_cast<std::int32_t>(*aSite));
+        call(iCompiler.iStubs[static_cast<std::size_t>(callSite ? stub::CalleeNumber : stub::MethodNumber)]);
+    }
+
+    void function_generator::callee_number_stub(bool aCallSite)
+    {
+        // (the callee number stubs' code (its parameters: callee, site): a call's site (aCallSite), else a method's)
+        namespace jsl = neos::language::javascript::layout;
+        std::uint32_t const aCallee = 0u, site = 1u;
         auto const entry = temporary();
-        property_site(*aSite);
+        property_site(site);
         tee(entry);
         mem_load(opcode::I64LoadMem, jsl::SiteFunction);
         get(aCallee);
@@ -4109,9 +4517,9 @@ namespace neos::compilers::javascript
         mem_load(opcode::I32LoadMem, jsl::SiteEntrySize + jsl::SiteNumber);
         op(opcode::Else);
         get(aCallee);
-        if (callSite)
+        if (aCallSite)
         {
-            i32(static_cast<std::int32_t>(*aSite));
+            get(site);
             runtime("callee_number_cached", { I64, I32 }, I32);
         }
         else
@@ -4198,7 +4606,7 @@ namespace neos::compilers::javascript
                 op(opcode::I64Add);
                 op(opcode::GlobalSet);
                 u32(depth);
-                get(number);
+                dispatch_number(number);
                 get(aCallee);
                 get(aThis);
                 undefined();
@@ -4210,7 +4618,7 @@ namespace neos::compilers::javascript
                     else
                         undefined();
                 }
-                call(iCompiler.iDispatcher);
+                dispatch(number);
                 op(opcode::GlobalGet);
                 u32(depth);
                 i64(1);
@@ -4309,7 +4717,7 @@ namespace neos::compilers::javascript
         op(opcode::If);
         iCode.push_back(0x7Eu);
         iControls.push_back(control{ control_kind::Block });
-        get(number);
+        dispatch_number(number);
         get(aCallee);
         get(aThis);
         undefined();
@@ -4321,7 +4729,7 @@ namespace neos::compilers::javascript
             else
                 undefined();
         }
-        call(iCompiler.iDispatcher);
+        dispatch(number);
         op(opcode::Else);
         get(aCallee);
         get(aThis);
@@ -4655,7 +5063,7 @@ namespace neos::compilers::javascript
                 runtime("push_arg", { I64 }, I64);
                 drop();
             }
-            get(number);
+            dispatch_number(number);
             get(callee);
             get(thisValue);
             get(callee);
@@ -4667,7 +5075,7 @@ namespace neos::compilers::javascript
                 else
                     undefined();
             }
-            call(iCompiler.iDispatcher);
+            dispatch(number);
             if (argc > RegisterArguments)
             {
                 auto const popped = temporary();
@@ -5206,10 +5614,54 @@ namespace neos::compilers::javascript
             else
                 op(opcode::I64ReinterpretF64);
             op(opcode::Else);
-            get(lhs);
-            get(rhs);
-            runtime(sOperations.at(aNode->kind), { I64, I64 }, I64);
-            check();
+            if (aNode->is(construct::StrictEqual) || aNode->is(construct::StrictNotEqual))
+            {
+                // (not both numbers: the same value if they are the same (bits), else different unless both are strings or both
+                // are bigints (the runtime's))
+                bool const notEqual = aNode->is(construct::StrictNotEqual);
+                get(lhs);
+                get(rhs);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                constant(notEqual ? values::False : values::True);
+                op(opcode::Else);
+                get(lhs);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                tee(iScratch);
+                get(rhs);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                op(opcode::I64Eq);
+                get(iScratch);
+                constant(values::TagString);
+                op(opcode::I64Eq);
+                get(iScratch);
+                constant(values::TagBigInt);
+                op(opcode::I64Eq);
+                op(opcode::I32Ior);
+                op(opcode::I32And);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(lhs);
+                get(rhs);
+                runtime(sOperations.at(aNode->kind), { I64, I64 }, I64);
+                check();
+                op(opcode::Else);
+                constant(notEqual ? values::True : values::False);
+                end_control();
+                end_control();
+            }
+            else
+            {
+                get(lhs);
+                get(rhs);
+                runtime(sOperations.at(aNode->kind), { I64, I64 }, I64);
+                check();
+            }
             end_control();
         }
         else
@@ -5406,7 +5858,7 @@ namespace neos::compilers::javascript
                     if (target->is(construct::Dot))
                         cached_set_named();
                     else
-                        runtime("set", { I64, I64, I64, I32 }, I64);
+                        set_computed();
                 }
                 check_void();
                 get(value);
@@ -5503,8 +5955,10 @@ namespace neos::compilers::javascript
                 get(keyValue);
                 if (target->is(construct::DotPrivate))
                     runtime("private_get", { I64, I64 }, I64);
+                else if (target->is(construct::Dot))
+                    cached_get_named();
                 else
-                    runtime("get", { I64, I64 }, I64);
+                    cached_get(true);
                 check();
             };
             writeTarget = [&](std::uint32_t aValue)
@@ -5517,7 +5971,10 @@ namespace neos::compilers::javascript
                 else
                 {
                     i32(iFunction.strict ? 1 : 0);
-                    runtime("set", { I64, I64, I64, I32 }, I64);
+                    if (target->is(construct::Dot))
+                        cached_set_named();
+                    else
+                        set_computed();
                 }
                 check_void();
             };
@@ -5718,7 +6175,12 @@ namespace neos::compilers::javascript
             set(keyValue);
             get(object);
             get(keyValue);
-            runtime(target->is(construct::DotPrivate) ? "private_get" : "get", { I64, I64 }, I64);
+            if (target->is(construct::DotPrivate))
+                runtime("private_get", { I64, I64 }, I64);
+            else if (target->is(construct::Dot))
+                cached_get_named();
+            else
+                cached_get(true);
             check();
             compute();
             get(object);
@@ -5729,7 +6191,10 @@ namespace neos::compilers::javascript
             else
             {
                 i32(iFunction.strict ? 1 : 0);
-                runtime("set", { I64, I64, I64, I32 }, I64);
+                if (target->is(construct::Dot))
+                    cached_set_named();
+                else
+                    set_computed();
             }
             check_void();
             release(keyValue);
@@ -6101,7 +6566,7 @@ namespace neos::compilers::javascript
                 if (t->is(construct::Dot))
                     cached_set_named();
                 else
-                    runtime("set", { I64, I64, I64, I32 }, I64);
+                    set_computed();
             }
             check_void();
         }
@@ -6154,7 +6619,7 @@ namespace neos::compilers::javascript
                     if (aTarget->is(construct::Dot))
                         cached_set_named();
                     else
-                        runtime("set", { I64, I64, I64, I32 }, I64);
+                        set_computed();
                 }
                 check_void();
                 release(keyValue);

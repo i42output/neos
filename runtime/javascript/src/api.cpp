@@ -112,6 +112,9 @@ namespace neos::javascript_runtime
                 at(o.properties.shape_field()) == jsl::ObjectShape &&
                 at(o.properties.entries_field()) == jsl::ObjectProperties &&
                 at(o.properties.entries_field()) + sizeof(std::uint64_t) == jsl::ObjectPropertyCount &&
+                at(o.properties.entries_field()) + 2u * sizeof(std::uint64_t) == jsl::ObjectPropertyCapacity &&
+                at(&o.extensible) == jsl::ObjectExtensible && sizeof(o.extensible) == 1u &&
+                offsetof(property, setter) == jsl::PropertySetter && AttributesDefault == jsl::AttributesDefault &&
                 sizeof(property) == jsl::PropertySize &&
                 offsetof(property, key) == jsl::PropertyKey &&
                 offsetof(property, data) == jsl::PropertyData &&
@@ -129,7 +132,16 @@ namespace neos::javascript_runtime
             if (!environmentOk)
                 std::fprintf(stderr, "JavaScript runtime: environment parent %zu, slots %zu; function environment %zu\n", field(probe, &probe.parent),
                     field(probe, &probe.slots), field(f, &f.environment));
-            if (!ok || !environmentOk)
+            array_object const array{ Undefined };
+            bool const arrayOk = field(array, &array.cls) == jsl::ObjectClass && static_cast<std::uint32_t>(object_class::Array) == jsl::ClassArray &&
+                field(array, array.elements.offset_field()) == jsl::ArrayElements && field(array, &array.sparse) == jsl::ArraySparse &&
+                field(array, &array.length) == jsl::ArrayLength && sizeof(array.length) == 4u &&
+                sizeof(array.sparse) == 1u && sizeof(array.cls) == 1u;
+            if (!ok || !arrayOk)
+                std::fprintf(stderr, "JavaScript runtime: object prototype %zu, shape %zu, properties %zu, class %zu, extensible %zu; array elements %zu, sparse %zu\n",
+                    at(&o.proto), at(o.properties.shape_field()), at(o.properties.entries_field()), at(&o.cls), at(&o.extensible),
+                    field(array, array.elements.offset_field()), field(array, &array.sparse));
+            if (!ok || !environmentOk || !arrayOk)
             {
                 std::fputs("JavaScript runtime: the heap's layout is not the one compiled code reads (neos::language::javascript::layout)\n", stderr);
                 std::abort();
@@ -1202,7 +1214,7 @@ namespace neos::javascript_runtime
                     if (p != aSite.prototypes[i].object)
                         return false;
                     auto const& o = obj(p);
-                    if (!ordinary_type(o))
+                    if (!o.ordinaryGet && !array_type(o))
                         return false;
                     if (!(aHolder && i + 1u == aSite.depth) && shape_word(o.properties.layout()) != aSite.prototypes[i].shape)
                         return false;
@@ -1236,10 +1248,31 @@ namespace neos::javascript_runtime
                 {
                     if (is_object(aObject))
                     {
+                        // (an object whose get is the ordinary one: an ordinary object, or an array (a key that is not its length
+                        // or an index))
+                        bool const arrayKey = aKey == the_names().length || array_index(aKey).has_value();
+                        auto const cacheable = [&](object const& aCandidate)
+                        {
+                            return aCandidate.ordinaryGet || (array_type(aCandidate) && !arrayKey);
+                        };
                         auto& o = obj(aObject);
-                        auto const* layout = o.properties.layout();
-                        if (layout == nullptr || !ordinary_type(o))
+                        if (!cacheable(o))
                             return;
+                        auto const* layout = o.properties.layout();
+                        if (layout == nullptr)
+                        {
+                            // (no shape (e.g. an object of many properties): its own property, if it has it (the object itself is
+                            // the entry's))
+                            if (o.mirrored)
+                                return;
+                            if (auto const* p = o.properties.find(aKey); p != nullptr && !p->accessor())
+                            {
+                                e.kind = jsl::SiteSelf;
+                                e.prototypes[0] = { aObject, 0u };
+                                e.position = position_of(o, p);
+                            }
+                            return;
+                        }
                         e.shape = shape_word(layout);
                         if (auto const* p = o.properties.find(aKey))
                         {
@@ -1253,7 +1286,7 @@ namespace neos::javascript_runtime
                         for (std::uint8_t depth = 0u; depth < 2u && prototype != Null; ++depth)
                         {
                             auto& holder = obj(prototype);
-                            if (!ordinary_type(holder))
+                            if (!cacheable(holder))
                                 return;
                             auto const* holderLayout = holder.properties.layout();
                             e.prototypes[depth] = { prototype, shape_word(holderLayout) };
@@ -1272,9 +1305,11 @@ namespace neos::javascript_runtime
                             prototype = holder.proto;
                         }
                     }
-                    else if (is_string(aObject) && aKey != the_names().length)
+                    else if (is_string(aObject) && aKey != the_names().length && !array_index(aKey))
                     {
-                        // (a string's property (not its length or an index: a named property): %String.prototype%'s)
+                        // (a string's property (not its length or an index: a named property): %String.prototype%'s (the realm's:
+                        // a program's code runs in the realm that it was evaluated in, so it is its sites' (compiled code uses the
+                        // entry's)))
                         auto const prototype = the_realm().stringPrototype;
                         auto& holder = obj(prototype);
                         if (auto const* p = holder.properties.find(aKey); p != nullptr && !p->accessor())
@@ -1314,6 +1349,16 @@ namespace neos::javascript_runtime
                     if (is_object(aObject))
                     {
                         auto& o = obj(aObject);
+                        if (e.kind == jsl::SiteSelf)
+                        {
+                            if (aObject == e.prototypes[0].object)
+                                if (auto const* p = holder_property(o, e.position, aKey))
+                                {
+                                    aResult = p->data;
+                                    return true;
+                                }
+                            continue;
+                        }
                         if (shape_word(o.properties.layout()) != e.shape || e.shape == 0u)
                             continue;
                         property const* p = nullptr;

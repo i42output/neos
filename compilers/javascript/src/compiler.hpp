@@ -34,6 +34,7 @@ namespace neos::compilers::javascript
     {
         inline constexpr std::uint64_t TagSpecial = 0xFFF9000000000000ull;
         inline constexpr std::uint64_t TagString = 0xFFFA000000000000ull;
+        inline constexpr std::uint64_t TagBigInt = 0xFFFC000000000000ull;
         inline constexpr std::uint64_t TagObject = 0xFFFD000000000000ull;
         inline constexpr std::uint64_t Undefined = TagSpecial | 0u;
         inline constexpr std::uint64_t Null = TagSpecial | 1u;
@@ -211,6 +212,10 @@ namespace neos::compilers::javascript
         function_generator(compiler& aCompiler, function_info& aFunction, bool aBody = false);
     public:
         void generate();
+        // (the program's property cache stubs: functions that the sites call (their code shared): get (object, key, site -> value),
+        // set (object, key, value, strict, site -> result), callee numbers (callee, site -> number))
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, Count };
+        void generate_stub(stub aStub);
     private:
         // control flow
         enum class control_kind
@@ -264,12 +269,22 @@ namespace neos::compilers::javascript
         std::uint32_t cached_get(bool aComputed);   ///< (as cached_get_named; aComputed: object, a computed key -> its value (its site's
                                                     ///< entries also have their keys))
         void site_entry(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey, std::size_t aSlow);
+        void cached_get_stub(bool aComputed);
+        void cached_set_stub();
+        void set_computed();                ///< (object, a computed key, value, strict -> the result: as runtime's set (a call of its stub))
+        void set_computed_stub();
+        void get_length_stub();
+        void array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss); ///< (an array's dense
+                                                    ///< element (the key a number): its address (in aAddress), else to aMiss)
+        void callee_number_stub(bool aCallSite);
         void mem_load(opcode aOpcode, std::uint32_t aOffset);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
         void mem_store(opcode aOpcode, std::uint32_t aOffset);
-        void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry)
+        void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry (aSite: the local (i32) that has its number))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
+        void dispatch_number(std::uint32_t aNumber);  ///< (a call of the program's function (see dispatch): its number, before its arguments)
+        void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
         static constexpr std::int64_t TailCallDepth = 256;  ///< (tail calls made as calls (nested) before they are made by the caller)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void check_void();          ///< (a call that returned Exception or Undefined (dropped))
@@ -430,6 +445,7 @@ namespace neos::compilers::javascript
         std::vector<std::uint8_t> iCode;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> iRelocations;
         std::vector<type> iLocals;
+        std::uint32_t iParameterCount = ParameterCount;    ///< (its parameters (a stub's are its own: see generate_stub))
         std::unordered_map<binding const*, numeric_rep> iNumeric;
         bool iDiscarded = false;
         std::set<node*> iTailCalls;                ///< (the calls in tail position of return statements)
@@ -539,6 +555,9 @@ namespace neos::compilers::javascript
         std::map<std::string, function_info*> iScriptFunctions;     ///< (the script's function declarations (those that define its functions))
         std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
+        bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
+        std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
+        std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub)
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
         std::uint32_t iErrorGlobal = 0u;

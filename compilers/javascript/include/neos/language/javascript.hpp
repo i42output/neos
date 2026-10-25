@@ -245,15 +245,24 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ObjectShape = 32u;           ///< (u64: its properties' shape (0: none))
         inline constexpr std::uint32_t ObjectProperties = 40u;      ///< (u64: the offset of its properties (property))
         inline constexpr std::uint32_t ObjectPropertyCount = 48u;   ///< (u64: their number)
+        inline constexpr std::uint32_t ObjectPropertyCapacity = 56u;    ///< (u64: the number that its properties' storage has room for)
+        inline constexpr std::uint32_t ObjectClass = 80u;           ///< (u8: its class (ClassArray ...))
+        inline constexpr std::uint32_t ObjectExtensible = 81u;      ///< (u8: it is extensible (checked by the runtime: see check_layout))
+        inline constexpr std::uint32_t ClassArray = 1u;             ///< (an array (exotic): its elements)
+        inline constexpr std::uint32_t ArrayElements = 128u;        ///< (u64: the offset of an array's elements (value), then their number)
+        inline constexpr std::uint32_t ArrayLength = 152u;          ///< (u32: its length)
+        inline constexpr std::uint32_t ArraySparse = 157u;          ///< (u8: its elements are its properties' (not ArrayElements'))
         inline constexpr std::uint32_t PropertySize = 32u;          ///< (a property: its key, its value (an accessor's getter), its setter, its attributes)
         inline constexpr std::uint32_t PropertyKey = 0u;
         inline constexpr std::uint32_t PropertyData = 8u;
+        inline constexpr std::uint32_t PropertySetter = 16u;
         inline constexpr std::uint32_t PropertyAttributes = 24u;    ///< (u8)
         inline constexpr std::uint32_t EnvironmentParent = 24u;     ///< (value: an environment's parent)
         inline constexpr std::uint32_t EnvironmentSlots = 32u;      ///< (u64: the offset of its slots (values))
         inline constexpr std::uint32_t FunctionEnvironment = 208u;   ///< (value: a function's environment (its closure's))
         inline constexpr std::uint32_t AttributeWritable = 0x01u;
         inline constexpr std::uint32_t AttributeAccessor = 0x08u;
+        inline constexpr std::uint32_t AttributesDefault = 0x07u;      ///< (writable, enumerable and configurable)
         // (a program's property cache sites (a get or a set of a property; numbered by the compiler from 0): SiteEntries entries each 
         // (the most recently used first), in a table that the runtime makes for the program (property_sites), whose offset is in a 
         // global of the program's; an entry's fields are at these offsets in it)
@@ -276,7 +285,8 @@ namespace neos::language::javascript
             SiteOwn = 1u,           ///< (the receiver's own data property)
             SiteHolder = 2u,        ///< (a data property of a prototype (depth 1: the receiver's prototype))
             SiteString = 3u,        ///< (a data property of %String.prototype% (the receiver a string))
-            SiteAdd = 4u            ///< (a set that adds a data property to the receiver)
+            SiteAdd = 4u,           ///< (a set that adds a data property to the receiver)
+            SiteSelf = 5u           ///< (a data property of the receiver itself (SitePrototype: the receiver; it has no shape))
         };
     }
 }
