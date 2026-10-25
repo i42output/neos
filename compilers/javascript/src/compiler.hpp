@@ -216,6 +216,7 @@ namespace neos::compilers::javascript
         // set (object, key, value, strict, site -> result), callee numbers (callee, site -> number))
         enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, Count };
         void generate_stub(stub aStub);
+        void call_stub(stub aStub);         ///< (a call of the stub (it is used))
     private:
         // control flow
         enum class control_kind
@@ -558,6 +559,7 @@ namespace neos::compilers::javascript
         bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
         std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
         std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub)
+        bool iStubsUsed[static_cast<std::size_t>(function_generator::stub::Count)] = {};
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
         std::uint32_t iErrorGlobal = 0u;

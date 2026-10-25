@@ -234,13 +234,13 @@ namespace neos::language::javascript
     }
 
     // the runtime's heap as generated code reads it: the runtime's region (its cells and the storage that code reads) is an external 
-    // memory (see neos_rt_host::external_memory_at) of index Memory; addresses are offsets in the region. A value's cell (its handle: 
-    // the value's low 32 bits) is found by the handle table (at RegionHandles: a u64 per handle, the cell's offset). The offsets of 
-    // the fields that code reads (the runtime checks them when it starts)
+    // memory (see neos_rt_host::external_memory_at) of index Memory; addresses are offsets in the region. A value's cell is at its
+    // handle (the value's low 32 bits) << HandleShift. The offsets of the fields that code reads (the runtime checks them when it 
+    // starts)
     namespace layout
     {
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
-        inline constexpr std::uint32_t RegionHandles = 65536u;      ///< (the handle table's offset (fixed: the region's second page))
+        inline constexpr std::uint32_t HandleShift = 4u;            ///< (a cell's offset: its handle << HandleShift)
         inline constexpr std::uint32_t ObjectProto = 24u;           ///< (value: an object's prototype)
         inline constexpr std::uint32_t ObjectShape = 32u;           ///< (u64: its properties' shape (0: none))
         inline constexpr std::uint32_t ObjectProperties = 40u;      ///< (u64: the offset of its properties (property))

@@ -148,7 +148,6 @@ namespace neos::javascript_runtime
     void* region_allocate(std::size_t aSize);           ///< (gc.cpp: storage in the region that is not a cell)
     void region_release(void* aMemory) noexcept;
     void publish_heap();                                ///< (the region, as the host's external memory (see layout::Memory))
-    std::uint64_t* handle_table(std::size_t aEntries);  ///< (gc.cpp: the handle table, with at least aEntries entries committed)
     inline std::uint64_t region_offset(void const* aAddress)
     {
         return static_cast<std::uint64_t>(static_cast<std::byte const*>(aAddress) - gRegionBase);
@@ -324,8 +323,8 @@ namespace neos::javascript_runtime
     struct function_object;
 
     // (the heap: cells, by handle; a mark-sweep garbage collector (gc.cpp) frees the cells that cannot be reached (cells do not move:
-    // a handle refers to its cell while the cell lives; freed handles are reused). Compiled code finds a handle's cell by the handle
-    // table, in the region (layout::RegionHandles))
+    // a cell's handle is its offset in the region, divided by 16 (the region's size is 64 GB: it is 32 bits); a cell's memory (and so
+    // its handle) is reused once it is freed). Compiled code finds a handle's cell from the handle (layout::HandleShift))
     class array_object;
     struct shape;
     struct property_descriptor;
@@ -375,15 +374,12 @@ namespace neos::javascript_runtime
                 }
             return *result;
         }
-        cell* find(std::uint32_t aHandle) const
-        {
-            return aHandle < iCells.size() ? iCells[aHandle] : nullptr;
-        }
+        static constexpr unsigned HandleShift = 4u;     ///< (a handle: its cell's offset in the region >> HandleShift)
+        cell* find(std::uint32_t aHandle) const;        ///< (gc.cpp: the live cell whose handle it is (null if none))
         cell& at(std::uint32_t aHandle) const
         {
-            return *iCells[aHandle];
+            return *reinterpret_cast<cell*>(gRegionBase + (static_cast<std::size_t>(aHandle) << HandleShift));
         }
-        std::size_t size() const { return iCells.size(); }
         void account(std::size_t aBytes) { iAllocatedBytes += aBytes; }    ///< (memory that a new cell owns (e.g. a string's text))
         void collect();                                                     ///< (a full collection now (unless collection is disabled))
     private:
@@ -393,11 +389,6 @@ namespace neos::javascript_runtime
         void add(cell& aCell, void* aMemory);
     private:
         friend class collector;
-        std::vector<cell*> iCells;
-        std::uint64_t* iHandleTable = nullptr;  ///< (the handle table: each handle's cell's offset in the region (0: none); at
-                                                ///< layout::RegionHandles)
-        std::size_t iHandleCapacity = 0u;       ///< (its entries whose pages are committed)
-        std::vector<std::uint32_t> iFreeHandles;
         std::uint64_t iAllocations = 0u;
         std::uint64_t iAllocationTrigger = ~std::uint64_t{};
         std::uint64_t iAllocatedBytes = 0u;

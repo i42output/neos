@@ -461,6 +461,7 @@ namespace neos::compilers::javascript
                 iDispatcher = generator().define_function(neolib::string{ "%js.dispatch" }, dispatcher, neolib::vector<type>{}, neolib::string{}, 1u);
             }
             // (the property caches' stubs (see function_generator::stub))
+            std::fill(std::begin(iStubsUsed), std::end(iStubsUsed), false);
             {
                 struct stub_signature { char const* name; std::vector<type> parameters; type result; };
                 stub_signature const stubs[] =
@@ -863,13 +864,12 @@ namespace neos::compilers::javascript
 
     void function_generator::cell_of(std::uint32_t aValue)
     {
-        // (the handle table's entry for the value's handle (its low 32 bits))
+        // (the value's handle (its low 32 bits): its cell's offset >> HandleShift)
         get(aValue);
         i64(0xFFFFFFFF);
         op(opcode::I64And);
-        i64(3);
+        i64(layout::HandleShift);
         op(opcode::I64Shl);
-        mem_load(opcode::I64LoadMem, layout::RegionHandles);
     }
 
     void function_generator::site_entry(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey,
@@ -940,7 +940,7 @@ namespace neos::compilers::javascript
         // (a site of its own (its number): a call of the program's get stub)
         auto const site = iCompiler.iPropertySites++;
         i32(static_cast<std::int32_t>(site));
-        call(iCompiler.iStubs[static_cast<std::size_t>(aComputed ? stub::GetComputed : stub::GetNamed)]);
+        call_stub(aComputed ? stub::GetComputed : stub::GetNamed);
         return site;
     }
 
@@ -1129,7 +1129,7 @@ namespace neos::compilers::javascript
         // (a site of its own: a call of the program's set stub)
         auto const site = iCompiler.iPropertySites++;
         i32(static_cast<std::int32_t>(site));
-        call(iCompiler.iStubs[static_cast<std::size_t>(stub::SetNamed)]);
+        call_stub(stub::SetNamed);
     }
 
     void function_generator::cached_set_stub()
@@ -1296,7 +1296,7 @@ namespace neos::compilers::javascript
 
     void function_generator::set_computed()
     {
-        call(iCompiler.iStubs[static_cast<std::size_t>(stub::SetComputed)]);
+        call_stub(stub::SetComputed);
     }
 
     void function_generator::set_computed_stub()
@@ -1428,11 +1428,17 @@ namespace neos::compilers::javascript
         release(index);
     }
 
+    void function_generator::call_stub(stub aStub)
+    {
+        iCompiler.iStubsUsed[static_cast<std::size_t>(aStub)] = true;
+        call(iCompiler.iStubs[static_cast<std::size_t>(aStub)]);
+    }
+
     void function_generator::generate_stub(stub aStub)
     {
         // (a stub's code: a function of the program's (see compiler::iStubs) that the property caches' sites call, so that the code is
-        // shared)
-        switch (aStub)
+        // shared; one that no site calls has none (it returns 0: it is not compiled for nothing (e.g. by each eval)))
+        switch (iCompiler.iStubsUsed[static_cast<std::size_t>(aStub)] ? aStub : stub::Count)
         {
         case stub::GetNamed:
         case stub::GetComputed:
@@ -1457,6 +1463,10 @@ namespace neos::compilers::javascript
             callee_number_stub(aStub == stub::CalleeNumber);
             break;
         default:
+            if (aStub == stub::CalleeNumber || aStub == stub::MethodNumber)
+                i32(0);
+            else
+                i64(0);
             break;
         }
         fragment code;
@@ -4351,7 +4361,7 @@ namespace neos::compilers::javascript
             if (name_of(aNode->child(1u)) == "length")
             {
                 // (x.length: a string's or an array's directly)
-                call(iCompiler.iStubs[static_cast<std::size_t>(stub::GetLength)]);
+                call_stub(stub::GetLength);
                 break;
             }
             key(name_of(aNode->child(1u)));
@@ -4486,7 +4496,7 @@ namespace neos::compilers::javascript
             aSite = iCompiler.iPropertySites++;
         get(aCallee);
         i32(static_cast<std::int32_t>(*aSite));
-        call(iCompiler.iStubs[static_cast<std::size_t>(callSite ? stub::CalleeNumber : stub::MethodNumber)]);
+        call_stub(callSite ? stub::CalleeNumber : stub::MethodNumber);
     }
 
     void function_generator::callee_number_stub(bool aCallSite)
