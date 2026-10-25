@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 13
+#define NEOS_RUNTIME_PLUGIN_VERSION 14
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -121,6 +121,7 @@ struct neos_rt_object
 };
 
 #define NEOS_RT_MAX_PARAMETERS 16
+#define NEOS_RT_EXTERNAL_MEMORIES 8                     /* external memories (memory indices 1 to 8): see neos_rt_host::external_memory_at */
 
 /* function flags */
 #define NEOS_RT_RESTRICTED 0x1u /* can change the host environment: not callable by scripts running in restricted mode */
@@ -285,9 +286,12 @@ typedef struct neos_rt_host
     /* (version 13) the external memory: a region of a plugin's (e.g. a language runtime's heap) that programs' code reads and writes
        as memory 1 (a memory access whose memarg has a memory index (flag 0x40) of 1, with a 64 bit address (an offset in the region)),
        so that the code a language's compiler generates can use the runtime's objects without calling it. aBase: the region's address;
-       aSize: its size (an access beyond it traps). Process-wide (one external memory, the last set); set again when the region
-       grows */
+       aSize: its size (an access beyond it traps). Process-wide (one memory 1, the last set); set again when the region grows */
     void (*external_memory)(void* aBase, unsigned long long aSize);
+    /* (version 14) an external memory by its index (1 to NEOS_RT_EXTERNAL_MEMORIES; external_memory sets memory 1): as external_memory,
+       for code whose memargs have that memory index, so that more than one plugin (e.g. the runtimes of different languages) can each
+       have a region that code uses at once (a language's compiler and runtime agree the index that its code uses) */
+    void (*external_memory_at)(unsigned aIndex, void* aBase, unsigned long long aSize);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

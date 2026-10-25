@@ -39,6 +39,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <unordered_set>
+#include <cstddef>
+#include <neos/language/javascript.hpp>
 #include "js.hpp"
 #include "api.hpp"
 #include "gc.hpp"
@@ -90,6 +92,37 @@ namespace neos::javascript_runtime
                 tDeferTail = false;
             }
             return r;
+        }
+
+        // (the layout of the heap that compiled code reads (neos::language::javascript::layout) is the runtime's)
+        void check_layout()
+        {
+            static bool sChecked = false;
+            if (sChecked)
+                return;
+            sChecked = true;
+            namespace jsl = neos::language::javascript::layout;
+            auto const& o = obj(the_realm().objectPrototype);
+            auto const at = [&](void const* aField)
+            {
+                return static_cast<std::size_t>(static_cast<std::byte const*>(aField) - reinterpret_cast<std::byte const*>(&o));
+            };
+            bool const ok =
+                at(&o.proto) == jsl::ObjectProto &&
+                at(o.properties.shape_field()) == jsl::ObjectShape &&
+                at(o.properties.entries_field()) == jsl::ObjectProperties &&
+                at(o.properties.entries_field()) + sizeof(std::uint64_t) == jsl::ObjectPropertyCount &&
+                sizeof(property) == jsl::PropertySize &&
+                offsetof(property, key) == jsl::PropertyKey &&
+                offsetof(property, data) == jsl::PropertyData &&
+                offsetof(property, attributes) == jsl::PropertyAttributes &&
+                AttributeWritable == jsl::AttributeWritable &&
+                AttributeAccessor == jsl::AttributeAccessor;
+            if (!ok)
+            {
+                std::fputs("JavaScript runtime: the heap's layout is not the one compiled code reads (neos::language::javascript::layout)\n", stderr);
+                std::abort();
+            }
         }
 
         template <typename F>
@@ -253,6 +286,8 @@ namespace neos::javascript_runtime
                     sMainProgram = current_program();
                 if (!realm_initialized())
                     initialize_realm();
+                check_layout();
+                publish_heap();
                 return Undefined;
             });
         }
@@ -566,7 +601,11 @@ namespace neos::javascript_runtime
             // (the program writes the global lexical bindings that it declares in place: it cannot run without its mirrors)
             auto* const word = program_word(aGlobal);
             auto& r = the_realm();
-            obj(r.global).mirrored = true;
+            if (auto& g = obj(r.global); !g.mirrored)
+            {
+                g.mirrored = true;
+                g.properties.make_dictionary();     // (the property caches do not use it)
+            }
             r.mirrors[name].push_back(word);
             program_words().push_back(program_word_use{ current_program(), word, &r, name });
             global_mirror_update(r, name);
@@ -817,6 +856,65 @@ namespace neos::javascript_runtime
             });
         }
 
+        std::int32_t construct_number(value aCallee)
+        {
+            // (new: a constructor that is the program's own compiled function (of the current realm): its number for the dispatcher (the
+            // compiled code calls it as function_object::construct does, with construct_this's this); else -1 (the runtime constructs))
+            auto* f = as_function(aCallee);
+            if (f == nullptr || f->kind != function_kind::Compiled || !f->isConstructor || f->program != current_program() ||
+                f->functionRealm != &the_realm())
+                return -1;
+            return static_cast<std::int32_t>(f->nativeId);
+        }
+
+        value construct_this(value aCallee)
+        {
+            // (the this of a construct_number constructor (as function_object::construct makes it): a derived class's is Empty (its
+            // constructor binds it))
+            return guard([&]() -> value
+            {
+                auto& f = *as_function(aCallee);
+                if (f.derived)
+                    return Empty;
+                // (its properties' storage: as much as the object it made last has (allocated once))
+                if (is_object(f.lastConstructed))
+                    f.constructedProperties = std::max<std::uint32_t>(f.constructedProperties, static_cast<std::uint32_t>(obj(f.lastConstructed).properties.size()));
+                auto const thisValue = ordinary_create_from_constructor(aCallee, &realm::objectPrototype);
+                if (f.constructedProperties != 0u)
+                    obj(thisValue).properties.reserve(f.constructedProperties);
+                f.lastConstructed = thisValue;
+                if (f.flavour == function_flavour::ClassConstructor)
+                    initialize_instance_elements(thisValue, aCallee);
+                return thisValue;
+            });
+        }
+
+        value char_code_at(value aCallee, value aThis, value aPosition)
+        {
+            // (s.charCodeAt(i): the built-in's result if the callee is it; else the callee is called)
+            value result;
+            if (javascript_runtime::char_code_at(aCallee, aThis, aPosition, result))
+                return result;
+            return guard([&]() -> value
+            {
+                value const argument[] = { aPosition };
+                return javascript_runtime::call(aCallee, aThis, argument);
+            });
+        }
+
+        value char_code_at_tail(value aCallee, value aThis, value aPosition)
+        {
+            // (char_code_at in a tail position: a callee that is not the built-in is a tail call)
+            value result;
+            if (javascript_runtime::char_code_at(aCallee, aThis, aPosition, result))
+                return result;
+            tTail.arguments.assign(1u, aPosition);
+            tTail.callee = aCallee;
+            tTail.thisValue = aThis;
+            tTail.pending = true;
+            return Exception;
+        }
+
         value sloppy_this(value aThis)
         {
             if (is_nullish(aThis))
@@ -960,6 +1058,324 @@ namespace neos::javascript_runtime
                 put_value(aObject, aKey, aValue, aStrict != 0);
                 return aValue;
             });
+        }
+
+        // --- property caches: a compiled get or set of a named property (a site: the compiler numbers a program's from 0) remembers
+        // where its last lookup found the property, by the shapes of the objects (see shape (js.hpp)): the receiver's own property at
+        // a position, a prototype's (the prototype, and the shapes of those that do not have it) or (a set) the property that the
+        // receiver adds; and (a get) the value's number for the dispatcher if it is a function of the program's. A program's sites are
+        // in a table in the region (property_sites makes it; its offset is in a global of the program's) that compiled code reads
+        // (see neos::language::javascript::layout): it uses an entry that fits (the receiver's shape and the key), and calls these
+        // functions if none does. What an entry remembers is checked when it is used, so it cannot give a wrong result; the values that
+        // it refers to (the prototypes, the function) are kept alive while it does
+
+        namespace
+        {
+            namespace jsl = neos::language::javascript::layout;
+
+            struct site
+            {
+                value key;
+                std::uint64_t shape;            ///< (the receiver's (Add: before it adds the property); a shape const*)
+                std::uint8_t kind;              ///< (jsl::SiteOwn ...)
+                std::uint8_t depth;             ///< (the prototypes that are checked)
+                std::uint16_t reserved;
+                std::uint32_t position;         ///< (the property's position in its holder's table)
+                struct link
+                {
+                    value object;
+                    std::uint64_t shape;
+                } prototypes[2];
+                std::uint64_t added;            ///< (Add: the receiver's shape with the property)
+                value function;                 ///< (a get's value, if it is a function of the program's (to call)...)
+                std::int32_t number;            ///< (... whose number this is (for the dispatcher); else -1)
+                std::uint32_t reserved2;
+            };
+            static_assert(std::is_standard_layout_v<site> && sizeof(site) == jsl::SiteSize);
+            static_assert(offsetof(site, key) == jsl::SiteKey && offsetof(site, shape) == jsl::SiteShape);
+            static_assert(offsetof(site, kind) == jsl::SiteKind && offsetof(site, depth) == jsl::SiteDepth);
+            static_assert(offsetof(site, position) == jsl::SitePosition && offsetof(site, prototypes) == jsl::SitePrototype);
+            static_assert(offsetof(site, added) == jsl::SiteAdded && offsetof(site, function) == jsl::SiteFunction);
+            static_assert(offsetof(site, number) == jsl::SiteNumber);
+
+            inline std::uint64_t shape_word(shape const* aShape) { return reinterpret_cast<std::uintptr_t>(aShape); }
+
+            // (the programs' tables)
+            struct site_tables
+            {
+                std::unordered_map<void*, region_vector<site>> tables;
+                void* lastProgram = nullptr;
+                region_vector<site>* lastTable = nullptr;
+            };
+            site_tables& the_site_tables()
+            {
+                static site_tables* sTables = new site_tables{};
+                return *sTables;
+            }
+            root_tracer const sSiteRoots{ [](tracer& aTracer)
+            {
+                for (auto const& [program, table] : the_site_tables().tables)
+                    for (auto const& s : table)
+                    {
+                        if (s.kind != jsl::SiteNone)
+                            for (auto const& p : s.prototypes)
+                                if (p.object != 0u)
+                                    aTracer.mark(p.object);
+                        if (s.function != 0u)
+                            aTracer.mark(s.function);
+                    }
+            } };
+
+            // (the running program's site (null: none (its table is not made yet)))
+            site* site_of(std::int32_t aSite)
+            {
+                auto& t = the_site_tables();
+                auto* const program = current_program();
+                if (program != t.lastProgram || t.lastTable == nullptr)
+                {
+                    auto const existing = t.tables.find(program);
+                    if (existing == t.tables.end())
+                        return nullptr;
+                    t.lastProgram = program;
+                    t.lastTable = &existing->second;
+                }
+                auto const index = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
+                return index < t.lastTable->size() ? &(*t.lastTable)[index] : nullptr;
+            }
+
+            // (the receiver's prototypes are the site's (the objects, their types ordinary and (those that do not have the property)
+            // their shapes the same); a get's holder (the last) has the property: its shape is not compared (the property's key is, at
+            // its position) so it may have none (e.g. a prototype of many methods))
+            bool prototypes_match(object const& aReceiver, site const& aSite, bool aHolder)
+            {
+                auto p = aReceiver.proto;
+                for (std::uint8_t i = 0u; i < aSite.depth; ++i)
+                {
+                    if (p != aSite.prototypes[i].object)
+                        return false;
+                    auto const& o = obj(p);
+                    if (!ordinary_type(o))
+                        return false;
+                    if (!(aHolder && i + 1u == aSite.depth) && shape_word(o.properties.layout()) != aSite.prototypes[i].shape)
+                        return false;
+                    p = o.proto;
+                }
+                return true;
+            }
+
+            // (a holder's property at a position: the key's data property, if it is still there)
+            property const* holder_property(object const& aHolder, std::uint32_t aPosition, value aKey)
+            {
+                auto const entries = aHolder.properties.entries();
+                if (aPosition >= entries.size())
+                    return nullptr;
+                auto const& p = entries[aPosition];
+                return p.key == aKey && !p.accessor() ? &p : nullptr;
+            }
+
+            std::uint32_t position_of(object const& aObject, property const* aProperty)
+            {
+                return static_cast<std::uint32_t>(aProperty - aObject.properties.entries().data());
+            }
+
+            // (a get's site: where the lookup found the property (if it can be remembered) and the function that it found)
+            void remember_get(std::int32_t aSite, value aObject, value aKey, value aResult)
+            {
+                site e{};
+                e.key = aKey;
+                e.number = -1;
+                [&]()
+                {
+                    if (is_object(aObject))
+                    {
+                        auto& o = obj(aObject);
+                        auto const* layout = o.properties.layout();
+                        if (layout == nullptr || !ordinary_type(o))
+                            return;
+                        e.shape = shape_word(layout);
+                        if (auto const* p = o.properties.find(aKey))
+                        {
+                            if (p->accessor())
+                                return;
+                            e.kind = jsl::SiteOwn;
+                            e.position = position_of(o, p);
+                            return;
+                        }
+                        auto prototype = o.proto;
+                        for (std::uint8_t depth = 0u; depth < 2u && prototype != Null; ++depth)
+                        {
+                            auto& holder = obj(prototype);
+                            if (!ordinary_type(holder))
+                                return;
+                            auto const* holderLayout = holder.properties.layout();
+                            e.prototypes[depth] = { prototype, shape_word(holderLayout) };
+                            auto const* p = holder.properties.find(aKey);
+                            if (p == nullptr && holderLayout == nullptr)
+                                return;     // (a prototype that does not have it is compared by its shape)
+                            if (p != nullptr)
+                            {
+                                if (p->accessor())
+                                    return;
+                                e.kind = jsl::SiteHolder;
+                                e.depth = depth + 1u;
+                                e.position = position_of(holder, p);
+                                return;
+                            }
+                            prototype = holder.proto;
+                        }
+                    }
+                    else if (is_string(aObject) && aKey != the_names().length)
+                    {
+                        // (a string's property (not its length or an index: a named property): %String.prototype%'s)
+                        auto const prototype = the_realm().stringPrototype;
+                        auto& holder = obj(prototype);
+                        if (auto const* p = holder.properties.find(aKey); p != nullptr && !p->accessor())
+                        {
+                            e.kind = jsl::SiteString;
+                            e.prototypes[0] = { prototype, 0u };
+                            e.position = position_of(holder, p);
+                        }
+                    }
+                }();
+                if (e.kind == jsl::SiteNone)
+                {
+                    e.shape = 0u;
+                    e.prototypes[0] = {};
+                    e.prototypes[1] = {};
+                }
+                // (a method: called through the dispatcher (as callee_number finds))
+                if (auto const number = callee_number(aResult); number >= 0)
+                {
+                    e.function = aResult;
+                    e.number = number;
+                }
+                if (auto* s = site_of(aSite))
+                    *s = e;
+            }
+        }
+
+        value property_sites(std::int32_t aCount, std::int32_t aGlobal)
+        {
+            // (the program's sites (see compiled code's property caches): its table (empty entries), whose offset is its global aGlobal)
+            return guard([&]() -> value
+            {
+                auto& t = the_site_tables();
+                auto& table = t.tables[current_program()];
+                table.clear();
+                table.resize(static_cast<std::size_t>(std::max(aCount, 1)), site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
+                t.lastProgram = nullptr;
+                t.lastTable = nullptr;
+                *program_word(aGlobal) = region_offset(table.data());
+                publish_heap();
+                return Undefined;
+            });
+        }
+
+        value get_named_cached(value aObject, value aKey, std::int32_t aSite)
+        {
+            if (auto const* e = site_of(aSite); e != nullptr && e->key == aKey && e->kind != jsl::SiteNone)
+            {
+                if (is_object(aObject))
+                {
+                    auto& o = obj(aObject);
+                    if (shape_word(o.properties.layout()) == e->shape && e->shape != 0u)
+                    {
+                        property const* p = nullptr;
+                        if (e->kind == jsl::SiteOwn)
+                            p = &o.properties.at(e->position);
+                        else if (e->kind == jsl::SiteHolder && prototypes_match(o, *e, true))
+                            p = holder_property(obj(e->prototypes[e->depth - 1u].object), e->position, aKey);
+                        if (p != nullptr && p->key == aKey && !p->accessor())
+                            return p->data;
+                    }
+                }
+                else if (is_string(aObject) && e->kind == jsl::SiteString && e->prototypes[0].object == the_realm().stringPrototype)
+                {
+                    if (auto const* p = holder_property(obj(e->prototypes[0].object), e->position, aKey))
+                        return p->data;
+                }
+            }
+            auto const result = get_named(aObject, aKey);
+            if (result != Exception)
+                remember_get(aSite, aObject, aKey, result);
+            return result;
+        }
+
+        value set_named_cached(value aObject, value aKey, value aValue, std::int32_t aStrict, std::int32_t aSite)
+        {
+            shape const* before = nullptr;
+            if (is_object(aObject))
+            {
+                auto& o = obj(aObject);
+                auto const* layout = o.properties.layout();
+                if (layout != nullptr && ordinary_type(o) && !o.mirrored)
+                {
+                    before = layout;
+                    if (auto const* e = site_of(aSite); e != nullptr && e->key == aKey && e->shape == shape_word(layout))
+                    {
+                        if (e->kind == jsl::SiteOwn)
+                        {
+                            auto& p = o.properties.at(e->position);
+                            if (p.key == aKey && (p.attributes & (AttributeAccessor | AttributeWritable)) == AttributeWritable)
+                            {
+                                p.data = aValue;
+                                return aValue;
+                            }
+                        }
+                        else if (e->kind == jsl::SiteAdd && o.extensible && prototypes_match(o, *e, false) &&
+                            (e->depth == 0u ? o.proto : obj(e->prototypes[e->depth - 1u].object).proto) == Null)
+                        {
+                            o.properties.add(aKey, aValue, AttributesDefault, reinterpret_cast<shape*>(e->added));
+                            return aValue;
+                        }
+                    }
+                }
+            }
+            auto const result = set_named(aObject, aKey, aValue, aStrict);
+            if (result == Exception || before == nullptr)
+                return result;
+            // (remembered: a writable data property that the receiver has, or the one that it added)
+            auto& o = obj(aObject);
+            auto const* after = o.properties.layout();
+            site e{};
+            e.key = aKey;
+            e.shape = shape_word(before);
+            e.number = -1;
+            if (after == before)
+            {
+                auto const* p = o.properties.find(aKey);
+                if (p == nullptr || (p->attributes & (AttributeAccessor | AttributeWritable)) != AttributeWritable)
+                    return result;
+                e.kind = jsl::SiteOwn;
+                e.position = position_of(o, p);
+            }
+            else
+            {
+                auto const& added = o.properties.entries().back();
+                if (after == nullptr || after->parent != before || after->key != aKey || added.key != aKey || added.attributes != AttributesDefault)
+                    return result;
+                // (no prototype (each of them ordinary) has the property; the last's prototype is null)
+                auto prototype = o.proto;
+                std::uint8_t depth = 0u;
+                for (; prototype != Null; ++depth)
+                {
+                    if (depth == 2u)
+                        return result;
+                    auto& p = obj(prototype);
+                    auto const* layout = p.properties.layout();
+                    if (layout == nullptr || !ordinary_type(p) || p.properties.find(aKey) != nullptr)
+                        return result;
+                    e.prototypes[depth] = { prototype, shape_word(layout) };
+                    prototype = p.proto;
+                }
+                e.kind = jsl::SiteAdd;
+                e.depth = depth;
+                e.position = static_cast<std::uint32_t>(o.properties.entries().size() - 1u);
+                e.added = shape_word(after);
+            }
+            if (auto* s = site_of(aSite))
+                *s = e;
+            return result;
         }
 
         value delete_(value aObject, value aKey, std::int32_t aStrict)
@@ -1507,6 +1923,10 @@ namespace neos::javascript_runtime
             { "tail_resolve", NEOS_RT_FUNCTION(tail_resolve), I64, 0u, {}, 0u },
             { "call_spread", NEOS_RT_FUNCTION(call_spread), I64, 3u, { I64, I64, I64 }, 0u },
             { "construct", NEOS_RT_FUNCTION(construct), I64, 2u, { I64, I64 }, 0u },
+            { "construct_number", NEOS_RT_FUNCTION(construct_number), I32, 1u, { I64 }, 0u },
+            { "construct_this", NEOS_RT_FUNCTION(construct_this), I64, 1u, { I64 }, 0u },
+            { "char_code_at", NEOS_RT_FUNCTION(char_code_at), I64, 3u, { I64, I64, I64 }, 0u },
+            { "char_code_at_tail", NEOS_RT_FUNCTION(char_code_at_tail), I64, 3u, { I64, I64, I64 }, 0u },
             { "sloppy_this", NEOS_RT_FUNCTION(sloppy_this), I64, 1u, { I64 }, 0u },
             { "arguments_object", NEOS_RT_FUNCTION(arguments_object), I64, 8u, { I64, I32, I64, I64, I64, I64, I32, I32 }, 0u },
             { "arguments_map", NEOS_RT_FUNCTION(arguments_map), I64, 4u, { I64, I64, I32, I32 }, 0u },
@@ -1514,8 +1934,11 @@ namespace neos::javascript_runtime
             { "derived_result", NEOS_RT_FUNCTION(derived_result), I64, 2u, { I64, I64 }, 0u },
             { "get", NEOS_RT_FUNCTION(get), I64, 2u, { I64, I64 }, 0u },
             { "get_named", NEOS_RT_FUNCTION(get_named), I64, 2u, { I64, I64 }, 0u },
+            { "get_named_cached", NEOS_RT_FUNCTION(get_named_cached), I64, 3u, { I64, I64, I32 }, 0u },
+            { "property_sites", NEOS_RT_FUNCTION(property_sites), I64, 2u, { I32, I32 }, 0u },
             { "set", NEOS_RT_FUNCTION(set), I64, 4u, { I64, I64, I64, I32 }, 0u },
             { "set_named", NEOS_RT_FUNCTION(set_named), I64, 4u, { I64, I64, I64, I32 }, 0u },
+            { "set_named_cached", NEOS_RT_FUNCTION(set_named_cached), I64, 5u, { I64, I64, I64, I32, I32 }, 0u },
             { "delete", NEOS_RT_FUNCTION(delete_), I64, 3u, { I64, I64, I32 }, 0u },
             { "super_base", NEOS_RT_FUNCTION(super_base), I64, 1u, { I64 }, 0u },
             { "super_get", NEOS_RT_FUNCTION(super_get), I64, 3u, { I64, I64, I64 }, 0u },

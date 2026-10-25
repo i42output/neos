@@ -878,6 +878,21 @@ namespace neos::javascript_runtime
         return value_of(it);
     }
 
+    bool char_code_at(value aCallee, value aThis, value aPosition, value& aResult)
+    {
+        auto const* f = as_function(aCallee);
+        if (f == nullptr || f->native != &string_char_code_at || !is_string(aThis) || !is_number(aPosition))
+            return false;
+        auto const text = cell_of<string>(aThis).chars();
+        auto const n = as_number(aPosition);
+        auto const position = std::isnan(n) ? 0.0 : std::trunc(n);  // (ToIntegerOrInfinity)
+        if (position < 0.0 || position >= static_cast<double>(text.size()))
+            aResult = CanonicalNaN;
+        else
+            aResult = number(text[static_cast<std::size_t>(position)]);
+        return true;
+    }
+
     std::u16string get_substitution_text(std::u16string const& aMatched, std::u16string const& aString, std::size_t aPosition,
         std::span<value const> aCaptures, value aNamedCaptures, std::u16string const& aReplacement)
     {

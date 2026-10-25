@@ -180,8 +180,9 @@ namespace neos
                 bool available();
                 // returns null if the module uses an instruction the JIT does not support (the interpreter is then used)
                 compiled_module_ptr compile(module_description const& aModule, host_function aHost);
-                // (memory 1: the external memory (see neos_rt_host::external_memory), process-wide)
-                memory& external_memory();
+                // (the external memories (memory indices 1 to NEOS_RT_EXTERNAL_MEMORIES: see neos_rt_host::external_memory_at), process-wide;
+                // an index beyond them: a memory of no size (an access traps))
+                memory& external_memory(std::uint64_t aIndex);
                 // traps are thrown as std::runtime_error (exceptions thrown by host functions propagate unchanged)
                 std::vector<value> invoke(compiled_module& aModule, std::uint32_t aFunction, std::span<value const> aArguments, 
                     invocation* aInvocation = nullptr);

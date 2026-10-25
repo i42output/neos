@@ -33,6 +33,7 @@ namespace neos::compilers::javascript
         iDepth = 0;
         iNodes.clear();
         iStack.clear();
+        iPropertySites = 0u;
     }
 
     void compiler::set_options(neolib::i_string const& aOptions)
@@ -79,6 +80,7 @@ namespace neos::compilers::javascript
 
     void compiler::begin_pass()
     {
+        iPropertySites = 0u;    // (each pass numbers the program's sites from 0)
     }
 
     void compiler::end_pass()
@@ -1645,6 +1647,11 @@ namespace neos::compilers::javascript
     {
         auto const f = iScriptFunctions.find(aName);
         return f != iScriptFunctions.end() ? f->second : nullptr;
+    }
+
+    std::uint32_t compiler::property_sites_global()
+    {
+        return global_index("%jssites", type::I64);
     }
 
     std::uint32_t compiler::function_closure(function_info const& aFunction)

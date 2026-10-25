@@ -40,14 +40,87 @@
 
 namespace neos::javascript_runtime
 {
+    // --- shapes
+
+    namespace
+    {
+        constexpr std::uint32_t MaxShapeKeys = 64u;         // (a table with more properties has no shape (e.g. an object used as a map))
+        constexpr std::size_t MaxShapes = 1u << 18;         // (then tables that add properties have none)
+        constexpr std::size_t FewKeys = 8u;                 // (keys that are found by searching them; more are indexed)
+        std::size_t sShapes = 0u;
+    }
+
+    shape* root_shape()
+    {
+        static shape* sRoot = new shape{};
+        return sRoot;
+    }
+
+    shape* shape::transition(value aKey)
+    {
+        if (iManyTransitions)
+        {
+            auto const existing = iManyTransitions->find(aKey);
+            if (existing != iManyTransitions->end())
+                return existing->second;
+        }
+        else
+            for (auto const& t : iTransitions)
+                if (t.first == aKey)
+                    return t.second;
+        if (count >= MaxShapeKeys || sShapes >= MaxShapes)
+            return nullptr;
+        auto* const next = new shape{};
+        ++sShapes;
+        next->parent = this;
+        next->key = aKey;
+        next->count = count + 1u;
+        if (iManyTransitions)
+            iManyTransitions->emplace(aKey, next);
+        else
+        {
+            iTransitions.emplace_back(aKey, next);
+            if (iTransitions.size() > FewKeys)
+            {
+                iManyTransitions = std::make_unique<std::unordered_map<value, shape*>>(iTransitions.begin(), iTransitions.end());
+                iTransitions.clear();
+                iTransitions.shrink_to_fit();
+            }
+        }
+        return next;
+    }
+
+    std::optional<std::uint32_t> shape::position(value aKey)
+    {
+        if (!iIndex)
+        {
+            iIndex = std::make_unique<std::unordered_map<value, std::uint32_t>>();
+            iIndex->reserve(count);
+            for (auto const* s = this; s->parent != nullptr; s = s->parent)
+                iIndex->emplace(s->key, s->count - 1u);
+        }
+        auto const existing = iIndex->find(aKey);
+        if (existing == iIndex->end())
+            return {};
+        return existing->second;
+    }
+
     // --- property tables
 
     property* property_table::find(value aKey)
     {
-        if (iIndex)
+        if (iEntries.size() > FewKeys)
         {
-            auto const existing = iIndex->find(aKey);
-            return existing != iIndex->end() ? &iEntries[existing->second] : nullptr;
+            if (iShape != nullptr)
+            {
+                auto const position = iShape->position(aKey);
+                return position ? &iEntries[*position] : nullptr;
+            }
+            if (iIndex)
+            {
+                auto const existing = iIndex->find(aKey);
+                return existing != iIndex->end() ? &iEntries[existing->second] : nullptr;
+            }
         }
         for (auto& e : iEntries)
             if (e.key == aKey)
@@ -55,13 +128,35 @@ namespace neos::javascript_runtime
         return nullptr;
     }
 
+    void property_table::make_dictionary()
+    {
+        if (iShape == nullptr)
+            return;
+        iShape = nullptr;
+        if (iEntries.size() > FewKeys)
+            reindex();
+    }
+
     property& property_table::add(value aKey, value aData, value aSetter, std::uint8_t aAttributes)
     {
         iEntries.push_back(property{ aKey, aData, aSetter, aAttributes });
-        if (iIndex)
+        if (iShape != nullptr)
+        {
+            iShape = iShape->transition(aKey);
+            if (iShape == nullptr && iEntries.size() > FewKeys)
+                reindex();
+        }
+        else if (iIndex)
             iIndex->emplace(aKey, static_cast<std::uint32_t>(iEntries.size() - 1u));
-        else if (iEntries.size() > 8u)
+        else if (iEntries.size() > FewKeys)
             reindex();
+        return iEntries.back();
+    }
+
+    property& property_table::add(value aKey, value aData, std::uint8_t aAttributes, shape* aShape)
+    {
+        iEntries.push_back(property{ aKey, aData, Undefined, aAttributes });
+        iShape = aShape;
         return iEntries.back();
     }
 
@@ -70,6 +165,7 @@ namespace neos::javascript_runtime
         auto* const p = find(aKey);
         if (p == nullptr)
             return;
+        make_dictionary();      // (its layout is its own from now on)
         if (iIndex)
             iIndex->erase(aKey);
         if (p == &iEntries.back())
@@ -81,7 +177,7 @@ namespace neos::javascript_runtime
         }
         if (iDeleted > 8u && iDeleted > iEntries.size() / 2u)
         {
-            std::erase_if(iEntries, [](property const& e) { return e.key == 0u; });
+            iEntries.erase_if([](property const& e) { return e.key == 0u; });
             iDeleted = 0u;
             if (iIndex)
                 reindex();
@@ -454,6 +550,27 @@ namespace neos::javascript_runtime
                 return true;
             }
             return set_with_own_descriptor(*this, aKey, aValue, aReceiver, p->descriptor());
+        }
+        // (fast path: an ordinary, extensible receiver that is this object and none of whose prototypes (all ordinary) has the property:
+        // the property is added (as [[Set]] adds it, by CreateDataProperty))
+        if (aReceiver == value_of(*this) && extensible && !mirrored && ordinary_type(*this))
+        {
+            bool absent = true;
+            for (auto parent = proto; parent != Null;)
+            {
+                auto& p = obj(parent);
+                if (!ordinary_type(p) || p.properties.find(aKey) != nullptr)
+                {
+                    absent = false;
+                    break;
+                }
+                parent = p.proto;
+            }
+            if (absent)
+            {
+                properties.add(aKey, aValue, Undefined, AttributesDefault);
+                return true;
+            }
         }
         return set_with_own_descriptor(*this, aKey, aValue, aReceiver, std::nullopt);
     }

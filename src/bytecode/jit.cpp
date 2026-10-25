@@ -3741,8 +3741,9 @@ namespace neos
                         // a load or store: [address + offset, address + offset + width) must be within linear memory
                         void memory_access(std::uint8_t aOp, std::uint64_t aOffset, std::uint32_t aMemory)
                         {
-                            // (memory 0: the module's (a 32 bit address); memory 1: the external memory (a 64 bit address))
-                            if (aMemory > 1u)
+                            // (memory 0: the module's (a 32 bit address); memories 1 to NEOS_RT_EXTERNAL_MEMORIES: the external memories (a 64 bit
+                            // address))
+                            if (aMemory > NEOS_RT_EXTERNAL_MEMORIES)
                                 throw unsupported{ "memory index" };
                             struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
                             static access const sAccesses[] =
@@ -3782,7 +3783,7 @@ namespace neos
                             if (aMemory == 0u)
                                 a.load(true, m, R15, ContextMemory);
                             else
-                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(&external_memory()), true);
+                                a.mov_ri(m, reinterpret_cast<std::uint64_t>(&external_memory(aMemory)), true);
                             a.lea(e, g, disp + static_cast<std::int32_t>(x.width));
                             a.alu_rm(7, true, e, m, MemorySize); // cmp
                             a.jcc(A, iTrapLabels[TrapOutOfBounds]);
@@ -4775,10 +4776,10 @@ namespace neos
 
 #endif
 
-                memory& external_memory()
+                memory& external_memory(std::uint64_t aIndex)
                 {
-                    static memory sExternal;
-                    return sExternal;
+                    static memory sExternal[NEOS_RT_EXTERNAL_MEMORIES + 1u];   // ([0]: none (no size))
+                    return sExternal[aIndex >= 1u && aIndex <= NEOS_RT_EXTERNAL_MEMORIES ? aIndex : 0u];
                 }
             }
         }

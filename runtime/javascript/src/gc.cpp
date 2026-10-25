@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <neos/language/javascript.hpp>
 #include "js.hpp"
 #include "gc.hpp"
 #include "api.hpp"
@@ -65,6 +66,8 @@ namespace neos::javascript_runtime
         constexpr std::size_t PageSize = std::size_t{ 1u } << PageShift;
         constexpr std::size_t RegionSize = std::size_t{ 64u } << 30u;      // (address space only: pages are committed when used)
         constexpr std::size_t MaxSmall = 4096u;
+        constexpr std::size_t HandlePages = 65536u;     // (the handle table's (4 GB: 512M handles): after the first page)
+        static_assert(neos::language::javascript::layout::RegionHandles == PageSize);
 
         constexpr std::uint32_t SizeClasses[] =
         {
@@ -78,7 +81,16 @@ namespace neos::javascript_runtime
             std::uint32_t slotSize = 0u;    ///< (0: not in use)
             std::uint32_t first = 0u;       ///< (a large cell's: its first page)
             std::size_t largeSize = 0u;     ///< (a large cell's: its size (0: the page has slots))
+            bool raw = false;               ///< (storage that is not cells (see region_vector))
         };
+
+        // (the region (its committed pages) is the external memory that compiled code reads (see neos::language::javascript::layout))
+        void publish_region(std::byte* aBase, std::size_t aSize)
+        {
+            auto const* h = host();
+            if (h != nullptr && h->version >= 14u && h->external_memory_at != nullptr)
+                h->external_memory_at(neos::language::javascript::layout::Memory, aBase, aSize);
+        }
 
         class cell_memory
         {
@@ -103,25 +115,34 @@ namespace neos::javascript_runtime
                     std::fputs("JavaScript runtime: cannot reserve the heap's address space\n", stderr);
                     std::abort();
                 }
+                gRegionBase = iBase;
                 iPages.reserve(4096u);
+                // (the first page is reserved (offset 0 is no cell); the handle table's pages follow it (layout::RegionHandles: 
+                // committed as it grows))
+                iPages.resize(1u + HandlePages);
+                for (auto& p : iPages)
+                    p.raw = true;
             }
         public:
-            void* allocate(std::size_t aSize)
+            // (a cell's memory, or (aRaw) storage that is not a cell)
+            void* allocate(std::size_t aSize, bool aRaw = false)
             {
                 if (aSize > MaxSmall)
-                    return allocate_large(aSize);
-                auto& c = iClasses[iClassOf[(aSize + 15u) / 16u]];
+                    return allocate_large(aSize, aRaw);
+                auto* const classes = aRaw ? iRawClasses : iClasses;
+                auto& c = classes[iClassOf[(aSize + 15u) / 16u]];
                 if (c.freeList != nullptr)
                 {
                     auto* const result = c.freeList;
                     c.freeList = *static_cast<void**>(result);
                     return result;
                 }
-                auto const slotSize = SizeClasses[&c - iClasses];
+                auto const slotSize = SizeClasses[&c - classes];
                 if (c.bump == c.bumpEnd)
                 {
                     auto const page = new_pages(1u);
                     iPages[page].slotSize = slotSize;
+                    iPages[page].raw = aRaw;
                     c.bump = page_address(page);
                     c.bumpEnd = c.bump + (PageSize / slotSize) * slotSize;
                 }
@@ -145,10 +166,22 @@ namespace neos::javascript_runtime
                 }
                 if (!aReuse)
                     return;
-                auto& c = iClasses[iClassOf[info.slotSize / 16u]];
+                auto& c = (info.raw ? iRawClasses : iClasses)[iClassOf[info.slotSize / 16u]];
                 *static_cast<void**>(aMemory) = c.freeList;
                 c.freeList = aMemory;
             }
+            void publish() const { publish_region(iBase, iPages.size() * PageSize); }
+            // (the handle table (with at least aEntries entries committed))
+            std::uint64_t* handles(std::size_t aEntries)
+            {
+                auto const needed = (aEntries * sizeof(std::uint64_t) + PageSize - 1u) / PageSize;
+                if (needed > HandlePages)
+                    throw std::bad_alloc{};
+                for (; iHandlePages < needed; ++iHandlePages)
+                    commit(page_address(1u + iHandlePages), PageSize);     // (zeroed)
+                return reinterpret_cast<std::uint64_t*>(iBase + neos::language::javascript::layout::RegionHandles);
+            }
+            std::size_t handle_capacity() const { return iHandlePages * PageSize / sizeof(std::uint64_t); }
             std::size_t size_of(void const* aMemory) const
             {
                 auto const& info = iPages[page_of(aMemory)];
@@ -164,7 +197,7 @@ namespace neos::javascript_runtime
                 if (page >= iPages.size())
                     return nullptr;
                 auto const& info = iPages[page];
-                if (info.slotSize == 0u)
+                if (info.slotSize == 0u || info.raw)
                     return nullptr;
                 if (info.largeSize != 0u)
                 {
@@ -200,14 +233,15 @@ namespace neos::javascript_runtime
                     throw std::bad_alloc{};
                 commit(page_address(page), aCount * PageSize);
                 iPages.resize(page + aCount);
+                publish();
                 return page;
             }
-            void* allocate_large(std::size_t aSize)
+            void* allocate_large(std::size_t aSize, bool aRaw)
             {
                 auto const count = (aSize + PageSize - 1u) / PageSize;
                 auto const page = new_pages(count);
                 for (std::size_t p = page; p < page + count; ++p)
-                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize };
+                    iPages[p] = page_info{ static_cast<std::uint32_t>(PageSize), static_cast<std::uint32_t>(page), aSize, aRaw };
                 return page_address(page);
             }
             static void commit(void* aAddress, std::size_t aSize)
@@ -238,6 +272,8 @@ namespace neos::javascript_runtime
             std::byte* iBase = nullptr;
             std::vector<page_info> iPages;
             std::vector<std::pair<std::size_t, std::size_t>> iFreeRuns;  ///< (large cells' pages that were freed: first, count)
+            size_class iRawClasses[ClassCount];
+            std::size_t iHandlePages = 0u;      ///< (the handle table's committed pages)
             size_class iClasses[ClassCount];
             std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
         };
@@ -523,12 +559,41 @@ namespace neos::javascript_runtime
             aCell.handle = iFreeHandles.back();
             iFreeHandles.pop_back();
             iCells[aCell.handle] = &aCell;
+            iHandleTable[aCell.handle] = region_offset(&aCell);
             return;
         }
         if (iCells.size() >= 0xFFFFFFFFu)
             throw std::bad_alloc{};
         aCell.handle = static_cast<std::uint32_t>(iCells.size());
         iCells.push_back(&aCell);
+        // (the handle table (compiled code's): at a fixed offset (its pages are committed as it grows))
+        if (aCell.handle >= iHandleCapacity)
+        {
+            iHandleTable = handle_table(static_cast<std::size_t>(aCell.handle) + 1u);
+            iHandleCapacity = the_collector().memory().handle_capacity();
+        }
+        iHandleTable[aCell.handle] = region_offset(&aCell);
+    }
+
+    std::uint64_t* handle_table(std::size_t aEntries)
+    {
+        return the_collector().memory().handles(aEntries);
+    }
+
+    void* region_allocate(std::size_t aSize)
+    {
+        // (no collection: the cell whose storage it is may be changing)
+        return the_collector().memory().allocate(aSize, true);
+    }
+
+    void region_release(void* aMemory) noexcept
+    {
+        the_collector().memory().release(aMemory, true);
+    }
+
+    void publish_heap()
+    {
+        the_collector().memory().publish();
     }
 
     void heap::collect()
@@ -693,6 +758,7 @@ namespace neos::javascript_runtime
     void collector::free_cell(cell* aCell, std::uint32_t aHandle)
     {
         iHeap.iCells[aHandle] = nullptr;
+        iHeap.iHandleTable[aHandle] = 0u;
         auto const size = iMemory.size_of(aCell);
         aCell->~cell();
         auto* const memory = reinterpret_cast<std::byte*>(aCell);
@@ -931,6 +997,7 @@ namespace neos::javascript_runtime
         aTracer.mark(lexicalNewTarget);
         aTracer.mark(lexicalHome);
         aTracer.mark(lexicalCallee);
+        aTracer.mark(lastConstructed);
         aTracer.mark(boundTarget);
         aTracer.mark(boundThis);
         aTracer.mark(boundArguments);

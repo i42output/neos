@@ -258,6 +258,13 @@ namespace neos::compilers::javascript
         void release(std::uint32_t aLocal);
         void call(std::uint32_t aFunction);
         void runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult);
+        std::uint32_t cached_get_named();   ///< (object, key -> its value: a get of a named property with a property cache site of its
+                                            ///< own (its number): inline if the site fits, else the runtime's get_named_cached)
+        void cached_set_named();            ///< (object, key, value, strict -> the result: as cached_get_named, a set)
+        void mem_load(opcode aOpcode, std::uint32_t aOffset);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
+        void mem_store(opcode aOpcode, std::uint32_t aOffset);
+        void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry)
+        void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void check_void();          ///< (a call that returned Exception or Undefined (dropped))
         void function_index(function_info& aFunction, bool aBody = false);
@@ -315,7 +322,7 @@ namespace neos::compilers::javascript
         void call_expression(node* aNode);
         void arguments_values(std::vector<node*> const& aArguments, std::optional<std::uint32_t>& aSpread);
         void call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail = false,
-            function_info const* aKnown = nullptr);   ///< (aKnown: the function that the callee probably is (it is called directly if it is))
+            function_info const* aKnown = nullptr, std::optional<std::uint32_t> aSite = {});   ///< (aKnown: the function that the callee probably is (it is called directly if it is))
         bool tail_call(node* aCall) const;
         void tail_positions(node* aExpression);
         void check_call();
@@ -504,6 +511,7 @@ namespace neos::compilers::javascript
         std::optional<std::uint32_t> global_mirror(std::string const& aName);   ///< (the global (an i64) that mirrors a global binding's value)
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
+        std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
         std::uint32_t source_line_of(std::string_view aSource) const;
     public:
         std::string_view fragment_source() const { return iSource; }
@@ -525,6 +533,7 @@ namespace neos::compilers::javascript
         std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
         std::uint32_t iTemplateSites = 0u;
+        std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
         std::uint32_t iErrorGlobal = 0u;
         std::map<std::uint32_t, std::string> iFrameNames;
         bool iModule = false;

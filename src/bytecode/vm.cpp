@@ -805,10 +805,10 @@ namespace neos
                                     }
                                     else
                                     {
-                                        // (the external memory: a 64 bit address)
-                                        auto const& external = jit::external_memory();
+                                        // (an external memory: a 64 bit address)
+                                        auto const& external = jit::external_memory(memoryIndex);
                                         auto const address = pop() + offset;
-                                        if (memoryIndex != 1u || address + width > external.size || address + width < address)
+                                        if (address + width > external.size || address + width < address)
                                             throw trap{ "out of bounds memory access" };
                                         source = external.base + address;
                                     }
@@ -842,9 +842,9 @@ namespace neos
                                     }
                                     else
                                     {
-                                        auto& external = jit::external_memory();
+                                        auto& external = jit::external_memory(memoryIndex);
                                         auto const address = pop() + offset;
-                                        if (memoryIndex != 1u || address + width > external.size || address + width < address)
+                                        if (address + width > external.size || address + width < address)
                                             throw trap{ "out of bounds memory access" };
                                         std::memcpy(external.base + address, &bits, width);
                                     }
@@ -2427,11 +2427,18 @@ namespace neos
                     return nullptr;
                 }
 
-                void host_external_memory(void* aBase, unsigned long long aSize)
+                void host_external_memory_at(unsigned aIndex, void* aBase, unsigned long long aSize)
                 {
-                    auto& external = jit::external_memory();
+                    if (aIndex < 1u || aIndex > NEOS_RT_EXTERNAL_MEMORIES)
+                        return;
+                    auto& external = jit::external_memory(aIndex);
                     external.base = static_cast<std::uint8_t*>(aBase);
                     external.size = aSize;
+                }
+
+                void host_external_memory(void* aBase, unsigned long long aSize)
+                {
+                    host_external_memory_at(1u, aBase, aSize);
                 }
 
                 void host_unload(void* aContext)
@@ -2674,7 +2681,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload, host_external_memory };
+                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at };
             }
 
             void const* runtime::host()

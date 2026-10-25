@@ -514,6 +514,16 @@ namespace neos::compilers::javascript
             code.resize(code.size() + 5u);
             call("javascript::init", { I32 }, I64);
             put_op(code, opcode::Drop);
+            if (iPropertySites != 0u)
+            {
+                // (the program's property cache sites: their table, whose offset is the global's)
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(iPropertySites));
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(property_sites_global()));
+                call("javascript::property_sites", { I32, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
             std::optional<std::uint32_t> moduleDescriptor;
             if (iModule)
                 moduleDescriptor = literal_string(utf8_encoding(module_descriptor(aScript) + "N\x01" +
@@ -746,6 +756,265 @@ namespace neos::compilers::javascript
         if (wasm_dump_path() != nullptr)
             wasm_dump_names()[index] = aName;
         call(index);
+    }
+
+    // --- property caches: a get or a set of a named property has a site (the runtime's property cache (see the runtime's api.cpp): an
+    // entry in the program's table, in the runtime's heap). The code reads the entry: a receiver whose shape is the entry's has the 
+    // property (or its prototype has it) at the entry's position, which the code then reads (or writes) itself; else the runtime's
+    // get_named_cached (set_named_cached) gets it (and remembers where it found it)
+
+    namespace
+    {
+        namespace layout = neos::language::javascript::layout;
+
+        std::uint8_t memory_flags(opcode aOpcode)
+        {
+            // (a memarg's flags: its alignment (log2), and 0x40: it has a memory index)
+            switch (aOpcode)
+            {
+            case opcode::I64LoadMem:
+            case opcode::I64StoreMem:
+                return 0x43u;
+            case opcode::I32LoadMem:
+            case opcode::I64LoadMem32U:
+                return 0x42u;
+            case opcode::I32LoadMem16U:
+                return 0x41u;
+            default:
+                return 0x40u;
+            }
+        }
+    }
+
+    void function_generator::mem_load(opcode aOpcode, std::uint32_t aOffset)
+    {
+        // (address (i64: an offset in the runtime's heap) -> the value there)
+        op(aOpcode);
+        u32(memory_flags(aOpcode));
+        u32(layout::Memory);
+        u32(aOffset);
+    }
+
+    void function_generator::mem_store(opcode aOpcode, std::uint32_t aOffset)
+    {
+        // (address, value ->)
+        op(aOpcode);
+        u32(memory_flags(aOpcode));
+        u32(layout::Memory);
+        u32(aOffset);
+    }
+
+    void function_generator::property_site(std::uint32_t aSite)
+    {
+        op(opcode::GlobalGet);
+        u32(iCompiler.property_sites_global());
+        i64(static_cast<std::int64_t>(aSite) * layout::SiteSize);
+        op(opcode::I64Add);
+    }
+
+    void function_generator::cell_of(std::uint32_t aValue)
+    {
+        // (the handle table's entry for the value's handle (its low 32 bits))
+        get(aValue);
+        i64(0xFFFFFFFF);
+        op(opcode::I64And);
+        i64(3);
+        op(opcode::I64Shl);
+        mem_load(opcode::I64LoadMem, layout::RegionHandles);
+    }
+
+    std::uint32_t function_generator::cached_get_named()
+    {
+        // (the entry's key is the site's (a program's sites are its own): the receiver's shape and the entry's kind decide)
+        auto const site = iCompiler.iPropertySites++;
+        auto const keyValue = temporary();
+        set(keyValue);
+        auto const object = temporary();
+        set(object);
+        auto const entry = temporary();
+        auto const cell = temporary();
+        auto const word = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        {
+            // (an object whose shape is the entry's)
+            get(object);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            cell_of(object);
+            tee(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape);
+            property_site(site);
+            tee(entry);
+            mem_load(opcode::I64LoadMem, layout::SiteShape);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            // (the entry's kind, depth and position (one word))
+            get(entry);
+            mem_load(opcode::I64LoadMem, layout::SiteKind);
+            tee(word);
+            i64(0xFFFF);
+            op(opcode::I64And);
+            i64(layout::SiteOwn);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Eu);
+            iControls.push_back(control{ control_kind::Block });
+            {
+                // (its own property at the position (the shape's))
+                get(cell);
+                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+                get(word);
+                i64(32);
+                op(opcode::I64ShrU);
+                i64(5);
+                op(opcode::I64Shl);
+                op(opcode::I64Add);
+            }
+            op(opcode::Else);
+            {
+                // (its prototype's (depth 1): the prototype is the entry's and has the key's property at the position)
+                get(word);
+                i64(0xFFFF);
+                op(opcode::I64And);
+                i64(static_cast<std::int64_t>(layout::SiteHolder | (1u << 8u)));
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(cell);
+                mem_load(opcode::I64LoadMem, layout::ObjectProto);
+                tee(cell);
+                get(entry);
+                mem_load(opcode::I64LoadMem, layout::SitePrototype);
+                op(opcode::I64Ne);
+                branch(slow, true);
+                cell_of(cell);
+                tee(cell);
+                mem_load(opcode::I64LoadMem, layout::ObjectPropertyCount);
+                get(word);
+                i64(32);
+                op(opcode::I64ShrU);
+                tee(word);
+                op(opcode::I64LeU);
+                branch(slow, true);
+                get(cell);
+                mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+                get(word);
+                i64(5);
+                op(opcode::I64Shl);
+                op(opcode::I64Add);
+                tee(cell);
+                mem_load(opcode::I64LoadMem, layout::PropertyKey);
+                get(keyValue);
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(cell);
+            }
+            end_control();
+            // (a data property: its value)
+            tee(cell);
+            mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
+            i32(layout::AttributeAccessor);
+            op(opcode::I32And);
+            branch(slow, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::PropertyData);
+            branch(done, false);
+        }
+        end_control();
+        get(object);
+        get(keyValue);
+        i32(static_cast<std::int32_t>(site));
+        runtime("get_named_cached", { I64, I64, I32 }, I64);
+        end_control();
+        release(word);
+        release(cell);
+        release(entry);
+        release(object);
+        release(keyValue);
+        return site;
+    }
+
+    void function_generator::cached_set_named()
+    {
+        auto const site = iCompiler.iPropertySites++;
+        auto const strict = temporary(I32);
+        set(strict);
+        auto const value = temporary();
+        set(value);
+        auto const keyValue = temporary();
+        set(keyValue);
+        auto const object = temporary();
+        set(object);
+        auto const entry = temporary();
+        auto const property = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        auto const slow = iControls.size() - 1u;
+        {
+            // (an object whose shape is the entry's, which has the property (SiteOwn) at the position: a writable data property)
+            get(object);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            cell_of(object);
+            tee(property);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape);
+            property_site(site);
+            tee(entry);
+            mem_load(opcode::I64LoadMem, layout::SiteShape);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            get(entry);
+            mem_load(opcode::I64LoadMem, layout::SiteKind);
+            tee(entry);
+            i64(0xFFFF);
+            op(opcode::I64And);
+            i64(layout::SiteOwn);
+            op(opcode::I64Ne);
+            branch(slow, true);
+            get(property);
+            mem_load(opcode::I64LoadMem, layout::ObjectProperties);
+            get(entry);
+            i64(32);
+            op(opcode::I64ShrU);
+            i64(5);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            tee(property);
+            mem_load(opcode::I32LoadMem8U, layout::PropertyAttributes);
+            i32(layout::AttributeAccessor | layout::AttributeWritable);
+            op(opcode::I32And);
+            i32(layout::AttributeWritable);
+            op(opcode::I32Ne);
+            branch(slow, true);
+            get(property);
+            get(value);
+            mem_store(opcode::I64StoreMem, layout::PropertyData);
+            get(value);
+            branch(done, false);
+        }
+        end_control();
+        get(object);
+        get(keyValue);
+        get(value);
+        get(strict);
+        i32(static_cast<std::int32_t>(site));
+        runtime("set_named_cached", { I64, I64, I64, I32, I32 }, I64);
+        end_control();
+        release(property);
+        release(entry);
+        release(object);
+        release(keyValue);
+        release(value);
+        release(strict);
     }
 
     void function_generator::function_index(function_info& aFunction, bool aBody)
@@ -3603,7 +3872,7 @@ namespace neos::compilers::javascript
                 break;
             }
             key(name_of(aNode->child(1u)));
-            runtime("get_named", { I64, I64 }, I64);
+            cached_get_named();
             break;
         case construct::DotPrivate:
             load(resolve(name_of(aNode->child(1u)), aNode));
@@ -3725,7 +3994,7 @@ namespace neos::compilers::javascript
     }
 
     void function_generator::call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail,
-        function_info const* aKnown)
+        function_info const* aKnown, std::optional<std::uint32_t> aSite)
     {
         // (the arguments are evaluated (into locals), then the callee is called: the program's own functions through the
         // dispatcher, others through the runtime)
@@ -3837,10 +4106,32 @@ namespace neos::compilers::javascript
             call(aKnown->index);
             op(opcode::Else);
         }
-        // (the program's function: its number)
+        // (the program's function: its number (a method's: the one its property cache site has, if the callee is that site's function))
         auto const number = temporary(I32);
-        get(aCallee);
-        runtime("callee_number", { I64 }, I32);
+        if (aSite)
+        {
+            auto const entry = temporary();
+            property_site(*aSite);
+            tee(entry);
+            mem_load(opcode::I64LoadMem, neos::language::javascript::layout::SiteFunction);
+            get(aCallee);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            get(entry);
+            mem_load(opcode::I32LoadMem, neos::language::javascript::layout::SiteNumber);
+            op(opcode::Else);
+            get(aCallee);
+            runtime("callee_number", { I64 }, I32);
+            end_control();
+            release(entry);
+        }
+        else
+        {
+            get(aCallee);
+            runtime("callee_number", { I64 }, I32);
+        }
         tee(number);
         i32(0);
         op(opcode::I32GeS);
@@ -3896,6 +4187,7 @@ namespace neos::compilers::javascript
         auto* calleeNode = aNode->child(0u);
         std::vector<node*> arguments{ aNode->children.begin() + 1, aNode->children.end() };
         function_info const* known = nullptr;
+        std::optional<std::uint32_t> methodSite;    // (a method's property cache site)
         auto const callee = temporary();
         auto const thisValue = temporary();
         // ((a.b)(): a parenthesized reference is the reference (its base is the this))
@@ -3924,7 +4216,7 @@ namespace neos::compilers::javascript
             if (calleeNode->is(construct::Dot))
             {
                 key(name_of(calleeNode->child(1u)));
-                runtime("get_named", { I64, I64 }, I64);
+                methodSite = cached_get_named();
             }
             else if (calleeNode->is(construct::DotPrivate))
             {
@@ -4095,7 +4387,27 @@ namespace neos::compilers::javascript
                 set(thisValue);
             }
         }
-        call_value(callee, thisValue, arguments, tail_call(aNode), known);
+        if (calleeNode->is(construct::Dot) && name_of(calleeNode->child(1u)) == "charCodeAt" && arguments.size() == 1u &&
+            !arguments[0]->is(construct::Spread))
+        {
+            // (s.charCodeAt(i): the built-in's result directly if the callee is it and s a string (else the callee is called (in a
+            // tail position: a tail call)))
+            expression(arguments[0]);
+            auto const position = temporary();
+            set(position);
+            get(callee);
+            get(thisValue);
+            get(position);
+            bool const tail = tail_call(aNode);
+            runtime(tail ? "char_code_at_tail" : "char_code_at", { I64, I64, I64 }, I64);
+            if (!tail)
+                check();
+            release(position);
+            release(thisValue);
+            release(callee);
+            return;
+        }
+        call_value(callee, thisValue, arguments, tail_call(aNode), known, methodSite);
         release(thisValue);
         release(callee);
     }
@@ -4109,31 +4421,133 @@ namespace neos::compilers::javascript
         if (aNode->size() > 1u)
             arguments.assign(aNode->child(1u)->children.begin(), aNode->child(1u)->children.end());
         bool const spread = std::any_of(arguments.begin(), arguments.end(), [](node* a) { return a->is(construct::Spread); });
-        i32(static_cast<std::int32_t>(arguments.size()));
-        runtime("array", { I32 }, I64);
-        auto const list = temporary();
-        set(list);
+        if (spread)
+        {
+            i32(static_cast<std::int32_t>(arguments.size()));
+            runtime("array", { I32 }, I64);
+            auto const list = temporary();
+            set(list);
+            for (auto* a : arguments)
+            {
+                get(list);
+                if (a->is(construct::Spread))
+                {
+                    expression(a->child(0u));
+                    runtime("array_spread", { I64, I64 }, I64);
+                }
+                else
+                {
+                    expression(a);
+                    runtime("array_push", { I64, I64 }, I64);
+                }
+                check_void();
+            }
+            get(callee);
+            get(list);
+            runtime("construct", { I64, I64 }, I64);
+            check();
+            release(list);
+            release(callee);
+            return;
+        }
+        // (the arguments are evaluated (into locals); a constructor that is the program's own compiled function is called as calls
+        // call it (through the dispatcher), with the object that construct_this makes (its this) and itself as new.target; the
+        // result is the this unless the call's result is an object (a derived constructor's result is its own); other constructors are
+        // constructed by the runtime)
+        std::vector<std::uint32_t> values;
         for (auto* a : arguments)
         {
-            get(list);
-            if (a->is(construct::Spread))
-            {
-                expression(a->child(0u));
-                runtime("array_spread", { I64, I64 }, I64);
-            }
-            else
-            {
-                expression(a);
-                runtime("array_push", { I64, I64 }, I64);
-            }
-            check_void();
+            expression(a);
+            auto const v = temporary();
+            set(v);
+            values.push_back(v);
         }
-        (void)spread;
+        auto const argc = static_cast<std::uint32_t>(values.size());
+        auto const number = temporary(I32);
         get(callee);
-        get(list);
-        runtime("construct", { I64, I64 }, I64);
-        check();
-        release(list);
+        runtime("construct_number", { I64 }, I32);
+        tee(number);
+        i32(0);
+        op(opcode::I32GeS);
+        op(opcode::If);
+        iCode.push_back(0x7Eu);
+        iControls.push_back(control{ control_kind::Block });
+        {
+            auto const thisValue = temporary();
+            get(callee);
+            runtime("construct_this", { I64 }, I64);
+            check();
+            set(thisValue);
+            for (std::size_t i = RegisterArguments; i < values.size(); ++i)
+            {
+                get(values[i]);
+                runtime("push_arg", { I64 }, I64);
+                drop();
+            }
+            get(number);
+            get(callee);
+            get(thisValue);
+            get(callee);
+            i32(static_cast<std::int32_t>(argc));
+            for (std::uint32_t i = 0u; i < RegisterArguments; ++i)
+            {
+                if (i < values.size())
+                    get(values[i]);
+                else
+                    undefined();
+            }
+            call(iCompiler.iDispatcher);
+            if (argc > RegisterArguments)
+            {
+                auto const popped = temporary();
+                set(popped);
+                i32(static_cast<std::int32_t>(argc - RegisterArguments));
+                runtime("pop_args", { I32 }, I64);
+                drop();
+                get(popped);
+                release(popped);
+            }
+            check_call();
+            auto const result = temporary();
+            set(result);
+            get(result);
+            get(thisValue);
+            get(thisValue);
+            constant(values::Empty);
+            op(opcode::I64Eq);
+            get(result);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Eq);
+            op(opcode::I32Ior);
+            op(opcode::Select);
+            release(result);
+            release(thisValue);
+        }
+        op(opcode::Else);
+        {
+            i32(static_cast<std::int32_t>(argc));
+            runtime("array", { I32 }, I64);
+            auto const list = temporary();
+            set(list);
+            for (auto v : values)
+            {
+                get(list);
+                get(v);
+                runtime("array_push", { I64, I64 }, I64);
+                drop();
+            }
+            get(callee);
+            get(list);
+            runtime("construct", { I64, I64 }, I64);
+            check();
+            release(list);
+        }
+        end_control();
+        release(number);
+        for (auto v : values)
+            release(v);
         release(callee);
     }
 
@@ -4368,7 +4782,7 @@ namespace neos::compilers::javascript
                     else if (n->is(construct::Dot) || n->is(construct::OptionalDot))
                     {
                         key(name_of(n->child(1u)));
-                        runtime("get_named", { I64, I64 }, I64);
+                        cached_get_named();
                     }
                     else if (n->is(construct::DotPrivate) || n->is(construct::OptionalPrivate))
                     {
@@ -4820,7 +5234,10 @@ namespace neos::compilers::javascript
                 else
                 {
                     i32(iFunction.strict ? 1 : 0);
-                    runtime(target->is(construct::Dot) ? "set_named" : "set", { I64, I64, I64, I32 }, I64);
+                    if (target->is(construct::Dot))
+                        cached_set_named();
+                    else
+                        runtime("set", { I64, I64, I64, I32 }, I64);
                 }
                 check_void();
                 get(value);
@@ -5512,7 +5929,10 @@ namespace neos::compilers::javascript
             else
             {
                 i32(iFunction.strict ? 1 : 0);
-                runtime(t->is(construct::Dot) ? "set_named" : "set", { I64, I64, I64, I32 }, I64);
+                if (t->is(construct::Dot))
+                    cached_set_named();
+                else
+                    runtime("set", { I64, I64, I64, I32 }, I64);
             }
             check_void();
         }
@@ -5562,7 +5982,10 @@ namespace neos::compilers::javascript
                 else
                 {
                     i32(iFunction.strict ? 1 : 0);
-                    runtime(aTarget->is(construct::Dot) ? "set_named" : "set", { I64, I64, I64, I32 }, I64);
+                    if (aTarget->is(construct::Dot))
+                        cached_set_named();
+                    else
+                        runtime("set", { I64, I64, I64, I32 }, I64);
                 }
                 check_void();
                 release(keyValue);
