@@ -1,0 +1,56 @@
+Third-party notices: the neos Lua runtime plugin (runtime/lua), the Lua
+compiler plugin (compilers/lua) and the Lua schema (languages/lua.neos)
+============================================================================
+
+Lua 5.4 (Lua.org, PUC-Rio)
+--------------------------
+
+neos's Lua is an implementation of the Lua 5.4 language and standard library
+as the Lua 5.4 Reference Manual describes them. Its code is written for neos
+and is not a copy of the reference implementation's source code, but the
+following parts follow the reference implementation's (Lua 5.4.6) algorithms
+and designs, so that neos's Lua behaves as the reference implementation does:
+
+* runtime/lua/src/lib_string.cpp: the pattern matcher follows the design of
+  the matcher in lstrlib.c (a recursive backtracking matcher with
+  max_expand/min_expand, class_end, match_balance and start_capture/
+  end_capture steps and a depth limit).
+* runtime/lua/src/lib_math.cpp: math.random and math.randomseed follow
+  lmathlib.c (the xoshiro256** generator's seeding from two integers and the
+  projection of a random integer into an interval by rejection with a mask),
+  so that a seeded generator gives the reference implementation's sequence.
+  (xoshiro256** itself is by David Blackman and Sebastiano Vigna and is in
+  the public domain.)
+* runtime/lua/src/api.cpp: forprep (the numeric for loop's preparation: the
+  clipping of a float limit and the precomputed iteration count) follows
+  forprep and forlimit in lvm.c.
+* languages/lua.neos: the grammar follows the complete syntax of Lua in the
+  Lua 5.4 Reference Manual (§9) and its lexical conventions (§3.1).
+* runtime/lua/src and compilers/lua/src: error messages, tracebacks and the
+  formats of numbers are worded as the reference implementation words them.
+
+Changes: written in C++ for neos's runtime (its values, tables, garbage
+collector and calls) rather than translated line by line.
+
+The Lua reference implementation and the Lua 5.4 Reference Manual carry the
+following licence:
+
+Copyright © 1994–2023 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

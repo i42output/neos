@@ -1,0 +1,288 @@
+(*
+  lua.neos
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*)
+
+(*
+  Lua (Lua 5.4): the syntax of chunks. Each construct is a concept of the Lua concept library (neos.lua) that the Lua compiler
+  (lua.ncp) builds its syntax tree from (a construct's children are the constructs within its source; a "postfix" construct, e.g.
+  a call's arguments or a binary operator and its right operand, also takes the construct that precedes it). The compiler checks
+  what the grammar does not: a statement that is an expression must be a call, assignments' targets, attributes, goto and labels,
+  break outside loops, string escapes and numerals' ranges.
+
+  The grammar follows the complete syntax of Lua in the Lua 5.4 Reference Manual (§9) (Copyright (c) 2020-2023 Lua.org, PUC-Rio,
+  MIT licence; see runtime/lua/NOTICE).
+*)
+
+%{
+    meta: {
+        language: "lua"
+        description: "Lua"
+        source.file.extension: ".lua"
+        source.package.specification.file.extension: ".lua"
+        source.package.implementation.file.extension: ".lua"
+        copyright: "Copyright (C) 2026 Leigh Johnston"
+        version: "0.1.0"
+    }
+
+    stages: {
+        parser : {
+            text : [ "#{" "}#" ]
+            root : chunk
+        }
+    }
+
+    pipeline: [
+        parser
+    ]
+
+    libraries: [
+        neos.core
+        neos.math.universal
+        neos.lua
+    ]
+
+    discard: [
+        WS
+        whitespace
+        comment
+    ]
+}%
+
+#{
+    (* --- whitespace and comments *)
+
+    WS ::= [ whitespace ] ;
+    whitespace ::= { U+0020 | U+0009 | U+000A | U+000D | U+000B | U+000C | comment } + ;
+    comment $ language.comment ::= "--" , ( long bracket / { line character } ) ;
+    line character ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D ) ) | '\x00' ;
+    shebang ::= "#" , { line character } ;
+
+    (* --- names and keywords *)
+
+    potential keyword ::= { 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' } + ;
+    name ::= ( 'A' .. 'Z' | 'a' .. 'z' | '_' ) , { 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' } ;
+
+    (* (a name that is a variable (an expression), a name that is not (a field's, method's or label's, or an attribute) and a name
+       that a local variable (or a parameter) is declared with) *)
+    identifier $ lua.identifier ::= name - ( "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return" | "then" | "true" | "until" | "while" ) ;
+    simple name $ lua.name ::= name - ( "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return" | "then" | "true" | "until" | "while" ) ;
+    binding name $ lua.binding ::= name - ( "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return" | "then" | "true" | "until" | "while" ) ;
+
+    (* (keywords: a potential keyword that is exactly the keyword (so not part of a longer name)) *)
+    and $ language.keyword ::= potential keyword ::= "and" ;
+    break $ language.keyword ::= potential keyword ::= "break" ;
+    do $ language.keyword ::= potential keyword ::= "do" ;
+    else $ language.keyword ::= potential keyword ::= "else" ;
+    elseif $ language.keyword ::= potential keyword ::= "elseif" ;
+    end $ language.keyword ::= potential keyword ::= "end" ;
+    false $ language.keyword ::= potential keyword ::= "false" ;
+    for $ language.keyword ::= potential keyword ::= "for" ;
+    function $ language.keyword ::= potential keyword ::= "function" ;
+    goto $ language.keyword ::= potential keyword ::= "goto" ;
+    if $ language.keyword ::= potential keyword ::= "if" ;
+    in $ language.keyword ::= potential keyword ::= "in" ;
+    local $ language.keyword ::= potential keyword ::= "local" ;
+    nil $ language.keyword ::= potential keyword ::= "nil" ;
+    not $ language.keyword ::= potential keyword ::= "not" ;
+    or $ language.keyword ::= potential keyword ::= "or" ;
+    repeat $ language.keyword ::= potential keyword ::= "repeat" ;
+    return $ language.keyword ::= potential keyword ::= "return" ;
+    then $ language.keyword ::= potential keyword ::= "then" ;
+    true $ language.keyword ::= potential keyword ::= "true" ;
+    until $ language.keyword ::= potential keyword ::= "until" ;
+    while $ language.keyword ::= potential keyword ::= "while" ;
+
+    (* --- literals *)
+
+    nil literal $ lua.nil ::= nil ;
+    true literal $ lua.true ::= true ;
+    false literal $ lua.false ::= false ;
+    vararg $ lua.vararg ::= "..." ;
+
+    numeral $ lua.number ::= hex numeral | decimal numeral ;
+    hex numeral ::= '0' , ( 'x' | 'X' ) , ( ( { hex digit } + , [ '.' , { hex digit } ] ) | ( '.' , { hex digit } + ) ) ,
+        [ ( 'p' | 'P' ) , [ '+' | '-' ] , { digit } + ] ;
+    decimal numeral ::= ( ( { digit } + , [ '.' , { digit } ] ) | ( '.' , { digit } + ) ) , [ ( 'e' | 'E' ) , [ '+' | '-' ] , { digit } + ] ;
+    digit ::= '0' .. '9' ;
+    hex digit ::= '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' ;
+
+    string literal $ lua.string ::= short string | long bracket ;
+    short string ::=
+        ( '\"' , { ( U+0001 .. '\xFF' - ( '\"' | '\\' | U+000A | U+000D ) ) | '\x00' | escape sequence | skip escape } , '\"' ) |
+        ( '\'' , { ( U+0001 .. '\xFF' - ( '\'' | '\\' | U+000A | U+000D ) ) | '\x00' | escape sequence | skip escape } , '\'' ) ;
+    (* (the compiler checks the escape sequences: \z skips the white space (and line breaks) that follow it) *)
+    escape sequence ::= '\\' , ( line character | ( U+000D , [ U+000A ] ) | ( U+000A , [ U+000D ] ) ) ;
+    skip escape ::= "\\z" , { U+0020 | U+0009 | U+000A | U+000D | U+000B | U+000C } ;
+
+    (* long brackets (long strings and long comments): [[ ... ]], [=[ ... ]=] ... of levels 0 to 7; the text of a level is anything 
+       but its closing bracket: a ']' and the '=' that follow it are text unless they are the level's (and are followed by ']') *)
+    long bracket ::= long bracket level0 | long bracket level1 | long bracket level2 | long bracket level3 | long bracket level4 | long bracket level5 | long bracket level6 | long bracket level7 ;
+    long text character ::= ( ! ']' .. ']' ) | '\x00' ;
+    long bracket level0 ::= "[[" , { long text character | ( ( ']' , { '=' } ) - "]" ) | ( "]" , long text character ) } , "]]" ;
+    long bracket level1 ::= "[=[" , { long text character | ( ( ']' , { '=' } ) - "]=" ) | ( "]=" , long text character ) } , "]=]" ;
+    long bracket level2 ::= "[==[" , { long text character | ( ( ']' , { '=' } ) - "]==" ) | ( "]==" , long text character ) } , "]==]" ;
+    long bracket level3 ::= "[===[" , { long text character | ( ( ']' , { '=' } ) - "]===" ) | ( "]===" , long text character ) } , "]===]" ;
+    long bracket level4 ::= "[====[" , { long text character | ( ( ']' , { '=' } ) - "]====" ) | ( "]====" , long text character ) } , "]====]" ;
+    long bracket level5 ::= "[=====[" , { long text character | ( ( ']' , { '=' } ) - "]=====" ) | ( "]=====" , long text character ) } , "]=====]" ;
+    long bracket level6 ::= "[======[" , { long text character | ( ( ']' , { '=' } ) - "]======" ) | ( "]======" , long text character ) } , "]======]" ;
+    long bracket level7 ::= "[=======[" , { long text character | ( ( ']' , { '=' } ) - "]=======" ) | ( "]=======" , long text character ) } , "]=======]" ;
+
+    (* --- operators (not the first characters of longer ones) *)
+
+    single equals ::= ( '=' , [ '=' ] ) - "==" ;
+    less than ::= ( '<' , [ '<' | '=' ] ) - ( "<<" | "<=" ) ;
+    greater than ::= ( '>' , [ '>' | '=' ] ) - ( ">>" | ">=" ) ;
+    tilde ::= ( '~' , [ '=' ] ) - "~=" ;
+    minus ::= ( '-' , [ '-' ] ) - "--" ;
+    slash ::= ( '/' , [ '/' ] ) - "//" ;
+    dots ::= ( ".." , [ '.' ] ) - "..." ;
+
+    (* --- expressions *)
+
+    expression list ::= expression , { WS , ',' , WS , expression } ;
+    expression ::= or expression ;
+
+    or expression ::= and expression , { WS , or tail } ;
+    or tail $ lua.or ::= or , WS , and expression ;
+    and expression ::= comparison expression , { WS , and tail } ;
+    and tail $ lua.and ::= and , WS , comparison expression ;
+    comparison expression ::= bitwise or expression , { WS , comparison tail } ;
+    comparison tail ::= less tail | greater tail | less equal tail | greater equal tail | equal tail | not equal tail ;
+    less tail $ lua.less ::= less than , WS , bitwise or expression ;
+    greater tail $ lua.greater ::= greater than , WS , bitwise or expression ;
+    less equal tail $ lua.lessequal ::= "<=" , WS , bitwise or expression ;
+    greater equal tail $ lua.greaterequal ::= ">=" , WS , bitwise or expression ;
+    equal tail $ lua.equal ::= "==" , WS , bitwise or expression ;
+    not equal tail $ lua.notequal ::= "~=" , WS , bitwise or expression ;
+    bitwise or expression ::= bitwise xor expression , { WS , bitwise or tail } ;
+    bitwise or tail $ lua.bitor ::= '|' , WS , bitwise xor expression ;
+    bitwise xor expression ::= bitwise and expression , { WS , bitwise xor tail } ;
+    bitwise xor tail $ lua.bitxor ::= tilde , WS , bitwise and expression ;
+    bitwise and expression ::= shift expression , { WS , bitwise and tail } ;
+    bitwise and tail $ lua.bitand ::= '&' , WS , shift expression ;
+    shift expression ::= concatenation expression , { WS , ( shift left tail | shift right tail ) } ;
+    shift left tail $ lua.shiftleft ::= "<<" , WS , concatenation expression ;
+    shift right tail $ lua.shiftright ::= ">>" , WS , concatenation expression ;
+    (* (concatenation and exponentiation are right associative) *)
+    concatenation expression ::= additive expression , [ WS , concatenation tail ] ;
+    concatenation tail $ lua.concat ::= dots , WS , concatenation expression ;
+    additive expression ::= multiplicative expression , { WS , ( add tail | subtract tail ) } ;
+    add tail $ lua.add ::= '+' , WS , multiplicative expression ;
+    subtract tail $ lua.subtract ::= minus , WS , multiplicative expression ;
+    multiplicative expression ::= unary expression , { WS , ( multiply tail | divide tail | floor divide tail | modulo tail ) } ;
+    multiply tail $ lua.multiply ::= '*' , WS , unary expression ;
+    divide tail $ lua.divide ::= slash , WS , unary expression ;
+    floor divide tail $ lua.floordivide ::= "//" , WS , unary expression ;
+    modulo tail $ lua.modulo ::= '%' , WS , unary expression ;
+    unary expression ::= not expression | negate expression | length expression | bitwise not expression | power expression ;
+    not expression $ lua.not ::= not , WS , unary expression ;
+    negate expression $ lua.negate ::= minus , WS , unary expression ;
+    length expression $ lua.length ::= '#' , WS , unary expression ;
+    bitwise not expression $ lua.bitnot ::= tilde , WS , unary expression ;
+    power expression ::= simple expression , [ WS , power tail ] ;
+    power tail $ lua.power ::= '^' , WS , unary expression ;
+
+    simple expression ::= nil literal | true literal | false literal | numeral | string literal | vararg | function expression |
+        table constructor | suffixed expression ;
+
+    suffixed expression ::= primary expression , { WS , suffix } ;
+    primary expression ::= identifier | parenthesized expression ;
+    parenthesized expression $ lua.parenthesized ::= '(' , WS , expression , WS , ')' ;
+    suffix ::= dot access | index access | method call | call arguments ;
+    dot access $ lua.dot ::= '.' , WS , simple name ;
+    index access $ lua.index ::= '[' , WS , expression , WS , ']' ;
+    method call $ lua.method ::= ':' , WS , simple name , WS , arguments ;
+    call arguments $ lua.call ::= arguments ;
+    arguments ::= ( '(' , WS , [ expression list ] , WS , ')' ) | table constructor | string literal ;
+
+    function expression $ lua.function ::= function , WS , function body ;
+    function body ::= parameter list , block , WS , end ;
+    parameter list $ lua.parameters ::= '(' , WS , [ parameter names ] , WS , ')' ;
+    parameter names ::= ( binding name , { WS , ',' , WS , binding name } , [ WS , ',' , WS , vararg ] ) | vararg ;
+
+    table constructor $ lua.table ::= '{' , WS , [ field list ] , WS , '}' ;
+    field list ::= field , { WS , field separator , WS , field } , [ WS , field separator ] ;
+    field ::= keyed field | named field | expression ;
+    keyed field $ lua.field.keyed ::= '[' , WS , expression , WS , ']' , WS , single equals , WS , expression ;
+    named field $ lua.field.named ::= simple name , WS , single equals , WS , expression ;
+    field separator ::= ',' | ';' ;
+
+    (* --- statements *)
+
+    block ::= { WS , statement } , [ WS , return statement ] ;
+
+    statement ::=
+        empty statement /
+        label statement /
+        break statement /
+        goto statement /
+        do statement /
+        while statement /
+        repeat statement /
+        if statement /
+        numeric for statement /
+        generic for statement /
+        function statement /
+        local function statement /
+        local statement /
+        assignment statement /
+        call statement ;
+
+    empty statement $ lua.empty ::= ';' ;
+    label statement $ lua.label ::= "::" , WS , simple name , WS , "::" ;
+    break statement $ lua.break ::= break ;
+    goto statement $ lua.goto ::= goto , WS , simple name ;
+    do statement $ lua.do ::= do , block , WS , end ;
+    while statement $ lua.while ::= while , WS , expression , WS , do , block , WS , end ;
+    repeat statement $ lua.repeat ::= repeat , block , WS , until , WS , expression ;
+    if statement $ lua.if ::= if , WS , expression , WS , then , block , { WS , elseif clause } , [ WS , else clause ] , WS , end ;
+    elseif clause $ lua.elseif ::= elseif , WS , expression , WS , then , block ;
+    else clause $ lua.else ::= else , block ;
+    numeric for statement $ lua.for.numeric ::= for , WS , binding name , WS , single equals , WS , expression , WS , ',' , WS , expression ,
+        [ WS , ',' , WS , expression ] , WS , do , block , WS , end ;
+    generic for statement $ lua.for.generic ::= for , WS , binding name , { WS , ',' , WS , binding name } , WS , in , WS , expression list ,
+        WS , do , block , WS , end ;
+    function statement $ lua.function.statement ::= function , WS , function name , WS , function body ;
+    function name $ lua.funcname ::= identifier , { WS , '.' , WS , simple name } , [ WS , ':' , WS , method name ] ;
+    method name $ lua.methodname ::= name - ( "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return" | "then" | "true" | "until" | "while" ) ;
+    local function statement $ lua.local.function ::= local , WS , function , WS , binding name , WS , function body ;
+    local statement $ lua.local ::= local , WS , attribute name , { WS , ',' , WS , attribute name } , [ WS , single equals , WS , expression list ] ;
+    attribute name $ lua.attname ::= binding name , [ WS , less than , WS , simple name , WS , '>' ] ;
+    assignment statement $ lua.assign ::= variable list , WS , single equals , WS , expression list ;
+    variable list $ lua.varlist ::= suffixed expression , { WS , ',' , WS , suffixed expression } ;
+    call statement $ lua.callstatement ::= suffixed expression ;
+    return statement $ lua.return ::= return , [ WS , expression list ] , [ WS , ';' ] ;
+
+    (* --- chunks *)
+
+    chunk $ lua.chunk ::= [ shebang ] , block , WS ;
+}#

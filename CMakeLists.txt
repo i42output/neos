@@ -219,6 +219,12 @@ add_neos_concept_library(javascript.core
     concepts/src/javascript/javascript.cpp)
 target_include_directories(javascript.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include")
 target_include_directories(javascript.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include")
+add_neos_concept_library(lua.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/lua/plugin.cpp
+    concepts/src/lua/lua.cpp)
+target_include_directories(lua.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include")
+target_include_directories(lua.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include")
 
 # compiler plugins (plugins with the extension ".ncp"): the code generation of a language (i_language_compiler)
 function(add_neos_compiler_plugin TARGET LANGUAGE)
@@ -248,6 +254,10 @@ target_compile_definitions(compiler.javascript.objects PRIVATE NEOS_JAVASCRIPT_C
 add_neos_compiler_plugin(compiler.neoscript neoscript
     compilers/neoscript/src/plugin.cpp
     compilers/neoscript/src/compiler.cpp)
+add_neos_compiler_plugin(compiler.lua lua
+    compilers/lua/src/plugin.cpp
+    compilers/lua/src/compiler.cpp
+    compilers/lua/src/codegen.cpp)
 add_neos_compiler_plugin(compiler.python python
     compilers/python/src/plugin.cpp
     compilers/python/src/compiler.cpp
@@ -261,7 +271,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core compiler.javascript compiler.python compiler.neoscript)
+add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core lua.core compiler.javascript compiler.python compiler.neoscript compiler.lua)
 
 # runtime stub (neos.stub): an image (an executable made by the console's "img" command) is a copy of it followed by a
 # program (see neos/image.hpp); it is built beside the console, which finds it there
@@ -351,6 +361,7 @@ ${table}    };
 endfunction()
 add_neos_compiler_stub(python core core.math.universal python.core compiler.python)
 add_neos_compiler_stub(javascript core core.math.universal javascript.core compiler.javascript)
+add_neos_compiler_stub(lua core core.math.universal lua.core compiler.lua)
 
 # runtime plugins (C ABI: include/neos/runtime/plugin.h)
 function(add_neos_runtime_plugin TARGET)
@@ -369,6 +380,27 @@ function(add_neos_runtime_plugin TARGET)
 endfunction()
 
 add_neos_runtime_plugin(c runtime/c/src/c.c)
+
+# Lua runtime: Lua's values, tables, metatables, coroutines and standard library
+add_neos_runtime_plugin(lua
+    runtime/lua/src/plugin.cpp
+    runtime/lua/src/api.cpp
+    runtime/lua/src/call.cpp
+    runtime/lua/src/gc.cpp
+    runtime/lua/src/ops.cpp
+    runtime/lua/src/table.cpp
+    runtime/lua/src/value.cpp
+    runtime/lua/src/lib_base.cpp
+    runtime/lua/src/lib_coroutine.cpp
+    runtime/lua/src/lib_package.cpp
+    runtime/lua/src/lib_string.cpp
+    runtime/lua/src/lib_table.cpp
+    runtime/lua/src/lib_math.cpp
+    runtime/lua/src/lib_io.cpp
+    runtime/lua/src/lib_os.cpp
+    runtime/lua/src/lib_utf8.cpp
+    runtime/lua/src/lib_debug.cpp)
+target_include_directories(lua PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include") # (Lua's values)
 
 add_neos_runtime_plugin(javascript
     runtime/javascript/src/javascript.cpp
@@ -444,7 +476,9 @@ if(NEOS_ICU)
         endif()
     else()
         find_package(ICU COMPONENTS uc i18n data)
-        if(ICU_FOUND)
+        if(ICU_FOUND AND ICU_VERSION VERSION_LESS 67)
+            message(STATUS "ICU ${ICU_VERSION} is older than ICU 67: JavaScript has no Intl")
+        elseif(ICU_FOUND)
             target_compile_definitions(javascript PRIVATE NEOS_JS_ICU)
             target_link_libraries(javascript PRIVATE ICU::i18n ICU::uc ICU::data)
         else()
