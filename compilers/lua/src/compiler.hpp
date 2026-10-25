@@ -123,6 +123,7 @@ namespace neos::compilers::lua
         bool integer = false;               ///< (its values are all integers (see compiler::infer_integers): its local holds an i64)
         bool floating = false;              ///< (its values are all floats (see compiler::infer_integers): its local holds an f64)
         bool assigned = false;              ///< (an assignment statement assigns it)
+        bool read = false;                  ///< (an expression reads it)
         function_info* constant = nullptr;  ///< (a local function that is never assigned another value: its function (calls of it are direct))
         std::uint32_t local = 0u;           ///< (its local (while its function's code is generated))
         std::uint32_t tbcDepth = 0u;        ///< (a to-be-closed variable: the number of its function's to-be-closed variables before it)
@@ -167,6 +168,9 @@ namespace neos::compilers::lua
         // version for such arguments)
         std::vector<variable*> speculative;
         std::vector<variable*> speculativeParameters;
+        // (an integer function (see compiler::infer_integers): its version that takes and returns i64s (its WebAssembly function))
+        bool integer = false;
+        std::uint32_t integerIndex = 0u;
     };
 
     // a compile error: its position in the fragment's source and its message (reported as a syntax error)
@@ -191,7 +195,7 @@ namespace neos::compilers::lua
         static constexpr std::uint32_t RegisterArguments = 4u;
         static constexpr std::uint32_t ParameterCount = 6u;
     public:
-        function_generator(compiler& aCompiler, function_info& aFunction);
+        function_generator(compiler& aCompiler, function_info& aFunction, bool aIntegerVersion = false);
     public:
         void generate();
     private:
@@ -337,6 +341,8 @@ namespace neos::compilers::lua
         std::size_t iTbcCount = 0u;                     ///< (the to-be-closed variables in scope)
         std::uint32_t iScratch = 0u;                    ///< (an i64 local for checks)
         bool iFusing = true;                            ///< (false: generating a fused expression's general case)
+        bool iIntegerVersion = false;                   ///< (an integer function's integer version (i64 parameters and result))
+        std::uint32_t iParameterCount = ParameterCount; ///< (its WebAssembly function's parameters)
         std::uint32_t iArgumentsBase = 0u;              ///< (an i32 local: the extra arguments' base)
         std::optional<std::uint32_t> iVarargs;          ///< (a vararg function: the local that holds its varargs)
         std::uint32_t iTbcMark = 0u;                    ///< (an i32 local: the runtime's to-be-closed stack's depth when it began)

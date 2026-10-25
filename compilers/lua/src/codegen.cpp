@@ -431,8 +431,26 @@ namespace neos::compilers::lua
             return f;
         }
 
+        // (a call of an integer function (see compiler::infer_integers) whose arguments are integer expressions: its function)
+        function_info const* integer_call(node const* aNode)
+        {
+            auto const* target = aNode->child(0u);
+            while (target->is(construct::Parenthesized))
+                target = target->child(0u);
+            if (!target->is(construct::Identifier) || target->resolved == nullptr || target->resolved->constant == nullptr ||
+                !target->resolved->constant->integer)
+                return nullptr;
+            auto const* f = target->resolved->constant;
+            if (aNode->size() - 1u != f->parameters.size())
+                return nullptr;
+            for (std::size_t i = 1u; i < aNode->size(); ++i)
+                if (!integer_expression(aNode->child(i)))
+                    return nullptr;
+            return f;
+        }
+
         // (an expression whose value is an integer: an integer numeral, an integer variable or arithmetic of them (the result of + - * of
-        // integers, and of // and % (else an error), is an integer), or a call that is inlined)
+        // integers, and of // and % (else an error), is an integer), or a call that is inlined or of an integer function)
         bool integer_expression(node const* aNode)
         {
             while (aNode->is(construct::Parenthesized))
@@ -452,7 +470,7 @@ namespace neos::compilers::lua
             case construct::Negate:
                 return integer_expression(aNode->child(0u));
             case construct::Call:
-                return inlined_call(aNode) != nullptr;
+                return inlined_call(aNode) != nullptr || integer_call(aNode) != nullptr;
             default:
                 return false;
             }
@@ -513,6 +531,8 @@ namespace neos::compilers::lua
             pending.pop_back();
             for (auto* c : n->children)
                 pending.push_back(c);
+            if (n->is(construct::Identifier) && n->resolved != nullptr && !(n->parent != nullptr && n->parent->is(construct::VariableList)))
+                n->resolved->read = true;
             if (n->is(construct::Local))
             {
                 std::vector<variable*> variables;
@@ -567,6 +587,14 @@ namespace neos::compilers::lua
         for (auto const& [v, f] : functions)
             if (v != nullptr && f != nullptr && !assigned.contains(v))
                 v->constant = f;
+        // (rounds: an integer function (see below) makes calls of it integer expressions, which can make more variables integers)
+        for (int round = 0; round < 4; ++round)
+        {
+        for (auto& f : iFunctions)
+        {
+            f.speculative.clear();
+            f.speculativeParameters.clear();
+        }
         for (auto& [v, expressions] : assignments)
             v->integer = declared.contains(v) && !v->captured && !excluded.contains(v);
         auto const solve = [&](std::vector<variable*> const& aVariables)
@@ -648,6 +676,153 @@ namespace neos::compilers::lua
             for (auto* v : base)
                 v->integer = true;
         }
+        // (integer functions: whose parameters are all integers (if their arguments are), that end with a return statement, whose 
+        // statements are only of integers (integer variables' declarations and assignments, ifs, whiles and numeric fors whose conditions
+        // are comparisons of integers, breaks and returns of one integer), that cannot raise errors (// and % by positive numerals), and
+        // whose calls are of integer functions (or are inlined): their version that takes and returns i64s)
+        bool changed = false;
+        for (auto& f : iFunctions)
+        {
+            bool const was = f.integer;
+            f.integer = false;
+            if (!was && round > 0)
+                changed = changed || false;
+            if (f.chunk || f.vararg || f.method || f.parameters.empty() || f.speculativeParameters.size() != f.parameters.size())
+            {
+                changed = changed || was;
+                continue;
+            }
+            std::vector<variable*> base;
+            for (auto* v : f.speculative)
+            {
+                if (v->integer)
+                    base.push_back(v);
+                v->integer = true;
+            }
+            f.integer = was || round == 0;  // (assumed while its calls of itself are checked)
+            std::function<bool(node const*)> safe = [&](node const* aNode) -> bool
+            {
+                while (aNode->is(construct::Parenthesized))
+                    aNode = aNode->child(0u);
+                if (!integer_expression(aNode))
+                    return false;
+                switch (aNode->kind)
+                {
+                case construct::FloorDivide:
+                case construct::Modulo:
+                    {
+                        auto const* divisor = aNode->child(1u);
+                        while (divisor->is(construct::Parenthesized))
+                            divisor = divisor->child(0u);
+                        if (!divisor->is(construct::Number) || std::get<std::int64_t>(number_value(divisor->source)) <= 0)
+                            return false;
+                        return safe(aNode->child(0u));
+                    }
+                case construct::Add:
+                case construct::Subtract:
+                case construct::Multiply:
+                    return safe(aNode->child(0u)) && safe(aNode->child(1u));
+                case construct::Negate:
+                    return safe(aNode->child(0u));
+                case construct::Call:
+                    for (std::size_t i = 1u; i < aNode->size(); ++i)
+                        if (!safe(aNode->child(i)))
+                            return false;
+                    return true;
+                default:
+                    return true;
+                }
+            };
+            std::function<bool(node const*)> condition = [&](node const* aNode) -> bool
+            {
+                while (aNode->is(construct::Parenthesized))
+                    aNode = aNode->child(0u);
+                switch (aNode->kind)
+                {
+                case construct::Not:
+                    return condition(aNode->child(0u));
+                case construct::And:
+                case construct::Or:
+                    return condition(aNode->child(0u)) && condition(aNode->child(1u));
+                case construct::Less:
+                case construct::Greater:
+                case construct::LessEqual:
+                case construct::GreaterEqual:
+                case construct::Equal:
+                case construct::NotEqual:
+                    return safe(aNode->child(0u)) && safe(aNode->child(1u));
+                default:
+                    return false;
+                }
+            };
+            std::function<bool(node const*, std::size_t)> statements;
+            std::function<bool(node const*)> statement = [&](node const* aNode) -> bool
+            {
+                switch (aNode->kind)
+                {
+                case construct::Empty:
+                case construct::Break:
+                    return true;
+                case construct::Local:
+                    return aNode->size() == 2u && aNode->child(0u)->is(construct::AttributeName) && aNode->child(0u)->size() == 1u &&
+                        aNode->child(0u)->child(0u)->declared != nullptr && aNode->child(0u)->child(0u)->declared->integer && safe(aNode->child(1u));
+                case construct::Assign:
+                    return aNode->size() == 2u && aNode->child(0u)->size() == 1u && aNode->child(0u)->child(0u)->is(construct::Identifier) &&
+                        aNode->child(0u)->child(0u)->resolved != nullptr && aNode->child(0u)->child(0u)->resolved->integer && safe(aNode->child(1u));
+                case construct::Return:
+                    return aNode->size() == 1u && safe(aNode->child(0u));
+                case construct::Do:
+                    return statements(aNode, 0u);
+                case construct::While:
+                    return condition(aNode->child(0u)) && statements(aNode, 1u);
+                case construct::NumericFor:
+                    {
+                        auto const first = first_statement(const_cast<node*>(aNode));
+                        if (aNode->child(0u)->declared == nullptr || !aNode->child(0u)->declared->integer)
+                            return false;
+                        for (std::size_t i = 1u; i < first; ++i)
+                            if (!safe(aNode->child(i)))
+                                return false;
+                        return statements(aNode, first);
+                    }
+                case construct::If:
+                case construct::ElseIf:
+                    {
+                        if (!condition(aNode->child(0u)))
+                            return false;
+                        for (std::size_t i = 1u; i < aNode->size(); ++i)
+                        {
+                            auto const* c = aNode->child(i);
+                            if (c->is(construct::ElseIf) || c->is(construct::Else) ? !statement(c) : !statement(c))
+                                return false;
+                        }
+                        return true;
+                    }
+                case construct::Else:
+                    return statements(aNode, 0u);
+                default:
+                    return false;
+                }
+            };
+            statements = [&](node const* aNode, std::size_t aFirst) -> bool
+            {
+                for (std::size_t i = aFirst; i < aNode->size(); ++i)
+                    if (!statement(aNode->child(i)))
+                        return false;
+                return true;
+            };
+            auto const first = first_statement(f.declaration);
+            auto const body = statements_of(f.declaration, first);
+            f.integer = !body.empty() && body.back()->is(construct::Return) && statements(f.declaration, first);
+            for (auto* v : f.speculative)
+                v->integer = false;
+            for (auto* v : base)
+                v->integer = true;
+            changed = changed || f.integer != was;
+        }
+        if (!changed && round > 0)
+            break;
+        }
     }
 
     // --- code generation (the module)
@@ -688,6 +863,25 @@ namespace neos::compilers::lua
                 iFrameNames[f.index] = f.name;
                 ++number;
             }
+            // (integer functions' integer versions)
+            for (auto& f : iFunctions)
+                if (f.integer)
+                {
+                    function_signature integerSignature;
+                    integerSignature.set_return_type(I64);
+                    function_parameters parameters;
+                    for (std::size_t i = 0u; i < f.parameters.size(); ++i)
+                    {
+                        function_parameter p;
+                        p.set_parameter_type(I64);
+                        parameters.push_back(p);
+                    }
+                    integerSignature.set_parameters(parameters);
+                    auto const name = neolib::string{ "%lua." + std::to_string(f.number) + ".int" };
+                    integerSignature.set_name(name);
+                    f.integerIndex = generator().define_function(name, integerSignature, neolib::vector<type>{}, neolib::string{ f.name }, f.line);
+                    iFrameNames[f.integerIndex] = f.name;
+                }
             // (the dispatcher: (function number, callee, count, arguments) -> result)
             {
                 function_signature dispatcher;
@@ -705,7 +899,11 @@ namespace neos::compilers::lua
             }
             // (each function's code)
             for (auto& f : iFunctions)
+            {
                 function_generator{ *this, f }.generate();
+                if (f.integer)
+                    function_generator{ *this, f, true }.generate();
+            }
             // the dispatcher's code: a binary search of the function numbers (each leaf calls its function and returns)
             {
                 std::vector<std::uint32_t> targets;
@@ -809,8 +1007,9 @@ namespace neos::compilers::lua
 
     // --- code generation (a function)
 
-    function_generator::function_generator(compiler& aCompiler, function_info& aFunction) :
-        iCompiler{ aCompiler }, iFunction{ aFunction }
+    function_generator::function_generator(compiler& aCompiler, function_info& aFunction, bool aIntegerVersion) :
+        iCompiler{ aCompiler }, iFunction{ aFunction }, iIntegerVersion{ aIntegerVersion },
+        iParameterCount{ aIntegerVersion ? static_cast<std::uint32_t>(aFunction.parameters.size()) : ParameterCount }
     {
     }
 
@@ -868,13 +1067,13 @@ namespace neos::compilers::lua
     std::uint32_t function_generator::local(type aType)
     {
         iLocals.push_back(aType);
-        return ParameterCount + static_cast<std::uint32_t>(iLocals.size() - 1u);
+        return iParameterCount + static_cast<std::uint32_t>(iLocals.size() - 1u);
     }
 
     std::uint32_t function_generator::temporary(type aType)
     {
         for (auto i = iFreeTemporaries.begin(); i != iFreeTemporaries.end(); ++i)
-            if (iLocals[*i - ParameterCount] == aType)
+            if (iLocals[*i - iParameterCount] == aType)
             {
                 auto const result = *i;
                 iFreeTemporaries.erase(i);
@@ -1048,6 +1247,48 @@ namespace neos::compilers::lua
 
     void function_generator::generate()
     {
+        if (iIntegerVersion)
+        {
+            // (an integer function's integer version: its parameters are i64s (its WebAssembly parameters), it returns an i64)
+            iScratch = local();
+            iArgumentsBase = local(I32);
+            begin(control_kind::Exit);
+            line_of(iFunction.declaration);
+            std::vector<std::pair<variable*, std::uint32_t>> saved;
+            for (std::size_t i = 0u; i < iFunction.parameters.size(); ++i)
+            {
+                auto* p = iFunction.parameters[i];
+                saved.emplace_back(p, p->local);
+                p->local = static_cast<std::uint32_t>(i);
+            }
+            std::vector<variable*> base;
+            for (auto* v : iFunction.speculative)
+            {
+                if (v->integer)
+                    base.push_back(v);
+                v->integer = true;
+            }
+            auto* declaration = iFunction.declaration;
+            auto const first = compiler::first_statement(declaration);
+            block(declaration, compiler::statements_of(declaration, first), first);
+            i64(0);
+            op(opcode::Return);
+            end_control();
+            i64(0);
+            for (auto* v : iFunction.speculative)
+                v->integer = false;
+            for (auto* v : base)
+                v->integer = true;
+            for (auto const& [p, l] : saved)
+                p->local = l;
+            fragment code;
+            code.fragmentCode.as_std_vector() = iCode;
+            for (auto const& r : iRelocations)
+                code.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ r.first, r.second });
+            iCompiler.generator().set_function_body(iFunction.integerIndex, code);
+            iCompiler.generator().set_function_locals(iFunction.integerIndex, neolib::vector<type>{ iLocals.begin(), iLocals.end() });
+            return;
+        }
         iScratch = local();
         iArgumentsBase = local(I32);
         if (iFunction.hasClose)
@@ -2364,10 +2605,14 @@ namespace neos::compilers::lua
             i64(1);
             op(opcode::I64Sub);
             set(icount);
-            get(ivar);
-            get(istep);
-            op(opcode::I64Add);
-            set(ivar);
+            // (a variable that nothing reads: not updated)
+            if (v->read || v->assigned)
+            {
+                get(ivar);
+                get(istep);
+                op(opcode::I64Add);
+                set(ivar);
+            }
             branch(loop);
             end_control();
             end_control();
@@ -2479,6 +2724,13 @@ namespace neos::compilers::lua
     void function_generator::return_statement(node* aNode)
     {
         std::vector<node*> expressions{ aNode->children.begin(), aNode->children.end() };
+        if (iIntegerVersion)
+        {
+            // (an integer function's integer version: its value's i64)
+            raw_integer(expressions[0], {}, std::nullopt);
+            op(opcode::Return);
+            return;
+        }
         if (iTbcCount > 0u && !expressions.empty())
         {
             // (its values, then its to-be-closed variables are closed)
@@ -3241,9 +3493,9 @@ namespace neos::compilers::lua
 
     void function_generator::call_expression(node* aNode)
     {
-        if (inlined_call(aNode) != nullptr)
+        if (integer_expression(aNode))
         {
-            // (an inlined call of integers: its expression)
+            // (an inlined call of integers, or of an integer function: its expression (its i64))
             raw_integer(aNode, {}, std::nullopt);
             box_integer();
             set_results(1u);
@@ -3634,6 +3886,15 @@ namespace neos::compilers::lua
             return;
         case construct::Call:
             {
+                if (inlined_call(aNode) == nullptr)
+                {
+                    // (a call of an integer function: its integer version, with its arguments' i64s)
+                    auto const* f = integer_call(aNode);
+                    for (std::size_t i = 1u; i < aNode->size(); ++i)
+                        raw_integer(aNode->child(i), aLeaves, aSlow);
+                    call(f->integerIndex);
+                    return;
+                }
                 // (an inlined call (of integers): its expression, its parameters its arguments' i64s)
                 auto const* f = inlined_call(aNode);
                 std::vector<std::uint32_t> raws;

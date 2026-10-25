@@ -2385,6 +2385,9 @@ namespace neos
                                 auto const op = static_cast<std::uint8_t>(iTokens[p]);
                                 auto const position = p;
                                 p += 1u + immediate_count(op, iTokens, p);
+                                // (the peepholes that the head's first compilation used)
+                                if (op == 0x20u && position + 7u <= loop.headEnd && update_local(position, p))
+                                    continue;
                                 instruction(op, position, [&](std::size_t aIndex) { return iTokens[position + 1u + aIndex]; });
                             }
                             // (continue unless the exit is taken)
