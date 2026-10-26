@@ -94,6 +94,9 @@ namespace neos::javascript_runtime
             f.flavour = function_flavour::Accessor;
         else if ((aFlags & ClosureMethod) != 0)
             f.flavour = function_flavour::Method;
+        // (a function that the dispatcher can call (not a class constructor): its dispatch key)
+        if (f.flavour != function_flavour::ClassConstructor)
+            f.dispatch = (std::uint64_t{ the_heap().program_serial(f.program) } << 32u) | aNumber;
         auto const& n = the_names();
         f.properties.add(n.length, number(aLength), Undefined, AttributeConfigurable);
         f.properties.add(n.name, aName, Undefined, AttributeConfigurable);
@@ -388,7 +391,7 @@ namespace neos::javascript_runtime
         auto const p = aRealm.functionPrototype;
         method(p, "apply", 2u, function_prototype_apply);
         method(p, "bind", 1u, function_prototype_bind);
-        method(p, "call", 1u, function_prototype_call);
+        aRealm.functionCall = method(p, "call", 1u, function_prototype_call);
         method(p, "toString", 0u, function_prototype_to_string);
         method(p, aRealm.symHasInstance, 1u, function_prototype_has_instance, 0u);
         // (%ThrowTypeError%: frozen, nameless)

@@ -717,7 +717,7 @@ namespace neos::javascript_runtime
 
         module_record& record_of(function_object& aFunction)
         {
-            return *reinterpret_cast<module_record*>(static_cast<std::uintptr_t>(as_number(aFunction.internal)));
+            return *reinterpret_cast<module_record*>(static_cast<std::uintptr_t>(as_number(aFunction.internal())));
         }
 
         value async_module_fulfilled(value, arguments, value, function_object& aSelf)
@@ -735,7 +735,7 @@ namespace neos::javascript_runtime
         value module_handler(native_function aFunction, module_record& aModule)
         {
             auto const f = make_native(the_names().empty, 1u, aFunction);
-            obj(f).internal = number(static_cast<double>(reinterpret_cast<std::uintptr_t>(&aModule)));
+            obj(f).internal() = number(static_cast<double>(reinterpret_cast<std::uintptr_t>(&aModule)));
             return f;
         }
 

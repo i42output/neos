@@ -639,6 +639,13 @@ namespace neos::javascript_runtime
         // (Array.prototype and Object.prototype have no index properties (that a plain array's [[Set]] of an index would find))
         bool plain_prototypes()
         {
+            return plain_array_prototypes();
+        }
+    }
+
+    bool plain_array_prototypes()
+    {
+        {
             auto const& r = the_realm();
             auto* ap = as_array(r.arrayPrototype);
             if (ap == nullptr || ap->sparse || !ap->elements.empty() || obj(r.arrayPrototype).proto != r.objectPrototype)
@@ -663,7 +670,10 @@ namespace neos::javascript_runtime
             }
             return cache.plain;
         }
+    }
 
+    namespace
+    {
         value array_push(value aThis, arguments aArguments, value, function_object&)
         {
             auto const o = to_object(aThis);
@@ -827,6 +837,18 @@ namespace neos::javascript_runtime
             auto const final_ = relative_index(argument(aArguments, 1u), len, len);
             auto const count = std::max(final_ - k, 0.0);
             auto const a = array_species_create(o, count);
+            // (a plain array's slice made by %Array%: its elements (a hole is one in the slice too))
+            if (auto* const source = as_array(o), *const result = as_array(a); source != nullptr && result != nullptr && source != result &&
+                !source->sparse && !result->sparse && source->proto == the_realm().arrayPrototype && result->proto == the_realm().arrayPrototype &&
+                result->extensible && result->lengthWritable && result->elements.empty() && result->properties.size() == 0u && 
+                result->length == static_cast<std::uint32_t>(count) && plain_prototypes())
+            {
+                auto const first = static_cast<std::size_t>(k);
+                auto const last = std::min(static_cast<std::size_t>(final_), static_cast<std::size_t>(source->elements.size()));
+                if (first < last)
+                    result->elements.assign(source->elements.begin() + static_cast<std::ptrdiff_t>(first), source->elements.begin() + static_cast<std::ptrdiff_t>(last));
+                return a;
+            }
             double n = 0.0;
             for (; k < final_; ++k, ++n)
             {

@@ -259,8 +259,8 @@ namespace neos::javascript_runtime
                 }
                 auto const onFulfilled = make_native(the_names().empty, 1u, dispose_job_fulfilled);
                 auto const onRejected = make_native(the_names().empty, 1u, dispose_job_rejected);
-                obj(onFulfilled).internal = TagInternal | aJob.handle;
-                obj(onRejected).internal = TagInternal | aJob.handle;
+                obj(onFulfilled).internal() = TagInternal | aJob.handle;
+                obj(onRejected).internal() = TagInternal | aJob.handle;
                 perform_promise_then(promise, onFulfilled, onRejected);
                 return;
             }
@@ -268,7 +268,7 @@ namespace neos::javascript_runtime
 
         value dispose_job_fulfilled(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& job = cell_of<dispose_resources_job>(aSelf.internal);
+            auto& job = cell_of<dispose_resources_job>(aSelf.internal());
             job.operation.resume(false, argument(aArguments, 0u));
             dispose_job_continue(job);
             return Undefined;
@@ -276,7 +276,7 @@ namespace neos::javascript_runtime
 
         value dispose_job_rejected(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& job = cell_of<dispose_resources_job>(aSelf.internal);
+            auto& job = cell_of<dispose_resources_job>(aSelf.internal());
             job.operation.resume(true, argument(aArguments, 0u));
             dispose_job_continue(job);
             return Undefined;

@@ -102,13 +102,13 @@ namespace neos::javascript_runtime
 
         captures& captured(function_object& aFunction)
         {
-            return cell_of<captures>(aFunction.internal);
+            return cell_of<captures>(aFunction.internal());
         }
 
         value closure(native_function aFunction, std::uint32_t aLength, captures& aCaptures)
         {
             auto const f = make_native(the_names().empty, aLength, aFunction);
-            obj(f).internal = value_of(aCaptures);
+            obj(f).internal() = value_of(aCaptures);
             return f;
         }
 

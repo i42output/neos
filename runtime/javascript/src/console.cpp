@@ -386,19 +386,19 @@ namespace neos::javascript_runtime
                 switch (o.cls)
                 {
                 case object_class::Number:
-                    prefix = "[Number: " + style(number_text(as_number(o.internal)), "33", "39", styled) + "]";
+                    prefix = "[Number: " + style(number_text(as_number(o.internal())), "33", "39", styled) + "]";
                     break;
                 case object_class::String:
-                    prefix = "[String: " + style(quote(str(o.internal)), "32", "39", styled) + "]";
+                    prefix = "[String: " + style(quote(str(o.internal())), "32", "39", styled) + "]";
                     break;
                 case object_class::Boolean:
-                    prefix = "[Boolean: " + style(o.internal == True ? "true" : "false", "33", "39", styled) + "]";
+                    prefix = "[Boolean: " + style(o.internal() == True ? "true" : "false", "33", "39", styled) + "]";
                     break;
                 case object_class::Symbol:
-                    prefix = "[Symbol: " + style(describe(o.internal), "32", "39", styled) + "]";
+                    prefix = "[Symbol: " + style(describe(o.internal()), "32", "39", styled) + "]";
                     break;
                 case object_class::BigInt:
-                    prefix = "[BigInt: " + style(describe(o.internal), "33", "39", styled) + "]";
+                    prefix = "[BigInt: " + style(describe(o.internal()), "33", "39", styled) + "]";
                     break;
                 case object_class::Date:
                 case object_class::RegExp:

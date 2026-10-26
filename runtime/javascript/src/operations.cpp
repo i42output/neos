@@ -38,6 +38,7 @@
 #include <neos/language/ecmascript.hpp>
 #include "js.hpp"
 #include "api.hpp"
+#include "typed_arrays.hpp"
 
 namespace neos::javascript_runtime
 {
@@ -315,7 +316,7 @@ namespace neos::javascript_runtime
             result = &the_heap().make<object>(r.bigintPrototype, object_class::BigInt);
         else
             return make_string_object(aValue, r.stringPrototype);
-        result->internal = aValue;
+        result->internal() = aValue;
         return value_of(*result);
     }
 
@@ -339,7 +340,10 @@ namespace neos::javascript_runtime
 
     double to_integer_or_infinity(value aValue)
     {
-        auto const n = to_number(aValue);
+        auto const n = is_number(aValue) ? as_number(aValue) : to_number(aValue);
+        // (a number whose magnitude is below 2^53 (not NaN): its integer part (by conversion, which truncates); -0 (and -0.5 ...): +0)
+        if (std::fabs(n) < 9007199254740992.0)
+            return static_cast<double>(static_cast<std::int64_t>(n)) + 0.0;
         if (std::isnan(n) || n == 0.0)
             return 0.0;
         if (std::isinf(n))
@@ -774,6 +778,31 @@ namespace neos::javascript_runtime
             throw_type_error("CreateListFromArrayLike called on non-object");
         auto const length = length_of_array_like(aObject);
         value_list result;
+        // (a plain array's, or a typed array's elements: as [[Get]] of their indices (a hole: undefined))
+        if (auto const* a = as_array(aObject); a != nullptr && !a->sparse && a->proto == the_realm().arrayPrototype && plain_array_prototypes())
+        {
+            result.reserve(static_cast<std::size_t>(length));
+            for (std::size_t i = 0u; static_cast<double>(i) < length; ++i)
+            {
+                auto const next = i < a->elements.size() && a->elements[i] != Empty ? a->elements[i] : Undefined;
+                if (aKeysOnly && !is_property_key(next))
+                    throw_type_error("not a property key");
+                result.push_back(next);
+            }
+            return result;
+        }
+        if (auto const* t = as_typed_array(aObject); t != nullptr)
+        {
+            result.reserve(static_cast<std::size_t>(length));
+            for (double i = 0.0; i < length; ++i)
+            {
+                auto const next = typed_array_get_element(*t, i);
+                if (aKeysOnly && !is_property_key(next))
+                    throw_type_error("not a property key");
+                result.push_back(next);
+            }
+            return result;
+        }
         for (double i = 0.0; i < length; ++i)
         {
             auto const next = get(aObject, index_key(static_cast<std::uint64_t>(i)));

@@ -983,7 +983,7 @@ namespace neos::javascript_runtime
             if (!can_be_held_weakly(target))
                 throw_type_error("WeakRef: invalid target " + describe(target));
             auto const result = ordinary_create_from_constructor(aNewTarget, &realm::weakRefPrototype, object_class::WeakRef);
-            obj(result).internal = target;
+            obj(result).internal() = target;
             keep_during_job(target);
             return result;
         }
@@ -992,7 +992,7 @@ namespace neos::javascript_runtime
         {
             if (!is_object(aThis) || obj(aThis).cls != object_class::WeakRef)
                 throw_type_error("Method WeakRef.prototype.deref called on incompatible receiver " + describe(aThis));
-            auto const target = obj(aThis).internal;
+            auto const target = obj(aThis).internal();
             if (target != Undefined)
                 keep_during_job(target);
             return target;

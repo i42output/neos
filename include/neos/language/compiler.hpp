@@ -511,6 +511,7 @@ namespace neos::language
         std::optional<bool> iBigintPromotion;
         compilation_state_stack_t iCompilationStateStack;
         wasm_module iModule;
+        std::unordered_map<std::string, std::uint32_t> iRuntimeFunctions;  ///< (runtime_function's: names -> indices that they probably have)
         std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;
         std::uint64_t iSymbolSequence = 0u;
         bool iDeclarationPass = false;

@@ -83,6 +83,7 @@ namespace neos
                 function const& resolve(std::string const& aImport, std::vector<std::uint8_t> const& aParameters, std::vector<std::uint8_t> const& aResults);
                 // true if the function can change the host environment (it cannot be called in restricted mode)
                 bool restricted(function const& aFunction);
+                bool common(function const& aFunction);     ///< (NEOS_RT_COMMON)
                 // (for calling it directly) its C function, its C signature (neos_rt_type values: aParameters and aResult) and its
                 // plugin's error function (null if it has none)
                 void const* c_function(function const& aFunction, std::vector<std::uint8_t>& aParameters, std::uint8_t& aResult, char const* (*&aError)());

@@ -73,6 +73,11 @@ namespace neos::javascript_runtime
             smallText = false;
             charsOffset = region_offset(text.data());
         }
+        if (base != 0u && text.empty())
+        {
+            text.assign(reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length);
+            charsOffset = region_offset(text.data());
+        }
         if (left == 0u)
             return text;
         // (a rope: its leaves in order (iteratively: a rope made by repeated concatenation is deep))
@@ -87,7 +92,7 @@ namespace neos::javascript_runtime
             auto& s = cell_of<string>(tPending.back());
             tPending.pop_back();
             if (s.left == 0u)
-                result.append(s.smallText ? std::u16string_view{ s.small, s.length } : std::u16string_view{ s.text });
+                result.append(s.chars());
             else
             {
                 tPending.push_back(s.right);
@@ -135,7 +140,24 @@ namespace neos::javascript_runtime
     {
         struct intern_table
         {
-            std::unordered_map<std::u16string_view, value> strings;
+            // (pinned strings (that live as long as the program): marked by the collector (pinnedValues, in the order they were 
+            // pinned); the others (weak) live while they are referred to (those that die are removed))
+            std::unordered_map<std::u16string_view, value> pinned;
+            std::unordered_map<std::u16string_view, value> weak;
+            std::vector<value> pinnedValues;
+            value find(std::u16string_view aText) const
+            {
+                if (auto const p = pinned.find(aText); p != pinned.end())
+                    return p->second;
+                if (auto const w = weak.find(aText); w != weak.end())
+                    return w->second;
+                return 0u;
+            }
+            void pin(std::u16string_view aText, value aString)
+            {
+                pinned.emplace(aText, aString);
+                pinnedValues.push_back(aString);
+            }
         };
 
         intern_table& interned()
@@ -148,12 +170,11 @@ namespace neos::javascript_runtime
         // globals; the runtime keeps others in statics); the others live while they are referred to: those that die are removed)
         root_tracer const sInternedRoots{ [](tracer& aTracer)
         {
-            for (auto const& entry : interned().strings)
-                if (cell_of<string>(entry.second).pinned)
-                    aTracer.mark(entry.second);
+            for (auto const v : interned().pinnedValues)
+                aTracer.mark(v);
         }, [](tracer& aTracer)
         {
-            std::erase_if(interned().strings, [&](auto const& aEntry) { return !aTracer.alive(aEntry.second); });
+            std::erase_if(interned().weak, [&](auto const& aEntry) { return !aTracer.alive(aEntry.second); });
         } };
     }
 
@@ -168,9 +189,14 @@ namespace neos::javascript_runtime
 
     value make_string(std::u16string_view aText)
     {
+        // (its code units copied once: to its own storage (in the region))
         if (aText.size() <= string::SmallCapacity)
             return make_small_string(aText);
-        return make_string(std::u16string{ aText });
+        if (aText.size() > MaxStringLength)
+            throw_range_error("invalid string length");
+        the_heap().account(aText.size() * sizeof(char16_t));
+        auto& s = the_heap().make<string>(aText);
+        return TagString | s.handle;
     }
 
     value make_small_string(std::u16string_view aText)
@@ -306,16 +332,23 @@ namespace neos::javascript_runtime
     value intern(std::u16string_view aText)
     {
         auto& table = interned();
-        if (auto existing = table.strings.find(aText); existing != table.strings.end())
-        {
-            cell_of<string>(existing->second).pinned = true;
+        if (auto existing = table.pinned.find(aText); existing != table.pinned.end())
             return existing->second;
+        if (auto existing = table.weak.find(aText); existing != table.weak.end())
+        {
+            // (pinned from now on)
+            auto const result = existing->second;
+            auto const key = existing->first;
+            table.weak.erase(existing);
+            cell_of<string>(result).pinned = true;
+            table.pin(key, result);
+            return result;
         }
         auto& s = the_heap().make<string>(std::u16string{ aText });
         s.interned = true;
         s.pinned = true;
         auto const result = TagString | s.handle;
-        table.strings.emplace(std::u16string_view{ s.text }, result);
+        table.pin(std::u16string_view{ s.text }, result);
         return result;
     }
 
@@ -326,10 +359,10 @@ namespace neos::javascript_runtime
             return aString;
         auto& table = interned();
         auto const& text = s.flat();
-        if (auto existing = table.strings.find(std::u16string_view{ text }); existing != table.strings.end())
-            return existing->second;
+        if (auto const existing = table.find(std::u16string_view{ text }); existing != 0u)
+            return existing;
         s.interned = true;
-        table.strings.emplace(std::u16string_view{ s.text }, aString);
+        table.weak.emplace(std::u16string_view{ s.text }, aString);
         return aString;
     }
 
@@ -406,9 +439,24 @@ namespace neos::javascript_runtime
         return make_string(std::move(text));
     }
 
-    region_u16string const& str(value aString)
+    std::u16string_view str(value aString)
     {
-        return cell_of<string>(aString).flat();
+        return cell_of<string>(aString).chars();
+    }
+
+    value substring_of(value aString, std::size_t aStart, std::size_t aLength)
+    {
+        // (a long one is a slice (it shares its code units: none are copied; the string whose they are (the base) lives while it does))
+        constexpr std::size_t MinimumSlice = 24u;
+        auto& s = cell_of<string>(aString);
+        if (aStart == 0u && aLength == s.length)
+            return aString;
+        if (aLength < MinimumSlice || s.smallText)
+            return make_string(s.chars().substr(aStart, aLength));
+        auto const base = s.base != 0u && s.text.empty() ? s.base : (s.flat(), aString);
+        auto const offset = cell_of<string>(aString).charsOffset + aStart * sizeof(char16_t);
+        auto& slice = the_heap().make<string>(string::slice_tag{}, base, offset, static_cast<std::uint32_t>(aLength));
+        return TagString | slice.handle;
     }
 
     bool string_equal(value aLhs, value aRhs)
@@ -453,9 +501,8 @@ namespace neos::javascript_runtime
         char digits[24];
         auto const end = std::to_chars(std::begin(digits), std::end(digits), aIndex).ptr;
         auto text = utf16_ascii(std::string_view{ digits, static_cast<std::size_t>(end - digits) });
-        auto& table = interned();
-        if (auto existing = table.strings.find(std::u16string_view{ text }); existing != table.strings.end())
-            return existing->second;
+        if (auto const existing = interned().find(std::u16string_view{ text }); existing != 0u)
+            return existing;
         return intern(make_string(std::move(text)));    // (not pinned: it lives while it is referred to)
     }
 

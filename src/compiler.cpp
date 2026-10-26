@@ -829,10 +829,18 @@ namespace neos::language
 
     std::uint32_t compiler::runtime_function(std::string const& aName, std::vector<type> const& aParameters, type aReturnType)
     {
+        // (the index it had when it was last found, if it still has it (else searched for))
+        if (auto const known = iRuntimeFunctions.find(aName); known != iRuntimeFunctions.end() && known->second < iModule.functions.size() &&
+            iModule.functions[known->second].imported && iModule.functions[known->second].name == aName)
+            return known->second;
         for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
             if (iModule.functions[id].imported && iModule.functions[id].name == aName)
+            {
+                iRuntimeFunctions[aName] = id;
                 return id;
+            }
         auto const id = add_function(aName, true);
+        iRuntimeFunctions[aName] = id;
         auto& function = iModule.functions[id];
         function.signature.set_name(neolib::string{ aName });
         function_parameters parameters;

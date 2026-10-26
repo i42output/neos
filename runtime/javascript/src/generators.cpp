@@ -294,7 +294,7 @@ namespace neos::javascript_runtime
 
         value async_generator_return_fulfilled(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& g = as_generator(aSelf.internal);
+            auto& g = as_generator(aSelf.internal());
             async_generator_complete_step(g, completion{ Normal, argument(aArguments, 0u) }, true);
             async_generator_drain_queue(g);
             return Undefined;
@@ -302,7 +302,7 @@ namespace neos::javascript_runtime
 
         value async_generator_return_rejected(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& g = as_generator(aSelf.internal);
+            auto& g = as_generator(aSelf.internal());
             async_generator_complete_step(g, completion{ Throw, argument(aArguments, 0u) }, true);
             async_generator_drain_queue(g);
             return Undefined;
@@ -311,7 +311,7 @@ namespace neos::javascript_runtime
         value native_closure(native_function aFunction, generator_object& g)
         {
             auto const f = make_native(the_names().empty, 1u, aFunction);
-            obj(f).internal = value_of(g);
+            obj(f).internal() = value_of(g);
             return f;
         }
 
@@ -379,7 +379,7 @@ namespace neos::javascript_runtime
 
         value await_fulfilled(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& g = as_generator(aSelf.internal);
+            auto& g = as_generator(aSelf.internal());
             g.resumption = completion{ Normal, argument(aArguments, 0u) };
             ran(g, run(g));
             return Undefined;
@@ -387,7 +387,7 @@ namespace neos::javascript_runtime
 
         value await_rejected(value, arguments aArguments, value, function_object& aSelf)
         {
-            auto& g = as_generator(aSelf.internal);
+            auto& g = as_generator(aSelf.internal());
             g.resumption = completion{ Throw, argument(aArguments, 0u) };
             ran(g, run(g));
             return Undefined;
@@ -544,13 +544,13 @@ namespace neos::javascript_runtime
         value async_from_sync_fulfilled(value, arguments aArguments, value, function_object& aSelf)
         {
             // (internal: an object whose internal value is done (a boolean))
-            return create_iter_result_object(argument(aArguments, 0u), obj(aSelf.internal).internal == True);
+            return create_iter_result_object(argument(aArguments, 0u), obj(aSelf.internal()).internal() == True);
         }
 
         value async_from_sync_rejected(value, arguments aArguments, value, function_object& aSelf)
         {
             // (internal: the async-from-sync iterator: its sync iterator is closed and the error rethrown)
-            auto& o = static_cast<async_from_sync_iterator&>(obj(aSelf.internal));
+            auto& o = static_cast<async_from_sync_iterator&>(obj(aSelf.internal()));
             iterator_close_on_throw(o.sync);
             throw js_exception{ argument(aArguments, 0u) };
         }
@@ -586,14 +586,14 @@ namespace neos::javascript_runtime
                 return rejectWith(e.thrown);
             }
             auto const doneObject = make_object(Null);
-            obj(doneObject).internal = boolean(done);
+            obj(doneObject).internal() = boolean(done);
             auto const onFulfilled = make_native(the_names().empty, 1u, async_from_sync_fulfilled);
-            obj(onFulfilled).internal = doneObject;
+            obj(onFulfilled).internal() = doneObject;
             value onRejected = Undefined;
             if (!done && aCloseOnRejection)
             {
                 onRejected = make_native(the_names().empty, 1u, async_from_sync_rejected);
-                obj(onRejected).internal = value_of(aIterator);
+                obj(onRejected).internal() = value_of(aIterator);
             }
             perform_promise_then(wrapper, onFulfilled, onRejected, aPromise, aResolve, aReject);
             return aPromise;

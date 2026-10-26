@@ -84,6 +84,7 @@ namespace neos
                     std::uint8_t result = 0u;
                     char const* (*error)() = nullptr;
                     long const* errorPending = nullptr;     ///< (if not null: error is called only if it is nonzero)
+                    bool common = false;                    ///< (NEOS_RT_COMMON: optimized code calls it (it is not a slow path to deoptimize at))
                 };
 
                 // how generated code calls an imported function
@@ -107,6 +108,8 @@ namespace neos
                     std::optional<plugin_function> plugin;                 ///< (import_call::Plugin)
                     std::size_t codeBegin = 0u; ///< token index
                     std::size_t codeEnd = 0u;   ///< token index
+                    bool inlinable = false;     ///< (the optimizing tier may inline its calls)
+                    bool frameless = false;     ///< (it has no frame of its own (e.g. a language's helper): it is not optimized itself)
                 };
 
                 // linear memory (updated by the VM when it moves or grows)
@@ -159,6 +162,7 @@ namespace neos
                     std::vector<std::uint64_t> const* tokens = nullptr; ///< decoded code: an opcode token followed by its immediates
                     std::vector<value>* globals = nullptr;
                     std::vector<std::uint8_t> const* globalTypes = nullptr;
+                    std::vector<std::uint8_t> const* fixedGlobals = nullptr;   ///< (globals whose values do not change again (see neos_rt_host::fix_global): nonzero)
                     memory const* linearMemory = nullptr;
                     object_table* objects = nullptr;    ///< (null: generated code calls the host's object functions)
                     host_interface host;

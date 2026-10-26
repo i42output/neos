@@ -464,6 +464,11 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/intl_segmenter.cpp
     runtime/javascript/src/intl_duration_format.cpp)
 target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/javascript/include") # (ECMAScript's conversions)
+# (its thread_locals (e.g. the calling thread's isolate, read all the time) through TLS descriptors: an access is not a call of
+# __tls_get_addr (x86-64 ELF))
+if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+    target_compile_options(javascript PRIVATE -mtls-dialect=gnu2)
+endif()
 
 # ICU (Intl, ECMA-402): its C API (on Windows the system's ICU (icu.dll: the Windows SDK's icu.h); elsewhere the system's libicu); without
 # it the JavaScript runtime has no Intl

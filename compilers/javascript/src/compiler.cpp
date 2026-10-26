@@ -31,7 +31,7 @@ namespace neos::compilers::javascript
     {
         // (a new program: a compilation that failed may not have ended its fragments)
         iDepth = 0;
-        iNodes.clear();
+        clear_nodes();
         iStack.clear();
         iPropertySites = 0u;
     }
@@ -98,7 +98,7 @@ namespace neos::compilers::javascript
                 iModuleMain = true;
             }
             iSource = aFragment.source().to_std_string_view();
-            iNodes.clear();
+            clear_nodes();
             iStack.clear();
         }
     }
@@ -126,8 +126,14 @@ namespace neos::compilers::javascript
 
     node* compiler::make_node(construct aKind, std::string_view aSource)
     {
-        iNodes.push_back(node{ aKind, aSource });
+        iNodes.push_back(node{ aKind, aSource, std::pmr::vector<node*>{ &iNodeMemory } });
         return &iNodes.back();
+    }
+
+    void compiler::clear_nodes()
+    {
+        iNodes.clear();
+        iNodeMemory.release();
     }
 
     void compiler::emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource)
@@ -1659,6 +1665,60 @@ namespace neos::compilers::javascript
         return global_index("%jscharcodeat", type::I64);
     }
 
+    std::uint32_t compiler::function_call_global()
+    {
+        iFunctionCallUsed = true;
+        return global_index("%jsfcall", type::I64);
+    }
+
+    std::uint32_t compiler::allocation_state_global()
+    {
+        return global_index("%jsalloc", type::I64);
+    }
+
+    std::uint32_t compiler::slow_function(std::uint32_t aRuntime, std::string const& aName, std::vector<type> const& aParameters, type aResult)
+    {
+        // (the slow function (see define_slow_functions) of the runtime's function, if it has one)
+        auto existing = iSlowFunctions.find(aName);
+        if (existing == iSlowFunctions.end() || existing->second.parameters != aParameters || aResult != type::I64)
+            return aRuntime;
+        existing->second.runtime = aRuntime;
+        return existing->second.function;
+    }
+
+    void compiler::define_slow_functions()
+    {
+        // (the slow functions (see slow_function): defined with the program's other functions (before their code))
+        static char const* const sUnary[] = { "sloppy_this", "increment", "decrement", "global_get", "global_get_typeof" };
+        static char const* const sBinary[] = { "exponent", "multiply", "divide", "remainder", "add", "subtract", "shift_left", "shift_right",
+            "shift_right_unsigned", "less_than", "greater_than", "less_equal", "greater_equal", "instance_of", "in", "strict_equal_value",
+            "strict_not_equal", "equal", "not_equal", "bitwise_and", "bitwise_xor", "bitwise_or" };
+        iSlowFunctions.clear();
+        auto const define = [&](std::string const& aName, std::vector<type> const& aParameters)
+        {
+            function_signature signature;
+            signature.set_return_type(type::I64);
+            function_parameters parameters;
+            for (auto const t : aParameters)
+            {
+                function_parameter p;
+                p.set_parameter_type(t);
+                parameters.push_back(p);
+            }
+            signature.set_parameters(parameters);
+            auto const name = "%js.slow." + aName;
+            signature.set_name(neolib::string{ name });
+            auto const function = generator().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+            iSlowFunctions.emplace(aName, slow_info{ function, std::nullopt, aParameters });
+        };
+        for (auto const* n : sUnary)
+            define(n, { type::I64 });
+        for (auto const* n : sBinary)
+            define(n, { type::I64, type::I64 });
+        // (a new expression's this, when the site's entry is not the callee's (or its slot is not taken here))
+        define("construct_this_cached", { type::I64, type::I32 });
+    }
+
     std::uint32_t compiler::tail_depth_global()
     {
         return global_index("%jstaildepth", type::I64);
@@ -1678,6 +1738,17 @@ namespace neos::compilers::javascript
     {
         if (aSource.data() < iSource.data() || aSource.data() > iSource.data() + iSource.size())
             return 1u;
-        return static_cast<std::uint32_t>(std::count(iSource.data(), aSource.data(), '\n') + 1);
+        // (the source's newlines' offsets: found once (for each source))
+        if (iNewlinesOf != iSource.data() || iNewlinesSize != iSource.size())
+        {
+            iNewlines.clear();
+            for (std::size_t i = 0u; i < iSource.size(); ++i)
+                if (iSource[i] == '\n')
+                    iNewlines.push_back(i);
+            iNewlinesOf = iSource.data();
+            iNewlinesSize = iSource.size();
+        }
+        auto const offset = static_cast<std::size_t>(aSource.data() - iSource.data());
+        return static_cast<std::uint32_t>(std::lower_bound(iNewlines.begin(), iNewlines.end(), offset) - iNewlines.begin() + 1);
     }
 }

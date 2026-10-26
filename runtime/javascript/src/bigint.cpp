@@ -496,7 +496,7 @@ namespace neos::javascript_runtime
             if (is_bigint(aThis))
                 return aThis;
             if (is_object(aThis) && obj(aThis).cls == object_class::BigInt)
-                return obj(aThis).internal;
+                return obj(aThis).internal();
             throw_type_error("BigInt.prototype method called on incompatible receiver " + describe(aThis));
         }
 

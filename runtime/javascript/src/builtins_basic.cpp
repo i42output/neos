@@ -86,7 +86,7 @@ namespace neos::javascript_runtime
             if (is_symbol(aThis))
                 return aThis;
             if (is_object(aThis) && obj(aThis).cls == object_class::Symbol)
-                return obj(aThis).internal;
+                return obj(aThis).internal();
             throw_type_error("Symbol.prototype method called on incompatible receiver " + describe(aThis));
         }
 
@@ -143,7 +143,7 @@ namespace neos::javascript_runtime
             if (aNewTarget == Undefined)
                 return b;
             auto const o = ordinary_create_from_constructor(aNewTarget, &realm::booleanPrototype, object_class::Boolean);
-            obj(o).internal = b;
+            obj(o).internal() = b;
             return o;
         }
 
@@ -152,7 +152,7 @@ namespace neos::javascript_runtime
             if (is_boolean(aThis))
                 return aThis;
             if (is_object(aThis) && obj(aThis).cls == object_class::Boolean)
-                return obj(aThis).internal;
+                return obj(aThis).internal();
             throw_type_error("Boolean.prototype method called on incompatible receiver " + describe(aThis));
         }
 
@@ -172,7 +172,7 @@ namespace neos::javascript_runtime
         auto const c = make_native("Boolean", 1u, boolean_constructor, true);
         aRealm.boolean = c;
         auto& p = the_heap().make<object>(aRealm.objectPrototype, object_class::Boolean);
-        p.internal = False;
+        p.internal() = False;
         aRealm.booleanPrototype = value_of(p);
         obj(c).put(the_names().prototype, aRealm.booleanPrototype, 0u);
         p.put(the_names().constructor, c);
@@ -196,7 +196,7 @@ namespace neos::javascript_runtime
             if (aNewTarget == Undefined)
                 return number(n);
             auto const o = ordinary_create_from_constructor(aNewTarget, &realm::numberPrototype, object_class::Number);
-            obj(o).internal = number(n);
+            obj(o).internal() = number(n);
             return o;
         }
 
@@ -205,7 +205,7 @@ namespace neos::javascript_runtime
             if (is_number(aThis))
                 return as_number(aThis);
             if (is_object(aThis) && obj(aThis).cls == object_class::Number)
-                return as_number(obj(aThis).internal);
+                return as_number(obj(aThis).internal());
             throw_type_error("Number.prototype method called on incompatible receiver " + describe(aThis));
         }
 
@@ -587,7 +587,7 @@ namespace neos::javascript_runtime
         auto const c = make_native("Number", 1u, number_constructor, true);
         aRealm.number = c;
         auto& p = the_heap().make<object>(aRealm.objectPrototype, object_class::Number);
-        p.internal = number(0.0);
+        p.internal() = number(0.0);
         aRealm.numberPrototype = value_of(p);
         obj(c).put(the_names().prototype, aRealm.numberPrototype, 0u);
         p.put(the_names().constructor, c);

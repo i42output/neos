@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <set>
 #include <string>
@@ -54,7 +55,7 @@ namespace neos::compilers::javascript
     {
         construct kind;
         std::string_view source;
-        std::vector<node*> children;
+        std::pmr::vector<node*> children;   ///< (in the compiler's node memory (see compiler::iNodeMemory): freed with its nodes)
         node* parent = nullptr;
         scope* ownScope = nullptr;          ///< (a node that creates a scope: its scope)
         function_info* function = nullptr;  ///< (a function node: its function)
@@ -214,8 +215,13 @@ namespace neos::compilers::javascript
         void generate();
         // (the program's property cache stubs: functions that the sites call (their code shared): get (object, key, site -> value),
         // set (object, key, value, strict, site -> result), callee numbers (callee, site -> number))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, Count };
+        // (the alias classes of the runtime's heap's words (see the VM's optimizer::MemargClassShift): a store of one class does not 
+        // change a word of another; Any: any word (the default))
+        enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header };
+        static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, Count };
         void generate_stub(stub aStub);
+        void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
     private:
         // control flow
@@ -264,12 +270,14 @@ namespace neos::compilers::javascript
         void release(std::uint32_t aLocal);
         void call(std::uint32_t aFunction);
         void runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult);
+        void slow_runtime(std::string const& aName, std::vector<type> const& aParameters, type aResult);   ///< (a slow path's: see compiler::slow_function)
         std::uint32_t cached_get_named();   ///< (object, key -> its value: a get of a named property with a property cache site of its
                                             ///< own (its number): inline if the site fits, else the runtime's get_named_cached)
         void cached_set_named();            ///< (object, key, value, strict -> the result: as cached_get_named, a set)
         std::uint32_t cached_get(bool aComputed);   ///< (as cached_get_named; aComputed: object, a computed key -> its value (its site's
                                                     ///< entries also have their keys))
-        void site_entry(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey, std::size_t aSlow);
+        void site_entries(std::uint32_t aSite, std::uint32_t aShape, std::uint32_t aEntry, std::optional<std::uint32_t> aKey, std::size_t aSlow,
+            std::function<void()> const& aBody);
         void cached_get_stub(bool aComputed);
         void cached_set_stub();
         void set_computed();                ///< (object, a computed key, value, strict -> the result: as runtime's set (a call of its stub))
@@ -277,15 +285,27 @@ namespace neos::compilers::javascript
         void get_length_stub();
         void char_code_at_stub();
         void to_boolean_stub();
+        void construct_this_stub();
+        void array_literal_stub();
+        void object_literal_stub();
+        bool simple_object_literal(node* aNode);
         void array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss); ///< (an array's dense
                                                     ///< element (the key a number): its address (in aAddress), else to aMiss)
-        void callee_number_stub(bool aCallSite);
-        void mem_load(opcode aOpcode, std::uint32_t aOffset);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
-        void mem_store(opcode aOpcode, std::uint32_t aOffset);
+        void callee_number_stub(stub aStub);
+        void mem_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias = alias::Any);   ///< (a load from the runtime's heap (its external memory: layout::Memory))
+        void mem_store(opcode aOpcode, std::uint32_t aOffset, alias aAlias = alias::Any);
         void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry (aSite: the local (i32) that has its number))
+        void volatile_load(opcode aOpcode, std::uint32_t aOffset, bool aHeapOffset, alias aAlias);
+        void offset_load(std::uint32_t aOffset, alias aAlias);
+        void site_load(opcode aOpcode, std::uint32_t aOffset);  ///< (as mem_load, a site's entry's field (a cached load))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
+        void callee_number_at(std::uint32_t aCallee, std::uint32_t aSite, bool aCallSite);
+        void site_dispatch_matches(std::uint32_t aCallee, std::uint32_t aSite);
+        void property_site_at(std::uint32_t aSite);
+        void string_lengths_differ();
+        void strict_equality(std::uint32_t aLhs, std::uint32_t aRhs);
         void dispatch_number(std::uint32_t aNumber);  ///< (a call of the program's function (see dispatch): its number, before its arguments)
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
         static constexpr std::int64_t TailCallDepth = 256;  ///< (tail calls made as calls (nested) before they are made by the caller)
@@ -340,6 +360,7 @@ namespace neos::compilers::javascript
         void expression(node* aNode);
         void expression_list(node* aNode);
         void condition(node* aNode);    ///< (an i32: its truth)
+        void truth();                   ///< (the value's (on the stack) ToBoolean: an i32)
         void literal(node* aNode);
         void identifier(node* aNode, bool aTypeof = false);
         void member(node* aNode);
@@ -347,6 +368,8 @@ namespace neos::compilers::javascript
         void arguments_values(std::vector<node*> const& aArguments, std::optional<std::uint32_t>& aSpread);
         void call_value(std::uint32_t aCallee, std::uint32_t aThis, std::vector<node*> const& aArguments, bool aTail = false,
             function_info const* aKnown = nullptr, std::optional<std::uint32_t> aSite = {});   ///< (aKnown: the function that the callee probably is (it is called directly if it is))
+        void call_locals(std::uint32_t aCallee, std::uint32_t aThis, std::vector<std::uint32_t> const& aValues, bool aTail = false,
+            function_info const* aKnown = nullptr, std::optional<std::uint32_t> aSite = {});
         bool tail_call(node* aCall) const;
         void tail_positions(node* aExpression);
         void check_call();
@@ -381,6 +404,7 @@ namespace neos::compilers::javascript
         void unbox(numeric_rep aRep);               ///< (a value (a number): as an f64 or i64 or i32)
         bool numeric_value(node* aNode);            ///< (a unary, conditional or intrinsic call expression of numbers: its value emitted (else false))
         bool numeric_binary(node* aNode);           ///< (an operation of numbers: emitted (else false))
+        bool relational_condition(node* aNode);    ///< (a comparison as a condition: an i32)
         bool numeric_condition(node* aNode);        ///< (an i32)
         bool numeric_update(reference const& aReference, bool aIncrement, bool aPostfix);
         bool numeric_assignment(reference const& aReference, node* aValue, std::string const& aOperator);
@@ -503,6 +527,7 @@ namespace neos::compilers::javascript
     private:
         // the syntax tree
         node* make_node(construct aKind, std::string_view aSource);
+        void clear_nodes();
         void await_operators(node* aNode, bool aAwait);
         void if_clause_functions(node* aNode);
         bool script_may_run_code() const;
@@ -538,14 +563,25 @@ namespace neos::compilers::javascript
         std::uint32_t function_closure(function_info const& aFunction);   ///< (the global (an i64) that holds its function object)
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
         std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
+        std::uint32_t function_call_global();   ///< (the global that holds %Function.prototype.call% (f.call(t, ...) calls f if the callee is it))
+        std::uint32_t allocation_state_global();    ///< (the global (an i64): the region offset of the isolate's allocation state)
+        // (a function of the program's that calls the runtime's function (its index) with its arguments: slow paths call it rather than
+        // the runtime's, so that an optimizing tier that inlines it can leave for the function's own code there (see the VM's deopt)
+        // rather than make the call, and so know more about the code after it)
+        std::uint32_t slow_function(std::uint32_t aRuntime, std::string const& aName, std::vector<type> const& aParameters, type aResult);
+        void define_slow_functions();
         std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t source_line_of(std::string_view aSource) const;
+        mutable std::vector<std::size_t> iNewlines;     ///< (see source_line_of)
+        mutable char const* iNewlinesOf = nullptr;
+        mutable std::size_t iNewlinesSize = 0u;
     public:
         std::string_view fragment_source() const { return iSource; }
         [[noreturn]] void error(std::string_view aSource, std::string const& aMessage) const;
     private:
         std::string_view iSource;
         std::deque<node> iNodes;
+        std::pmr::monotonic_buffer_resource iNodeMemory;    ///< (the nodes' children: released with the nodes (at once))
         std::vector<node*> iStack;
         std::deque<function_info> iFunctions;
         std::deque<scope> iScopes;
@@ -559,10 +595,13 @@ namespace neos::compilers::javascript
         std::map<std::string, function_info*> iScriptFunctions;     ///< (the script's function declarations (those that define its functions))
         std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
+        bool iFunctionCallUsed = false;         ///< (function_call_global is used: the program's start sets it)
         bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
         std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
         std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub)
         bool iStubsUsed[static_cast<std::size_t>(function_generator::stub::Count)] = {};
+        struct slow_info { std::uint32_t function; std::optional<std::uint32_t> runtime; std::vector<type> parameters; };
+        std::map<std::string, slow_info> iSlowFunctions;    ///< (by the runtime's function's name: see slow_function)
         std::uint32_t iTemplateSites = 0u;
         std::uint32_t iPropertySites = 0u;      ///< (the program's property cache sites (see cached_get_named): the next one's number)
         std::uint32_t iErrorGlobal = 0u;

@@ -1470,7 +1470,7 @@ namespace neos::javascript_runtime
         method(tap, "join", 1u, typed_array_join);
         method(tap, "keys", 0u, typed_array_keys);
         method(tap, "lastIndexOf", 1u, typed_array_last_index_of);
-        getter(tap, the_names().length, typed_array_length);
+        aRealm.typedArrayLength = getter(tap, the_names().length, typed_array_length);
         method(tap, "map", 1u, typed_array_map);
         method_with_id(tap, "reduce", 1u, typed_array_reduce, 0u);
         method_with_id(tap, "reduceRight", 1u, typed_array_reduce, 1u);

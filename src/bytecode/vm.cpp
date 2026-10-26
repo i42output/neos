@@ -432,6 +432,12 @@ namespace neos
                         for (auto const& f : iFunctions)
                         {
                             jit::function_description d;
+                            // (a function may be inlined: one without a frame of its own (that the compiler did not name: e.g. a language's 
+                            // helper) has none where it is inlined; one with a frame, its frame (see the optimizer's inline chains))
+                            if (auto const index = static_cast<std::size_t>(&f - iFunctions.data()); !f.import && (index >= iFrames.size() || !iFrames[index].frame))
+                                d.inlinable = d.frameless = true;
+                            else if (!f.import)
+                                d.inlinable = true;
                             d.parameters = &iTypes.at(f.type).parameters;
                             d.results = &iTypes.at(f.type).results;
                             d.type = f.type;
@@ -457,6 +463,8 @@ namespace neos
                             module.types.emplace_back(&t.parameters, &t.results);
                         module.tokens = &iTokens;
                         module.globals = &iGlobals;
+                        iFixedGlobals.resize(iGlobals.size(), 0u);
+                        module.fixedGlobals = &iFixedGlobals;
                         module.globalTypes = &iGlobalTypes;
                         module.linearMemory = &iMemoryView;
                         module.objects = &iObjectTable;
@@ -1825,6 +1833,7 @@ namespace neos
                             jit::plugin_function result;
                             result.function = runtime::c_function(f, result.parameters, result.result, result.error);
                             result.errorPending = runtime::error_pending(f);
+                            result.common = runtime::common(f);
                             return result;
                         }
                         catch (...)
@@ -1939,6 +1948,12 @@ namespace neos
                     {
                         return aIndex < iGlobals.size() ? &iGlobals[aIndex] : nullptr;
                     }
+                    // (a global whose value does not change again (see neos_rt_host::fix_global): code optimized after this uses it as a constant)
+                    void fix_global(std::uint32_t aIndex)
+                    {
+                        if (aIndex < iGlobals.size() && aIndex < iFixedGlobals.size())
+                            iFixedGlobals[aIndex] = 1u;
+                    }
                 private:
                     static inline std::atomic<std::uint64_t> sSerial{ 0u };
                     std::uint64_t const iSerial;    ///< (identifies the program (see walk): a program loaded at the address of one that has ended is another)
@@ -1958,6 +1973,7 @@ namespace neos
                     linear_memory iMemory;
                     jit::memory iMemoryView;   ///< (for the JIT)
                     std::vector<value> iGlobals;
+                    std::vector<std::uint8_t> iFixedGlobals;    ///< (see fix_global)
                     std::vector<std::uint8_t> iGlobalTypes;
                     std::unordered_map<std::string, std::uint32_t> iImportTypes;
                     std::vector<import_kind> iImportKinds;
@@ -2553,6 +2569,12 @@ namespace neos
                     return reinterpret_cast<unsigned long long*>(tRunning.program->global_address(aGlobal));
                 }
 
+                void host_fix_global(unsigned aGlobal)
+                {
+                    if (tRunning.program != nullptr)
+                        tRunning.program->fix_global(aGlobal);
+                }
+
                 void host_values(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
                 {
                     if (aVisit == nullptr)
@@ -2684,7 +2706,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at };
+                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global };
             }
 
             void const* runtime::host()
@@ -2786,4 +2808,4 @@ namespace neos
             }
         }
     }
-}
+}

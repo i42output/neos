@@ -44,6 +44,7 @@
 #include <iomanip>
 #include <sstream>
 #include <limits>
+#include <array>
 #include <cmath>
 #include <neos/bytecode/opcodes.hpp>
 #include <neos/bytecode/text.hpp>
@@ -59,10 +60,34 @@ namespace neos::language
 
         inline void put_op(bytes& aCode, bytecode::opcode aOpcode)
         {
-            text t;
-            t << aOpcode;
-            for (auto b : t)
-                aCode.push_back(static_cast<std::uint8_t>(b));
+            // (an opcode of one byte (most): its byte (from a table of them, made once); else its encoding)
+            static auto const sSingle = []()
+            {
+                std::array<std::int16_t, 256u> result;
+                result.fill(-1);
+                for (auto const& [op, entry] : bytecode::opcode_dictionary())
+                    if (auto const* e = std::get_if<bytecode::op1>(&entry.encoding); e != nullptr && static_cast<std::uint32_t>(op) < 256u)
+                        result[static_cast<std::uint32_t>(op)] = static_cast<std::int16_t>(e->b);
+                return result;
+            }();
+            auto const value = static_cast<std::uint32_t>(aOpcode);
+            if (value < 256u && sSingle[value] >= 0)
+            {
+                aCode.push_back(static_cast<std::uint8_t>(sSingle[value]));
+                return;
+            }
+            auto const& encoding = bytecode::opcode_dictionary().at(aOpcode).encoding;
+            if (auto const* e1 = std::get_if<bytecode::op1>(&encoding))
+                aCode.push_back(static_cast<std::uint8_t>(e1->b));
+            else if (auto const* e2 = std::get_if<bytecode::op2>(&encoding))
+            {
+                aCode.push_back(static_cast<std::uint8_t>(e2->p));
+                std::visit([&](auto const& e)
+                    {
+                        for (auto const& b : e)
+                            aCode.push_back(static_cast<std::uint8_t>(b));
+                    }, e2->e);
+            }
         }
 
         inline void put_u32(bytes& aCode, std::uint64_t aValue)

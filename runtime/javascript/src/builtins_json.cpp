@@ -674,7 +674,7 @@ namespace neos::javascript_runtime
                         break;
                     case object_class::Boolean:
                     case object_class::BigInt:
-                        v = o.internal;
+                        v = o.internal();
                         break;
                     default:
                         break;

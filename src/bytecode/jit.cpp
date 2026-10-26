@@ -43,11 +43,23 @@
 #include <optional>
 #include <string>
 #include <initializer_list>
+#include <array>
+#include <chrono>
 #include <map>
+#include <memory>
+#include <set>
+#include <unordered_map>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <neos/bytecode/vm/jit.hpp>
 #include <neos/bytecode/bytecode.hpp>
+#include "jit_optimizer.hpp"
+#include "jit_ssa.hpp"
 #define NEOS_RUNTIME_PLUGIN_HOST
 #include <neos/runtime/plugin.h>
 
@@ -66,7 +78,9 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <pthread.h>
+#include <unistd.h>
 #endif
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -144,8 +158,10 @@ namespace neos
                         // the call, so that its frames can be walked (see walk))
                         std::uint64_t exitFrame;
                         std::uint64_t exitSite;
+                        value* deoptBuffer;     ///< (the thread's: where optimized code that leaves for the baseline's puts its values)
                         value results[MaxResults];
                     };
+                    constexpr std::size_t MaxDeoptValues = 4096u;
 
                     constexpr std::int32_t ContextStackLimit = static_cast<std::int32_t>(offsetof(context, stackLimit));
                     constexpr std::int32_t ContextSavedStackPointer = static_cast<std::int32_t>(offsetof(context, savedStackPointer));
@@ -160,6 +176,7 @@ namespace neos
                     constexpr std::int32_t ContextExitFrame = static_cast<std::int32_t>(offsetof(context, exitFrame));
                     constexpr std::int32_t ContextExitSite = static_cast<std::int32_t>(offsetof(context, exitSite));
                     constexpr std::int32_t ContextObjects = static_cast<std::int32_t>(offsetof(context, objects));
+                    constexpr std::int32_t ContextDeoptBuffer = static_cast<std::int32_t>(offsetof(context, deoptBuffer));
                     constexpr std::int32_t TableSlots = static_cast<std::int32_t>(offsetof(object_table, slots));
                     constexpr std::int32_t TableSize = static_cast<std::int32_t>(offsetof(object_table, size));
                     constexpr std::int32_t TableFree = static_cast<std::int32_t>(offsetof(object_table, free));
@@ -202,12 +219,113 @@ namespace neos
                     // (sorted), and the offset that the trampoline's call returns to)
                     std::vector<std::pair<std::size_t, std::size_t>> callSites;
                     std::size_t trampolineReturn = 0u;
+                    std::size_t exitOffset = 0u;    ///< (where a trap leaves generated code (see code_generator::trampoline))
+                    // --- the optimizing tier: a function that is called often (its counter (of calls before then) reaches 0) is optimized 
+                    // (see jit_optimizer.hpp) and compiled again (its code elsewhere (a chunk): its entry (and its indirect table entry) 
+                    // then go there)
+                    struct tier_version     ///< (an optimized function's code: its inlined calls that have guards are reported with it)
+                    {
+                        std::uint32_t function = 0u;
+                        std::vector<optimizer::inline_site> sites;
+                        std::vector<optimizer::deopt> deopts;
+                        mutable std::vector<std::uint32_t> deoptCounts;     ///< (each deopt's (its code left for the baseline's))
+                        mutable std::uint32_t deoptsTaken = 0u;             ///< (its deopts' (not guards'): all of them)
+                    };
+                    struct tier_chunk
+                    {
+                        void* code = nullptr;
+                        std::size_t size = 0u;
+                        std::vector<std::pair<std::size_t, std::size_t>> callSites;    ///< (as callSites, in it)
+                    };
+                    bool tiering = false;
+                    bool speculation = true;
+                    bool inlining = true;
+                    bool backend = true;    ///< (the optimizing code generator (else the baseline's))
+                    bool deopt = true;      ///< (its code leaves for the baseline's (see optimizer::deopt))
+                    std::uint32_t verbose = 0u;
+                    std::uint64_t compileMicroseconds = 0u;
+                    std::uint64_t phaseMicroseconds[4] = {};
+                    std::vector<std::int32_t> counters;
+                    std::vector<std::uint8_t> tierState;                ///< (0: not optimized, 1: optimized, 2: not to be optimized)
+                    std::vector<std::uint32_t> recompiles;
+                    std::vector<std::set<std::size_t>> noInline;        ///< (calls (their positions) not to inline (their guards failed))
+                    std::vector<std::set<std::size_t>> noDeopt;         ///< (inlined calls (their positions) whose code calls rather than deopts
+                                                                        ///< (it left there often))
+                    std::vector<std::map<std::size_t, std::uint32_t>> guardFailures;
+                    std::vector<std::vector<std::size_t>> inlineChains;  ///< (optimized code's inline chains (see optimizer::InlineChainToken): 
+                                                                        ///< the frames of calls within inlined calls, innermost first)
+                    std::vector<tier_version const*> currentVersion;
+                    std::vector<std::unique_ptr<tier_version>> versions;
+                    // (optimization in the background (see tier_worker): a function's optimized code is made on a thread of its own (its 
+                    // optimizer runs here: it reads the program's memory); tierState 3 while it is)
+                    struct tier_job;
+                    bool background = true;
+                    std::vector<std::shared_ptr<tier_job>> jobs;        ///< (by function: its optimization in the background)
+                    std::uint32_t jobsInFlight = 0u;                    ///< (being made by the worker (see tier_worker::mutex))
+                    bool closing = false;                               ///< (being destroyed: no more jobs (see tier_worker::mutex))
+                    std::vector<tier_chunk> chunks;
+                    std::vector<std::array<std::uint8_t, 14u>> savedEntries;    ///< (the code that an optimized function's entry had)
+                    // (deoptimization: optimized code that leaves for the function's own code (its frame made as the baseline's is, where a
+                    // call (of an inlinable function: an inlined call of the optimized code's) is made): each function's frame, and each such
+                    // call's (by its token): the code that makes the call (its arguments in the outgoing area) and the operand stack's slots
+                    // below its arguments)
+                    struct deopt_frame
+                    {
+                        struct local
+                        {
+                            std::uint8_t type = 0u;
+                            bool pinned = false;
+                            std::int8_t reg = 0;
+                            std::int32_t disp = 0;  ///< (not pinned: [rbp + disp])
+                        };
+                        bool valid = false;
+                        std::vector<std::int8_t> pushed;                ///< (the registers pushed after rbp, in order)
+                        std::uint32_t frameSize = 0u;                   ///< (rsp's below them)
+                        std::int8_t memoryBase = -1;                    ///< (the register that has a fixed external memory's address)
+                        std::uint32_t memoryIndex = 0u;
+                        std::vector<std::pair<std::int8_t, std::int32_t>> savedXmms;  ///< (the xmms (callee saved) that it saves: where)
+                        std::vector<local> locals;                      ///< (parameters first)
+                    };
+                    struct deopt_slot
+                    {
+                        bool inSlot = false;            ///< (else a constant or a local's value: in the code)
+                        std::uint8_t type = 0u;
+                        std::int32_t disp = 0;          ///< ([rbp + disp])
+                    };
+                    struct deopt_point
+                    {
+                        std::uint32_t function = 0u;
+                        std::size_t resume = 0u;        ///< (the code's offset)
+                        std::uint32_t arguments = 0u;
+                        std::vector<deopt_slot> stack;
+                    };
+                    std::vector<deopt_frame> deoptFrames;
+                    std::unordered_map<std::size_t, deopt_point> deoptPoints;
                 };
 
                 void compiled_module_deleter::operator()(compiled_module* aModule) const
                 {
                     delete aModule;
                 }
+
+                // (an optimization's code made in the background: the optimizer's result (made before), then its code)
+                struct compiled_module::tier_job
+                {
+                    compiled_module* module = nullptr;
+                    std::uint32_t function = 0u;
+                    std::chrono::steady_clock::time_point start;
+                    optimizer::result result;
+                    optimizer::options options;
+                    std::unique_ptr<tier_version> version;
+                    module_description description;     ///< (the module's, the function's code the optimizer's)
+                    std::vector<std::uint8_t> code;
+                    std::vector<std::pair<std::size_t, std::size_t>> callSites;
+                    bool optimizing = false;            ///< (the optimizing code generator made it (else it is made by the baseline's: when it is
+                                                        ///< installed))
+                    std::string why;
+                    std::uint64_t phases[3] = {};
+                    std::atomic<bool> done = false;
+                };
 
 #if defined(NEOS_JIT_X64)
 
@@ -441,6 +559,28 @@ namespace neos
                             modrm_mem(aReg, aBase, aDisp);
                         }
                         // [base + index * 8]
+                        // ([aBase + aIndex + aDisp] (aIndex not rsp); aByteReg: aReg is a byte register (spl, bpl, sil and dil need a rex))
+                        void op_bi(std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aBase, int aIndex, std::int32_t aDisp, int aPrefix = -1, bool aByteReg = false)
+                        {
+                            lengthenable();
+                            if (aPrefix >= 0)
+                                emit8(static_cast<std::uint8_t>(aPrefix));
+                            rex(aW, aReg, aIndex, aBase, aByteReg && aReg >= 4 && aReg < 8);
+                            for (auto b : aOpcode)
+                                emit8(b);
+                            if (fits_i8(aDisp))
+                            {
+                                emit8(static_cast<std::uint8_t>(0x44u | ((aReg & 7) << 3)));
+                                emit8(static_cast<std::uint8_t>(((aIndex & 7) << 3) | (aBase & 7)));
+                                emit8(static_cast<std::uint8_t>(static_cast<std::int8_t>(aDisp)));
+                            }
+                            else
+                            {
+                                emit8(static_cast<std::uint8_t>(0x84u | ((aReg & 7) << 3)));
+                                emit8(static_cast<std::uint8_t>(((aIndex & 7) << 3) | (aBase & 7)));
+                                emit32(static_cast<std::uint32_t>(aDisp));
+                            }
+                        }
                         void op_sib8(std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aBase, int aIndex)
                         {
                             lengthenable();
@@ -566,6 +706,12 @@ namespace neos
                             emit8(static_cast<std::uint8_t>(0xD0u | (aReg & 7)));
                             within_boundary(start);
                         }
+                        void jmp_r(int aReg)
+                        {
+                            rex(false, 0, 0, aReg);
+                            emit8(0xFFu);
+                            emit8(static_cast<std::uint8_t>(0xE0u | (aReg & 7)));
+                        }
                         void jmp(std::size_t aLabel)
                         {
                             auto const at = offset();
@@ -609,6 +755,16 @@ namespace neos
                             emit8(aOp);
                             emit8(static_cast<std::uint8_t>(0x05u | ((aReg & 7) << 3)));
                             fixup(aLabel);
+                        }
+                        // (aReg op [rip + constant] (aOp as alu_rr's: e.g. cmp 7))
+                        void alu_rip(int aOp, bool aW, int aReg, std::size_t aLabel)
+                        {
+                            auto const start = offset();
+                            rex(aW, aReg, 0, 0);
+                            emit8(static_cast<std::uint8_t>(aOp * 8 + 3));
+                            emit8(static_cast<std::uint8_t>(0x05u | ((aReg & 7) << 3)));
+                            fixup(aLabel);
+                            fusable(aOp, start);
                         }
                         std::size_t constant(std::uint64_t aBits)
                         {
@@ -1115,6 +1271,12 @@ namespace neos
                         }
                     }
 
+                    // (the optimizing tier's helpers, that generated code calls: a function's counter has reached 0 (its optimized 
+                    // code's address, or null to go on with its code); a guard of an optimized function's inlined call failed)
+                    void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept;
+                    void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept;
+                    void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept;
+
                     class code_generator
                     {
                     private:
@@ -1195,6 +1357,12 @@ namespace neos
                         void generate(compiled_module& aOutput)
                         {
                             iIndirect = aOutput.indirect.data();
+                            if (aOutput.tiering)
+                            {
+                                iCounters = aOutput.counters.data();
+                                aOutput.deoptFrames.resize(iModule.functions.size());
+                                iDeoptFrames = &aOutput.deoptFrames;
+                            }
                             trampoline();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 if (!iModule.functions[f].imported)
@@ -1207,9 +1375,48 @@ namespace neos
                             for (auto const& site : iCallSites)
                                 aOutput.callSites.emplace_back(a.label_offset(site.first), site.second);
                             std::sort(aOutput.callSites.begin(), aOutput.callSites.end());
+                            for (auto& d : iDeoptPoints)
+                            {
+                                d.point.resume = a.label_offset(d.label);
+                                aOutput.deoptPoints[d.position] = std::move(d.point);
+                            }
                             aOutput.trampolineReturn = a.label_offset(iTrampolineReturn);
+                            aOutput.exitOffset = a.label_offset(iExit);
                             iCode = std::move(a.code);
                         }
+                        // (the optimizing tier: one function (aModule's code is elsewhere: this one's calls are through its indirect table,
+                        // and its traps leave through its exit); aOrigins: the positions that its tokens' calls are reported at)
+                        void generate_function(compiled_module& aModule, std::uint32_t aFunction, std::vector<std::size_t> const& aOrigins,
+                            compiled_module::tier_version const* aVersion, std::vector<std::pair<std::size_t, std::size_t>>& aCallSites)
+                        {
+                            iIndirect = aModule.indirect.data();
+                            iTier = &aModule;
+                            iOrigins = &aOrigins;
+                            iTierVersion = aVersion;
+                            function(aFunction);
+                            auto const exit = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(aModule.code) + aModule.exitOffset);
+                            for (std::uint32_t t = 1u; t < TrapCount; ++t)
+                            {
+                                a.bind(iTrapLabels[t]);
+                                a.store_imm(false, R15, ContextTrap, static_cast<std::int32_t>(t));
+                                a.mov_ri(RAX, t, false);
+                                a.mov_ri(RCX, exit, true);
+                                a.jmp_r(RCX);
+                            }
+                            a.bind(iTrapFromContext);
+                            a.load(false, RAX, R15, ContextTrap);
+                            a.mov_ri(RCX, exit, true);
+                            a.jmp_r(RCX);
+                            a.bind(iExit);
+                            a.bind(iTrampolineReturn);
+                            a.emit_constants();
+                            a.resolve();
+                            for (auto const& site : iCallSites)
+                                aCallSites.emplace_back(a.label_offset(site.first), site.second);
+                            std::sort(aCallSites.begin(), aCallSites.end());
+                            iCode = std::move(a.code);
+                        }
+                        std::size_t function_offset(std::uint32_t aFunction) const { return a.label_offset(iFunctionLabels[aFunction]); }
                         bytes& code() { return iCode; }
                     private:
                         // --- module level code
@@ -1872,6 +2079,11 @@ namespace neos
                             a.store(true, RSP, ShadowSpace + static_cast<std::int32_t>(aPosition) * 8, R15);
                         }
                     private:
+                        // (the position that a call at a token is reported at (see compiled_module::callSites))
+                        std::size_t origin(std::size_t aPosition) const
+                        {
+                            return iOrigins != nullptr && aPosition < iOrigins->size() ? (*iOrigins)[aPosition] : aPosition;
+                        }
                         // --- functions
                         // (code that is rarely executed: what follows a block that is the first in its enclosing block and that ends 
                         // with a branch out of that block (br 1): see control::coldTail)
@@ -2046,11 +2258,52 @@ namespace neos
                             }
                             return zero;
                         }
+                        // (the optimizing tier: the function's counter (of calls before it is optimized) is decremented; at 0, tier_up (its
+                        // optimized code is jumped to, if it has it). Its 18 bytes (at the function's entry: not moved) are replaced by a jump to 
+                        // its optimized code when it has it)
+                        void tier_entry(std::uint32_t aIndex)
+                        {
+                            a.barrier();
+                            auto const cold = a.new_label();
+                            auto const resume = a.new_label();
+                            a.emit8(0x48u);     // movabs rax, counter
+                            a.emit8(0xB8u);
+                            a.emit64(reinterpret_cast<std::uint64_t>(&iCounters[aIndex]));
+                            a.emit8(0xFFu);     // dec dword [rax]
+                            a.emit8(0x08u);
+                            a.jcc(E, cold);
+                            a.barrier();
+                            a.bind(resume);
+                            a.begin_cold();
+                            a.bind(cold);
+                            // (at the entry: the arguments are on the stack (the caller's outgoing area); the caller's pinned registers that 
+                            // native code does not preserve are saved by it, except its xmms (on System V))
+                            a.push(RBP);
+                            a.mov_rr(true, RBP, RSP);
+                            a.sub_rsp_imm32(Windows ? ShadowSpace : ShadowSpace + 128);
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movdqu_store(RSP, ShadowSpace + (x - 8) * 16, x);
+                            a.mov_rr(true, NativeIntegerArguments[0], R15);
+                            a.mov_ri(NativeIntegerArguments[1], aIndex, false);
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&tier_up), true);
+                            a.call_r(RAX);
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movdqu_load(x, RSP, ShadowSpace + (x - 8) * 16);
+                            a.mov_rr(true, RSP, RBP);
+                            a.pop(RBP);
+                            a.test_rr(true, RAX, RAX);
+                            a.jcc(E, resume);
+                            a.jmp_r(RAX);
+                            a.end_cold();
+                        }
                         void function(std::uint32_t aIndex)
                         {
                             reset_function();
                             auto const& f = iModule.functions[aIndex];
                             iFunction = &f;
+                            iFunctionIndex = aIndex;
                             if (f.results->size() > MaxResults)
                                 throw unsupported{ "too many results" };
                             for (auto t : *f.parameters)
@@ -2085,6 +2338,10 @@ namespace neos
                             // prologue (aligned, so that the speed of its code (e.g. its loops' jumps) does not depend on the code before it)
                             a.align(FunctionAlignment);
                             a.bind(iFunctionLabels[aIndex]);
+                            // (a function that the optimizing tier inlines (it has no frame of its own: a language's helper) is not optimized
+                            // itself: its callers are)
+                            if (iCounters != nullptr && !iModule.functions[aIndex].frameless)
+                                tier_entry(aIndex);
                             a.push(RBP);
                             a.mov_rr(true, RBP, RSP);
                             for (auto r : iUsedPinnedGprs)
@@ -2148,6 +2405,20 @@ namespace neos
                             std::int32_t const raw = -iSlotsBase - pushed_bytes() + 8 * static_cast<std::int32_t>(iMaxDepth) + std::max(iOutgoing, ShadowSpace);
                             std::int32_t const total = (pushed_bytes() + raw + 15) & ~15;
                             a.patch32(frameSizePatch, static_cast<std::uint32_t>(total - pushed_bytes()));
+                            if (iDeoptFrames != nullptr)
+                            {
+                                auto& d = (*iDeoptFrames)[aIndex];
+                                d.valid = true;
+                                for (auto r : iUsedPinnedGprs)
+                                    d.pushed.push_back(static_cast<std::int8_t>(r));
+                                d.frameSize = static_cast<std::uint32_t>(total - pushed_bytes());
+                                d.memoryBase = static_cast<std::int8_t>(iMemoryBase);
+                                d.memoryIndex = iMemoryBaseIndex;
+                                for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
+                                    d.savedXmms.emplace_back(static_cast<std::int8_t>(iUsedPinnedXmms[i]), xmm_save_disp(i));
+                                for (auto const& l : iLocals)
+                                    d.locals.push_back(compiled_module::deopt_frame::local{ l.type, l.pinned, static_cast<std::int8_t>(l.reg), l.disp });
+                            }
                         }
                         // move the function's results into place (first in rax, others in the context)
                         void transfer_results()
@@ -3131,6 +3402,19 @@ namespace neos
                         void call(std::uint32_t aFunction, std::size_t aPosition)
                         {
                             materialize_cond();
+                            if (iTierVersion != nullptr && aFunction == optimizer::intrinsics::guard_failed(iModule))
+                            {
+                                // (an optimized function's inlined call's guard failed: its inline site (an i32) is reported)
+                                auto const site = pop();
+                                store_entry(site, RSP, ShadowSpace + 16);
+                                release(site);
+                                spill_registers();
+                                stage_context(0u);
+                                a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(iTierVersion), true);
+                                a.store(true, RSP, ShadowSpace + 8, RAX);
+                                native_call(reinterpret_cast<void const*>(&guard_failed), { { false, false }, { false, false }, { false, false } }, false);
+                                return;
+                            }
                             if (aFunction >= iModule.functions.size())
                                 throw unsupported{ "invalid function index" };
                             auto const& callee = iModule.functions[aFunction];
@@ -3152,20 +3436,40 @@ namespace neos
                             for (std::size_t i = 0u; i < n; ++i)
                                 release(pop());
                             spill_registers();
+                            if (iCounters != nullptr && iTier == nullptr && !callee.imported && callee.inlinable)
+                            {
+                                // (where optimized code that inlined the call can leave for this code (see compiled_module::deopt_point))
+                                pending_deopt_point d;
+                                d.position = aPosition;
+                                d.label = a.new_label();
+                                d.point.function = iFunctionIndex;
+                                d.point.arguments = static_cast<std::uint32_t>(n);
+                                for (auto const& e : iStack)
+                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp });
+                                a.bind(d.label);
+                                iDeoptPoints.push_back(std::move(d));
+                            }
                             iOutgoing = std::max(iOutgoing, base + 8 * static_cast<std::int32_t>(std::max(n, results.size())));
                             // (an import (except neos::object_retain, which cannot call the program): the frame that calls it and the
                             // call, so that its frames can be walked while it runs (see walk))
                             if (callee.imported && callee.call != import_call::ObjectRetain)
                             {
                                 a.store(true, R15, ContextExitFrame, RBP);
-                                a.store_imm(true, R15, ContextExitSite, static_cast<std::int32_t>(aPosition));
+                                a.store_imm(true, R15, ContextExitSite, static_cast<std::int32_t>(origin(aPosition)));
                             }
                             if (!callee.imported)
                             {
                                 save_pinned_gprs();
-                                a.call(iFunctionLabels[aFunction]);
+                                if (iTier != nullptr)
+                                {
+                                    // (the optimizing tier: through the indirect table (the function's optimized code, if it has it))
+                                    a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&static_cast<compiled_module::indirect_entry const*>(iIndirect)[aFunction].target), true);
+                                    a.op_rm({ 0xFFu }, false, 2, R11, 0);   // call [r11]
+                                }
+                                else
+                                    a.call(iFunctionLabels[aFunction]);
                                 // (where it returns to: a frame making this call (see walk))
-                                iCallSites.emplace_back(a.new_label(), aPosition);
+                                iCallSites.emplace_back(a.new_label(), origin(aPosition));
                                 a.bind(iCallSites.back().first);
                                 restore_pinned_gprs();
                                 for (std::size_t i = 0u; i < results.size(); ++i)
@@ -3228,6 +3532,20 @@ namespace neos
                             for (std::size_t i = 0u; i <= n; ++i)
                                 release(pop());
                             spill_registers();
+                            if (iCounters != nullptr && iTier == nullptr)
+                            {
+                                // (where optimized code that inlined the call (its index a constant) can leave for this code (its arguments
+                                // are the call's, then the index))
+                                pending_deopt_point d;
+                                d.position = aPosition;
+                                d.label = a.new_label();
+                                d.point.function = iFunctionIndex;
+                                d.point.arguments = static_cast<std::uint32_t>(n + 1u);
+                                for (auto const& e : iStack)
+                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp });
+                                a.bind(d.label);
+                                iDeoptPoints.push_back(std::move(d));
+                            }
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(n + 1u, results.size())));
                             save_pinned_gprs();
                             a.load(false, RAX, RSP, 8 * static_cast<std::int32_t>(n));
@@ -3241,7 +3559,7 @@ namespace neos
                             a.load(true, R11, R11, 0);
                             a.call_r(R11);
                             // (where it returns to: a frame making this call (see walk))
-                            iCallSites.emplace_back(a.new_label(), aPosition);
+                            iCallSites.emplace_back(a.new_label(), origin(aPosition));
                             a.bind(iCallSites.back().first);
                             restore_pinned_gprs();
                             for (std::size_t i = 0u; i < results.size(); ++i)
@@ -3816,24 +4134,39 @@ namespace neos
                                 // function has it in one); [address, address + disp + width) within it: address + disp + width - 1 (without
                                 // carry) below its size)
                                 auto const& fixed = external_memory(aMemory);
-                                auto const last = disp + static_cast<std::int32_t>(x.width) - 1;
-                                a.mov_rr(true, e, g);
-                                if (last != 0)
-                                {
-                                    a.alu_ri(0, true, e, last); // add
-                                    a.jcc(B, iTrapLabels[TrapOutOfBounds]);
-                                }
                                 auto const size = static_cast<std::uint64_t>(fixed.size);
-                                if ((size & (size - 1u)) == 0u && size != 0u)
+                                auto const end = static_cast<std::uint64_t>(disp) + x.width;
+                                if (size >= end)
                                 {
-                                    a.shift_ri(5, true, e, static_cast<std::uint8_t>(std::countr_zero(size))); // shr
-                                    a.jcc(NE, iTrapLabels[TrapOutOfBounds]);
+                                    // (the address at most size - (disp + width))
+                                    auto const limit = size - end;
+                                    if (limit <= 0x7FFFFFFFull)
+                                        a.alu_ri(7, true, g, static_cast<std::int32_t>(limit)); // cmp
+                                    else
+                                        a.alu_rip(7, true, g, a.constant(limit)); // cmp
+                                    a.jcc(A, iTrapLabels[TrapOutOfBounds]);
                                 }
                                 else
+                                    a.jmp(iTrapLabels[TrapOutOfBounds]);
+                                if (!is_float(x.type) && iMemoryBase >= 0 && aMemory == iMemoryBaseIndex)
                                 {
-                                    a.mov_ri(m, fixed.size, true);
-                                    a.alu_rr(7, true, e, m); // cmp
-                                    a.jcc(AE, iTrapLabels[TrapOutOfBounds]);
+                                    // ([base + address + disp])
+                                    release_reg(false, e);
+                                    if (store)
+                                    {
+                                        a.op_bi({ x.opcode0 }, x.w, v, iMemoryBase, g, disp, x.prefix, x.width == 1u);
+                                        release_reg(false, v);
+                                        release_reg(false, g);
+                                        release_reg(false, m);
+                                        return;
+                                    }
+                                    if (x.opcode1 != 0u)
+                                        a.op_bi({ x.opcode0, x.opcode1 }, x.w, m, iMemoryBase, g, disp, x.prefix);
+                                    else
+                                        a.op_bi({ x.opcode0 }, x.w, m, iMemoryBase, g, disp, x.prefix);
+                                    release_reg(false, g);
+                                    push_reg(x.type, m);
+                                    return;
                                 }
                                 a.mov_rr(true, m, g);
                                 if (iMemoryBase >= 0 && aMemory == iMemoryBaseIndex)
@@ -4496,6 +4829,19 @@ namespace neos
                         std::vector<std::size_t> iFunctionLabels;
                         std::vector<std::pair<std::size_t, std::size_t>> iCallSites; ///< (labels where calls return, and their tokens)
                         bytes iCode;
+                        std::int32_t* iCounters = nullptr;              ///< (the optimizing tier's counters (see compiled_module::counters))
+                        compiled_module* iTier = nullptr;               ///< (the optimizing tier: the module whose function is compiled)
+                        std::vector<std::size_t> const* iOrigins = nullptr;
+                        compiled_module::tier_version const* iTierVersion = nullptr;
+                        struct pending_deopt_point
+                        {
+                            std::size_t position = 0u;
+                            std::size_t label = 0u;
+                            compiled_module::deopt_point point;
+                        };
+                        std::vector<compiled_module::deopt_frame>* iDeoptFrames = nullptr;
+                        std::vector<pending_deopt_point> iDeoptPoints;
+                        std::uint32_t iFunctionIndex = 0u;
                         // function state
                         function_description const* iFunction = nullptr;
                         std::vector<entry> iStack;
@@ -4524,6 +4870,2264 @@ namespace neos
                         std::size_t iEpilogue = 0u;
                         bool iReachable = true;
                         std::optional<std::pair<std::size_t, std::size_t>> iLastBranch; ///< (the last br: its position and depth)
+                    };
+
+                    // --- the optimizing tier's code generator: a function in SSA form (see jit_ssa.hpp), its values in registers (linear
+                    // scan register allocation over its blocks' order (a value is live from its definition to its last use: one interval;
+                    // a value that is live across a call is in a register that calls preserve, or in the frame)), its instructions selected
+                    // (a comparison fused with the branch that uses it; constants as immediates; a memory access's address in its
+                    // instruction (base + index + offset); no check of an access that cannot be out of bounds). Its frames, calls, traps
+                    // and results are as the baseline's (see code_generator)
+
+                    class optimizing_generator
+                    {
+                    private:
+                        using value = ssa::value;
+                        struct location
+                        {
+                            enum kind_t : std::uint8_t { None, Register, Slot } kind = None;
+                            int reg = 0;
+                            std::int32_t disp = 0;  ///< (a slot: [rbp + disp])
+                        };
+                        struct interval
+                        {
+                            std::uint32_t start = ~std::uint32_t{};
+                            std::uint32_t end = 0u;
+                            bool crossesCall = false;
+                            bool xmm = false;
+                            value v = ssa::None;
+                        };
+                        struct pending_condition
+                        {
+                            value compare = ssa::None;
+                            std::uint8_t cc = 0u;
+                            bool floatEq = false;   ///< (float ==: E and not P)
+                            bool floatNe = false;   ///< (float !=: NE or P)
+                        };
+#if defined(_WIN32)
+                        static constexpr int CallerSavedGprs[] = { R8, R9, R10 };
+                        static constexpr int CalleeSavedGprs[] = { RBX, RSI, RDI, R12, R13, R14 };
+#else
+                        static constexpr int CallerSavedGprs[] = { RSI, RDI, R8, R9, R10 };
+                        static constexpr int CalleeSavedGprs[] = { RBX, R12, R13, R14 };
+#endif
+                        static constexpr int CallerSavedXmms[] = { 2, 3, 4, 5, 6, 7 };
+                        static constexpr int CalleeSavedXmms[] = { 8, 9, 10, 11, 12, 13, 14, 15 };
+                        static constexpr std::size_t MaxValues = 60000u;
+                    public:
+                        optimizing_generator(module_description const& aModule, compiled_module& aTier, compiled_module::tier_version const* aVersion, ssa::function& aFunction) :
+                            iModule{ aModule }, iTier{ aTier }, iVersion{ aVersion }, f{ aFunction }, iSse41{ has_sse41() }
+                        {
+                            for (std::size_t i = 0u; i < TrapCount; ++i)
+                                iTrapLabels[i] = a.new_label();
+                            iTrapFromContext = a.new_label();
+                            iEpilogue = a.new_label();
+                        }
+                    public:
+                        void generate(std::vector<std::pair<std::size_t, std::size_t>>& aCallSites)
+                        {
+                            if (f.values.size() > MaxValues)
+                                throw unsupported{ "too large" };
+                            split_critical_edges();
+                            choose_memory_base();
+                            check_supported();
+                            number();
+                            liveness();
+                            allocate();
+                            homes();
+                            saves_at_calls();
+                            live_xmms_at_calls();
+                            emit_function();
+                            for (auto const& [v, label] : iDeoptExits)
+                            {
+                                a.bind(label);
+                                deopt_exit(v);
+                            }
+                            auto const exit = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + iTier.exitOffset);
+                            for (std::uint32_t t = 1u; t < TrapCount; ++t)
+                            {
+                                a.bind(iTrapLabels[t]);
+                                a.store_imm(false, R15, ContextTrap, static_cast<std::int32_t>(t));
+                                a.mov_ri(RAX, t, false);
+                                a.mov_ri(RCX, exit, true);
+                                a.jmp_r(RCX);
+                            }
+                            a.bind(iTrapFromContext);
+                            a.load(false, RAX, R15, ContextTrap);
+                            a.mov_ri(RCX, exit, true);
+                            a.jmp_r(RCX);
+                            a.emit_constants();
+                            a.resolve();
+                            for (auto const& site : iCallSites)
+                                aCallSites.emplace_back(a.label_offset(site.first), site.second);
+                            std::sort(aCallSites.begin(), aCallSites.end());
+                            iCode = std::move(a.code);
+                        }
+                        bytes& code() { return iCode; }
+                    private:
+                        // --- preparation
+                        void split_critical_edges()
+                        {
+                            // (an edge from a block with more than one successor to a block with phis: through a block of its own, which
+                            // has the phis' moves)
+                            auto const count = static_cast<std::uint32_t>(f.blocks.size());
+                            for (std::uint32_t b = 0u; b < count; ++b)
+                            {
+                                if (!f.blocks[b].reachable || f.blocks[b].successors.size() < 2u)
+                                    continue;
+                                for (std::size_t s = 0u; s < f.blocks[b].successors.size(); ++s)
+                                {
+                                    auto const to = f.blocks[b].successors[s];
+                                    bool const phis = !f.blocks[to].code.empty() && f.values[f.blocks[to].code.front()].op == ssa::Phi;
+                                    if (!phis)
+                                        continue;
+                                    auto const middle = static_cast<std::uint32_t>(f.blocks.size());
+                                    f.blocks.emplace_back();
+                                    ssa::instruction jump;
+                                    jump.op = ssa::Jump;
+                                    jump.block = middle;
+                                    f.values.push_back(jump);
+                                    f.blocks[middle].code.push_back(static_cast<value>(f.values.size() - 1u));
+                                    f.blocks[middle].successors.push_back(to);
+                                    f.blocks[middle].predecessors.push_back(b);
+                                    f.blocks[middle].reachable = true;
+                                    f.blocks[b].successors[s] = middle;
+                                    // (the first of the target's predecessors that is this block and has not been replaced)
+                                    auto& preds = f.blocks[to].predecessors;
+                                    for (auto& p : preds)
+                                        if (p == b)
+                                        {
+                                            p = middle;
+                                            break;
+                                        }
+                                }
+                            }
+                            ssa::finish(f);
+                        }
+                        void choose_memory_base()
+                        {
+                            // (the first fixed external memory that it accesses: its address in r14)
+                            for (auto const& i : f.values)
+                                if (!i.dead && (i.load() || i.store()))
+                                    if (auto const memory = static_cast<std::uint32_t>(i.imm0 >> 32u); memory != 0u && memory <= NEOS_RT_EXTERNAL_MEMORIES && external_memory(memory).fixed)
+                                    {
+                                        iMemoryBase = MemoryBaseRegister;
+                                        iMemoryBaseIndex = memory;
+                                        return;
+                                    }
+                        }
+                        // (an instruction that the code generator does not have: the function is compiled by the baseline's)
+                        void check_supported()
+                        {
+                            for (auto b : f.order)
+                                for (auto v : f.blocks[b].code)
+                                {
+                                    auto const& i = f.values[v];
+                                    if (i.dead)
+                                        continue;
+                                    if (i.op == 0x10u)
+                                    {
+                                        auto const callee = static_cast<std::uint32_t>(i.imm0);
+                                        if (callee == optimizer::intrinsics::guard_failed(iModule))
+                                        {
+                                            if (iVersion == nullptr)
+                                                throw unsupported{ "intrinsic" };
+                                            continue;
+                                        }
+                                        auto const& c = iModule.functions[callee];
+                                        if (c.results->size() > MaxResults)
+                                            throw unsupported{ "results" };
+                                        if (c.imported && !plain_plugin(c))
+                                        {
+                                            std::string why = "import f" + std::to_string(callee) + ": call " + std::to_string(static_cast<int>(c.call)) + (c.checked ? " checked" : "");
+                                            if (c.plugin)
+                                            {
+                                                why += " plugin(";
+                                                for (auto t : c.plugin->parameters)
+                                                    why += std::to_string(static_cast<int>(t)) + " ";
+                                                why += "-> " + std::to_string(static_cast<int>(c.plugin->result)) + ")";
+                                            }
+                                            throw unsupported{ why };
+                                        }
+                                    }
+                                    else if (i.op == 0x11u)
+                                    {
+                                        if (iModule.types[static_cast<std::size_t>(i.imm0)].second->size() > MaxResults)
+                                            throw unsupported{ "results" };
+                                    }
+                                    else if (i.op == ssa::Switch && f.blocks[b].successors.size() > 4096u)
+                                        throw unsupported{ "switch" };
+                                    else if ((i.load() || i.store()) && i.imm1 > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max() - 16))
+                                        throw unsupported{ "offset" };
+                                    else if ((i.load() || i.store()) && (i.imm0 >> 32u) > NEOS_RT_EXTERNAL_MEMORIES)
+                                        throw unsupported{ "memory" };
+                                }
+                            if (f.results.size() > MaxResults)
+                                throw unsupported{ "results" };
+                        }
+                        // (a runtime plugin function that is called directly, whose arguments and result need no conversion)
+                        static bool plain_plugin(function_description const& aCallee)
+                        {
+                            if (aCallee.call != import_call::Plugin || !aCallee.plugin || aCallee.plugin->function == nullptr || aCallee.checked)
+                                return false;
+                            auto const plain = [](std::uint8_t aType)
+                            {
+                                return aType == NEOS_RT_I32 || aType == NEOS_RT_U32 || aType == NEOS_RT_I64 || aType == NEOS_RT_U64 || aType == NEOS_RT_SIZE ||
+                                    aType == NEOS_RT_F32 || aType == NEOS_RT_F64;
+                            };
+                            for (auto p : aCallee.plugin->parameters)
+                                if (!plain(p))
+                                    return false;
+                            return (aCallee.plugin->result == NEOS_RT_VOID || plain(aCallee.plugin->result)) && aCallee.plugin->parameters.size() <= NEOS_RT_MAX_PARAMETERS &&
+                                aCallee.parameters->size() == aCallee.plugin->parameters.size() && aCallee.results->size() <= 1u;
+                        }
+                        // (an instruction that is a call of native code (a helper): its operands' types)
+                        static void const* helper_of(std::uint16_t aOp)
+                        {
+                            switch (aOp)
+                            {
+                            case 0x69: return reinterpret_cast<void const*>(&i32_popcnt);
+                            case 0x7B: return reinterpret_cast<void const*>(&i64_popcnt);
+                            case 0x96: return reinterpret_cast<void const*>(&f32_min);
+                            case 0x97: return reinterpret_cast<void const*>(&f32_max);
+                            case 0xA4: return reinterpret_cast<void const*>(&f64_min);
+                            case 0xA5: return reinterpret_cast<void const*>(&f64_max);
+                            case 0x8D: return reinterpret_cast<void const*>(&f32_ceil);
+                            case 0x8E: return reinterpret_cast<void const*>(&f32_floor);
+                            case 0x8F: return reinterpret_cast<void const*>(&f32_trunc);
+                            case 0x90: return reinterpret_cast<void const*>(&f32_nearest);
+                            case 0x9B: return reinterpret_cast<void const*>(&f64_ceil);
+                            case 0x9C: return reinterpret_cast<void const*>(&f64_floor);
+                            case 0x9D: return reinterpret_cast<void const*>(&f64_trunc);
+                            case 0x9E: return reinterpret_cast<void const*>(&f64_nearest);
+                            case 0xA8: return reinterpret_cast<void const*>(&trunc_f32_i32);
+                            case 0xA9: return reinterpret_cast<void const*>(&trunc_f32_u32);
+                            case 0xAB: return reinterpret_cast<void const*>(&trunc_f64_u32);
+                            case 0xAE: return reinterpret_cast<void const*>(&trunc_f32_i64);
+                            case 0xAF: return reinterpret_cast<void const*>(&trunc_f32_u64);
+                            case 0xB1: return reinterpret_cast<void const*>(&trunc_f64_u64);
+                            case 0xB5: return reinterpret_cast<void const*>(&f32_from_u64);
+                            case 0xBA: return reinterpret_cast<void const*>(&f64_from_u64);
+                            default: return nullptr;
+                            }
+                        }
+                        bool rounding_inline(std::uint16_t aOp) const { return iSse41 && ((aOp >= 0x8Du && aOp <= 0x90u) || (aOp >= 0x9Bu && aOp <= 0x9Eu)); }
+                        static bool helper_traps(std::uint16_t aOp) { return (aOp >= 0xA8u && aOp <= 0xABu) || (aOp >= 0xAEu && aOp <= 0xB1u); }
+                        bool is_call(ssa::instruction const& aInstruction) const
+                        {
+                            if (aInstruction.call())
+                                return true;
+                            if (aInstruction.op >= 0x45u && aInstruction.op <= 0xC4u && helper_of(aInstruction.op) != nullptr && !rounding_inline(aInstruction.op))
+                                return true;
+                            return false;
+                        }
+                        bool needs_location(value aValue) const
+                        {
+                            auto const& i = f.values[aValue];
+                            return !i.dead && i.type != ssa::Void && !i.constant();
+                        }
+                        static bool is_float_type(std::uint8_t aType) { return aType == ssa::F32 || aType == ssa::F64; }
+                        static bool is_wide_type(std::uint8_t aType) { return aType == ssa::I64 || aType == ssa::F64; }
+                        // --- positions (each instruction's: 2 apart; a block's start and end)
+                        void number()
+                        {
+                            iPosition.assign(f.values.size(), 0u);
+                            iBlockStart.assign(f.blocks.size(), 0u);
+                            iBlockEnd.assign(f.blocks.size(), 0u);
+                            std::uint32_t p = 2u;
+                            for (auto b : f.order)
+                            {
+                                iBlockStart[b] = p;
+                                p += 2u;
+                                for (auto v : f.blocks[b].code)
+                                {
+                                    if (f.values[v].op == ssa::Phi)
+                                        iPosition[v] = iBlockStart[b];
+                                    else
+                                    {
+                                        iPosition[v] = p;
+                                        p += 2u;
+                                    }
+                                    if (!f.values[v].dead && is_call(f.values[v]))
+                                        iCalls.push_back(iPosition[v]);
+                                }
+                                iBlockEnd[b] = p;
+                                p += 2u;
+                            }
+                        }
+                        // --- liveness: each value's interval (from its definition to its last use; through a loop, if it is live at its
+                        // header)
+                        void liveness()
+                        {
+                            iHome.assign(f.values.size(), false);
+                            auto const n = f.values.size();
+                            auto const words = (n + 63u) / 64u;
+                            std::vector<std::vector<std::uint64_t>> liveIn(f.blocks.size());
+                            iIntervals.assign(n, interval{});
+                            for (std::size_t v = 0u; v < n; ++v)
+                            {
+                                iIntervals[v].v = static_cast<value>(v);
+                                iIntervals[v].xmm = is_float_type(f.values[v].type);
+                            }
+                            // (each loop header's last block (in the order): its loop's end)
+                            std::vector<std::uint32_t> orderIndex(f.blocks.size(), 0u);
+                            for (std::uint32_t i = 0u; i < f.order.size(); ++i)
+                                orderIndex[f.order[i]] = i;
+                            std::vector<std::uint32_t> loopEnd(f.blocks.size(), 0u);
+                            for (auto h : f.order)
+                            {
+                                if (!f.blocks[h].loopHeader)
+                                    continue;
+                                std::uint32_t last = orderIndex[h];
+                                std::vector<std::uint32_t> work;
+                                std::vector<bool> in(f.blocks.size(), false);
+                                for (auto p : f.blocks[h].predecessors)
+                                    if (orderIndex[p] >= orderIndex[h])
+                                        work.push_back(p);
+                                in[h] = true;
+                                while (!work.empty())
+                                {
+                                    auto const x = work.back();
+                                    work.pop_back();
+                                    if (in[x] || !f.blocks[x].reachable)
+                                        continue;
+                                    in[x] = true;
+                                    last = std::max(last, orderIndex[x]);
+                                    for (auto p : f.blocks[x].predecessors)
+                                        work.push_back(p);
+                                }
+                                loopEnd[h] = iBlockEnd[f.order[last]];
+                            }
+                            std::vector<std::uint64_t> live(words);
+                            auto const set = [&](std::vector<std::uint64_t>& aSet, value aValue) { aSet[aValue / 64u] |= std::uint64_t{ 1u } << (aValue % 64u); };
+                            auto const reset = [&](std::vector<std::uint64_t>& aSet, value aValue) { aSet[aValue / 64u] &= ~(std::uint64_t{ 1u } << (aValue % 64u)); };
+                            auto const extend = [&](value aValue, std::uint32_t aFrom, std::uint32_t aTo)
+                            {
+                                auto& i = iIntervals[aValue];
+                                i.start = std::min(i.start, aFrom);
+                                i.end = std::max(i.end, aTo);
+                            };
+                            for (auto o = f.order.size(); o-- > 0u;)
+                            {
+                                auto const b = f.order[o];
+                                auto const& block = f.blocks[b];
+                                std::fill(live.begin(), live.end(), 0u);
+                                for (auto s : block.successors)
+                                {
+                                    if (!liveIn[s].empty())
+                                        for (std::size_t w = 0u; w < words; ++w)
+                                            live[w] |= liveIn[s][w];
+                                    // (the phis' operands from this block)
+                                    auto const& to = f.blocks[s];
+                                    auto const index = static_cast<std::size_t>(std::find(to.predecessors.begin(), to.predecessors.end(), b) - to.predecessors.begin());
+                                    for (auto v : to.code)
+                                    {
+                                        auto const& i = f.values[v];
+                                        if (i.op != ssa::Phi)
+                                            break;
+                                        if (!i.dead && index < i.operands.size() && needs_location(i.operands[index]))
+                                            set(live, i.operands[index]);
+                                    }
+                                }
+                                for (std::size_t w = 0u; w < words; ++w)
+                                    for (auto bits = live[w]; bits != 0u; bits &= bits - 1u)
+                                        extend(static_cast<value>(w * 64u + static_cast<std::size_t>(std::countr_zero(bits))), iBlockStart[b], iBlockEnd[b]);
+                                for (auto c = block.code.size(); c-- > 0u;)
+                                {
+                                    auto const v = block.code[c];
+                                    auto const& i = f.values[v];
+                                    if (i.dead || i.op == ssa::Phi)
+                                        continue;
+                                    if (needs_location(v))
+                                    {
+                                        // (its definition: its interval's start (in SSA form a value is used only where its definition 
+                                        // dominates, after it in the order: the block's start that its uses here extended it to is not))
+                                        iIntervals[v].start = iPosition[v];
+                                        iIntervals[v].end = std::max(iIntervals[v].end, iPosition[v] + 1u);
+                                        reset(live, v);
+                                    }
+                                    if (i.op == ssa::Deopt)
+                                    {
+                                        // (a deopt's values: read from their homes (each is stored there when it is made: see home): they
+                                        // are not live here)
+                                        for (auto op : i.operands)
+                                            if (needs_location(op))
+                                                iHome[op] = true;
+                                        continue;
+                                    }
+                                    for (auto op : i.operands)
+                                        if (needs_location(op))
+                                        {
+                                            extend(op, iBlockStart[b], iPosition[v]);
+                                            set(live, op);
+                                        }
+                                }
+                                for (auto v : block.code)
+                                {
+                                    auto const& i = f.values[v];
+                                    if (i.op != ssa::Phi)
+                                        break;
+                                    if (i.dead)
+                                        continue;
+                                    iIntervals[v].start = std::min(iIntervals[v].start, iBlockStart[b]);
+                                    iIntervals[v].end = std::max(iIntervals[v].end, iBlockStart[b] + 1u);
+                                    // (its register is written at the ends of its block's predecessors (the moves to it))
+                                    for (auto p : block.predecessors)
+                                        extend(v, iBlockEnd[p] - 1u, iBlockEnd[p]);
+                                    reset(live, v);
+                                }
+                                if (block.loopHeader)
+                                    for (std::size_t w = 0u; w < words; ++w)
+                                        for (auto bits = live[w]; bits != 0u; bits &= bits - 1u)
+                                            extend(static_cast<value>(w * 64u + static_cast<std::size_t>(std::countr_zero(bits))), iBlockStart[b], loopEnd[b]);
+                                liveIn[b] = live;
+                            }
+                            // (the calls that each interval spans)
+                            std::sort(iCalls.begin(), iCalls.end());
+                            for (auto& i : iIntervals)
+                            {
+                                if (i.start > i.end)
+                                    continue;
+                                auto const c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start);
+                                i.crossesCall = c != iCalls.end() && *c < i.end;
+                            }
+                        }
+                        // --- register allocation
+                        void allocate()
+                        {
+                            iLocations.assign(f.values.size(), location{});
+                            std::vector<interval*> order;
+                            for (auto& i : iIntervals)
+                                if (i.start <= i.end && needs_location(i.v))
+                                    order.push_back(&i);
+                            std::sort(order.begin(), order.end(), [](interval const* x, interval const* y) { return x->start < y->start || (x->start == y->start && x->v < y->v); });
+                            std::vector<interval*> active;
+                            std::vector<bool> gprFree(16, false), xmmFree(16, false);
+                            for (auto r : CallerSavedGprs)
+                                gprFree[r] = true;
+                            for (auto r : CalleeSavedGprs)
+                                if (r != iMemoryBase)
+                                    gprFree[r] = true;
+                            for (auto r : CallerSavedXmms)
+                                xmmFree[r] = true;
+                            for (auto r : CalleeSavedXmms)
+                                xmmFree[r] = true;
+                            auto const calleeSaved = [&](bool aXmm, int aReg)
+                            {
+                                if (aXmm)
+                                    return aReg >= 8;
+                                for (auto r : CalleeSavedGprs)
+                                    if (r == aReg)
+                                        return true;
+                                return false;
+                            };
+                            for (auto* i : order)
+                            {
+                                // (intervals that have ended: their registers are free)
+                                for (auto a = active.begin(); a != active.end();)
+                                    if ((*a)->end <= i->start)
+                                    {
+                                        auto const& l = iLocations[(*a)->v];
+                                        ((*a)->xmm ? xmmFree : gprFree)[l.reg] = true;
+                                        a = active.erase(a);
+                                    }
+                                    else
+                                        ++a;
+                                // (a parameter that is not used (deopts read it from its argument's slot): its slot)
+                                if (f.values[i->v].op == ssa::Param && i->end <= i->start + 1u)
+                                {
+                                    spill(i->v);
+                                    continue;
+                                }
+                                auto& free = i->xmm ? xmmFree : gprFree;
+                                int reg = -1;
+                                auto const pick = [&](int const* aRegs, std::size_t aCount)
+                                {
+                                    for (std::size_t r = 0u; r < aCount && reg < 0; ++r)
+                                        if (free[aRegs[r]])
+                                            reg = aRegs[r];
+                                };
+                                // (an interval across calls: a callee saved register, else a caller saved one (saved around the calls (see
+                                // saves_at_calls)), else the frame)
+                                if (i->xmm)
+                                {
+                                    if (!i->crossesCall)
+                                        pick(CallerSavedXmms, std::size(CallerSavedXmms));
+                                    pick(CalleeSavedXmms, std::size(CalleeSavedXmms));
+                                    pick(CallerSavedXmms, std::size(CallerSavedXmms));
+                                }
+                                else
+                                {
+                                    if (!i->crossesCall)
+                                        pick(CallerSavedGprs, std::size(CallerSavedGprs));
+                                    pick(CalleeSavedGprs, std::size(CalleeSavedGprs));
+                                    pick(CallerSavedGprs, std::size(CallerSavedGprs));
+                                }
+                                if (reg < 0)
+                                {
+                                    // (none free: the interval (this or an active one) that ends last is in the frame)
+                                    interval* victim = nullptr;
+                                    for (auto* x : active)
+                                        if (x->xmm == i->xmm && (victim == nullptr || x->end > victim->end))
+                                            victim = x;
+                                    if (victim != nullptr && victim->end > i->end)
+                                    {
+                                        reg = iLocations[victim->v].reg;
+                                        spill(victim->v);
+                                        active.erase(std::find(active.begin(), active.end(), victim));
+                                    }
+                                    else
+                                    {
+                                        spill(i->v);
+                                        continue;
+                                    }
+                                }
+                                else
+                                    free[reg] = false;
+                                iLocations[i->v] = location{ location::Register, reg, 0 };
+                                if (calleeSaved(i->xmm, reg))
+                                {
+                                    if (i->xmm)
+                                        iUsedCalleeXmms[reg] = true;
+                                    else
+                                        iUsedCalleeGprs[reg] = true;
+                                }
+                                active.push_back(i);
+                            }
+                        }
+                        // (the values that deopts read: in their homes, slots that they are stored in when they are made (a value in the
+                        // frame: its slot; a parameter in a register: its argument's slot), so that they need not be live until the deopts)
+                        void homes()
+                        {
+                            for (std::size_t v = 0u; v < f.values.size(); ++v)
+                            {
+                                if (!iHome[v])
+                                    continue;
+                                auto const& l = iLocations[v];
+                                if (l.kind == location::Slot)
+                                    continue;
+                                if (f.values[v].op == ssa::Param)
+                                    continue;
+                                iHomeSlots.emplace(static_cast<value>(v), 0);
+                            }
+                        }
+                        std::int32_t home_of(value aValue) const
+                        {
+                            auto const& i = f.values[aValue];
+                            if (auto const h = iHomeSlots.find(aValue); h != iHomeSlots.end())
+                                return h->second;
+                            if (where(aValue).kind == location::Slot)
+                                return where(aValue).disp;
+                            return 16 + 8 * static_cast<std::int32_t>(i.imm0);   // (a parameter: its argument's slot)
+                        }
+                        void store_home(value aValue)
+                        {
+                            auto const h = iHomeSlots.find(aValue);
+                            if (h == iHomeSlots.end() || where(aValue).kind != location::Register)
+                                return;
+                            if (is_float_type(f.values[aValue].type))
+                                a.movf_store(true, RBP, h->second, where(aValue).reg);
+                            else
+                                a.store(true, RBP, h->second, where(aValue).reg);
+                        }
+                        // (the values in caller saved registers across each call: saved before it (in slots of their own) and restored after it)
+                        void saves_at_calls()
+                        {
+                            auto const callerSaved = [](bool aXmm, int aReg)
+                            {
+                                if (aXmm)
+                                    return aReg < 8;
+                                for (auto r : CallerSavedGprs)
+                                    if (r == aReg)
+                                        return true;
+                                return false;
+                            };
+                            for (auto const& i : iIntervals)
+                                if (i.crossesCall && needs_location(i.v) && where(i.v).kind == location::Register && callerSaved(i.xmm, where(i.v).reg))
+                                    for (auto c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start); c != iCalls.end() && *c < i.end; ++c)
+                                    {
+                                        // (not a value defined by the call, or after it (an interval starts at its block's start))
+                                        if (iPosition[i.v] >= *c)
+                                            continue;
+                                        iSavesAtCalls[*c].push_back(i.v);
+                                        iCallSaveSlots.emplace(i.v, 0);
+                                    }
+                        }
+                        void save_at_call(value v)
+                        {
+                            if (auto const s = iSavesAtCalls.find(iPosition[v]); s != iSavesAtCalls.end())
+                                for (auto x : s->second)
+                                {
+                                    auto const disp = iCallSaveSlots.at(x);
+                                    if (is_float_type(f.values[x].type))
+                                        a.movf_store(true, RBP, disp, where(x).reg);
+                                    else
+                                        a.store(true, RBP, disp, where(x).reg);
+                                }
+                        }
+                        void restore_at_call(value v)
+                        {
+                            if (auto const s = iSavesAtCalls.find(iPosition[v]); s != iSavesAtCalls.end())
+                                for (auto x : s->second)
+                                {
+                                    auto const disp = iCallSaveSlots.at(x);
+                                    if (is_float_type(f.values[x].type))
+                                        a.movf_load(true, where(x).reg, RBP, disp);
+                                    else
+                                        a.load(true, where(x).reg, RBP, disp);
+                                }
+                        }
+                        // (System V: the xmms (8-15) that hold values across each call (native code does not preserve them))
+                        void live_xmms_at_calls()
+                        {
+                            if (Windows)
+                                return;
+                            for (auto const& i : iIntervals)
+                                if (i.xmm && i.crossesCall && needs_location(i.v) && where(i.v).kind == location::Register && where(i.v).reg >= 8)
+                                    for (auto c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start); c != iCalls.end() && *c < i.end; ++c)
+                                        iLiveXmmsAtCalls[*c] |= 1u << where(i.v).reg;
+                        }
+                        void spill(value aValue)
+                        {
+                            auto const& i = f.values[aValue];
+                            if (i.op == ssa::Param)
+                            {
+                                // (a parameter's slot: its argument's)
+                                iLocations[aValue] = location{ location::Slot, 0, 16 + 8 * static_cast<std::int32_t>(i.imm0) };
+                                return;
+                            }
+                            iLocations[aValue] = location{ location::Slot, 0, 0 };
+                            iSpills.push_back(aValue);
+                        }
+                        // --- the frame: [rbp - 8 * (pushed)]: the callee saved registers that it uses; then the xmms that it saves (those
+                        // that native calls do not preserve (System V), and its callee saved ones); then the values in the frame; then the
+                        // outgoing area (rsp)
+                        void layout()
+                        {
+                            iPushed.clear();
+                            for (auto r : CalleeSavedGprs)
+                                if (iUsedCalleeGprs[r] || r == iMemoryBase)
+                                    iPushed.push_back(r);
+                            std::int32_t offset = 8 * static_cast<std::int32_t>(iPushed.size());
+                            for (int x = 8; x < 16; ++x)
+                                if (iUsedCalleeXmms[x])
+                                {
+                                    offset += 8;
+                                    iXmmSave[x] = -offset;
+                                }
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                {
+                                    offset += 8;
+                                    iXmmNativeSave[x] = -offset;
+                                }
+                            for (auto v : iSpills)
+                            {
+                                offset += 8;
+                                iLocations[v].disp = -offset;
+                            }
+                            for (auto& [v, disp] : iCallSaveSlots)
+                            {
+                                offset += 8;
+                                disp = -offset;
+                            }
+                            for (auto& [v, disp] : iHomeSlots)
+                            {
+                                offset += 8;
+                                disp = -offset;
+                            }
+                            iFrameBelowPushed = offset - 8 * static_cast<std::int32_t>(iPushed.size());
+                        }
+                        // --- values
+                        bool constant(value aValue) const { return f.values[aValue].constant(); }
+                        std::uint64_t bits(value aValue) const
+                        {
+                            auto const& i = f.values[aValue];
+                            return (i.type == ssa::I32 || i.type == ssa::F32) ? (i.imm0 & 0xFFFFFFFFull) : i.imm0;
+                        }
+                        location const& where(value aValue) const { return iLocations[aValue]; }
+                        bool in_register(value aValue) const { return !constant(aValue) && where(aValue).kind == location::Register; }
+                        // (an integer value in a register: its, or aScratch (loaded))
+                        int gpr(value aValue, int aScratch)
+                        {
+                            if (constant(aValue))
+                            {
+                                a.mov_ri(aScratch, bits(aValue), is_wide_type(f.values[aValue].type));
+                                return aScratch;
+                            }
+                            auto const& l = where(aValue);
+                            if (l.kind == location::Register)
+                                return l.reg;
+                            a.load(is_wide_type(f.values[aValue].type), aScratch, RBP, l.disp);
+                            return aScratch;
+                        }
+                        void gpr_into(value aValue, int aReg)
+                        {
+                            auto const r = gpr(aValue, aReg);
+                            if (r != aReg)
+                                a.mov_rr(true, aReg, r);
+                        }
+                        int xmm(value aValue, int aScratch)
+                        {
+                            auto const type = f.values[aValue].type;
+                            if (constant(aValue))
+                            {
+                                auto const b = bits(aValue);
+                                if (b == 0u)
+                                    a.xorpd(aScratch, aScratch);
+                                else
+                                    a.sse_rip(type == ssa::F64 ? 0xF2 : 0xF3, 0x10, aScratch, a.constant(b));
+                                return aScratch;
+                            }
+                            auto const& l = where(aValue);
+                            if (l.kind == location::Register)
+                                return l.reg;
+                            a.movf_load(type == ssa::F64, aScratch, RBP, l.disp);
+                            return aScratch;
+                        }
+                        void xmm_into(value aValue, int aReg)
+                        {
+                            auto const x = xmm(aValue, aReg);
+                            if (x != aReg)
+                                a.movapd(aReg, x);
+                        }
+                        // (the register that a value is computed into: its, or aScratch (then stored: see defined))
+                        int target(value aValue, int aScratch) const
+                        {
+                            auto const& l = where(aValue);
+                            return l.kind == location::Register ? l.reg : aScratch;
+                        }
+                        void defined(value aValue, int aReg)
+                        {
+                            auto const& l = where(aValue);
+                            auto const type = f.values[aValue].type;
+                            if (l.kind == location::Register)
+                            {
+                                if (l.reg != aReg)
+                                {
+                                    if (is_float_type(type))
+                                        a.movapd(l.reg, aReg);
+                                    else
+                                        a.mov_rr(true, l.reg, aReg);
+                                }
+                                return;
+                            }
+                            if (l.kind == location::Slot)
+                            {
+                                if (is_float_type(type))
+                                    a.movf_store(type == ssa::F64, RBP, l.disp, aReg);
+                                else
+                                    a.store(true, RBP, l.disp, aReg);
+                            }
+                        }
+                        // (a value as an operand of an integer instruction: an immediate (aImmediate: if it fits), a register or a slot)
+                        struct operand
+                        {
+                            enum kind_t { Immediate, Register, Memory } kind;
+                            std::int32_t imm = 0;
+                            int reg = 0;
+                            std::int32_t disp = 0;
+                        };
+                        operand operand_of(value aValue, int aScratch, bool aImmediate = true)
+                        {
+                            if (constant(aValue))
+                            {
+                                auto const b = bits(aValue);
+                                bool const wide = is_wide_type(f.values[aValue].type);
+                                if (aImmediate && (wide ? fits_i32(static_cast<std::int64_t>(b)) : true))
+                                    return operand{ operand::Immediate, static_cast<std::int32_t>(static_cast<std::uint32_t>(b)) };
+                                a.mov_ri(aScratch, b, wide);
+                                return operand{ operand::Register, 0, aScratch };
+                            }
+                            auto const& l = where(aValue);
+                            if (l.kind == location::Register)
+                                return operand{ operand::Register, 0, l.reg };
+                            return operand{ operand::Memory, 0, 0, l.disp };
+                        }
+                        void alu(int aOp, bool aW, int aDst, operand const& aOperand)
+                        {
+                            switch (aOperand.kind)
+                            {
+                            case operand::Immediate: a.alu_ri(aOp, aW, aDst, aOperand.imm); break;
+                            case operand::Register: a.alu_rr(aOp, aW, aDst, aOperand.reg); break;
+                            default: a.alu_rm(aOp, aW, aDst, RBP, aOperand.disp); break;
+                            }
+                        }
+                        // --- code
+                        void emit_function()
+                        {
+                            iDeferred.assign(f.values.size(), false);
+                            layout();
+                            for (auto b : f.order)
+                                iBlockLabels.emplace(b, a.new_label());
+                            // prologue
+                            a.push(RBP);
+                            a.mov_rr(true, RBP, RSP);
+                            for (auto r : iPushed)
+                                a.push(r);
+                            a.sub_rsp_imm32(0);
+                            auto const frameSizePatch = a.offset() - 4u;
+                            a.barrier();
+                            a.alu_rm(7, true, RSP, R15, ContextStackLimit);
+                            a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            if (iMemoryBase >= 0)
+                                a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
+                            for (int x = 8; x < 16; ++x)
+                                if (iUsedCalleeXmms[x])
+                                    a.movf_store(true, RBP, iXmmSave[x], x);
+                            for (std::size_t o = 0u; o < f.order.size(); ++o)
+                            {
+                                auto const b = f.order[o];
+                                iNext = o + 1u < f.order.size() ? f.order[o + 1u] : ~std::uint32_t{};
+                                if (f.blocks[b].loopHeader)
+                                    a.align_executable(LoopAlignment);
+                                a.bind(iBlockLabels[b]);
+                                defer_and_branch(b);
+                                auto const& code = f.blocks[b].code;
+                                if (!iHomeSlots.empty())
+                                    for (auto v : code)
+                                    {
+                                        if (f.values[v].op != ssa::Phi)
+                                            break;
+                                        if (!f.values[v].dead)
+                                            store_home(v);
+                                    }
+                                for (std::size_t c = 0u; c < code.size(); ++c)
+                                {
+                                    auto const v = code[c];
+                                    if (f.values[v].dead || f.values[v].op == ssa::Phi)
+                                        continue;
+                                    iCurrentBlock = b;
+                                    iNextInstruction = c + 1u < code.size() ? code[c + 1u] : ssa::None;
+                                    instruction(v);
+                                    if (!iHomeSlots.empty() && !iDeferred[v])
+                                        store_home(v);
+                                }
+                            }
+                            // epilogue
+                            a.bind(iEpilogue);
+                            for (int x = 8; x < 16; ++x)
+                                if (iUsedCalleeXmms[x])
+                                    a.movf_load(true, x, RBP, iXmmSave[x]);
+                            a.lea(RSP, RBP, -8 * static_cast<std::int32_t>(iPushed.size()));
+                            for (auto r = iPushed.rbegin(); r != iPushed.rend(); ++r)
+                                a.pop(*r);
+                            a.pop(RBP);
+                            a.ret();
+                            a.append_cold();
+                            std::int32_t const pushed = 8 * static_cast<std::int32_t>(iPushed.size());
+                            std::int32_t const raw = iFrameBelowPushed + std::max(iOutgoing, ShadowSpace);
+                            std::int32_t const total = (pushed + raw + 15) & ~15;
+                            a.patch32(frameSizePatch, static_cast<std::uint32_t>(total - pushed));
+                        }
+                        // (a deopt (see optimizer::deopt): its values to the thread's deopt buffer; reported; this frame left (as its epilogue
+                        // leaves it); the function's frame made as the baseline's code has it where it makes the call (its locals, its
+                        // operand stack's slots and the call's arguments from the buffer); then the baseline's code that makes the call)
+                        void deopt_exit(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const& d = iVersion->deopts.at(static_cast<std::size_t>(i.imm0));
+                            auto const& point = iTier.deoptPoints.at(d.call);
+                            auto const& frame = iTier.deoptFrames.at(point.function);
+                            a.load(true, R11, R15, ContextDeoptBuffer);
+                            for (std::size_t o = 0u; o < i.operands.size(); ++o)
+                            {
+                                auto const x = i.operands[o];
+                                auto const disp = 8 * static_cast<std::int32_t>(o);
+                                auto const type = f.values[x].type;
+                                bool const narrow = type == ssa::I32 || type == ssa::F32;
+                                if (constant(x))
+                                {
+                                    a.mov_ri(RAX, narrow ? (bits(x) & 0xFFFFFFFFull) : bits(x), true);
+                                    a.store(true, R11, disp, RAX);
+                                }
+                                else if (iHome[x])
+                                {
+                                    a.load(!narrow, RAX, RBP, home_of(x));
+                                    a.store(true, R11, disp, RAX);
+                                }
+                                else if (where(x).kind == location::Register)
+                                {
+                                    if (is_float_type(type))
+                                        a.movf_store(type == ssa::F64, R11, disp, where(x).reg);
+                                    else if (type == ssa::I32)
+                                    {
+                                        a.mov_rr(false, RAX, where(x).reg);
+                                        a.store(true, R11, disp, RAX);
+                                    }
+                                    else
+                                        a.store(true, R11, disp, where(x).reg);
+                                }
+                                else
+                                {
+                                    a.load(!narrow, RAX, RBP, where(x).disp);
+                                    a.store(true, R11, disp, RAX);
+                                }
+                            }
+                            // (reported: the native call does not preserve xmm8-15 (System V): saved around it)
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movf_store(true, RBP, iXmmNativeSave[x], x);
+                            a.mov_rr(true, NativeIntegerArguments[0], R15);
+                            a.mov_ri(NativeIntegerArguments[1], reinterpret_cast<std::uint64_t>(iVersion), true);
+                            a.mov_ri(NativeIntegerArguments[2], i.imm0, false);
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&deopt_taken), true);
+                            a.call_r(RAX);
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movf_load(true, x, RBP, iXmmNativeSave[x]);
+                            // (this frame left)
+                            for (int x = 8; x < 16; ++x)
+                                if (iUsedCalleeXmms[x])
+                                    a.movf_load(true, x, RBP, iXmmSave[x]);
+                            a.lea(RSP, RBP, -8 * static_cast<std::int32_t>(iPushed.size()));
+                            for (auto r = iPushed.rbegin(); r != iPushed.rend(); ++r)
+                                a.pop(*r);
+                            a.pop(RBP);
+                            // (the baseline's frame (as its prologue makes it))
+                            a.push(RBP);
+                            a.mov_rr(true, RBP, RSP);
+                            for (auto r : frame.pushed)
+                                a.push(r);
+                            a.sub_rsp_imm32(static_cast<std::int32_t>(frame.frameSize));
+                            if (frame.memoryBase >= 0)
+                                a.mov_ri(frame.memoryBase, reinterpret_cast<std::uint64_t>(external_memory(frame.memoryIndex).base), true);
+                            for (auto const& [x, disp] : frame.savedXmms)
+                                a.movf_store(true, RBP, disp, x);
+                            a.load(true, RCX, R15, ContextDeoptBuffer);
+                            std::size_t o = 0u;
+                            for (auto const& l : frame.locals)
+                            {
+                                auto const disp = 8 * static_cast<std::int32_t>(o++);
+                                if (l.pinned)
+                                {
+                                    if (is_float_type(l.type))
+                                        a.movf_load(l.type == ssa::F64, l.reg, RCX, disp);
+                                    else
+                                        a.load(is_wide_type(l.type), l.reg, RCX, disp);
+                                }
+                                else
+                                {
+                                    a.load(true, RAX, RCX, disp);
+                                    a.store(true, RBP, l.disp, RAX);
+                                }
+                            }
+                            for (auto const& e : point.stack)
+                            {
+                                auto const disp = 8 * static_cast<std::int32_t>(o++);
+                                if (!e.inSlot)
+                                    continue;
+                                a.load(true, RAX, RCX, disp);
+                                a.store(true, RBP, e.disp, RAX);
+                            }
+                            for (std::uint32_t arg = 0u; arg < point.arguments; ++arg)
+                            {
+                                auto const disp = 8 * static_cast<std::int32_t>(o++);
+                                a.load(true, RAX, RCX, disp);
+                                a.store(true, RSP, 8 * static_cast<std::int32_t>(arg), RAX);
+                            }
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + point.resume), true);
+                            a.jmp_r(RAX);
+                        }
+                        // (the moves of the phis of the successor (of the block that ends with a jump to it): a parallel move)
+                        void phi_moves(std::uint32_t aFrom, std::uint32_t aTo)
+                        {
+                            auto const& to = f.blocks[aTo];
+                            auto const index = static_cast<std::size_t>(std::find(to.predecessors.begin(), to.predecessors.end(), aFrom) - to.predecessors.begin());
+                            struct move
+                            {
+                                value source;
+                                value destination;
+                            };
+                            std::vector<move> moves;
+                            for (auto v : to.code)
+                            {
+                                auto const& i = f.values[v];
+                                if (i.op != ssa::Phi)
+                                    break;
+                                if (i.dead || index >= i.operands.size())
+                                    continue;
+                                auto const s = i.operands[index];
+                                if (!constant(s) && where(s).kind == where(v).kind && where(s).reg == where(v).reg && where(s).disp == where(v).disp)
+                                    continue;
+                                moves.push_back(move{ s, v });
+                            }
+                            // (a move whose destination is not another's source first; a cycle: one source to a scratch register)
+                            std::vector<bool> done(moves.size(), false);
+                            std::size_t remaining = moves.size();
+                            std::vector<std::pair<value, int>> scratch;    // (sources moved to scratch registers)
+                            auto const blocked = [&](std::size_t aMove)
+                            {
+                                auto const& d = where(moves[aMove].destination);
+                                bool const dx = is_float_type(f.values[moves[aMove].destination].type);
+                                for (std::size_t m = 0u; m < moves.size(); ++m)
+                                {
+                                    if (done[m] || m == aMove)
+                                        continue;
+                                    auto const s = moves[m].source;
+                                    if (constant(s) || std::any_of(scratch.begin(), scratch.end(), [&](auto const& aScratch) { return aScratch.first == s; }))
+                                        continue;
+                                    auto const& l = where(s);
+                                    if (l.kind == d.kind && (d.kind == location::Register ? (l.reg == d.reg && is_float_type(f.values[s].type) == dx) : l.disp == d.disp))
+                                        return true;
+                                }
+                                return false;
+                            };
+                            auto const perform = [&](std::size_t aMove)
+                            {
+                                auto const s = moves[aMove].source;
+                                auto const d = moves[aMove].destination;
+                                bool const x = is_float_type(f.values[d].type);
+                                // (a source that was moved to a scratch register to break a cycle)
+                                for (auto const& [sv, reg] : scratch)
+                                    if (sv == s)
+                                    {
+                                        defined(d, reg);
+                                        return;
+                                    }
+                                if (x)
+                                {
+                                    auto const r = target(d, 1);
+                                    xmm_into(s, r);
+                                    defined(d, r);
+                                }
+                                else
+                                {
+                                    auto const r = target(d, R11);
+                                    gpr_into(s, r);
+                                    defined(d, r);
+                                }
+                            };
+                            while (remaining != 0u)
+                            {
+                                bool progress = false;
+                                for (std::size_t m = 0u; m < moves.size(); ++m)
+                                    if (!done[m] && !blocked(m))
+                                    {
+                                        perform(m);
+                                        done[m] = true;
+                                        --remaining;
+                                        progress = true;
+                                    }
+                                if (progress)
+                                    continue;
+                                // (a cycle: a source (of a move not done) to a scratch register; the moves from it use that)
+                                for (std::size_t m = 0u; m < moves.size(); ++m)
+                                    if (!done[m])
+                                    {
+                                        auto const s = moves[m].source;
+                                        bool const x = is_float_type(f.values[s].type);
+                                        int const reg = x ? 0 : RAX;
+                                        for (auto const& sc : scratch)
+                                            if (sc.second == reg)
+                                                throw unsupported{ "phi cycles" };
+                                        if (x)
+                                            xmm_into(s, reg);
+                                        else
+                                            gpr_into(s, reg);
+                                        scratch.emplace_back(s, reg);
+                                        break;
+                                    }
+                                // (its location no longer blocks the moves to it: the moves from it use the scratch register)
+                            }
+                        }
+                        void jump_to(std::uint32_t aTarget)
+                        {
+                            phi_moves(iCurrentBlock, aTarget);
+                            if (aTarget != iNext)
+                                a.jmp(iBlockLabels[aTarget]);
+                        }
+                        // (a comparison that the next instruction (a branch) uses (only): its condition, not its value)
+                        bool fused(value aValue) const
+                        {
+                            if (aValue == iForceFused)
+                                return true;
+                            if (iNextInstruction == ssa::None)
+                                return false;
+                            auto const& next = f.values[iNextInstruction];
+                            return next.op == ssa::Branch && next.operands[0] == aValue && f.uses[aValue] == 1u;
+                        }
+                        // (a branch on the and of two comparisons (each used only by it, just before it): the comparisons' branches (see
+                        // branch))
+                        static bool integer_comparison(std::uint16_t aOp) { return (aOp >= 0x46u && aOp <= 0x4Fu) || (aOp >= 0x51u && aOp <= 0x5Au); }
+                        void defer_and_branch(std::uint32_t aBlock)
+                        {
+                            // (the block's last instructions that have code (not constants, nor dead))
+                            auto const& all = f.blocks[aBlock].code;
+                            std::vector<value> code;
+                            for (auto c = all.size(); c-- > 0u && code.size() < 4u;)
+                                if (!f.values[all[c]].dead && !f.values[all[c]].constant())
+                                    code.insert(code.begin(), all[c]);
+                            if (code.size() < 4u)
+                                return;
+                            auto const branch = code[code.size() - 1u];
+                            auto const conjunction = code[code.size() - 2u];
+                            auto const& b = f.values[branch];
+                            auto const& c = f.values[conjunction];
+                            if (b.op != ssa::Branch || b.operands[0] != conjunction || c.op != 0x71u || c.dead || f.uses[conjunction] != 1u)
+                                return;
+                            auto const x = code[code.size() - 3u];
+                            auto const y = code[code.size() - 4u];
+                            if (x == y || !((c.operands[0] == x && c.operands[1] == y) || (c.operands[0] == y && c.operands[1] == x)))
+                                return;
+                            for (auto o : { x, y })
+                                if (f.values[o].dead || !integer_comparison(f.values[o].op) || f.uses[o] != 1u)
+                                    return;
+                            iDeferred[x] = iDeferred[y] = iDeferred[conjunction] = true;
+                        }
+                        void instruction(value v)
+                        {
+                            if (!iSavesAtCalls.empty() && is_call(f.values[v]) && !f.values[v].dead)
+                            {
+                                save_at_call(v);
+                                instruction_of(v);
+                                restore_at_call(v);
+                                return;
+                            }
+                            instruction_of(v);
+                        }
+                        void instruction_of(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const op = i.op;
+                            if (i.constant())
+                                return;     // (constants are where they are used)
+                            if (iDeferred[v])
+                                return;     // (see defer_and_branch)
+                            switch (op)
+                            {
+                            case ssa::Param:
+                                if (where(v).kind == location::Register)
+                                {
+                                    auto const type = i.type;
+                                    auto const disp = 16 + 8 * static_cast<std::int32_t>(i.imm0);
+                                    if (is_float_type(type))
+                                        a.movf_load(type == ssa::F64, where(v).reg, RBP, disp);
+                                    else
+                                        a.load(is_wide_type(type), where(v).reg, RBP, disp);
+                                }
+                                return;
+                            case ssa::CallResult:
+                                {
+                                    auto const disp = ContextResults + 8 * static_cast<std::int32_t>(i.imm0);
+                                    if (is_float_type(i.type))
+                                    {
+                                        auto const r = target(v, 0);
+                                        a.movf_load(i.type == ssa::F64, r, R15, disp);
+                                        defined(v, r);
+                                    }
+                                    else
+                                    {
+                                        auto const r = target(v, RAX);
+                                        a.load(is_wide_type(i.type), r, R15, disp);
+                                        defined(v, r);
+                                    }
+                                }
+                                return;
+                            case ssa::Jump:
+                                jump_to(f.blocks[iCurrentBlock].successors[0]);
+                                return;
+                            case ssa::Branch:
+                                branch(v);
+                                return;
+                            case ssa::Switch:
+                                switch_(v);
+                                return;
+                            case ssa::Return:
+                                return_(v);
+                                return;
+                            case ssa::Trap:
+                                a.jmp(iTrapLabels[TrapUnreachable]);
+                                return;
+                            case ssa::Deopt:
+                                iDeoptExits.emplace_back(v, a.new_label());
+                                a.jmp(iDeoptExits.back().second);
+                                return;
+                            case 0x10:
+                                call(v);
+                                return;
+                            case 0x11:
+                                call_indirect(v);
+                                return;
+                            case 0x1B:
+                                select(v);
+                                return;
+                            case 0x23:
+                                {
+                                    a.load(true, RCX, R15, ContextGlobals);
+                                    auto const disp = 8 * static_cast<std::int32_t>(i.imm0);
+                                    if (is_float_type(i.type))
+                                    {
+                                        auto const r = target(v, 0);
+                                        a.movf_load(i.type == ssa::F64, r, RCX, disp);
+                                        defined(v, r);
+                                    }
+                                    else
+                                    {
+                                        auto const r = target(v, RAX);
+                                        a.load(is_wide_type(i.type), r, RCX, disp);
+                                        defined(v, r);
+                                    }
+                                }
+                                return;
+                            case 0x24:
+                                {
+                                    auto const x = i.operands[0];
+                                    auto const type = f.values[x].type;
+                                    auto const disp = 8 * static_cast<std::int32_t>(i.imm0);
+                                    a.load(true, RCX, R15, ContextGlobals);
+                                    if (is_float_type(type))
+                                        a.movf_store(type == ssa::F64, RCX, disp, xmm(x, 0));
+                                    else
+                                        a.store(true, RCX, disp, gpr(x, RAX));
+                                }
+                                return;
+                            default:
+                                break;
+                            }
+                            if (i.load() || i.store())
+                            {
+                                memory(v);
+                                return;
+                            }
+                            numeric(v);
+                        }
+                        // --- control
+                        void branch(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const& successors = f.blocks[iCurrentBlock].successors;
+                            auto const whenTrue = successors[0];
+                            auto const whenFalse = successors[1];
+                            if (iDeferred[i.operands[0]])
+                            {
+                                // (the and of two comparisons: each one's branch to the false successor)
+                                auto const& conjunction = f.values[i.operands[0]];
+                                for (auto o : conjunction.operands)
+                                {
+                                    iDeferred[o] = false;
+                                    iForceFused = o;
+                                    instruction(o);
+                                    iForceFused = ssa::None;
+                                    if (iPending.compare != o)
+                                        throw std::logic_error("neos::jit: and of comparisons");
+                                    a.jcc(invert(iPending.cc), iBlockLabels[whenFalse]);
+                                    iPending = {};
+                                }
+                                if (whenTrue != iNext)
+                                    a.jmp(iBlockLabels[whenTrue]);
+                                return;
+                            }
+                            std::uint8_t cc = NE;
+                            bool floatEq = false;
+                            bool floatNe = false;
+                            if (iPending.compare == i.operands[0])
+                            {
+                                cc = iPending.cc;
+                                floatEq = iPending.floatEq;
+                                floatNe = iPending.floatNe;
+                                iPending = {};
+                            }
+                            else
+                            {
+                                auto const c = gpr(i.operands[0], RAX);
+                                a.test_rr(false, c, c);
+                            }
+                            // (successors have no phis (edges to blocks with phis are split))
+                            auto const t = iBlockLabels[whenTrue];
+                            auto const e = iBlockLabels[whenFalse];
+                            if (floatEq)
+                            {
+                                a.jcc(P, e);
+                                a.jcc(E, t);
+                                if (whenFalse != iNext)
+                                    a.jmp(e);
+                                return;
+                            }
+                            if (floatNe)
+                            {
+                                a.jcc(P, t);
+                                a.jcc(NE, t);
+                                if (whenFalse != iNext)
+                                    a.jmp(e);
+                                return;
+                            }
+                            if (whenTrue == iNext)
+                                a.jcc(invert(cc), e);
+                            else
+                            {
+                                a.jcc(cc, t);
+                                if (whenFalse != iNext)
+                                    a.jmp(e);
+                            }
+                        }
+                        void switch_(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const& successors = f.blocks[iCurrentBlock].successors;
+                            auto const index = gpr(i.operands[0], RAX);
+                            if (index != RAX)
+                                a.mov_rr(false, RAX, index);
+                            auto const targets = successors.size() - 1u;
+                            if (targets >= 8u)
+                            {
+                                // (a binary search of the targets' indices)
+                                switch_search(0u, targets, successors);
+                                return;
+                            }
+                            for (std::size_t t = 0u; t < targets; ++t)
+                            {
+                                a.alu_ri(7, false, RAX, static_cast<std::int32_t>(t));
+                                a.jcc(E, iBlockLabels[successors[t]]);
+                            }
+                            if (successors.back() != iNext)
+                                a.jmp(iBlockLabels[successors.back()]);
+                        }
+                        void switch_search(std::size_t aBegin, std::size_t aEnd, std::vector<std::uint32_t> const& aSuccessors)
+                        {
+                            if (aEnd - aBegin <= 4u)
+                            {
+                                for (auto t = aBegin; t < aEnd; ++t)
+                                {
+                                    a.alu_ri(7, false, RAX, static_cast<std::int32_t>(t));
+                                    a.jcc(E, iBlockLabels[aSuccessors[t]]);
+                                }
+                                a.jmp(iBlockLabels[aSuccessors.back()]);
+                                return;
+                            }
+                            auto const middle = (aBegin + aEnd) / 2u;
+                            auto const upper = a.new_label();
+                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(middle));
+                            a.jcc(AE, upper);
+                            switch_search(aBegin, middle, aSuccessors);
+                            a.bind(upper);
+                            switch_search(middle, aEnd, aSuccessors);
+                        }
+                        void return_(value v)
+                        {
+                            auto const& i = f.values[v];
+                            for (std::size_t r = i.operands.size(); r-- > 0u;)
+                            {
+                                auto const x = i.operands[r];
+                                auto const type = f.values[x].type;
+                                if (r == 0u)
+                                {
+                                    if (is_float_type(type))
+                                        a.movq_gx(type == ssa::F64, RAX, xmm(x, 0));
+                                    else
+                                        gpr_into(x, RAX);
+                                }
+                                else if (is_float_type(type))
+                                    a.movf_store(type == ssa::F64, R15, ContextResults + 8 * static_cast<std::int32_t>(r), xmm(x, 0));
+                                else
+                                    a.store(true, R15, ContextResults + 8 * static_cast<std::int32_t>(r), gpr(x, RCX));
+                            }
+                            a.jmp(iEpilogue);
+                        }
+                        // --- calls
+                        // (a value stored to the outgoing area, as an argument (a word))
+                        void argument(value aValue, std::int32_t aDisp)
+                        {
+                            auto const type = f.values[aValue].type;
+                            if (constant(aValue))
+                            {
+                                auto const b = bits(aValue);
+                                if (fits_i32(static_cast<std::int64_t>(b)))
+                                    a.store_imm(true, RSP, aDisp, static_cast<std::int32_t>(b));
+                                else
+                                {
+                                    a.mov_ri(RAX, b, true);
+                                    a.store(true, RSP, aDisp, RAX);
+                                }
+                                return;
+                            }
+                            if (is_float_type(type))
+                                a.movf_store(type == ssa::F64, RSP, aDisp, xmm(aValue, 0));
+                            else
+                                a.store(true, RSP, aDisp, gpr(aValue, RAX));
+                        }
+                        void result(value v)
+                        {
+                            auto const type = f.values[v].type;
+                            if (type == ssa::Void || f.values[v].dead)
+                                return;
+                            if (is_float_type(type))
+                            {
+                                auto const r = target(v, 0);
+                                a.movq_xg(type == ssa::F64, r, RAX);
+                                defined(v, r);
+                            }
+                            else
+                                defined(v, RAX);
+                        }
+                        void call(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const callee = static_cast<std::uint32_t>(i.imm0);
+                            if (callee == optimizer::intrinsics::guard_failed(iModule))
+                            {
+                                // (an inlined call's guard failed (aVersion, the site))
+                                native_call(reinterpret_cast<void const*>(&guard_failed), { ssa::None, ssa::None, i.operands[0] }, v, true, reinterpret_cast<std::uint64_t>(iVersion));
+                                return;
+                            }
+                            auto const& c = iModule.functions[callee];
+                            if (c.imported)
+                            {
+                                plugin_call(v, callee, c);
+                                return;
+                            }
+                            for (std::size_t p = 0u; p < i.operands.size(); ++p)
+                                argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
+                            iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(i.operands.size(), c.results->size())));
+                            a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&iTier.indirect[callee].target), true);
+                            a.op_rm({ 0xFFu }, false, 2, R11, 0);
+                            iCallSites.emplace_back(a.new_label(), i.origin);
+                            a.bind(iCallSites.back().first);
+                            result(v);
+                        }
+                        void call_indirect(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const type = static_cast<std::uint32_t>(i.imm0);
+                            auto const n = i.operands.size() - 1u;
+                            for (std::size_t p = 0u; p < n; ++p)
+                                argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
+                            auto const& results = *iModule.types[type].second;
+                            iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(n + 1u, results.size())));
+                            auto const index = gpr(i.operands[n], RAX);
+                            if (index != RAX)
+                                a.mov_rr(false, RAX, index);
+                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size()));
+                            a.jcc(AE, iTrapLabels[TrapIndirectCall]);
+                            a.shift_ri(4, true, RAX, 4u);
+                            a.mov_ri(R11, reinterpret_cast<std::uint64_t>(iTier.indirect.data()), true);
+                            a.alu_rr(0, true, R11, RAX);
+                            a.alu_mi(7, false, R11, 8, static_cast<std::int32_t>(type));
+                            a.jcc(NE, iTrapLabels[TrapIndirectCall]);
+                            a.load(true, R11, R11, 0);
+                            a.call_r(R11);
+                            iCallSites.emplace_back(a.new_label(), i.origin);
+                            a.bind(iCallSites.back().first);
+                            result(v);
+                        }
+                        // (a native function's call: its arguments (ssa::None: the context (the first), or aImmediate (the second)); its
+                        // result (of v's type) in rax or xmm0; the xmms that native code does not preserve (System V) saved around it)
+                        void native_call(void const* aFunction, std::vector<value> const& aArguments, value v, bool aWithContext, std::uint64_t aImmediate = 0u,
+                            bool aCanTrap = false)
+                        {
+                            for (std::size_t p = 0u; p < aArguments.size(); ++p)
+                            {
+                                auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
+                                if (aArguments[p] == ssa::None)
+                                {
+                                    if (p == 0u && aWithContext)
+                                        a.store(true, RSP, disp, R15);
+                                    else
+                                    {
+                                        a.mov_ri(RAX, aImmediate, true);
+                                        a.store(true, RSP, disp, RAX);
+                                    }
+                                }
+                                else
+                                    argument(aArguments[p], disp);
+                            }
+                            native_arguments(aArguments);
+                            iOutgoing = std::max(iOutgoing, ShadowSpace + 8 * static_cast<std::int32_t>(aArguments.size() + 1u));
+                            auto const saved = save_xmms(v);
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aFunction), true);
+                            a.call_r(RAX);
+                            restore_xmms(saved);
+                            if (aCanTrap)
+                            {
+                                a.alu_mi(7, false, R15, ContextTrap, 0);
+                                a.jcc(NE, iTrapFromContext);
+                            }
+                        }
+                        // (a native call's arguments (staged in the outgoing area, after its shadow space): to their registers, or (beyond those)
+                        // to the stack (Windows: after its shadow space; System V: from rsp), as the native calling convention has them (the
+                        // stack arguments that are moved there overwrite only staged arguments that are in registers by then))
+                        void native_arguments(std::vector<value> const& aArguments)
+                        {
+                            int intIndex = 0;
+                            int floatIndex = 0;
+                            std::int32_t stackIndex = 0;
+                            for (std::size_t p = 0u; p < aArguments.size(); ++p)
+                            {
+                                auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
+                                bool const isFloat = aArguments[p] != ssa::None && is_float_type(f.values[aArguments[p]].type);
+                                bool const inRegister = Windows ? p < std::size(NativeIntegerArguments) :
+                                    isFloat ? floatIndex < 8 : intIndex < static_cast<int>(std::size(NativeIntegerArguments));
+                                if (!inRegister)
+                                {
+                                    auto const slot = Windows ? disp - 8 * static_cast<std::int32_t>(std::size(NativeIntegerArguments)) : 8 * stackIndex++;
+                                    if (slot != disp)
+                                    {
+                                        a.load(true, RAX, RSP, disp);
+                                        a.store(true, RSP, slot, RAX);
+                                    }
+                                }
+                                else if (isFloat)
+                                {
+                                    int const x = Windows ? static_cast<int>(p) : floatIndex++;
+                                    a.movf_load(f.values[aArguments[p]].type == ssa::F64, x, RSP, disp);
+                                }
+                                else
+                                {
+                                    int const g = Windows ? NativeIntegerArguments[p] : NativeIntegerArguments[intIndex++];
+                                    a.load(true, g, RSP, disp);
+                                }
+                            }
+                        }
+                        // (System V: the values in xmm8-xmm15 that are live across the call (native code does not preserve them))
+                        std::vector<int> save_xmms(value v)
+                        {
+                            std::vector<int> saved;
+                            if (Windows)
+                                return saved;
+                            if (auto const live = iLiveXmmsAtCalls.find(iPosition[v]); live != iLiveXmmsAtCalls.end())
+                                for (int x = 8; x < 16; ++x)
+                                    if ((live->second & (1u << x)) != 0u)
+                                        saved.push_back(x);
+                            for (auto x : saved)
+                                a.movf_store(true, RBP, iXmmNativeSave[x], x);
+                            return saved;
+                        }
+                        void restore_xmms(std::vector<int> const& aSaved)
+                        {
+                            for (auto x : aSaved)
+                                a.movf_load(true, x, RBP, iXmmNativeSave[x]);
+                        }
+                        void plugin_call(value v, std::uint32_t aFunction, function_description const& aCallee)
+                        {
+                            auto const& i = f.values[v];
+                            auto const& p = *aCallee.plugin;
+                            // (its frames can be walked while it runs (see walk))
+                            a.store(true, R15, ContextExitFrame, RBP);
+                            a.store_imm(true, R15, ContextExitSite, static_cast<std::int32_t>(i.origin));
+                            native_call(p.function, i.operands, v, false);
+                            // (its result in rax (an integer) or xmm0: (it is stored for the error's helper))
+                            bool const floatResult = p.result == NEOS_RT_F32 || p.result == NEOS_RT_F64;
+                            if (floatResult)
+                                a.movf_store(p.result == NEOS_RT_F64, RSP, ShadowSpace, 0);
+                            else if (p.result != NEOS_RT_VOID)
+                                a.store(true, RSP, ShadowSpace, RAX);
+                            if (p.error != nullptr)
+                            {
+                                // (its error (if it may have one: its plugin's error pending flag)): the host's (a trap if it throws)
+                                auto const error = a.new_label();
+                                auto const resume = a.new_label();
+                                if (p.errorPending != nullptr && iModule.objects != nullptr)
+                                {
+                                    a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(p.errorPending), true);
+                                    a.alu_mi(7, sizeof(long) == 8u, RAX, 0, 0);
+                                    a.jcc(NE, error);
+                                }
+                                else
+                                    a.jmp(error);
+                                a.bind(resume);
+                                a.begin_cold();
+                                a.bind(error);
+                                auto const saved = save_xmms(v);
+                                a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(p.error), true);
+                                a.call_r(RAX);
+                                a.test_rr(true, RAX, RAX);
+                                auto const none = a.new_label();
+                                a.jcc(E, none);
+                                a.mov_rr(true, NativeIntegerArguments[3], RAX);
+                                a.mov_rr(true, NativeIntegerArguments[0], R15);
+                                a.mov_ri(NativeIntegerArguments[1], aFunction, false);
+                                a.lea(NativeIntegerArguments[2], RSP, ShadowSpace);
+                                a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&plugin_result), true);
+                                a.call_r(RAX);
+                                a.test_rr(false, RAX, RAX);
+                                a.jcc(NE, iTrapLabels[TrapHostException]);
+                                a.bind(none);
+                                restore_xmms(saved);
+                                a.jmp(resume);
+                                a.end_cold();
+                            }
+                            if (i.type == ssa::Void || i.dead)
+                                return;
+                            if (is_float_type(i.type))
+                            {
+                                auto const r = target(v, 0);
+                                a.movf_load(i.type == ssa::F64, r, RSP, ShadowSpace);
+                                defined(v, r);
+                            }
+                            else
+                            {
+                                auto const r = target(v, RAX);
+                                a.load(is_wide_type(i.type), r, RSP, ShadowSpace);
+                                defined(v, r);
+                            }
+                        }
+                        // --- memory
+                        void memory(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const op = static_cast<std::uint8_t>(i.op);
+                            bool const store = i.store();
+                            struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
+                            static access const sAccesses[] =
+                            {
+                                { 4, I32, 0x8B, 0, false, -1 }, { 8, I64, 0x8B, 0, true, -1 }, { 4, F32, 0x10, 0, false, 0xF3 }, { 8, F64, 0x10, 0, false, 0xF2 },
+                                { 1, I32, 0x0F, 0xBE, false, -1 }, { 1, I32, 0x0F, 0xB6, false, -1 },
+                                { 2, I32, 0x0F, 0xBF, false, -1 }, { 2, I32, 0x0F, 0xB7, false, -1 },
+                                { 1, I64, 0x0F, 0xBE, true, -1 }, { 1, I64, 0x0F, 0xB6, false, -1 },
+                                { 2, I64, 0x0F, 0xBF, true, -1 }, { 2, I64, 0x0F, 0xB7, false, -1 },
+                                { 4, I64, 0x63, 0, true, -1 }, { 4, I64, 0x8B, 0, false, -1 },
+                                { 4, I32, 0x89, 0, false, -1 }, { 8, I64, 0x89, 0, true, -1 }, { 4, F32, 0x11, 0, false, 0xF3 }, { 8, F64, 0x11, 0, false, 0xF2 },
+                                { 1, I32, 0x88, 0, false, -1 }, { 2, I32, 0x89, 0, false, 0x66 },
+                                { 1, I64, 0x88, 0, false, -1 }, { 2, I64, 0x89, 0, false, 0x66 }, { 4, I64, 0x89, 0, false, -1 }
+                            };
+                            auto const& x = sAccesses[op - 0x28u];
+                            auto const memoryIndex = static_cast<std::uint32_t>(i.imm0 >> 32u);
+                            auto const disp = static_cast<std::int32_t>(i.imm1);
+                            // (the address: in a register (rdx if it is not in one); a constant address within a fixed memory: in the displacement)
+                            int base = -1;
+                            int index = -1;
+                            std::int32_t offset = disp;
+                            auto const address = i.operands[0];
+                            bool const fixed = memoryIndex != 0u && external_memory(memoryIndex).fixed;
+                            bool const within = fixed && constant(address) && bits(address) <= external_memory(memoryIndex).size &&
+                                bits(address) + static_cast<std::uint64_t>(disp) + x.width <= external_memory(memoryIndex).size;
+                            bool const unchecked = (i.flags & ssa::Unchecked) != 0u || within;
+                            if (within && fits_i32(static_cast<std::int64_t>(bits(address) + static_cast<std::uint64_t>(disp))))
+                            {
+                                // (within it: no check)
+                                offset = static_cast<std::int32_t>(bits(address) + static_cast<std::uint64_t>(disp));
+                                if (iMemoryBase >= 0 && memoryIndex == iMemoryBaseIndex)
+                                    base = iMemoryBase;
+                                else
+                                {
+                                    a.mov_ri(RCX, reinterpret_cast<std::uint64_t>(external_memory(memoryIndex).base), true);
+                                    base = RCX;
+                                }
+                            }
+                            else
+                            {
+                                index = gpr(address, RDX);
+                                if (memoryIndex == 0u)
+                                {
+                                    if (index != RDX)
+                                        a.mov_rr(false, RDX, index);    // (zero extend: a 32 bit address)
+                                    else
+                                        a.mov_rr(false, RDX, RDX);
+                                    index = RDX;
+                                    a.load(true, RCX, R15, ContextMemory);
+                                    a.lea(RAX, RDX, disp + static_cast<std::int32_t>(x.width));
+                                    a.alu_rm(7, true, RAX, RCX, MemorySize);
+                                    a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                    a.load(true, RCX, RCX, MemoryBase);
+                                    base = RCX;
+                                }
+                                else if (fixed)
+                                {
+                                    auto const& m = external_memory(memoryIndex);
+                                    if (!unchecked)
+                                    {
+                                        // (the address at most size - (disp + width))
+                                        auto const size = static_cast<std::uint64_t>(m.size);
+                                        auto const end = static_cast<std::uint64_t>(static_cast<std::uint32_t>(disp)) + x.width;
+                                        if (disp < 0 || size < end)
+                                            a.jmp(iTrapLabels[TrapOutOfBounds]);
+                                        else
+                                        {
+                                            auto const limit = size - end;
+                                            if (limit <= 0x7FFFFFFFull)
+                                                a.alu_ri(7, true, index, static_cast<std::int32_t>(limit));
+                                            else
+                                                a.alu_rip(7, true, index, a.constant(limit));
+                                            a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                        }
+                                    }
+                                    if (iMemoryBase >= 0 && memoryIndex == iMemoryBaseIndex)
+                                        base = iMemoryBase;
+                                    else
+                                    {
+                                        a.mov_ri(RCX, reinterpret_cast<std::uint64_t>(m.base), true);
+                                        base = RCX;
+                                    }
+                                }
+                                else
+                                {
+                                    a.mov_ri(RCX, reinterpret_cast<std::uint64_t>(&external_memory(memoryIndex)), true);
+                                    a.lea(RAX, index, disp + static_cast<std::int32_t>(x.width));
+                                    a.alu_rm(7, true, RAX, RCX, MemorySize);
+                                    a.jcc(A, iTrapLabels[TrapOutOfBounds]);
+                                    a.load(true, RCX, RCX, MemoryBase);
+                                    base = RCX;
+                                }
+                            }
+                            auto const access_at = [&](std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aPrefix, bool aByte)
+                            {
+                                if (index >= 0)
+                                    a.op_bi(aOpcode, aW, aReg, base, index, offset, aPrefix, aByte);
+                                else
+                                    a.op_rm(aOpcode, aW, aReg, base, offset, aPrefix);
+                            };
+                            if (store)
+                            {
+                                auto const value = i.operands[1];
+                                if (is_float_type(x.type))
+                                {
+                                    auto const r = xmm(value, 0);
+                                    access_at({ 0x0Fu, x.opcode0 }, false, r, x.prefix, false);
+                                    return;
+                                }
+                                int r = gpr(value, RAX);
+                                if (x.width == 1u && r >= 4 && r < 8)
+                                {
+                                    // (spl, bpl, sil and dil: through al)
+                                    a.mov_rr(false, RAX, r);
+                                    r = RAX;
+                                }
+                                access_at({ x.opcode0 }, x.w, r, x.prefix, false);
+                                return;
+                            }
+                            if (is_float_type(x.type))
+                            {
+                                auto const r = target(v, 0);
+                                access_at({ 0x0Fu, x.opcode0 }, false, r, x.prefix, false);
+                                defined(v, r);
+                                return;
+                            }
+                            auto const r = target(v, RAX);
+                            if (x.opcode1 != 0u)
+                                access_at({ x.opcode0, x.opcode1 }, x.w, r, x.prefix, false);
+                            else
+                                access_at({ x.opcode0 }, x.w, r, x.prefix, false);
+                            defined(v, r);
+                        }
+                        // --- select
+                        void select(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const x = i.operands[0];
+                            auto const y = i.operands[1];
+                            auto const c = gpr(i.operands[2], RCX);
+                            if (is_float_type(i.type))
+                            {
+                                bool const d = i.type == ssa::F64;
+                                auto const skip = a.new_label();
+                                xmm_into(x, 0);
+                                a.test_rr(false, c, c);
+                                a.jcc(NE, skip);
+                                xmm_into(y, 0);
+                                a.bind(skip);
+                                (void)d;
+                                defined(v, 0);
+                                return;
+                            }
+                            bool const w = is_wide_type(i.type);
+                            a.test_rr(false, c, c);
+                            gpr_into(x, RAX);   // (mov: the flags stay)
+                            auto const o = operand_of(y, R11, false);
+                            if (o.kind == operand::Register)
+                                a.cmov_rr(E, w, RAX, o.reg);
+                            else
+                                a.cmov_rm(E, w, RAX, RBP, o.disp);
+                            defined(v, RAX);
+                        }
+                        // --- numeric instructions
+                        void numeric(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const op = static_cast<std::uint8_t>(i.op);
+                            if (auto const* h = helper_of(op); h != nullptr && !rounding_inline(op))
+                            {
+                                bool const traps = helper_traps(op);
+                                std::vector<value> arguments = i.operands;
+                                // (truncations: the context after the value)
+                                if (traps)
+                                    arguments.push_back(ssa::None);
+                                helper_call(h, arguments, v, traps);
+                                return;
+                            }
+                            if (op == 0x45u || op == 0x50u)
+                            {
+                                // eqz
+                                auto const x = gpr(i.operands[0], RAX);
+                                a.test_rr(op == 0x50u, x, x);
+                                condition(v, E);
+                                return;
+                            }
+                            if ((op >= 0x46u && op <= 0x4Fu) || (op >= 0x51u && op <= 0x5Au))
+                            {
+                                static std::uint8_t const sCcs[] = { E, NE, L, B, G, A, LE, BE, GE, AE };
+                                static std::uint8_t const sSwapped[] = { E, NE, G, A, L, B, GE, AE, LE, BE };
+                                bool const w = op >= 0x51u;
+                                auto first = i.operands[0];
+                                auto second = i.operands[1];
+                                auto cc = sCcs[op - (w ? 0x51u : 0x46u)];
+                                if (constant(first) && !constant(second))
+                                {
+                                    // (a constant first: second, then the constant (the relation swapped))
+                                    std::swap(first, second);
+                                    cc = sSwapped[op - (w ? 0x51u : 0x46u)];
+                                }
+                                auto const x = gpr(first, RAX);
+                                if (w && constant(second) && !fits_i32(static_cast<std::int64_t>(bits(second))))
+                                    a.alu_rip(7, true, x, a.constant(bits(second)));    // (a 64 bit constant: from the constants (cmp x, [rip + c]))
+                                else
+                                    alu(7, w, x, operand_of(second, RCX));
+                                condition(v, cc);
+                                return;
+                            }
+                            if ((op >= 0x5Bu && op <= 0x60u) || (op >= 0x61u && op <= 0x66u))
+                            {
+                                bool const d = op >= 0x61u;
+                                int const relation = op - (d ? 0x61u : 0x5Bu);   // 0 eq, 1 ne, 2 lt, 3 gt, 4 le, 5 ge
+                                bool const swap = relation == 2 || relation == 4;
+                                auto const first = swap ? i.operands[1] : i.operands[0];
+                                auto const second = swap ? i.operands[0] : i.operands[1];
+                                auto const fx = xmm(first, 0);
+                                auto const sx = xmm(second, 1);
+                                a.ucomis(d, fx, sx);
+                                if (relation >= 2)
+                                    condition(v, relation <= 3 ? A : AE);
+                                else
+                                    float_equality(v, relation == 0);
+                                return;
+                            }
+                            bool const isInt32 = op >= 0x67u && op <= 0x78u;
+                            bool const isInt64 = op >= 0x79u && op <= 0x8Au;
+                            if (isInt32 || isInt64)
+                            {
+                                integer(v, op, isInt64);
+                                return;
+                            }
+                            if ((op >= 0x8Bu && op <= 0x98u) || (op >= 0x99u && op <= 0xA6u))
+                            {
+                                floating(v, op);
+                                return;
+                            }
+                            conversion(v, op);
+                        }
+                        // (a comparison's result: its condition (if the branch that follows uses it), else 0 or 1)
+                        void condition(value v, std::uint8_t aCc)
+                        {
+                            if (fused(v))
+                            {
+                                iPending = pending_condition{ v, aCc };
+                                return;
+                            }
+                            auto const r = target(v, RAX);
+                            a.setcc(aCc, r);
+                            a.movzx8(r, r);
+                            defined(v, r);
+                        }
+                        void float_equality(value v, bool aEqual)
+                        {
+                            if (fused(v))
+                            {
+                                iPending = pending_condition{ v, aEqual ? E : NE, aEqual, !aEqual };
+                                return;
+                            }
+                            auto const r = target(v, RAX);
+                            if (aEqual)
+                            {
+                                a.setcc(E, r);
+                                a.setcc(NP, RCX);
+                                a.alu_rr(4, false, r, RCX);
+                            }
+                            else
+                            {
+                                a.setcc(NE, r);
+                                a.setcc(P, RCX);
+                                a.alu_rr(1, false, r, RCX);
+                            }
+                            a.movzx8(r, r);
+                            defined(v, r);
+                        }
+                        void integer(value v, std::uint8_t aOp, bool aW)
+                        {
+                            auto const& i = f.values[v];
+                            auto const base = aW ? 0x7Cu : 0x6Au;
+                            if (aOp == (aW ? 0x79u : 0x67u) || aOp == (aW ? 0x7Au : 0x68u))
+                            {
+                                // clz / ctz: bsr / bsf (0: the width)
+                                bool const clz = aOp == (aW ? 0x79u : 0x67u);
+                                auto const x = gpr(i.operands[0], RAX);
+                                auto const r = target(v, RAX);
+                                auto const zero = a.new_label();
+                                auto const done = a.new_label();
+                                a.op_rr({ 0x0Fu, static_cast<std::uint8_t>(clz ? 0xBDu : 0xBCu) }, aW, RCX, x);
+                                a.jcc(E, zero);
+                                if (clz)
+                                    a.alu_ri(6, aW, RCX, aW ? 63 : 31);
+                                a.mov_rr(aW, r, RCX);
+                                a.jmp(done);
+                                a.bind(zero);
+                                a.mov_ri(r, aW ? 64u : 32u, false);
+                                a.bind(done);
+                                defined(v, r);
+                                return;
+                            }
+                            auto const k = aOp - base;     // (0 add, 1 sub, 2 mul, 3 div_s, 4 div_u, 5 rem_s, 6 rem_u, 7 and, 8 or, 9 xor, 10 shl, 11 shr_s, 12 shr_u, 13 rotl, 14 rotr)
+                            auto const x = i.operands[0];
+                            auto const y = i.operands[1];
+                            if (k >= 3u && k <= 6u)
+                            {
+                                divide(v, aW, k == 3u || k == 5u, k >= 5u);
+                                return;
+                            }
+                            if (k >= 10u)
+                            {
+                                static int const sDigits[] = { 4, 7, 5, 0, 1 };
+                                auto const digit = sDigits[k - 10u];
+                                auto const r = target(v, RAX);
+                                if (constant(y))
+                                {
+                                    gpr_into(x, r);
+                                    a.shift_ri(digit, aW, r, static_cast<std::uint8_t>(bits(y) & (aW ? 63u : 31u)));
+                                }
+                                else
+                                {
+                                    gpr_into(y, RCX);
+                                    gpr_into(x, r);
+                                    a.shift_cl(digit, aW, r);
+                                }
+                                defined(v, r);
+                                return;
+                            }
+                            bool const commutative = k == 0u || k == 2u || k == 7u || k == 8u || k == 9u;
+                            if (k == 7u && aW && constant(y) && bits(y) == 0xFFFFFFFFull)
+                            {
+                                // (x & 0xFFFFFFFF: its low 32 bits (zero extended))
+                                auto const r = target(v, RAX);
+                                if (in_register(x))
+                                    a.mov_rr(false, r, where(x).reg);
+                                else
+                                {
+                                    gpr_into(x, r);
+                                    a.mov_rr(false, r, r);
+                                }
+                                defined(v, r);
+                                return;
+                            }
+                            if (k == 0u && aW && constant(y) && fits_i32(static_cast<std::int64_t>(bits(y))) && in_register(x))
+                            {
+                                // (x + c: lea)
+                                auto const r = target(v, RAX);
+                                if (r != where(x).reg)
+                                {
+                                    a.lea(r, where(x).reg, static_cast<std::int32_t>(bits(y)));
+                                    defined(v, r);
+                                    return;
+                                }
+                            }
+                            int r = target(v, RAX);
+                            // (the result's register is y's: x in it would overwrite y)
+                            if (in_register(y) && where(y).reg == r && !(in_register(x) && where(x).reg == r))
+                            {
+                                if (commutative)
+                                {
+                                    auto const o = operand_of(x, RCX);
+                                    if (k == 2u)
+                                        mul(aW, r, o);
+                                    else
+                                        alu(k == 0u ? 0 : k == 7u ? 4 : k == 8u ? 1 : 6, aW, r, o);
+                                    defined(v, r);
+                                    return;
+                                }
+                                r = RAX;
+                            }
+                            gpr_into(x, r);
+                            auto const o = operand_of(y, RCX);
+                            if (k == 2u)
+                                mul(aW, r, o);
+                            else
+                                alu(k == 0u ? 0 : k == 1u ? 5 : k == 7u ? 4 : k == 8u ? 1 : 6, aW, r, o);
+                            defined(v, r);
+                        }
+                        void mul(bool aW, int aDst, operand const& aOperand)
+                        {
+                            switch (aOperand.kind)
+                            {
+                            case operand::Immediate: a.imul_rri(aW, aDst, aDst, aOperand.imm); break;
+                            case operand::Register: a.imul_rr(aW, aDst, aOperand.reg); break;
+                            default: a.imul_rm(aW, aDst, RBP, aOperand.disp); break;
+                            }
+                        }
+                        void divide(value v, bool aW, bool aSigned, bool aRemainder)
+                        {
+                            auto const& i = f.values[v];
+                            gpr_into(i.operands[1], RCX);
+                            gpr_into(i.operands[0], RAX);
+                            a.test_rr(aW, RCX, RCX);
+                            a.jcc(E, iTrapLabels[TrapDivideByZero]);
+                            auto const done = a.new_label();
+                            if (aSigned)
+                            {
+                                // (the minimum / -1: an overflow (its remainder: 0))
+                                auto const normal = a.new_label();
+                                a.alu_ri(7, aW, RCX, -1);
+                                a.jcc(NE, normal);
+                                if (aRemainder)
+                                {
+                                    a.alu_rr(6, false, RDX, RDX);
+                                    a.jmp(done);
+                                }
+                                else
+                                {
+                                    if (aW)
+                                    {
+                                        a.mov_ri(RDX, 0x8000000000000000ull, true);
+                                        a.alu_rr(7, true, RAX, RDX);
+                                    }
+                                    else
+                                        a.alu_ri(7, false, RAX, std::numeric_limits<std::int32_t>::min());
+                                    a.jcc(E, iTrapLabels[TrapIntegerOverflow]);
+                                }
+                                a.bind(normal);
+                                a.cqo(aW);
+                                a.f7(7, aW, RCX);
+                            }
+                            else
+                            {
+                                a.alu_rr(6, false, RDX, RDX);
+                                a.f7(6, aW, RCX);
+                            }
+                            a.bind(done);
+                            defined(v, aRemainder ? RDX : RAX);
+                        }
+                        void floating(value v, std::uint8_t aOp)
+                        {
+                            auto const& i = f.values[v];
+                            bool const d = aOp >= 0x99u;
+                            auto const k = aOp - (d ? 0x99u : 0x8Bu);  // (0 abs, 1 neg, 2 ceil, 3 floor, 4 trunc, 5 nearest, 6 sqrt, 7 add, 8 sub, 9 mul, 10 div, 11 min, 12 max, 13 copysign)
+                            int const prefix = d ? 0xF2 : 0xF3;
+                            auto r = target(v, 0);
+                            if (k >= 7u && k <= 10u)
+                            {
+                                static std::uint8_t const sOps[] = { 0x58, 0x5C, 0x59, 0x5E };
+                                auto const y = i.operands[1];
+                                if (in_register(y) && where(y).reg == r && !(in_register(i.operands[0]) && where(i.operands[0]).reg == r))
+                                    r = 0;
+                                xmm_into(i.operands[0], r);
+                                auto const yx = xmm(y, 1);
+                                a.sse_rr(prefix, sOps[k - 7u], false, r, yx);
+                                defined(v, r);
+                                return;
+                            }
+                            if (k == 0u || k == 1u)
+                            {
+                                std::uint64_t const sign = d ? 0x8000000000000000ull : 0x80000000ull;
+                                xmm_into(i.operands[0], r);
+                                a.sse_rip(prefix, 0x10, 1, a.constant(k == 0u ? (d ? ~sign : (~sign & 0xFFFFFFFFull)) : sign));
+                                a.sse_rr(d ? 0x66 : -1, k == 0u ? 0x54 : 0x57, false, r, 1);
+                                defined(v, r);
+                                return;
+                            }
+                            if (k == 6u)
+                            {
+                                auto const x = xmm(i.operands[0], 1);
+                                a.sse_rr(prefix, 0x51, false, r, x);
+                                defined(v, r);
+                                return;
+                            }
+                            if (k >= 2u && k <= 5u)
+                            {
+                                // (SSE 4.1: round (ceil 2, floor 1, trunc 3, nearest 0))
+                                static std::uint8_t const sModes[] = { 2, 1, 3, 0 };
+                                auto const x = xmm(i.operands[0], 1);
+                                a.round(d, r, x, sModes[k - 2u]);
+                                defined(v, r);
+                                return;
+                            }
+                            throw unsupported{ "float instruction" };
+                        }
+                        void conversion(value v, std::uint8_t aOp)
+                        {
+                            auto const& i = f.values[v];
+                            auto const x = i.operands[0];
+                            switch (aOp)
+                            {
+                            case 0xA7: // i32.wrap_i64
+                            case 0xAD: // i64.extend_i32_u
+                                {
+                                    auto const r = target(v, RAX);
+                                    auto const g = gpr(x, r);
+                                    a.mov_rr(false, r, g);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xAC: // i64.extend_i32_s
+                                {
+                                    auto const r = target(v, RAX);
+                                    auto const g = gpr(x, r);
+                                    a.movsxd(r, g);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xC0:
+                            case 0xC1:
+                                {
+                                    auto const r = target(v, RAX);
+                                    auto const g = gpr(x, RAX);
+                                    if (g != RAX)
+                                        a.mov_rr(false, RAX, g);
+                                    if (aOp == 0xC0)
+                                        a.movsx8(r, RAX);
+                                    else
+                                        a.movsx16(r, RAX);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xAA: // i32.trunc_f64_s
+                            case 0xB0: // i64.trunc_f64_s
+                                {
+                                    bool const wide = aOp == 0xB0;
+                                    auto const xr = xmm(x, 0);
+                                    auto const r = target(v, RAX);
+                                    a.sse_rr(0xF2, 0x2C, wide, RCX, xr);
+                                    auto const done = a.new_label();
+                                    if (wide)
+                                    {
+                                        a.mov_ri(RDX, 0x8000000000000000ull, true);
+                                        a.alu_rr(7, true, RCX, RDX);
+                                    }
+                                    else
+                                        a.alu_ri(7, false, RCX, std::numeric_limits<std::int32_t>::min());
+                                    a.jcc(NE, done);
+                                    a.xorpd(1, 1);
+                                    a.sse_rr(0xF2, 0x2A, wide, 1, RCX);
+                                    a.ucomis(true, xr, 1);
+                                    a.jcc(P, iTrapLabels[TrapInvalidConversion]);
+                                    a.jcc(NE, iTrapLabels[TrapIntegerOverflow]);
+                                    a.bind(done);
+                                    a.mov_rr(wide, r, RCX);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xB2: case 0xB3: case 0xB4: // f32.convert_i32_s/u, i64_s
+                            case 0xB7: case 0xB8: case 0xB9: // f64.convert_i32_s/u, i64_s
+                                {
+                                    bool const d = aOp >= 0xB7;
+                                    bool const wideSource = aOp == 0xB4 || aOp == 0xB9;
+                                    bool const isSigned = aOp == 0xB2 || aOp == 0xB4 || aOp == 0xB7 || aOp == 0xB9;
+                                    auto const g = gpr(x, RAX);
+                                    bool w = wideSource;
+                                    int source = g;
+                                    if (!wideSource && !isSigned)
+                                    {
+                                        a.mov_rr(false, RAX, g);
+                                        source = RAX;
+                                        w = true;
+                                    }
+                                    auto const r = target(v, 0);
+                                    a.xorpd(r, r);
+                                    a.sse_rr(d ? 0xF2 : 0xF3, 0x2A, w, r, source);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xB6: // f32.demote_f64
+                            case 0xBB: // f64.promote_f32
+                                {
+                                    auto const xr = xmm(x, 1);
+                                    auto const r = target(v, 0);
+                                    a.sse_rr(aOp == 0xB6 ? 0xF2 : 0xF3, 0x5A, false, r, xr);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xBC: // i32.reinterpret_f32
+                            case 0xBD: // i64.reinterpret_f64
+                                {
+                                    auto const r = target(v, RAX);
+                                    if (constant(x))
+                                        a.mov_ri(r, bits(x), aOp == 0xBD);
+                                    else if (where(x).kind == location::Slot)
+                                        a.load(aOp == 0xBD, r, RBP, where(x).disp);
+                                    else
+                                        a.movq_gx(aOp == 0xBD, r, where(x).reg);
+                                    defined(v, r);
+                                }
+                                return;
+                            case 0xBE: // f32.reinterpret_i32
+                            case 0xBF: // f64.reinterpret_i64
+                                {
+                                    auto const r = target(v, 0);
+                                    if (!constant(x) && where(x).kind == location::Slot)
+                                        a.movf_load(aOp == 0xBF, r, RBP, where(x).disp);
+                                    else
+                                        a.movq_xg(aOp == 0xBF, r, gpr(x, RAX));
+                                    defined(v, r);
+                                }
+                                return;
+                            default:
+                                throw unsupported{ "conversion" };
+                            }
+                        }
+                        void helper_call(void const* aFunction, std::vector<value> const& aArguments, value v, bool aCanTrap)
+                        {
+                            // (the context argument (ssa::None) is the last: as the helpers take it)
+                            for (std::size_t p = 0u; p < aArguments.size(); ++p)
+                            {
+                                auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
+                                if (aArguments[p] == ssa::None)
+                                    a.store(true, RSP, disp, R15);
+                                else
+                                    argument(aArguments[p], disp);
+                            }
+                            native_arguments(aArguments);
+                            iOutgoing = std::max(iOutgoing, ShadowSpace + 8 * static_cast<std::int32_t>(aArguments.size() + 1u));
+                            auto const saved = save_xmms(v);
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aFunction), true);
+                            a.call_r(RAX);
+                            restore_xmms(saved);
+                            if (aCanTrap)
+                            {
+                                a.alu_mi(7, false, R15, ContextTrap, 0);
+                                a.jcc(NE, iTrapFromContext);
+                            }
+                            auto const type = f.values[v].type;
+                            if (is_float_type(type))
+                                defined(v, 0);
+                            else
+                                defined(v, RAX);
+                        }
+                    private:
+                        assembler a;
+                        module_description const& iModule;
+                        compiled_module& iTier;
+                        compiled_module::tier_version const* iVersion;
+                        ssa::function& f;
+                        bool const iSse41;
+                        std::size_t iTrapLabels[TrapCount] = {};
+                        std::size_t iTrapFromContext = 0u;
+                        std::size_t iEpilogue = 0u;
+                        bytes iCode;
+                        int iMemoryBase = -1;
+                        std::uint32_t iMemoryBaseIndex = 0u;
+                        std::vector<std::uint32_t> iPosition;
+                        std::vector<std::uint32_t> iBlockStart;
+                        std::vector<std::uint32_t> iBlockEnd;
+                        std::vector<std::uint32_t> iCalls;
+                        std::vector<interval> iIntervals;
+                        std::vector<location> iLocations;
+                        std::vector<value> iSpills;
+                        bool iUsedCalleeGprs[16] = {};
+                        bool iUsedCalleeXmms[16] = {};
+                        std::vector<int> iPushed;
+                        std::int32_t iXmmSave[16] = {};
+                        std::int32_t iXmmNativeSave[16] = {};
+                        std::int32_t iFrameBelowPushed = 0;
+                        std::int32_t iOutgoing = 0;
+                        std::unordered_map<std::uint32_t, std::size_t> iBlockLabels;
+                        std::uint32_t iCurrentBlock = 0u;
+                        std::uint32_t iNext = 0u;
+                        value iNextInstruction = ssa::None;
+                        pending_condition iPending;
+                        std::vector<std::pair<value, std::size_t>> iDeoptExits;    ///< (the deopts, and their code's labels)
+                        std::vector<bool> iDeferred;                ///< (see defer_and_branch)
+                        std::unordered_map<std::uint32_t, std::vector<value>> iSavesAtCalls;   ///< (by the calls' positions: see saves_at_calls)
+                        std::unordered_map<value, std::int32_t> iCallSaveSlots;
+                        std::vector<bool> iHome;                                ///< (values that deopts read (from their homes))
+                        std::unordered_map<value, std::int32_t> iHomeSlots;     ///< (values in registers: their homes)
+                        value iForceFused = ssa::None;
+                        std::vector<std::pair<std::size_t, std::size_t>> iCallSites;
+                        std::unordered_map<std::uint32_t, std::uint32_t> iLiveXmmsAtCalls;
                     };
 
                     void* allocate_executable(bytes const& aCode, std::size_t& aSize)
@@ -4564,6 +7168,471 @@ namespace neos
 #else
                         ::munmap(aMemory, aSize);
 #endif
+                    }
+
+                    // --- the optimizing tier
+
+                    // (aCount bytes at an address, if they can be read (e.g. not a page of a region that is reserved but not committed))
+                    bool read_memory(void const* aAddress, void* aBuffer, std::size_t aCount)
+                    {
+#if defined(_WIN32)
+                        SIZE_T read = 0u;
+                        return ::ReadProcessMemory(::GetCurrentProcess(), aAddress, aBuffer, aCount, &read) && read == aCount;
+#else
+                        struct iovec local{ aBuffer, aCount };
+                        struct iovec remote{ const_cast<void*>(aAddress), aCount };
+                        return ::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(aCount);
+#endif
+                    }
+
+                    // (code that runs is changed: aCount bytes at aAddress)
+                    void patch_code(void* aAddress, void const* aBytes, std::size_t aCount)
+                    {
+#if defined(_WIN32)
+                        DWORD old;
+                        if (!::VirtualProtect(aAddress, aCount, PAGE_EXECUTE_READWRITE, &old))
+                            throw std::runtime_error("neos::jit: cannot patch code");
+                        std::memcpy(aAddress, aBytes, aCount);
+                        ::VirtualProtect(aAddress, aCount, old, &old);
+                        ::FlushInstructionCache(::GetCurrentProcess(), aAddress, aCount);
+#else
+                        auto const pageSize = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
+                        auto const first = reinterpret_cast<std::uintptr_t>(aAddress) & ~(pageSize - 1u);
+                        auto const last = (reinterpret_cast<std::uintptr_t>(aAddress) + aCount + pageSize - 1u) & ~(pageSize - 1u);
+                        // (the code that is patched is not running (this thread runs the tier's helper; generated code is not shared by 
+                        // threads that run at the same time))
+                        if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_READ | PROT_WRITE) != 0)
+                            throw std::runtime_error("neos::jit: cannot patch code");
+                        std::memcpy(aAddress, aBytes, aCount);
+                        if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_READ | PROT_EXEC) != 0)
+                            std::abort();
+#endif
+                    }
+
+                    constexpr std::int32_t NotAgain = std::numeric_limits<std::int32_t>::max();
+                    constexpr std::uint32_t MaxRecompiles = 16u;        ///< (then without speculation)
+                    constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
+                    constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
+
+                    optimizer::result run_optimizer(compiled_module& aModule, std::uint32_t aFunction, optimizer::options const& aOptions)
+                    {
+                        auto& m = aModule;
+                        auto const inlinable = [&](std::uint32_t aCallee) { return m.description.functions[aCallee].inlinable; };
+                        auto const memoryWord = [](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
+                        {
+                            auto const& x = external_memory(aMemory);
+                            if (!x.fixed || aWidth > 8u || aAddress > x.size || x.size - aAddress < aWidth)
+                                return {};
+                            std::uint64_t word = 0u;
+                            if (!read_memory(x.base + aAddress, &word, aWidth))
+                                return {};
+                            return word;
+                        };
+                        return optimizer::optimize(m.description, aFunction, aOptions, inlinable, memoryWord);
+                    }
+
+                    // (an optimization's first part (its optimizer: here, as it reads the program's memory): its job (null: not optimized))
+                    std::shared_ptr<compiled_module::tier_job> prepare_optimization(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        auto& m = aModule;
+                        auto const f = aFunction;
+                        auto job = std::make_shared<compiled_module::tier_job>();
+                        job->module = &m;
+                        job->function = f;
+                        job->start = std::chrono::steady_clock::now();
+                        auto& options = job->options;
+                        options.noInline = m.noInline[f];
+                        options.noDeopt = m.noDeopt[f];
+                        options.speculation = m.speculation && m.recompiles[f] < MaxRecompiles;
+                        options.inlining = m.inlining;
+                        // (deopts: where the baseline's code has a frame to leave for (else none))
+                        // (a function optimized again more than twice (its deopts were taken): without deopts (its slow paths call))
+                        options.deopt = m.backend && m.deopt && m.deoptFrames.size() > f && m.deoptFrames[f].valid;
+                        auto const deopts_valid = [&](optimizer::result const& aResult)
+                        {
+                            for (auto const& x : aResult.deopts)
+                            {
+                                auto const point = m.deoptPoints.find(x.call);
+                                if (point == m.deoptPoints.end() || point->second.function != f || point->second.arguments != x.arguments ||
+                                    point->second.stack.size() != x.depth || m.deoptFrames[f].locals.size() != x.locals ||
+                                    std::size_t{ x.locals } + x.depth + x.arguments > MaxDeoptValues)
+                                    return false;
+                            }
+                            return true;
+                        };
+                        auto& r = job->result;
+                        r = run_optimizer(m, f, options);
+                        if (!r.deopts.empty() && !deopts_valid(r))
+                        {
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
+                            options.deopt = false;
+                            r = run_optimizer(m, f, options);
+                        }
+                        if (!r.deopts.empty())
+                        {
+                            // (the locals that the function's own code reads after each deopt's call: the others are not the deopt's)
+                            std::vector<std::size_t> positions;
+                            for (auto const& x : r.deopts)
+                                positions.push_back(x.call);
+                            auto live = optimizer::live_locals(m.description, f, positions);
+                            for (std::size_t k = 0u; k < r.deopts.size(); ++k)
+                                r.deopts[k].live = std::move(live[k]);
+                        }
+                        // (code that the optimizer did not change: optimized only by the optimizing code generator (its registers))
+                        if (r.tokens.empty() || (r.inlined == 0u && r.folded == 0u && !m.backend))
+                        {
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: not optimized\n", f);
+                            return nullptr;
+                        }
+                        if (!r.chains.empty())
+                        {
+                            // (its inline chains: the module's (their indices in its origins); none if there are too many (the outermost
+                            // calls' positions instead: their frames only))
+                            auto const base = m.inlineChains.size();
+                            bool const room = base + r.chains.size() < optimizer::InlineChainToken;
+                            for (auto& o : r.origins)
+                                if ((o & optimizer::InlineChainToken) != 0u)
+                                {
+                                    auto const index = o & ~optimizer::InlineChainToken;
+                                    o = room ? (optimizer::InlineChainToken | (base + index)) : r.chains[index].back();
+                                }
+                            if (room)
+                                for (auto& c : r.chains)
+                                    m.inlineChains.push_back(std::move(c));
+                            r.chains.clear();
+                        }
+                        job->version = std::make_unique<compiled_module::tier_version>();
+                        job->version->function = f;
+                        job->version->sites = r.sites;
+                        job->version->deopts = r.deopts;
+                        job->version->deoptCounts.assign(r.deopts.size(), 0u);
+                        job->description = m.description;
+                        auto& d = job->description;
+                        d.tokens = &r.tokens;
+                        d.functions[f].codeBegin = 0u;
+                        d.functions[f].codeEnd = r.tokens.size();
+                        d.functions[f].locals = &r.locals;
+                        job->phases[0] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - job->start).count());
+                        return job;
+                    }
+
+                    // (an optimization's second part (on any thread: it reads only what does not change): its code (by the optimizing code
+                    // generator; else none (it is made when it is installed)))
+                    void generate_optimization(compiled_module::tier_job& aJob)
+                    {
+                        if (!aJob.module->backend)
+                            return;
+                        auto& r = aJob.result;
+                        auto const f = aJob.function;
+                        auto const& d = aJob.description;
+                        try
+                        {
+                            auto const from = std::chrono::steady_clock::now();
+                            auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts);
+                            auto const built_at = std::chrono::steady_clock::now();
+                            ssa::optimize(function, d, [](std::uint32_t aMemory) -> std::uint64_t
+                            {
+                                if (aMemory == 0u || aMemory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(aMemory).fixed)
+                                    return 0u;
+                                return external_memory(aMemory).size;
+                            });
+                            auto const ssa_at = std::chrono::steady_clock::now();
+                            optimizing_generator generator{ d, *aJob.module, aJob.version.get(), function };
+                            generator.generate(aJob.callSites);
+                            auto const generated_at = std::chrono::steady_clock::now();
+                            auto const us = [](auto aFrom, auto aTo) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(aTo - aFrom).count()); };
+                            aJob.phases[1] = us(from, built_at);
+                            aJob.phases[2] = us(built_at, ssa_at) + us(ssa_at, generated_at);
+                            aJob.code = std::move(generator.code());
+                            aJob.optimizing = true;
+                        }
+                        catch (ssa::unsupported const& e)
+                        {
+                            aJob.why = e.what();
+                            aJob.callSites.clear();
+                        }
+                        catch (unsupported const& e)
+                        {
+                            aJob.why = e.what();
+                            aJob.callSites.clear();
+                        }
+                        catch (...)
+                        {
+                            aJob.why = "error";
+                            aJob.callSites.clear();
+                        }
+                    }
+
+                    // (an optimization's last part (here): its code installed (the function's calls go there))
+                    void const* install_optimization(compiled_module& aModule, compiled_module::tier_job& aJob)
+                    {
+                        auto& m = aModule;
+                        auto const f = aJob.function;
+                        auto& r = aJob.result;
+                        auto& d = aJob.description;
+                        auto& version = aJob.version;
+                        compiled_module::tier_chunk chunk;
+                        chunk.callSites = std::move(aJob.callSites);
+                        bytes code = std::move(aJob.code);
+                        std::size_t entry = 0u;
+                        bool const optimizing = aJob.optimizing;
+                        if (!optimizing)
+                        {
+                            if (m.verbose != 0u && m.backend)
+                                std::fprintf(stderr, "[tier2] f%u: baseline code generator (%s)\n", f, aJob.why.c_str());
+                            if (!r.deopts.empty())
+                            {
+                                // (the baseline's code generator has no deopts: optimized again without them)
+                                aJob.options.deopt = false;
+                                r = run_optimizer(m, f, aJob.options);
+                                if (r.tokens.empty())
+                                {
+                                    m.tierState[f] = 2u;
+                                    return nullptr;
+                                }
+                                version->sites = r.sites;
+                                version->deopts.clear();
+                                version->deoptCounts.clear();
+                                d.tokens = &r.tokens;
+                                d.functions[f].codeEnd = r.tokens.size();
+                                d.functions[f].locals = &r.locals;
+                            }
+                            chunk.callSites.clear();
+                            code_generator generator{ d };
+                            generator.generate_function(m, f, r.origins, version.get(), chunk.callSites);
+                            entry = generator.function_offset(f);
+                            code = std::move(generator.code());
+                        }
+                        chunk.code = allocate_executable(code, chunk.size);
+                        if (chunk.code == nullptr)
+                        {
+                            m.tierState[f] = 2u;
+                            return nullptr;
+                        }
+                        auto* const optimized = static_cast<std::uint8_t*>(chunk.code) + entry;
+                        m.chunks.push_back(std::move(chunk));
+                        // (calls of it go there: its indirect table entry and its entry (a jump: jmp [rip]; its address))
+                        auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
+                        std::memcpy(m.savedEntries[f].data(), baseline, m.savedEntries[f].size());
+                        std::uint8_t jump[14] = { 0xFFu, 0x25u, 0u, 0u, 0u, 0u };
+                        auto const target = reinterpret_cast<std::uint64_t>(optimized);
+                        std::memcpy(jump + 6, &target, sizeof(target));
+                        patch_code(baseline, jump, sizeof(jump));
+                        m.indirect[f].target = target;
+                        m.tierState[f] = 1u;
+                        m.currentVersion[f] = version.get();
+                        m.versions.push_back(std::move(version));
+                        for (std::size_t i = 0u; i < 3u; ++i)
+                            m.phaseMicroseconds[i] += aJob.phases[i];
+                        if (m.verbose != 0u)
+                        {
+                            auto const us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - aJob.start).count();
+                            m.compileMicroseconds += static_cast<std::uint64_t>(aJob.phases[0] + aJob.phases[1] + aJob.phases[2]);
+                            std::fprintf(stderr, "[tier2] f%u%s: %zu inlined, %zu folded, %zu guards; %zu tokens (was %zu), %zu bytes; %lld us after (total %llu us compiling)\n", f, optimizing ? " (ssa)" : "", r.inlined, r.folded, r.guards,
+                                r.tokens.size(), m.description.functions[f].codeEnd - m.description.functions[f].codeBegin, code.size(), static_cast<long long>(us),
+                                static_cast<unsigned long long>(m.compileMicroseconds));
+                            std::fprintf(stderr, "[tier2] phases (total): optimizer %llu, ssa build %llu, ssa optimize+generate %llu us\n",
+                                (unsigned long long)m.phaseMicroseconds[0], (unsigned long long)m.phaseMicroseconds[1], (unsigned long long)m.phaseMicroseconds[2]);
+                        }
+                        return optimized;
+                    }
+
+                    // (the thread that makes optimized code (see compiled_module::background): jobs in the order they were made)
+                    class tier_worker
+                    {
+                    public:
+                        // (never destroyed: modules may be destroyed after static objects are (each waits for its own jobs))
+                        static tier_worker& instance()
+                        {
+                            static tier_worker* const sWorker = new tier_worker{};
+                            return *sWorker;
+                        }
+                    public:
+                        void add(std::shared_ptr<compiled_module::tier_job> aJob)
+                        {
+                            {
+                                std::lock_guard<std::mutex> lock{ iMutex };
+                                if (!iStarted)
+                                {
+                                    std::thread{ [this]() { run(); } }.detach();
+                                    iStarted = true;
+                                }
+                                iQueue.push_back(std::move(aJob));
+                            }
+                            iWork.notify_one();
+                        }
+                        // (a module is destroyed: its jobs are not made (it waits for the one being made))
+                        void closing(compiled_module& aModule)
+                        {
+                            std::unique_lock<std::mutex> lock{ iMutex };
+                            aModule.closing = true;
+                            iQueue.erase(std::remove_if(iQueue.begin(), iQueue.end(), [&](auto const& j) { return j->module == &aModule; }), iQueue.end());
+                            iIdle.wait(lock, [&]() { return aModule.jobsInFlight == 0u; });
+                        }
+                    private:
+                        void run()
+                        {
+                            for (;;)
+                            {
+                                std::shared_ptr<compiled_module::tier_job> job;
+                                {
+                                    std::unique_lock<std::mutex> lock{ iMutex };
+                                    iWork.wait(lock, [&]() { return !iQueue.empty(); });
+                                    job = std::move(iQueue.front());
+                                    iQueue.pop_front();
+                                    if (job->module->closing)
+                                        continue;
+                                    ++job->module->jobsInFlight;
+                                }
+                                generate_optimization(*job);
+                                {
+                                    std::lock_guard<std::mutex> lock{ iMutex };
+                                    --job->module->jobsInFlight;
+                                    job->done.store(true, std::memory_order_release);
+                                }
+                                iIdle.notify_all();
+                            }
+                        }
+                    private:
+                        std::mutex iMutex;
+                        std::condition_variable iWork;
+                        std::condition_variable iIdle;
+                        std::deque<std::shared_ptr<compiled_module::tier_job>> iQueue;
+                        bool iStarted = false;
+                    };
+
+                    constexpr std::int32_t PollCalls = 100;     ///< (calls before a function whose optimization is being made looks again)
+
+                    void const* optimize_function(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        auto& m = aModule;
+                        auto const f = aFunction;
+                        if (m.tierState[f] == 3u)
+                        {
+                            // (being made in the background: installed if it has been made)
+                            auto job = m.jobs[f];
+                            if (!job || !job->done.load(std::memory_order_acquire))
+                            {
+                                m.counters[f] = PollCalls;
+                                return nullptr;
+                            }
+                            m.jobs[f].reset();
+                            m.tierState[f] = 0u;
+                            return install_optimization(m, *job);
+                        }
+                        if (m.tierState[f] != 0u)
+                            return nullptr;
+                        auto job = prepare_optimization(m, f);
+                        if (!job)
+                        {
+                            m.tierState[f] = 2u;
+                            return nullptr;
+                        }
+                        if (m.background && m.backend)
+                        {
+                            m.tierState[f] = 3u;
+                            m.jobs[f] = job;
+                            tier_worker::instance().add(job);
+                            m.counters[f] = PollCalls;
+                            return nullptr;
+                        }
+                        generate_optimization(*job);
+                        return install_optimization(m, *job);
+                    }
+
+                    void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept
+                    {
+                        auto& m = *aContext->module;
+                        m.counters[aFunction] = NotAgain;   // (optimize_function sets it again if it is to look again)
+                        try
+                        {
+                            return optimize_function(m, aFunction);
+                        }
+                        catch (...)
+                        {
+                            m.tierState[aFunction] = 2u;
+                            return nullptr;
+                        }
+                    }
+
+                    void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept
+                    {
+                        auto& m = *aContext->module;
+                        auto const f = aVersion->function;
+                        try
+                        {
+                            // (an inlined call whose guards fail again is not inlined)
+                            if (aSite < aVersion->sites.size())
+                            {
+                                auto const call = aVersion->sites[aSite].call;
+                                if (++m.guardFailures[f][call] >= 2u)
+                                    m.noInline[f].insert(call);
+                            }
+                            if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
+                                return;
+                            // (the function's own code again (its optimized code may be running: it stays), until it is optimized again (with 
+                            // the values that the guards' words have then))
+                            auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
+                            patch_code(baseline, m.savedEntries[f].data(), m.savedEntries[f].size());
+                            m.indirect[f].target = reinterpret_cast<std::uint64_t>(baseline);
+                            m.tierState[f] = 0u;
+                            m.currentVersion[f] = nullptr;
+                            ++m.recompiles[f];
+                            m.counters[f] = RecompileCalls;
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: a guard failed (site %u)\n", f, aSite);
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+
+                    void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept
+                    {
+                        // (the optimized code left for the baseline's: a call that is left at again is not inlined; the function's own code
+                        // again (as guard_failed))
+                        auto& m = *aContext->module;
+                        auto const f = aVersion->function;
+                        try
+                        {
+                            // (a guard that failed (its speculation's value changed): the function is optimized again (with the value it has
+                            // then); else (the inlined code would have called (e.g. a property cache's miss)) not until it has left there often)
+                            if (aDeopt >= aVersion->deopts.size())
+                                return;
+                            auto const& d = aVersion->deopts[aDeopt];
+                            if (!d.guard)
+                            {
+                                ++aVersion->deoptCounts[aDeopt];
+                                if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
+                                    return;
+                            }
+                            // (the inlined code that left often (e.g. a cache's misses, an allocator's slow path) calls instead: optimized 
+                            // again; a guard that fails again: not inlined)
+                            if (!d.guard)
+                                m.noDeopt[f].insert(d.call);
+                            else if (++m.guardFailures[f][d.call] >= 2u)
+                                m.noInline[f].insert(d.call);
+                            // (and the version's other such deopts that it has left at (each of them: a deopt costs more than the call))
+                            for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
+                                if (!aVersion->deopts[k].guard && aVersion->deoptCounts[k] >= 1u)
+                                    m.noDeopt[f].insert(aVersion->deopts[k].call);
+                            if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
+                                return;
+                            auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
+                            patch_code(baseline, m.savedEntries[f].data(), m.savedEntries[f].size());
+                            m.indirect[f].target = reinterpret_cast<std::uint64_t>(baseline);
+                            m.tierState[f] = 0u;
+                            m.currentVersion[f] = nullptr;
+                            ++m.recompiles[f];
+                            m.counters[f] = RecompileCalls;
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "");
+                        }
+                        catch (...)
+                        {
+                        }
                     }
 
                     thread_local std::uint64_t tCoroutineStack = 0u;
@@ -4615,8 +7684,12 @@ namespace neos
 
                 compiled_module::~compiled_module()
                 {
+                    if (tiering && background)
+                        tier_worker::instance().closing(*this);
                     if (code != nullptr)
                         free_executable(code, codeSize);
+                    for (auto const& c : chunks)
+                        free_executable(c.code, c.size);
                 }
 
                 namespace
@@ -4690,6 +7763,36 @@ namespace neos
                         for (std::size_t f = 0u; f < result->description.functions.size(); ++f)
                             if (!result->description.functions[f].imported)
                                 result->indirect[f].type = result->description.functions[f].type;
+                        // (the optimizing tier (NEOS_TIER2: 0 off; NEOS_TIER2_CALLS: the calls before a function is optimized; 0 without:
+                        // NEOS_TIER2_SPECULATE speculation, NEOS_TIER2_INLINE inlining, NEOS_TIER2_SSA the optimizing code generator, 
+                        // NEOS_TIER2_DEOPT deoptimization, NEOS_TIER2_BACKGROUND compiling in the background; NEOS_TIER2_VERBOSE 1: what it does))
+                        {
+                            auto const setting = [](char const* aName) -> std::optional<long long>
+                            {
+                                if (auto const text = std::getenv(aName); text != nullptr && *text != '\0')
+                                    return std::strtoll(text, nullptr, 10);
+                                return {};
+                            };
+                            auto& m = *result;
+                            m.tiering = setting("NEOS_TIER2").value_or(1) != 0;
+                            m.speculation = setting("NEOS_TIER2_SPECULATE").value_or(1) != 0;
+                            m.inlining = setting("NEOS_TIER2_INLINE").value_or(1) != 0;
+                            m.backend = setting("NEOS_TIER2_SSA").value_or(1) != 0;
+                            m.deopt = setting("NEOS_TIER2_DEOPT").value_or(1) != 0;
+                            m.background = setting("NEOS_TIER2_BACKGROUND").value_or(1) != 0;
+                            m.verbose = static_cast<std::uint32_t>(setting("NEOS_TIER2_VERBOSE").value_or(0));
+                            auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
+                            auto const n = m.description.functions.size();
+                            m.counters.assign(n, calls);
+                            m.tierState.assign(n, 0u);
+                            m.recompiles.assign(n, 0u);
+                            m.noInline.resize(n);
+                            m.noDeopt.resize(n);
+                            m.guardFailures.resize(n);
+                            m.currentVersion.assign(n, nullptr);
+                            m.savedEntries.resize(n);
+                            m.jobs.resize(n);
+                        }
                         code_generator generator{ result->description };
                         generator.generate(*result);
 #if defined(NEOS_JIT_DUMP)
@@ -4751,6 +7854,10 @@ namespace neos
                     c.linearMemory = aModule.description.linearMemory;
                     c.module = &aModule;
                     c.objects = aModule.description.objects;
+                    thread_local std::unique_ptr<value[]> tDeoptBuffer;
+                    if (!tDeoptBuffer)
+                        tDeoptBuffer = std::make_unique<value[]>(MaxDeoptValues);
+                    c.deoptBuffer = tDeoptBuffer.get();
                     struct invoked
                     {
                         invocation* i;
@@ -4792,19 +7899,48 @@ namespace neos
                     auto token = static_cast<std::size_t>(c->exitSite);
                     for (std::size_t depth = 0u; depth < 1000000u; ++depth)
                     {
-                        if (!aVisit(token, frame))
+                        if (((token & optimizer::InlineChainToken) != 0u && (token & ~std::size_t{ 0xFFFFFFFFu }) == 0u) || (token >> 31u) == 0x1FFFFFFFFull)
+                        {
+                            // (a call within inlined calls (of functions with frames of their own): the frames of the code and of the 
+                            // calls that inlined it (innermost first: each the frame's address plus twice its depth in the inlined calls))
+                            auto const index = static_cast<std::size_t>(token & 0x7FFFFFFFu);
+                            if (index >= aModule.inlineChains.size())
+                                return;
+                            auto const& chain = aModule.inlineChains[index];
+                            for (std::size_t k = 0u; k < chain.size(); ++k)
+                                if (!aVisit(chain[k], frame + 2u * static_cast<std::uint64_t>(chain.size() - 1u - k)))
+                                    return;
+                        }
+                        else if (!aVisit(token, frame))
                             return;
                         if (frame == 0u || (frame & 7u) != 0u || frame >= limit)
                             return;
                         auto const caller = *reinterpret_cast<std::uint64_t const*>(frame);
                         auto const returnAddress = *reinterpret_cast<std::uint64_t const*>(frame + 8u);
-                        if (returnAddress < code || returnAddress - code >= aModule.codeSize)
-                            return;
-                        auto const offset = static_cast<std::size_t>(returnAddress - code);
-                        if (offset == aModule.trampolineReturn)
-                            return;
-                        auto const site = std::lower_bound(aModule.callSites.begin(), aModule.callSites.end(), std::make_pair(offset, std::size_t{}));
-                        if (site == aModule.callSites.end() || site->first != offset || caller <= frame)
+                        // (in the module's code, or in an optimized function's (a chunk))
+                        auto const* sites = &aModule.callSites;
+                        std::size_t offset = 0u;
+                        if (returnAddress >= code && returnAddress - code < aModule.codeSize)
+                        {
+                            offset = static_cast<std::size_t>(returnAddress - code);
+                            if (offset == aModule.trampolineReturn)
+                                return;
+                        }
+                        else
+                        {
+                            sites = nullptr;
+                            for (auto const& c : aModule.chunks)
+                                if (returnAddress >= reinterpret_cast<std::uint64_t>(c.code) && returnAddress - reinterpret_cast<std::uint64_t>(c.code) < c.size)
+                                {
+                                    sites = &c.callSites;
+                                    offset = static_cast<std::size_t>(returnAddress - reinterpret_cast<std::uint64_t>(c.code));
+                                    break;
+                                }
+                            if (sites == nullptr)
+                                return;
+                        }
+                        auto const site = std::lower_bound(sites->begin(), sites->end(), std::make_pair(offset, std::size_t{}));
+                        if (site == sites->end() || site->first != offset || caller <= frame)
                             return;
                         token = site->second;
                         frame = caller;

@@ -43,6 +43,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <span>
 #include <string_view>
 #include <vector>
 #include <neos/bytecode/bytecode.hpp>
@@ -886,7 +887,7 @@ namespace neos::compilers::javascript
 
             // --- declarations
 
-            void declarations(std::vector<node*> const& aItems, bool aTopLevel, bool aStrict, std::vector<node*> const* aParameters = nullptr)
+            void declarations(std::span<node* const> aItems, bool aTopLevel, bool aStrict, std::vector<node*> const* aParameters = nullptr)
             {
                 std::vector<lexical_name> lexical;
                 std::vector<node*> vars;

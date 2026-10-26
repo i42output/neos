@@ -41,8 +41,6 @@ namespace neos::javascript_runtime
 {
     namespace
     {
-        thread_local realm* tCurrent = nullptr;
-        thread_local realm* tCaller = nullptr;
 
         std::unordered_map<std::u16string, value>& symbol_registry()
         {
@@ -101,7 +99,8 @@ namespace neos::javascript_runtime
 
     realm& the_realm()
     {
-        return tCurrent != nullptr ? *tCurrent : *the_heap().mainRealm;
+        auto& h = the_heap();
+        return h.currentRealm != nullptr ? *h.currentRealm : *h.mainRealm;
     }
 
     void global_mirror_update(realm& aRealm, value aName)
@@ -136,38 +135,40 @@ namespace neos::javascript_runtime
         return the_heap().mainRealm != nullptr;
     }
 
-    realm_scope::realm_scope(realm* aRealm) : iPrevious{ tCurrent }, iPreviousCaller{ tCaller }
+    realm_scope::realm_scope(realm* aRealm) : iHeap{ the_heap() }, iPrevious{ iHeap.currentRealm }, iPreviousCaller{ iHeap.callerRealm }
     {
-        tCaller = &the_realm();
+        iHeap.callerRealm = &the_realm();
         if (aRealm != nullptr)
-            tCurrent = aRealm;
+            iHeap.currentRealm = aRealm;
     }
 
     realm_scope::~realm_scope()
     {
-        tCurrent = iPrevious;
-        tCaller = iPreviousCaller;
+        iHeap.currentRealm = iPrevious;
+        iHeap.callerRealm = iPreviousCaller;
     }
 
     void isolate_ending()
     {
-        tCurrent = nullptr;
-        tCaller = nullptr;
+        auto& h = the_heap();
+        h.currentRealm = nullptr;
+        h.callerRealm = nullptr;
     }
 
     realm* exchange_realm(realm* aRealm)
     {
-        return std::exchange(tCurrent, aRealm);
+        return std::exchange(the_heap().currentRealm, aRealm);
     }
 
     realm* exchange_caller_realm(realm* aRealm)
     {
-        return std::exchange(tCaller, aRealm);
+        return std::exchange(the_heap().callerRealm, aRealm);
     }
 
     realm& caller_realm()
     {
-        return tCaller != nullptr ? *tCaller : the_realm();
+        auto& h = the_heap();
+        return h.callerRealm != nullptr ? *h.callerRealm : the_realm();
     }
 
     realm* create_realm()

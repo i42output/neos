@@ -241,21 +241,23 @@ namespace neos::language::javascript
     {
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
         inline constexpr std::uint32_t HandleShift = 4u;            ///< (a cell's offset: its handle << HandleShift)
-        inline constexpr std::uint32_t ObjectProto = 24u;           ///< (value: an object's prototype)
-        inline constexpr std::uint32_t ObjectShape = 32u;           ///< (u64: its properties' shape (0: none: a dictionary))
-        inline constexpr std::uint32_t ObjectValues = 40u;          ///< (u64: a shape's: the offset of its properties' values (value))
-        inline constexpr std::uint32_t ObjectValueCount = 48u;      ///< (u64: their number)
-        inline constexpr std::uint32_t ObjectValueCapacity = 56u;   ///< (u64: the number that their storage has room for)
-        inline constexpr std::uint32_t ObjectEntries = 64u;         ///< (u64: a dictionary's: the offset of its properties (PropertySize each))
-        inline constexpr std::uint32_t ObjectEntryCount = 72u;      ///< (u64: their number)
-        inline constexpr std::uint32_t ObjectClass = 104u;          ///< (u8: its class (ClassArray ...))
-        inline constexpr std::uint32_t ObjectExtensible = 105u;     ///< (u8: it is extensible (checked by the runtime: see check_layout))
+        inline constexpr std::uint32_t ObjectProto = 16u;           ///< (value: an object's prototype)
+        inline constexpr std::uint32_t ObjectShape = 24u;           ///< (u64: its properties' shape (0: none: a dictionary))
+        inline constexpr std::uint32_t ObjectValues = 32u;          ///< (u64: a shape's: the offset of its properties' values (value))
+        inline constexpr std::uint32_t ObjectValueCount = 40u;      ///< (u32: their number)
+        inline constexpr std::uint32_t ObjectValueCapacity = 44u;   ///< (u32: the number that their storage has room for)
+        inline constexpr std::uint32_t ObjectDictionary = 48u;      ///< (u64: a dictionary's: the offset of its dictionary (0: none), whose
+                                                                    ///< first fields are:)
+        inline constexpr std::uint32_t DictionaryEntries = 0u;      ///< (u64: the offset of its properties (PropertySize each))
+        inline constexpr std::uint32_t DictionaryEntryCount = 8u;   ///< (u32: their number)
+        inline constexpr std::uint32_t ObjectClass = 10u;           ///< (u8: its class (ClassArray ...): in its cell's first word)
+        inline constexpr std::uint32_t ObjectExtensible = 11u;      ///< (u8: it is extensible (checked by the runtime: see check_layout))
         inline constexpr std::uint32_t ClassArray = 1u;             ///< (an array (exotic): its elements)
         inline constexpr std::uint32_t ClassHTMLDDA = 40u;          ///< (an object that [[IsHTMLDDA]] (ToBoolean: false))
-        inline constexpr std::uint32_t ArrayElements = 136u;        ///< (u64: the offset of an array's elements (value), then their number)
-        inline constexpr std::uint32_t ArrayLength = 160u;          ///< (u32: its length)
-        inline constexpr std::uint32_t ArraySparse = 165u;          ///< (u8: its elements are its properties' (not ArrayElements'))
-        inline constexpr std::uint32_t StringLength = 20u;          ///< (u32: a string's length (its code units))
+        inline constexpr std::uint32_t ArrayElements = 64u;         ///< (u64: the offset of an array's elements (value), then their number)
+        inline constexpr std::uint32_t ArrayLength = 80u;           ///< (u32: its length)
+        inline constexpr std::uint32_t ArraySparse = 85u;           ///< (u8: its elements are its properties' (not ArrayElements'))
+        inline constexpr std::uint32_t StringLength = 16u;          ///< (u32: a string's length (its code units))
         inline constexpr std::uint32_t StringChars = 24u;           ///< (u64: the offset of its code units (u16), if it is flat (else 0))
         inline constexpr std::uint32_t PropertySize = 32u;          ///< (a dictionary's property: its key, its value (an accessor's getter), its
                                                                     ///< setter, its attributes)
@@ -263,17 +265,21 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t PropertyData = 8u;
         inline constexpr std::uint32_t PropertySetter = 16u;
         inline constexpr std::uint32_t PropertyAttributes = 24u;    ///< (u8)
-        inline constexpr std::uint32_t EnvironmentParent = 24u;     ///< (value: an environment's parent)
-        inline constexpr std::uint32_t EnvironmentSlots = 32u;      ///< (u64: the offset of its slots (values))
-        inline constexpr std::uint32_t FunctionEnvironment = 216u;  ///< (value: a function's environment (its closure's))
+        inline constexpr std::uint32_t EnvironmentParent = 16u;     ///< (value: an environment's parent)
+        inline constexpr std::uint32_t EnvironmentSlots = 24u;      ///< (u64: the offset of its slots (values))
+        inline constexpr std::uint32_t FunctionEnvironment = 144u;  ///< (value: a function's environment (its closure's))
+        inline constexpr std::uint32_t FunctionDispatch = 152u;     ///< (u64: a function's dispatch key: a function of a program's that the
+                                                                    ///< dispatcher calls: its program's serial (32 bits, not 0) then its number
+                                                                    ///< (for the dispatcher: the low 32 bits); else all ones)
+        inline constexpr std::uint32_t ClassFunction = 2u;          ///< (a function (ObjectClass))
         inline constexpr std::uint32_t AttributeWritable = 0x01u;
         inline constexpr std::uint32_t AttributeAccessor = 0x08u;
         inline constexpr std::uint32_t AttributesDefault = 0x07u;      ///< (writable, enumerable and configurable)
         // (a program's property cache sites (a get or a set of a property; numbered by the compiler from 0): SiteEntries entries each 
         // (the most recently used first), in a table that the runtime makes for the program (property_sites), whose offset is in a 
         // global of the program's; an entry's fields are at these offsets in it)
-        inline constexpr std::uint32_t SiteEntries = 2u;
-        inline constexpr std::uint32_t SiteEntrySize = 80u;
+        inline constexpr std::uint32_t SiteEntries = 4u;
+        inline constexpr std::uint32_t SiteEntrySize = 88u;
         inline constexpr std::uint32_t SiteSize = SiteEntries * SiteEntrySize;
         inline constexpr std::uint32_t SiteKey = 0u;                ///< (value: the property's key)
         inline constexpr std::uint32_t SiteShape = 8u;              ///< (u64: the receiver's shape)
@@ -285,6 +291,34 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t SiteAdded = 56u;             ///< (u64: a set that adds the property: the receiver's shape after)
         inline constexpr std::uint32_t SiteFunction = 64u;          ///< (value: the property's value, a function of the program's ...)
         inline constexpr std::uint32_t SiteNumber = 72u;            ///< (i32: ... whose number (for the dispatcher) this is (else -1))
+        inline constexpr std::uint32_t SiteSlotSize = 76u;          ///< (u32: a new expression's (SiteConstruct): the size of the object's slot)
+        inline constexpr std::uint32_t SiteDispatch = 80u;          ///< (u64: the function's (SiteFunction's) dispatch key (see FunctionDispatch); else 0)
+        inline constexpr std::uint32_t SiteTemplate = SiteAdded;    ///< (u64: SiteConstruct: the region offset of the object's template (its first
+                                                                    ///< ObjectSize bytes: its new objects' are a copy of it, then their handle,
+                                                                    ///< prototype and values' offset))
+        inline constexpr std::uint32_t SiteClass = SiteDepth;       ///< (u8: SiteConstruct: the object's slot's size class (see AllocFreeLists))
+        // (an isolate's allocation state (see the runtime's allocation_state): its size classes' free lists (u64 each: the region offset of the
+        // first free slot (0: none); a free slot's first u64 is the next's), the bytes allocated (u64) and the bytes (u64) at which compiled
+        // code's allocations are the runtime's instead)
+        inline constexpr std::uint32_t AllocFreeLists = 0u;
+        inline constexpr std::uint32_t AllocBytes = 256u;
+        inline constexpr std::uint32_t AllocLimit = 264u;
+        inline constexpr std::uint32_t AllocMegamorphic = 272u;     ///< (u64: the region offset of the megamorphic cache: MegamorphicEntries entries
+                                                                    ///< (its shape (u64), key (value) and the property's position (u32)), by the
+                                                                    ///< hash of shape and key ((shape >> 4 ^ shape >> 16 ^ key) & (entries - 1)))
+        inline constexpr std::uint32_t AllocBump = 280u;            ///< (u64 each (by size class): the region offset of its run of free slots' next
+                                                                    ///< (0: none) (compiled code allocates it if it is within its run ...)
+        inline constexpr std::uint32_t AllocBumpLimit = 536u;       ///< (... whose end's region offset this is)
+        inline constexpr std::uint32_t MegamorphicEntries = 4096u;
+        inline constexpr std::uint32_t MegamorphicEntrySize = 32u;
+        inline constexpr std::uint32_t MegamorphicKey = 8u;
+        inline constexpr std::uint32_t MegamorphicPosition = 16u;
+        inline constexpr std::uint32_t MegamorphicWritable = 20u;   ///< (u32: not 0: the property is writable (a set can store it))
+        inline constexpr std::uint32_t CellHandle = 12u;            ///< (u32: a cell's handle)
+        inline constexpr std::uint32_t ObjectSize = 64u;            ///< (an ordinary object's size (its values' storage in its cell follows it))
+        inline constexpr std::uint32_t ArraySize = 88u;             ///< (an array's size (an array literal's elements' storage in its cell follows it))
+        inline constexpr std::uint32_t MaxLiteralElements = 16u;    ///< (an array literal's elements that its site's arrays have room for)
+        inline constexpr std::uint32_t MaxLiteralProperties = 32u;  ///< (an object literal's properties that its site's objects have room for)
         enum : std::uint8_t
         {
             SiteNone = 0u,
@@ -292,7 +326,15 @@ namespace neos::language::javascript
             SiteHolder = 2u,        ///< (a data property of a prototype (depth 1: the receiver's prototype))
             SiteString = 3u,        ///< (a data property of %String.prototype% (the receiver a string))
             SiteAdd = 4u,           ///< (a set that adds a data property to the receiver)
-            SiteSelf = 5u           ///< (a data property of the receiver itself (SitePrototype: the receiver; it has no shape))
+            SiteSelf = 5u,          ///< (a data property of the receiver itself (SitePrototype: the receiver; it has no shape))
+            SiteConstruct = 6u,     ///< (a new expression's constructor (SiteFunction): its objects are made by compiled code (see SiteTemplate);
+                                    ///< SiteShape: the constructor's properties' shape, SitePosition: its prototype property's position)
+            SiteArray = 7u,         ///< (an array literal's: its arrays are made by compiled code (SiteTemplate: an array's (ArraySize bytes), 
+                                    ///< SiteClass, SiteSlotSize; SitePrototype: their prototype)
+            SiteLiteral = 8u,       ///< (an object literal's (its properties data properties of identifier keys): its objects are made by compiled
+                                    ///< code (SiteTemplate, SiteClass, SiteSlotSize; SiteShape: their shape; SitePrototype: their prototype)
+            SiteMegamorphic = 9u    ///< (a named get's site (its first entry) whose receivers have had more shapes than its entries: its gets of 
+                                    ///< own data properties are found in the megamorphic cache (see AllocMegamorphic))
         };
     }
 }

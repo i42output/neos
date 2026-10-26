@@ -55,9 +55,9 @@ namespace neos::javascript_runtime
             std::optional<property_descriptor> string_property(value aKey)
             {
                 auto const index = array_index(aKey);
-                if (!index || *index >= string_length(internal))
+                if (!index || *index >= string_length(internal()))
                     return {};
-                return property_descriptor::data(make_string(str(internal)[*index]), AttributeEnumerable);
+                return property_descriptor::data(make_string(str(internal())[*index]), AttributeEnumerable);
             }
             std::optional<property_descriptor> get_own_property(value aKey) override
             {
@@ -96,7 +96,7 @@ namespace neos::javascript_runtime
             value_list own_property_keys() override
             {
                 value_list result;
-                auto const length = string_length(internal);
+                auto const length = string_length(internal());
                 for (std::uint32_t i = 0u; i < length; ++i)
                     result.push_back(index_key(i));
                 for (auto const k : ordinary_own_property_keys())
@@ -119,7 +119,7 @@ namespace neos::javascript_runtime
     value make_string_object(value aString, value aPrototype)
     {
         auto& o = the_heap().make<string_object>(aPrototype);
-        o.internal = aString;
+        o.internal() = aString;
         o.properties.add(the_names().length, number(string_length(aString)), Undefined, 0u);
         return value_of(o);
     }
@@ -131,7 +131,7 @@ namespace neos::javascript_runtime
             if (is_string(aThis))
                 return aThis;
             if (is_object(aThis) && obj(aThis).cls == object_class::String)
-                return obj(aThis).internal;
+                return obj(aThis).internal();
             throw_type_error(std::string{ "String.prototype." } + aMethod + " requires that 'this' be a String");
         }
 
@@ -143,7 +143,7 @@ namespace neos::javascript_runtime
             return to_string(aThis);
         }
 
-        region_u16string const& text_of(value aString)
+        std::u16string_view text_of(value aString)
         {
             return str(aString);
         }
@@ -341,7 +341,7 @@ namespace neos::javascript_runtime
 
         value string_to_well_formed(value aThis, arguments, value, function_object&)
         {
-            auto text = text_of(this_string(aThis, "toWellFormed"));
+            std::u16string text{ text_of(this_string(aThis, "toWellFormed")) };
             for (std::size_t i = 0u; i < text.size(); ++i)
             {
                 std::size_t units;
@@ -451,7 +451,7 @@ namespace neos::javascript_runtime
             }
             if (from >= to)
                 return the_names().empty;
-            return make_string(std::u16string_view{ text }.substr(static_cast<std::size_t>(from), static_cast<std::size_t>(to - from)));
+            return substring_of(s, static_cast<std::size_t>(from), static_cast<std::size_t>(to - from));
         }
 
         value string_starts_with(value aThis, arguments aArguments, value, function_object&)
@@ -480,7 +480,7 @@ namespace neos::javascript_runtime
             auto const finalEnd = clamp_index(intEnd, len);
             auto const from = std::min(finalStart, finalEnd);
             auto const to = std::max(finalStart, finalEnd);
-            return make_string(std::u16string_view{ text }.substr(static_cast<std::size_t>(from), static_cast<std::size_t>(to - from)));
+            return substring_of(s, static_cast<std::size_t>(from), static_cast<std::size_t>(to - from));
         }
 
         value string_substr(value aThis, arguments aArguments, value, function_object&)
@@ -499,7 +499,7 @@ namespace neos::javascript_runtime
             auto const intEnd = std::clamp(intStart + intLength, intStart, size);
             if (intEnd <= intStart)
                 return the_names().empty;
-            return make_string(std::u16string_view{ text }.substr(static_cast<std::size_t>(intStart), static_cast<std::size_t>(intEnd - intStart)));
+            return substring_of(s, static_cast<std::size_t>(intStart), static_cast<std::size_t>(intEnd - intStart));
         }
 
         value string_to_lower_case(value aThis, arguments, value, function_object&)
@@ -902,7 +902,7 @@ namespace neos::javascript_runtime
     {
         aRealm.stringPrototype = value_of(the_heap().make<string_object>(aRealm.objectPrototype));
         auto& p = obj(aRealm.stringPrototype);
-        p.internal = the_names().empty;
+        p.internal() = the_names().empty;
         p.properties.add(the_names().length, number(0.0), Undefined, 0u);
         auto const c = make_native("String", 1u, string_constructor, true);
         aRealm.string = c;

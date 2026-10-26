@@ -888,7 +888,7 @@ namespace neos::javascript_runtime
             {
                 auto const v = aArguments[0];
                 if (is_object(v) && obj(v).cls == object_class::Date)
-                    tv = as_number(obj(v).internal);
+                    tv = as_number(obj(v).internal());
                 else
                 {
                     auto const primitive = to_primitive(v);
@@ -908,7 +908,7 @@ namespace neos::javascript_runtime
                 tv = utc(finalDate);
             }
             auto const o = ordinary_create_from_constructor(aNewTarget, &realm::datePrototype, object_class::Date);
-            obj(o).internal = number(time_clip(tv));
+            obj(o).internal() = number(time_clip(tv));
             return o;
         }
 
@@ -943,13 +943,13 @@ namespace neos::javascript_runtime
 
         double this_time_value(value aThis)
         {
-            return as_number(this_date(aThis).internal);
+            return as_number(this_date(aThis).internal());
         }
 
         value set_time_value(object& aDate, double aTime)
         {
-            aDate.internal = number(aTime);
-            return aDate.internal;
+            aDate.internal() = number(aTime);
+            return aDate.internal();
         }
 
         enum date_field : std::uint32_t
@@ -1005,7 +1005,7 @@ namespace neos::javascript_runtime
         value date_set_time_fields(value aThis, arguments aArguments, value, function_object& aCallee)
         {
             auto& date = this_date(aThis);
-            auto t = as_number(date.internal);
+            auto t = as_number(date.internal());
             bool const isUtc = (aCallee.nativeId & FieldUtc) != 0u;
             auto const first = (aCallee.nativeId & ~FieldUtc) - FieldHours;     // (0 hours, 1 minutes, 2 seconds, 3 milliseconds)
             double fields[4] = {};
@@ -1035,7 +1035,7 @@ namespace neos::javascript_runtime
         value date_set_date_fields(value aThis, arguments aArguments, value, function_object& aCallee)
         {
             auto& date = this_date(aThis);
-            auto t = as_number(date.internal);
+            auto t = as_number(date.internal());
             bool const isUtc = (aCallee.nativeId & FieldUtc) != 0u;
             auto const first = aCallee.nativeId & ~FieldUtc;      // (0 year, 1 month, 2 date)
             double fields[3] = {};
@@ -1188,7 +1188,7 @@ namespace neos::javascript_runtime
         value date_set_year(value aThis, arguments aArguments, value, function_object&)
         {
             auto& date = this_date(aThis);
-            auto t = as_number(date.internal);
+            auto t = as_number(date.internal());
             auto const y = to_number(argument(aArguments, 0u));
             t = std::isnan(t) ? 0.0 : local_time(t);
             auto const yyyy = make_full_year(y);

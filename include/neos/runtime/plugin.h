@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 14
+#define NEOS_RUNTIME_PLUGIN_VERSION 15
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -126,6 +126,7 @@ struct neos_rt_object
 
 /* function flags */
 #define NEOS_RT_RESTRICTED 0x1u /* can change the host environment: not callable by scripts running in restricted mode */
+#define NEOS_RT_COMMON 0x2u     /* a call that optimized code makes (not a slow path that it may leave for the function's unoptimized code to make) */
 
 typedef void (*neos_rt_function_pointer)(void);
 
@@ -136,7 +137,7 @@ typedef struct neos_rt_function
     neos_rt_type result;
     unsigned parameterCount;
     neos_rt_type parameters[NEOS_RT_MAX_PARAMETERS];
-    unsigned flags;                                     /* NEOS_RT_RESTRICTED */
+    unsigned flags;                                     /* NEOS_RT_RESTRICTED, NEOS_RT_COMMON */
 } neos_rt_function;
 
 typedef struct neos_rt_plugin
@@ -297,6 +298,10 @@ typedef struct neos_rt_host
        is not checked further (an access of an address in it that the plugin has not made accessible (e.g. a reserved page that is not
        committed) faults) */
     void (*external_memory_at)(unsigned aIndex, void* aBase, unsigned long long aSize, unsigned aFlags);
+    /* (version 15) a global of the running program (as global's) whose value does not change again (the plugin does not change it, 
+       and the program's code does not set it): code optimized after this may use its value as a constant (e.g. the address of a 
+       table that the plugin made for the program) */
+    void (*fix_global)(unsigned aGlobal);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

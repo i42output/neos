@@ -485,6 +485,11 @@ namespace neos
                     return (aFunction.description->flags & NEOS_RT_RESTRICTED) != 0u;
                 }
 
+                bool common(function const& aFunction)
+                {
+                    return (aFunction.description->flags & NEOS_RT_COMMON) != 0u;
+                }
+
                 void const* c_function(function const& aFunction, std::vector<std::uint8_t>& aParameters, std::uint8_t& aResult, char const* (*&aError)())
                 {
                     auto const& d = *aFunction.description;

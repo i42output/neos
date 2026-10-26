@@ -109,9 +109,10 @@ namespace neos::javascript_runtime
 
         std::pair<value, property>* private_element_find(object& aObject, value aName)
         {
-            for (auto& e : aObject.privateElements)
-                if (e.first == aName)
-                    return &e;
+            if (auto* const extra = aObject.extra_if())
+                for (auto& e : extra->privateElements)
+                    if (e.first == aName)
+                        return &e;
             return nullptr;
         }
 
@@ -124,7 +125,7 @@ namespace neos::javascript_runtime
             p.key = aName;
             p.data = aValue;
             p.attributes = AttributeWritable;
-            o.privateElements.emplace_back(aName, p);
+            o.private_elements_of().emplace_back(aName, p);
         }
 
         void private_method_add(value aObject, private_method const& aMethod)
@@ -142,7 +143,7 @@ namespace neos::javascript_runtime
             }
             else
                 p.data = aMethod.method;
-            o.privateElements.emplace_back(aMethod.key, p);
+            o.private_elements_of().emplace_back(aMethod.key, p);
         }
 
         void define_field(value aReceiver, class_element const& aField)

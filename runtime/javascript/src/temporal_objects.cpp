@@ -1105,7 +1105,7 @@ namespace neos::javascript_runtime
         {
             if (!is_object(aThis) || obj(aThis).cls != object_class::Date)
                 throw_type_error("Date.prototype.toTemporalInstant called on an incompatible receiver");
-            auto const t = as_number(obj(aThis).internal);
+            auto const t = as_number(obj(aThis).internal());
             if (std::isnan(t))
                 throw_range_error("Invalid Date");
             auto const ns = i128{ static_cast<std::int64_t>(t) } * i128{ 1000000 };
