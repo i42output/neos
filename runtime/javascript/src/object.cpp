@@ -44,7 +44,7 @@ namespace neos::javascript_runtime
 
     namespace
     {
-        constexpr std::uint32_t MaxShapeKeys = 64u;         // (a table with more properties has no shape (e.g. an object used as a map))
+        constexpr std::uint32_t MaxShapeKeys = 128u;        // (a table with more properties has no shape (e.g. an object used as a map))
         constexpr std::size_t MaxShapes = 1u << 18;         // (then tables that add properties have none)
         constexpr std::size_t FewKeys = 8u;                 // (keys that are found by searching them; more are indexed)
 
@@ -83,6 +83,7 @@ namespace neos::javascript_runtime
             return nullptr;
         auto* const next = new shape{};
         ++shapes;
+        pin_interned(aKey);     // (an equal key later (e.g. of another run of the same code) is this one: its transition is found)
         next->parent = this;
         next->key = aKey;
         next->attributes = aAttributes;

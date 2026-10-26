@@ -479,7 +479,8 @@ namespace neos::compilers::javascript
                     { "%js.construct_number", { I64, I32 }, I32 },
                     { "%js.construct_this", { I64, I32 }, I64 },
                     { "%js.array_literal", { I32, I32 }, I64 },
-                    { "%js.object_literal", { I32, I32 }, I64 }
+                    { "%js.object_literal", { I32, I32 }, I64 },
+                    { "%js.array_push", { I64, I64, I64 }, I64 }
                 };
                 static_assert(std::size(stubs) == static_cast<std::size_t>(function_generator::stub::Count));
                 for (std::size_t i = 0u; i < std::size(stubs); ++i)
@@ -582,12 +583,26 @@ namespace neos::compilers::javascript
             }
             if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ConstructThis)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayLiteral)] ||
                 iStubsUsed[static_cast<std::size_t>(function_generator::stub::ObjectLiteral)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetNamed)] ||
-                iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetNamed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetComputed)])
+                iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetComputed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetNamed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetComputed)])
             {
                 // (the isolate's allocation state: the construct this stub's (its region offset))
                 call("javascript::allocation_state", {}, I64);
                 put_op(code, opcode::I32Const);
                 put_s64(code, static_cast<std::int32_t>(allocation_state_global()));
+                call("javascript::fixed_global", { I64, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
+            if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)])
+            {
+                // (%Array.prototype.push% and %Array.prototype%: the push stub compares callees and arrays' prototypes with them)
+                call("javascript::array_push_function", {}, I64);
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(array_push_global()));
+                call("javascript::fixed_global", { I64, I32 }, I64);
+                put_op(code, opcode::Drop);
+                call("javascript::array_prototype_value", {}, I64);
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(array_prototype_global()));
                 call("javascript::fixed_global", { I64, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
@@ -1364,6 +1379,69 @@ namespace neos::compilers::javascript
             end_control();
         }
         end_control();
+        if (aComputed)
+        {
+            // (a string key whose site's entries do not have it (e.g. o[k] of many keys): an own data property in the megamorphic cache
+            // (an entry of the receiver's shape and the key))
+            begin(control_kind::Block);
+            auto const miss = iControls.size() - 1u;
+            get(keyValue);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagString);
+            op(opcode::I64Ne);
+            get(object);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            cell_of(object);
+            tee(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            tee(word);
+            op(opcode::I64Eqz);
+            branch(miss, true);
+            // (the entry: ((shape >> 4) ^ (shape >> 16) ^ key) & (entries - 1))
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocMegamorphic);
+            get(word);
+            i64(4);
+            op(opcode::I64ShrU);
+            get(word);
+            i64(16);
+            op(opcode::I64ShrU);
+            op(opcode::I64Xor);
+            get(keyValue);
+            op(opcode::I64Xor);
+            i64(static_cast<std::int64_t>(layout::MegamorphicEntries - 1u));
+            op(opcode::I64And);
+            i64(static_cast<std::int64_t>(layout::MegamorphicEntrySize));
+            op(opcode::I64Mul);
+            op(opcode::I64Add);
+            tee(entry);
+            mem_load(opcode::I64LoadMem, 0u, alias::Site);
+            get(word);
+            op(opcode::I64Ne);
+            get(entry);
+            mem_load(opcode::I64LoadMem, layout::MegamorphicKey, alias::Site);
+            get(keyValue);
+            op(opcode::I64Ne);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(cell);
+            offset_load(layout::ObjectValues, alias::Values);
+            get(entry);
+            mem_load(opcode::I64LoadMem32U, layout::MegamorphicPosition, alias::Site);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            mem_load(opcode::I64LoadMem, 0u, alias::Slot);
+            branch(done, false);
+            end_control();
+        }
         get(object);
         get(keyValue);
         get(site);
@@ -1385,7 +1463,8 @@ namespace neos::compilers::javascript
 
     void function_generator::cached_set_stub()
     {
-        // (the set stub's code (its parameters: object, key, value, strict, site))
+        // (the set stub's code (its parameters: object, key, value, strict, site): Exception if it threw, else (its fast paths) undefined
+        // (its callers check it, and do not use it: code that inlines it then knows that its fast paths did not throw))
         std::uint32_t const object = 0u, keyValue = 1u, value = 2u, strict = 3u, site = 4u;
         auto const entry = temporary();
         auto const cell = temporary();
@@ -1460,7 +1539,7 @@ namespace neos::compilers::javascript
                 op(opcode::I64Add);
                 get(value);
                 mem_store(opcode::I64StoreMem, 0u, alias::Slot);
-                get(value);
+                undefined();    // (set: its callers check its result (not an exception), not use it)
                 branch(done, false);
             }
             end_control();
@@ -1488,7 +1567,7 @@ namespace neos::compilers::javascript
                     op(opcode::I64Add);
                     get(value);
                     mem_store(opcode::I64StoreMem, 0u, alias::Slot);
-                    get(value);
+                    undefined();
                     branch(done, false);
                 }
                 end_control();
@@ -1566,7 +1645,7 @@ namespace neos::compilers::javascript
                 get(entry);
                 site_load(opcode::I64LoadMem, layout::SiteAdded);
                 mem_store(opcode::I64StoreMem, layout::ObjectShape, alias::Shape);
-                get(value);
+                undefined();
                 branch(done, false);
             });
         }
@@ -1610,7 +1689,7 @@ namespace neos::compilers::javascript
             get(address);
             get(value);
             mem_store(opcode::I64StoreMem, 0u, alias::Element);
-            get(value);
+            undefined();    // (see the set stub)
             branch(done, false);
         }
         end_control();
@@ -2283,6 +2362,136 @@ namespace neos::compilers::javascript
         release(cell);
     }
 
+    void function_generator::array_push_stub()
+    {
+        // (the push stub's code (its parameters: callee, this, value): a.push(x): if the callee is the realm's %Array.prototype.push%, a
+        // plain array (dense, extensible, its length writable, its prototype %Array.prototype%) whose elements' storage has room, and the
+        // prototypes plain (as the runtime last found them (see remember_plain_arrays): of the same shapes, %Array.prototype% of no 
+        // elements): x its element, its new length the result; else the runtime's array_push_one (the callee called))
+        std::uint32_t const callee = 0u, thisValue = 1u, element = 2u;
+        auto const cell = temporary();
+        auto const size = temporary();
+        auto const prototype = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            get(callee);
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_push_global());
+            op(opcode::I64Ne);
+            get(thisValue);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            cell_of(thisValue);
+            tee(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+            i32(layout::ClassArray);
+            op(opcode::I32Ne);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
+            op(opcode::I32Ior);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectExtensible, alias::Header);
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ArrayLengthWritable, alias::Elements);
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_prototype_global());
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (its elements: as many as its length, fewer than their storage has room for)
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ArrayElements + 8u, alias::Elements);
+            tee(size);
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ArrayLength, alias::Elements);
+            op(opcode::I64Ne);
+            get(size);
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ArrayElements + 12u, alias::Elements);
+            op(opcode::I64GeU);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            // (the prototypes: as the runtime last found them plain)
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_prototype_global());
+            set(prototype);
+            cell_of(prototype);
+            tee(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays);
+            op(opcode::I64Ne);
+            get(prototype);
+            mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
+            op(opcode::I32Ior);
+            get(prototype);
+            mem_load(opcode::I32LoadMem, layout::ArrayElements + 8u, alias::Elements);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            tee(prototype);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 8u);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 16u);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (the element, then its number and length)
+            get(cell);
+            offset_load(layout::ArrayElements, alias::Elements);
+            get(size);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            get(element);
+            mem_store(opcode::I64StoreMem, 0u, alias::Element);
+            get(size);
+            i64(1);
+            op(opcode::I64Add);
+            set(size);
+            get(cell);
+            get(size);
+            mem_store(opcode::I64StoreMem32, layout::ArrayElements + 8u, alias::Elements);
+            get(cell);
+            get(size);
+            mem_store(opcode::I64StoreMem32, layout::ArrayLength, alias::Elements);
+            get(size);
+            op(opcode::F64UConvertI64);
+            op(opcode::I64ReinterpretF64);
+            branch(done, false);
+        }
+        end_control();
+        get(callee);
+        get(thisValue);
+        get(element);
+        runtime("array_push_one", { I64, I64, I64 }, I64);
+        end_control();
+        release(prototype);
+        release(size);
+        release(cell);
+    }
+
     void function_generator::array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss)
     {
         // (an array (not sparse) and a number that is an index (an integer in [0, 2^32 - 1)) below the number of its elements)
@@ -2377,6 +2586,10 @@ namespace neos::compilers::javascript
         case stub::ToBoolean:
             iParameterCount = 1u;
             to_boolean_stub();
+            break;
+        case stub::ArrayPush:
+            iParameterCount = 3u;
+            array_push_stub();
             break;
         case stub::ConstructThis:
             iParameterCount = 2u;
@@ -6195,6 +6408,24 @@ namespace neos::compilers::javascript
             release(callee);
             return;
         }
+        if (calleeNode->is(construct::Dot) && name_of(calleeNode->child(1u)) == "push" && arguments.size() == 1u &&
+            !arguments[0]->is(construct::Spread) && !tail_call(aNode))
+        {
+            // (a.push(x): the element pushed directly if the callee is the built-in and a a plain array (see the push stub); else the 
+            // callee is called)
+            expression(arguments[0]);
+            auto const element = temporary();
+            set(element);
+            get(callee);
+            get(thisValue);
+            get(element);
+            call_stub(stub::ArrayPush);
+            check();
+            release(element);
+            release(thisValue);
+            release(callee);
+            return;
+        }
         if (calleeNode->is(construct::Dot) && name_of(calleeNode->child(1u)) == "call" &&
             std::none_of(arguments.begin(), arguments.end(), [](node* a) { return a->is(construct::Spread); }))
         {
@@ -6948,6 +7179,8 @@ namespace neos::compilers::javascript
                 end_control();
                 end_control();
             }
+            else if (aNode->is(construct::Equal) || aNode->is(construct::NotEqual))
+                loose_equality(lhs, rhs, aNode->is(construct::NotEqual), sOperations.at(aNode->kind));
             else
             {
                 get(lhs);
@@ -6966,6 +7199,150 @@ namespace neos::compilers::javascript
         }
         release(rhs);
         release(lhs);
+    }
+
+    void function_generator::loose_equality(std::uint32_t aLhs, std::uint32_t aRhs, bool aNotEqual, std::string const& aRuntime)
+    {
+        // (IsLooselyEqual of values that are not both numbers -> a boolean value: the same value (bits); undefined and null; values of
+        // the same type (not strings: of different lengths, else the runtime's) that are different; undefined or null and a value that is
+        // not an object ([[IsHTMLDDA]]: the runtime's) are different; else the runtime's)
+        auto const result = [&](bool aEqual) { constant(aEqual != aNotEqual ? values::True : values::False); };
+        auto const tags = temporary();
+        get(aLhs);
+        get(aRhs);
+        op(opcode::I64Eq);
+        op(opcode::If);
+        iCode.push_back(0x7Eu);
+        iControls.push_back(control{ control_kind::Block });
+        result(true);
+        op(opcode::Else);
+        {
+            // (nullish: undefined or null)
+            get(aLhs);
+            i64(static_cast<std::int64_t>(~std::uint64_t{ 1u }));
+            op(opcode::I64And);
+            constant(values::Undefined);
+            op(opcode::I64Eq);
+            get(aRhs);
+            i64(static_cast<std::int64_t>(~std::uint64_t{ 1u }));
+            op(opcode::I64And);
+            constant(values::Undefined);
+            op(opcode::I64Eq);
+            op(opcode::I32And);
+            op(opcode::If);
+            iCode.push_back(0x7Eu);
+            iControls.push_back(control{ control_kind::Block });
+            result(true);
+            op(opcode::Else);
+            {
+                // (the same type: the left's tag if it is the right's)
+                get(aLhs);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                tee(tags);
+                get(aRhs);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                {
+                    // (bigints, and strings of the same length: the runtime's)
+                    get(tags);
+                    constant(values::TagString);
+                    op(opcode::I64Eq);
+                    op(opcode::If);
+                    iCode.push_back(0x7Fu);
+                    iControls.push_back(control{ control_kind::Block });
+                    get(aLhs);
+                    get(aRhs);
+                    string_lengths_differ();
+                    op(opcode::I32Eqz);
+                    op(opcode::Else);
+                    get(tags);
+                    constant(values::TagBigInt);
+                    op(opcode::I64Eq);
+                    end_control();
+                    op(opcode::If);
+                    iCode.push_back(0x7Eu);
+                    iControls.push_back(control{ control_kind::Block });
+                    get(aLhs);
+                    get(aRhs);
+                    slow_runtime(aRuntime, { I64, I64 }, I64);
+                    check();
+                    op(opcode::Else);
+                    result(false);
+                    end_control();
+                }
+                op(opcode::Else);
+                {
+                    // (undefined or null and a value that is not undefined, null or an object (an object: its class, HTMLDDA's the 
+                    // runtime's) -> different)
+                    get(aLhs);
+                    i64(static_cast<std::int64_t>(~std::uint64_t{ 1u }));
+                    op(opcode::I64And);
+                    constant(values::Undefined);
+                    op(opcode::I64Eq);
+                    get(aRhs);
+                    i64(static_cast<std::int64_t>(~std::uint64_t{ 1u }));
+                    op(opcode::I64And);
+                    constant(values::Undefined);
+                    op(opcode::I64Eq);
+                    op(opcode::I32Ior);
+                    op(opcode::If);
+                    iCode.push_back(0x7Eu);
+                    iControls.push_back(control{ control_kind::Block });
+                    {
+                        // (the other: an object of class HTMLDDA: the runtime's; else different)
+                        get(aRhs);
+                        get(aLhs);
+                        get(aLhs);
+                        i64(static_cast<std::int64_t>(~std::uint64_t{ 1u }));
+                        op(opcode::I64And);
+                        constant(values::Undefined);
+                        op(opcode::I64Eq);
+                        op(opcode::Select);     // (the right if the left is undefined or null, else the left)
+                        set(tags);
+                        get(tags);
+                        constant(0xFFFF000000000000ull);
+                        op(opcode::I64And);
+                        constant(values::TagObject);
+                        op(opcode::I64Eq);
+                        op(opcode::If);
+                        iCode.push_back(0x7Fu);
+                        iControls.push_back(control{ control_kind::Block });
+                        cell_of(tags);
+                        mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+                        i32(static_cast<std::int32_t>(layout::ClassHTMLDDA));
+                        op(opcode::I32Eq);
+                        op(opcode::Else);
+                        i32(0);
+                        end_control();
+                        op(opcode::If);
+                        iCode.push_back(0x7Eu);
+                        iControls.push_back(control{ control_kind::Block });
+                        get(aLhs);
+                        get(aRhs);
+                        slow_runtime(aRuntime, { I64, I64 }, I64);
+                        check();
+                        op(opcode::Else);
+                        result(false);
+                        end_control();
+                    }
+                    op(opcode::Else);
+                    get(aLhs);
+                    get(aRhs);
+                    slow_runtime(aRuntime, { I64, I64 }, I64);
+                    check();
+                    end_control();
+                }
+                end_control();
+            }
+            end_control();
+        }
+        end_control();
+        release(tags);
     }
 
     void function_generator::logical(node* aNode)

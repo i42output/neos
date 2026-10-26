@@ -393,6 +393,8 @@ namespace neos::javascript_runtime
         std::uint64_t megamorphic;          ///< (the region offset of the gets' cache of own data properties by shape and key (see megamorphic_entry))
         std::uint64_t bump[Classes];        ///< (each size class's run of free slots: the next's region offset (0: none) ...
         std::uint64_t bumpLimit[Classes];   ///< (... and the end's)
+        std::uint64_t plainArrays[3];       ///< (compiled code's push stub: %Array.prototype%'s shape, its prototype (%Object.prototype%) and that
+                                            ///< one's shape when they were last plain (see remember_plain_arrays); all ones: not known)
     };
     // (an entry of the megamorphic cache (MegamorphicEntries of them): an own data property's position in the objects of a shape (a key 
     // and shape whose entry it is: by their hash (see megamorphic_index)); shapes do not change, so an entry is never wrong)
@@ -744,6 +746,7 @@ namespace neos::javascript_runtime
     value ascii(char const* aText);                             ///< (an interned string)
     value intern(value aString);                                ///< (a string (that lives while it is referred to) as an interned string)
     value intern(std::u16string_view aText);                    ///< (an interned string that lives as long as the program (pinned))
+    void pin_interned(value aString);                           ///< (an interned string (that lives while it is referred to): pinned)
     value concat(value aLeft, value aRight);                    ///< (strings)
     std::u16string_view str(value aString);                     ///< (a string's code units (a rope is flattened))
     value substring_of(value aString, std::size_t aStart, std::size_t aLength);  ///< (its code units [aStart, aStart + aLength): a long one
@@ -1249,6 +1252,9 @@ namespace neos::javascript_runtime
     value make_array(std::size_t aLength = 0u);
     value make_array(value_list aElements);
     bool plain_array_prototypes();      ///< (%Array.prototype% and %Object.prototype% have no elements (an array's hole is undefined))
+    void remember_plain_arrays();       ///< (they are plain (plain_array_prototypes): compiled code's push stub is told how they are now (their
+                                        ///< shapes: a change of either (e.g. an element of Object.prototype's) is a shape's change, or Array.prototype's
+                                        ///< elements'))
     inline array_object* as_array(value aValue)
     {
         if (!is_object(aValue))
@@ -1456,6 +1462,7 @@ namespace neos::javascript_runtime
         value arrayProtoValues = Undefined;     ///< (%Array.prototype.values%)
         value charCodeAt = Undefined;           ///< (%String.prototype.charCodeAt% (compiled code compares callees with it))
         value functionCall = Undefined;         ///< (%Function.prototype.call% (compiled code compares callees with it))
+        value arrayPush = Undefined;            ///< (%Array.prototype.push% (compiled code compares callees with it))
         value typedArrayLength = Undefined;     ///< (%TypedArray.prototype%'s length getter (see api::get_length))
         value eval = Undefined;
         // well-known symbols

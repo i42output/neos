@@ -266,6 +266,7 @@ namespace neos::javascript_runtime
                 }
                 // (the allocation state (that compiled code uses): in the region)
                 iState = ::new (allocate(sizeof(allocation_state), true)) allocation_state{};
+                iState->plainArrays[0] = ~std::uint64_t{};
                 auto* const table = allocate(MegamorphicEntries * sizeof(megamorphic_entry), true);
                 std::memset(table, 0, MegamorphicEntries * sizeof(megamorphic_entry));
                 iState->megamorphic = static_cast<std::uint64_t>(static_cast<std::byte*>(table) - iBase);

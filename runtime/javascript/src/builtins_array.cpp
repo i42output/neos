@@ -643,6 +643,22 @@ namespace neos::javascript_runtime
         }
     }
 
+    void remember_plain_arrays()
+    {
+        auto const& r = the_realm();
+        auto& state = the_heap().the_allocation_state();
+        auto const* arrayShape = obj(r.arrayPrototype).properties.layout();
+        auto const* objectShape = obj(r.objectPrototype).properties.layout();
+        if (arrayShape == nullptr || objectShape == nullptr)
+        {
+            state.plainArrays[0] = ~std::uint64_t{};
+            return;
+        }
+        state.plainArrays[0] = reinterpret_cast<std::uintptr_t>(arrayShape);
+        state.plainArrays[1] = r.objectPrototype;
+        state.plainArrays[2] = reinterpret_cast<std::uintptr_t>(objectShape);
+    }
+
     bool plain_array_prototypes()
     {
         {
@@ -681,6 +697,7 @@ namespace neos::javascript_runtime
                 a->length + aArguments.size() < 0xFFFFFFFFull && a->proto == the_realm().arrayPrototype && plain_prototypes())
             {
                 // (a plain array: its elements)
+                remember_plain_arrays();
                 a->elements.insert(a->elements.end(), aArguments.begin(), aArguments.end());
                 a->length = static_cast<std::uint32_t>(a->elements.size());
                 return number(a->length);
@@ -1108,7 +1125,7 @@ namespace neos::javascript_runtime
         method(pr, "lastIndexOf", 1u, array_last_index_of);
         method(pr, "map", 1u, array_map);
         method(pr, "pop", 0u, array_pop);
-        method(pr, "push", 1u, array_push);
+        aRealm.arrayPush = method(pr, "push", 1u, array_push);
         method(pr, "reduce", 1u, array_reduce);
         method(pr, "reduceRight", 1u, array_reduce_right);
         method(pr, "reverse", 0u, array_reverse);

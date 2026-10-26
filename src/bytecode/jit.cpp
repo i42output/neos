@@ -291,6 +291,7 @@ namespace neos
                         bool inSlot = false;            ///< (else a constant or a local's value: in the code)
                         std::uint8_t type = 0u;
                         std::int32_t disp = 0;          ///< ([rbp + disp])
+                        std::int32_t local = -1;        ///< (a local's value (not yet read: the code reads the local when it needs it))
                     };
                     struct deopt_point
                     {
@@ -3445,7 +3446,7 @@ namespace neos
                                 d.point.function = iFunctionIndex;
                                 d.point.arguments = static_cast<std::uint32_t>(n);
                                 for (auto const& e : iStack)
-                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp });
+                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
                                 iDeoptPoints.push_back(std::move(d));
                             }
@@ -3459,6 +3460,9 @@ namespace neos
                             }
                             if (!callee.imported)
                             {
+                                // (System V: the callee may call native code, which does not preserve xmm8-xmm15: they are saved here, around
+                                // the call (as the pinned registers that native code does not preserve are))
+                                save_pinned_xmms();
                                 save_pinned_gprs();
                                 if (iTier != nullptr)
                                 {
@@ -3471,6 +3475,7 @@ namespace neos
                                 // (where it returns to: a frame making this call (see walk))
                                 iCallSites.emplace_back(a.new_label(), origin(aPosition));
                                 a.bind(iCallSites.back().first);
+                                restore_pinned_xmms();
                                 restore_pinned_gprs();
                                 for (std::size_t i = 0u; i < results.size(); ++i)
                                 {
@@ -3542,11 +3547,12 @@ namespace neos
                                 d.point.function = iFunctionIndex;
                                 d.point.arguments = static_cast<std::uint32_t>(n + 1u);
                                 for (auto const& e : iStack)
-                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp });
+                                    d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
                                 iDeoptPoints.push_back(std::move(d));
                             }
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(n + 1u, results.size())));
+                            save_pinned_xmms();     // (System V: see call)
                             save_pinned_gprs();
                             a.load(false, RAX, RSP, 8 * static_cast<std::int32_t>(n));
                             a.alu_ri(7, false, RAX, static_cast<std::int32_t>(iModule.functions.size()));
@@ -3561,6 +3567,7 @@ namespace neos
                             // (where it returns to: a frame making this call (see walk))
                             iCallSites.emplace_back(a.new_label(), origin(aPosition));
                             a.bind(iCallSites.back().first);
+                            restore_pinned_xmms();
                             restore_pinned_gprs();
                             for (std::size_t i = 0u; i < results.size(); ++i)
                             {
@@ -5815,10 +5822,29 @@ namespace neos
                             for (auto const& e : point.stack)
                             {
                                 auto const disp = 8 * static_cast<std::int32_t>(o++);
-                                if (!e.inSlot)
-                                    continue;
-                                a.load(true, RAX, RCX, disp);
-                                a.store(true, RBP, e.disp, RAX);
+                                if (e.inSlot)
+                                {
+                                    a.load(true, RAX, RCX, disp);
+                                    a.store(true, RBP, e.disp, RAX);
+                                }
+                                else if (e.local >= 0 && static_cast<std::size_t>(e.local) < frame.locals.size())
+                                {
+                                    // (a local's value that the code reads later (when the local is written, or the entry is used): the
+                                    // local has it (the optimized code's local may be another value by then, or none (no longer used)))
+                                    auto const& l = frame.locals[static_cast<std::size_t>(e.local)];
+                                    if (l.pinned)
+                                    {
+                                        if (is_float_type(l.type))
+                                            a.movf_load(l.type == ssa::F64, l.reg, RCX, disp);
+                                        else
+                                            a.load(is_wide_type(l.type), l.reg, RCX, disp);
+                                    }
+                                    else
+                                    {
+                                        a.load(true, RAX, RCX, disp);
+                                        a.store(true, RBP, l.disp, RAX);
+                                    }
+                                }
                             }
                             for (std::uint32_t arg = 0u; arg < point.arguments; ++arg)
                             {
@@ -6279,10 +6305,14 @@ namespace neos
                             for (std::size_t p = 0u; p < i.operands.size(); ++p)
                                 argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(i.operands.size(), c.results->size())));
+                            // (System V: the callee may call native code, which does not preserve xmm8-xmm15: those that hold values across
+                            // the call are saved around it)
+                            auto const saved = save_xmms(v);
                             a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&iTier.indirect[callee].target), true);
                             a.op_rm({ 0xFFu }, false, 2, R11, 0);
                             iCallSites.emplace_back(a.new_label(), i.origin);
                             a.bind(iCallSites.back().first);
+                            restore_xmms(saved);
                             result(v);
                         }
                         void call_indirect(value v)
@@ -6305,9 +6335,11 @@ namespace neos
                             a.alu_mi(7, false, R11, 8, static_cast<std::int32_t>(type));
                             a.jcc(NE, iTrapLabels[TrapIndirectCall]);
                             a.load(true, R11, R11, 0);
+                            auto const saved = save_xmms(v);    // (System V: see call)
                             a.call_r(R11);
                             iCallSites.emplace_back(a.new_label(), i.origin);
                             a.bind(iCallSites.back().first);
+                            restore_xmms(saved);
                             result(v);
                         }
                         // (a native function's call: its arguments (ssa::None: the context (the first), or aImmediate (the second)); its

@@ -273,17 +273,19 @@ namespace neos::javascript_runtime
     {
         if (is_number(aValue))
             return number_to_string(as_number(aValue));
-        auto const& n = the_names();
         switch (tag_of(aValue))
         {
         case TagString:
             return aValue;
         case TagSpecial:
+        {
+            auto const& n = the_names();
             if (aValue == Undefined)
                 return n.undefined;
             if (aValue == Null)
                 return n.null;
             return aValue == True ? n.true_ : n.false_;
+        }
         case TagSymbol:
             throw_type_error("Cannot convert a Symbol value to a string");
         case TagBigInt:

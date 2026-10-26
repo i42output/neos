@@ -256,6 +256,7 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ClassHTMLDDA = 40u;          ///< (an object that [[IsHTMLDDA]] (ToBoolean: false))
         inline constexpr std::uint32_t ArrayElements = 64u;         ///< (u64: the offset of an array's elements (value), then their number)
         inline constexpr std::uint32_t ArrayLength = 80u;           ///< (u32: its length)
+        inline constexpr std::uint32_t ArrayLengthWritable = 84u;   ///< (u8: its length is writable)
         inline constexpr std::uint32_t ArraySparse = 85u;           ///< (u8: its elements are its properties' (not ArrayElements'))
         inline constexpr std::uint32_t StringLength = 16u;          ///< (u32: a string's length (its code units))
         inline constexpr std::uint32_t StringChars = 24u;           ///< (u64: the offset of its code units (u16), if it is flat (else 0))
@@ -309,6 +310,9 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t AllocBump = 280u;            ///< (u64 each (by size class): the region offset of its run of free slots' next
                                                                     ///< (0: none) (compiled code allocates it if it is within its run ...)
         inline constexpr std::uint32_t AllocBumpLimit = 536u;       ///< (... whose end's region offset this is)
+        inline constexpr std::uint32_t AllocPlainArrays = 792u;     ///< (u64 each: %Array.prototype%'s shape, its prototype (%Object.prototype%) and
+                                                                    ///< that one's shape when they were last known to have no elements (all ones:
+                                                                    ///< not known): the push stub compares them with what they are)
         inline constexpr std::uint32_t MegamorphicEntries = 4096u;
         inline constexpr std::uint32_t MegamorphicEntrySize = 32u;
         inline constexpr std::uint32_t MegamorphicKey = 8u;

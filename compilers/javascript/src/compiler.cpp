@@ -1665,6 +1665,16 @@ namespace neos::compilers::javascript
         return global_index("%jscharcodeat", type::I64);
     }
 
+    std::uint32_t compiler::array_push_global()
+    {
+        return global_index("%jsarraypush", type::I64);
+    }
+
+    std::uint32_t compiler::array_prototype_global()
+    {
+        return global_index("%jsarrayproto", type::I64);
+    }
+
     std::uint32_t compiler::function_call_global()
     {
         iFunctionCallUsed = true;

@@ -366,6 +366,25 @@ namespace neos::javascript_runtime
         return aString;
     }
 
+    void pin_interned(value aString)
+    {
+        // (an interned string that lives while it is referred to: it lives as long as the program from now on (e.g. a shape's key: an
+        // equal key later is the same string (its transitions are found), not a new one))
+        if (!is_string(aString))
+            return;
+        auto& s = cell_of<string>(aString);
+        if (!s.interned || s.pinned)
+            return;
+        auto& table = interned();
+        auto const text = std::u16string_view{ s.text };
+        if (auto const w = table.weak.find(text); w != table.weak.end() && w->second == aString)
+        {
+            table.weak.erase(w);
+            table.pin(text, aString);
+            s.pinned = true;
+        }
+    }
+
     value ascii(char const* aText)
     {
         std::u16string text;

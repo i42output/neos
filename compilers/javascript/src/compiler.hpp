@@ -219,7 +219,7 @@ namespace neos::compilers::javascript
         // change a word of another; Any: any word (the default))
         enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, Count };
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
@@ -284,6 +284,7 @@ namespace neos::compilers::javascript
         void set_computed_stub();
         void get_length_stub();
         void char_code_at_stub();
+        void array_push_stub();
         void to_boolean_stub();
         void construct_this_stub();
         void array_literal_stub();
@@ -306,9 +307,10 @@ namespace neos::compilers::javascript
         void property_site_at(std::uint32_t aSite);
         void string_lengths_differ();
         void strict_equality(std::uint32_t aLhs, std::uint32_t aRhs);
+        void loose_equality(std::uint32_t aLhs, std::uint32_t aRhs, bool aNotEqual, std::string const& aRuntime);
         void dispatch_number(std::uint32_t aNumber);  ///< (a call of the program's function (see dispatch): its number, before its arguments)
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
-        static constexpr std::int64_t TailCallDepth = 256;  ///< (tail calls made as calls (nested) before they are made by the caller)
+        static constexpr std::int64_t TailCallDepth = 1024;  ///< (tail calls made as calls (nested) before they are made by the caller)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
         void check_void();          ///< (a call that returned Exception or Undefined (dropped))
         void function_index(function_info& aFunction, bool aBody = false);
@@ -564,6 +566,8 @@ namespace neos::compilers::javascript
         std::uint32_t property_sites_global();  ///< (the global (an i64) that holds the offset of the program's property cache sites)
         std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
         std::uint32_t function_call_global();   ///< (the global that holds %Function.prototype.call% (f.call(t, ...) calls f if the callee is it))
+        std::uint32_t array_push_global();      ///< (the global that holds %Array.prototype.push% (see function_generator::stub))
+        std::uint32_t array_prototype_global(); ///< (the global that holds %Array.prototype%)
         std::uint32_t allocation_state_global();    ///< (the global (an i64): the region offset of the isolate's allocation state)
         // (a function of the program's that calls the runtime's function (its index) with its arguments: slow paths call it rather than
         // the runtime's, so that an optimizing tier that inlines it can leave for the function's own code there (see the VM's deopt)

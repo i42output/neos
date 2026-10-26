@@ -140,6 +140,7 @@ namespace neos::javascript_runtime
                 offsetof(allocation_state, allocatedBytes) == jsl::AllocBytes &&
                 offsetof(allocation_state, compiledLimit) == jsl::AllocLimit && offsetof(allocation_state, megamorphic) == jsl::AllocMegamorphic &&
                 offsetof(allocation_state, bump) == jsl::AllocBump && offsetof(allocation_state, bumpLimit) == jsl::AllocBumpLimit &&
+                offsetof(allocation_state, plainArrays) == jsl::AllocPlainArrays &&
                 MegamorphicEntries == jsl::MegamorphicEntries && sizeof(megamorphic_entry) == jsl::MegamorphicEntrySize &&
                 offsetof(megamorphic_entry, key) == jsl::MegamorphicKey && offsetof(megamorphic_entry, position) == jsl::MegamorphicPosition &&
                 offsetof(megamorphic_entry, reserved) == jsl::MegamorphicWritable;
@@ -166,6 +167,7 @@ namespace neos::javascript_runtime
                 static_cast<std::uint32_t>(object_class::HTMLDDA) == jsl::ClassHTMLDDA &&
                 field(array, array.elements.offset_field()) == jsl::ArrayElements && field(array, &array.sparse) == jsl::ArraySparse &&
                 field(array, &array.length) == jsl::ArrayLength && sizeof(array.length) == 4u &&
+                field(array, &array.lengthWritable) == jsl::ArrayLengthWritable && sizeof(array.lengthWritable) == 1u &&
                 sizeof(array.sparse) == 1u && sizeof(array.cls) == 1u;
             if (!ok || !arrayOk)
                 std::fprintf(stderr, "JavaScript runtime: object prototype %zu, shape %zu, values %zu, dictionary %zu, class %zu, extensible %zu; array elements %zu, length %zu, sparse %zu\n",
@@ -874,8 +876,32 @@ namespace neos::javascript_runtime
             }
         }
 
+        namespace
+        {
+            // (a built-in (native) function of the realm that is running: called directly (its realm need not be made the running one))
+            function_object* direct_native(value aCallee)
+            {
+                if (!is_object(aCallee))
+                    return nullptr;
+                auto& o = obj(aCallee);
+                if (o.cls != object_class::Function)
+                    return nullptr;
+                auto& f = static_cast<function_object&>(o);
+                if (f.kind != function_kind::Native || f.functionRealm != &the_realm())
+                    return nullptr;
+                return &f;
+            }
+        }
+
         value call(value aCallee, value aThis, std::int32_t aCount, value a0, value a1, value a2, value a3)
         {
+            if (aCount <= 4)
+                if (auto* const f = direct_native(aCallee))
+                    return guard([&]() -> value
+                    {
+                        value const registers[] = { a0, a1, a2, a3 };
+                        return f->native(aThis, arguments{ registers, static_cast<std::size_t>(std::max(aCount, 0)) }, Undefined, *f);
+                    });
             return guard([&]() -> value
             {
                 if (aCount <= 4)
@@ -1022,6 +1048,28 @@ namespace neos::javascript_runtime
         {
             // (the realm's %String.prototype.charCodeAt%: compiled code's s.charCodeAt(i) is the built-in's if the callee is it)
             return the_realm().charCodeAt;
+        }
+
+        value array_push_function()
+        {
+            // (the realm's %Array.prototype.push%: compiled code's a.push(x) is its own if the callee is it (see the push stub))
+            return the_realm().arrayPush;
+        }
+
+        value array_prototype_value()
+        {
+            // (the realm's %Array.prototype% (the push stub's arrays' prototype))
+            return the_realm().arrayPrototype;
+        }
+
+        value array_push_one(value aCallee, value aThis, value aValue)
+        {
+            // (a.push(x) that the push stub does not do itself: the callee called)
+            return guard([&]() -> value
+            {
+                value const argument[] = { aValue };
+                return javascript_runtime::call(aCallee, aThis, argument);
+            });
         }
 
         value function_call_function()
@@ -2478,6 +2526,9 @@ namespace neos::javascript_runtime
             { "char_code_at", NEOS_RT_FUNCTION(char_code_at), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_tail", NEOS_RT_FUNCTION(char_code_at_tail), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_function", NEOS_RT_FUNCTION(char_code_at_function), I64, 0u, {}, 0u },
+            { "array_push_function", NEOS_RT_FUNCTION(array_push_function), I64, 0u, {}, 0u },
+            { "array_prototype_value", NEOS_RT_FUNCTION(array_prototype_value), I64, 0u, {}, 0u },
+            { "array_push_one", NEOS_RT_FUNCTION(array_push_one), I64, 3u, { I64, I64, I64 }, 0u },
             { "function_call_function", NEOS_RT_FUNCTION(function_call_function), I64, 0u, {}, 0u },
             { "sloppy_this", NEOS_RT_FUNCTION(sloppy_this), I64, 1u, { I64 }, 0u },
             { "arguments_object", NEOS_RT_FUNCTION(arguments_object), I64, 8u, { I64, I32, I64, I64, I64, I64, I32, I32 }, 0u },
