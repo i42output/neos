@@ -46,6 +46,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <unordered_set>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -230,6 +231,7 @@ namespace neos
                         std::vector<optimizer::deopt> deopts;
                         mutable std::vector<std::uint32_t> deoptCounts;     ///< (each deopt's (its code left for the baseline's))
                         mutable std::uint32_t deoptsTaken = 0u;             ///< (its deopts' (not guards'): all of them)
+                        mutable std::uint64_t calls = 0u;                   ///< (its code's calls (counted if it has deopts that are not guards'))
                     };
                     struct tier_chunk
                     {
@@ -285,6 +287,9 @@ namespace neos
                         std::uint32_t memoryIndex = 0u;
                         std::vector<std::pair<std::int8_t, std::int32_t>> savedXmms;  ///< (the xmms (callee saved) that it saves: where)
                         std::vector<local> locals;                      ///< (parameters first)
+                        std::vector<std::pair<std::int8_t, std::int32_t>> callSavedGprs;    ///< (the registers that it saves around its calls
+                                                                                            ///< (native code does not preserve them): where)
+                        std::vector<std::pair<std::int8_t, std::int32_t>> callSavedXmms;    ///< (... the xmms)
                     };
                     struct deopt_slot
                     {
@@ -297,6 +302,7 @@ namespace neos
                     {
                         std::uint32_t function = 0u;
                         std::size_t resume = 0u;        ///< (the code's offset)
+                        std::size_t returned = 0u;      ///< (the code's offset where its call returns to (0: none))
                         std::uint32_t arguments = 0u;
                         std::vector<deopt_slot> stack;
                     };
@@ -1379,6 +1385,8 @@ namespace neos
                             for (auto& d : iDeoptPoints)
                             {
                                 d.point.resume = a.label_offset(d.label);
+                                if (d.returnLabel)
+                                    d.point.returned = a.label_offset(*d.returnLabel);
                                 aOutput.deoptPoints[d.position] = std::move(d.point);
                             }
                             aOutput.trampolineReturn = a.label_offset(iTrampolineReturn);
@@ -2419,6 +2427,11 @@ namespace neos
                                     d.savedXmms.emplace_back(static_cast<std::int8_t>(iUsedPinnedXmms[i]), xmm_save_disp(i));
                                 for (auto const& l : iLocals)
                                     d.locals.push_back(compiled_module::deopt_frame::local{ l.type, l.pinned, static_cast<std::int8_t>(l.reg), l.disp });
+                                for (std::size_t i = 0u; i < iNativeVolatilePinnedGprs.size(); ++i)
+                                    d.callSavedGprs.emplace_back(static_cast<std::int8_t>(iNativeVolatilePinnedGprs[i]), gpr_native_save_disp(i));
+                                if (!Windows)
+                                    for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
+                                        d.callSavedXmms.emplace_back(static_cast<std::int8_t>(iUsedPinnedXmms[i]), xmm_native_save_disp(i));
                             }
                         }
                         // move the function's results into place (first in rax, others in the context)
@@ -3475,6 +3488,8 @@ namespace neos
                                 // (where it returns to: a frame making this call (see walk))
                                 iCallSites.emplace_back(a.new_label(), origin(aPosition));
                                 a.bind(iCallSites.back().first);
+                                if (!iDeoptPoints.empty() && iDeoptPoints.back().position == aPosition && !iDeoptPoints.back().returnLabel)
+                                    iDeoptPoints.back().returnLabel = iCallSites.back().first;
                                 restore_pinned_xmms();
                                 restore_pinned_gprs();
                                 for (std::size_t i = 0u; i < results.size(); ++i)
@@ -3567,6 +3582,8 @@ namespace neos
                             // (where it returns to: a frame making this call (see walk))
                             iCallSites.emplace_back(a.new_label(), origin(aPosition));
                             a.bind(iCallSites.back().first);
+                            if (!iDeoptPoints.empty() && iDeoptPoints.back().position == aPosition && !iDeoptPoints.back().returnLabel)
+                                iDeoptPoints.back().returnLabel = iCallSites.back().first;
                             restore_pinned_xmms();
                             restore_pinned_gprs();
                             for (std::size_t i = 0u; i < results.size(); ++i)
@@ -4844,6 +4861,7 @@ namespace neos
                         {
                             std::size_t position = 0u;
                             std::size_t label = 0u;
+                            std::optional<std::size_t> returnLabel;
                             compiled_module::deopt_point point;
                         };
                         std::vector<compiled_module::deopt_frame>* iDeoptFrames = nullptr;
@@ -5677,6 +5695,13 @@ namespace neos
                             a.barrier();
                             a.alu_rm(7, true, RSP, R15, ContextStackLimit);
                             a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            if (iVersion != nullptr && std::any_of(iVersion->deopts.begin(), iVersion->deopts.end(), [](auto const& d) { return !d.guard; }))
+                            {
+                                // (its calls are counted: a deopt that it seldom takes (as a share of its calls) does not make it optimized
+                                // again (see deopt_taken))
+                                a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&iVersion->calls), true);
+                                a.alu_mi(0, true, R11, 0, 1);
+                            }
                             if (iMemoryBase >= 0)
                                 a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
                             for (int x = 8; x < 16; ++x)
@@ -5791,6 +5816,11 @@ namespace neos
                             for (auto r = iPushed.rbegin(); r != iPushed.rend(); ++r)
                                 a.pop(*r);
                             a.pop(RBP);
+                            if (!d.frames.empty())
+                            {
+                                frames_exit(d);
+                                return;
+                            }
                             // (the baseline's frame (as its prologue makes it))
                             a.push(RBP);
                             a.mov_rr(true, RBP, RSP);
@@ -5853,6 +5883,143 @@ namespace neos
                                 a.store(true, RSP, 8 * static_cast<std::int32_t>(arg), RAX);
                             }
                             a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + point.resume), true);
+                            a.jmp_r(RAX);
+                        }
+                        // (the frames of a deopt that leaves for inlined calls' frames (see optimizer::deopt::frames), made (after this frame
+                        // is left) from its values (in the deopt buffer: each frame's locals and operand stack, then the call's arguments), as
+                        // the baseline's code makes them: each but the last (the innermost) as its call (the next's) has it while it runs (the
+                        // next's return address is where it returns to), the last at its call (which it then makes). A register's value that
+                        // a frame has (its pinned locals', its memory's base) is the one that the next frame's prologue saves (it is restored
+                        // when that one returns), and the one that the frame's code restores after its call (registers that it saves around 
+                        // its calls); the registers have the last frame's values (and, those that no frame has, the values they have now:
+                        // the optimized code's caller's))
+                        void frames_exit(optimizer::deopt const& aDeopt)
+                        {
+                            struct register_value
+                            {
+                                enum kind_t : std::uint8_t { Now, Buffer, Constant } kind = Now;
+                                std::int32_t disp = 0;      ///< (Buffer: its value's, in the buffer)
+                                bool wide = true;
+                                std::uint64_t bits = 0u;    ///< (Constant)
+                            };
+                            std::array<register_value, 16> gprs{};
+                            std::array<register_value, 16> xmms{};
+                            // (RAX: a register's value; RCX: the buffer)
+                            auto const gpr_value = [&](register_value const& aValue, int aRegister)
+                            {
+                                switch (aValue.kind)
+                                {
+                                case register_value::Buffer:
+                                    a.load(aValue.wide, RAX, RCX, aValue.disp);
+                                    break;
+                                case register_value::Constant:
+                                    a.mov_ri(RAX, aValue.bits, true);
+                                    break;
+                                default:
+                                    a.mov_rr(true, RAX, aRegister);
+                                    break;
+                                }
+                            };
+                            auto const store_xmm = [&](register_value const& aValue, int aXmm, std::int32_t aDisp)
+                            {
+                                if (aValue.kind == register_value::Buffer)
+                                {
+                                    a.load(true, RAX, RCX, aValue.disp);
+                                    a.store(true, RBP, aDisp, RAX);
+                                }
+                                else
+                                    a.movf_store(true, RBP, aDisp, aXmm);
+                            };
+                            a.load(true, RCX, R15, ContextDeoptBuffer);
+                            std::int32_t o = 0;
+                            compiled_module::deopt_point const* previous = nullptr;
+                            for (auto const& d : aDeopt.frames)
+                            {
+                                auto const& point = iTier.deoptPoints.at(d.position);
+                                auto const& frame = iTier.deoptFrames.at(d.function);
+                                if (previous != nullptr)
+                                {
+                                    // (the previous frame's call: it returns there)
+                                    a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + previous->returned), true);
+                                    a.push(RAX);
+                                }
+                                a.push(RBP);
+                                a.mov_rr(true, RBP, RSP);
+                                for (auto r : frame.pushed)
+                                {
+                                    if (gprs[r].kind == register_value::Now)
+                                        a.push(r);
+                                    else
+                                    {
+                                        gpr_value(gprs[r], r);
+                                        a.push(RAX);
+                                    }
+                                }
+                                a.sub_rsp_imm32(static_cast<std::int32_t>(frame.frameSize));
+                                for (auto const& [x, disp] : frame.savedXmms)
+                                    store_xmm(xmms[x], x, disp);
+                                if (frame.memoryBase >= 0)
+                                    gprs[frame.memoryBase] = register_value{ register_value::Constant, 0, true,
+                                        reinterpret_cast<std::uint64_t>(external_memory(frame.memoryIndex).base) };
+                                auto const to_local = [&](std::size_t aLocal, std::int32_t aDisp)
+                                {
+                                    auto const& l = frame.locals[aLocal];
+                                    if (l.pinned)
+                                    {
+                                        auto& r = is_float_type(l.type) ? xmms[l.reg] : gprs[l.reg];
+                                        r = register_value{ register_value::Buffer, aDisp, is_wide_type(l.type), 0u };
+                                    }
+                                    else
+                                    {
+                                        a.load(true, RAX, RCX, aDisp);
+                                        a.store(true, RBP, l.disp, RAX);
+                                    }
+                                };
+                                for (std::size_t l = 0u; l < frame.locals.size(); ++l)
+                                    to_local(l, 8 * o++);
+                                for (auto const& e : point.stack)
+                                {
+                                    auto const disp = 8 * o++;
+                                    if (e.inSlot)
+                                    {
+                                        a.load(true, RAX, RCX, disp);
+                                        a.store(true, RBP, e.disp, RAX);
+                                    }
+                                    else if (e.local >= 0 && static_cast<std::size_t>(e.local) < frame.locals.size())
+                                        to_local(static_cast<std::size_t>(e.local), disp);
+                                }
+                                if (&d != &aDeopt.frames.back())
+                                {
+                                    // (what its code restores after its call)
+                                    for (auto const& [r, disp] : frame.callSavedGprs)
+                                    {
+                                        gpr_value(gprs[r], r);
+                                        a.store(true, RBP, disp, RAX);
+                                    }
+                                    for (auto const& [x, disp] : frame.callSavedXmms)
+                                        store_xmm(xmms[x], x, disp);
+                                }
+                                previous = &point;
+                            }
+                            // (the last frame's call: its arguments)
+                            for (std::uint32_t arg = 0u; arg < aDeopt.arguments; ++arg)
+                            {
+                                a.load(true, RAX, RCX, 8 * o++);
+                                a.store(true, RSP, 8 * static_cast<std::int32_t>(arg), RAX);
+                            }
+                            // (the registers' values)
+                            for (int x = 0; x < 16; ++x)
+                                if (xmms[x].kind == register_value::Buffer)
+                                    a.movf_load(xmms[x].wide, x, RCX, xmms[x].disp);
+                            for (int r = 0; r < 16; ++r)
+                                if (r != RCX && gprs[r].kind != register_value::Now)
+                                {
+                                    if (gprs[r].kind == register_value::Buffer)
+                                        a.load(gprs[r].wide, r, RCX, gprs[r].disp);
+                                    else
+                                        a.mov_ri(r, gprs[r].bits, true);
+                                }
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + previous->resume), true);
                             a.jmp_r(RAX);
                         }
                         // (the moves of the phis of the successor (of the block that ends with a jump to it): a parallel move)
@@ -7245,19 +7412,35 @@ namespace neos
                     constexpr std::uint32_t MaxRecompiles = 16u;        ///< (then without speculation)
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
+                    constexpr std::uint64_t CallsPerSeldomDeopt = 1000u;    ///< (an optimized function's calls per deopt (at least) that do not make it
+                                                                            ///< optimized again)
 
                     optimizer::result run_optimizer(compiled_module& aModule, std::uint32_t aFunction, optimizer::options const& aOptions)
                     {
                         auto& m = aModule;
                         auto const inlinable = [&](std::uint32_t aCallee) { return m.description.functions[aCallee].inlinable; };
-                        auto const memoryWord = [](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
+                        // (the program's memory is read safely (its pages may not be committed); a page that has been read once is read
+                        // directly (here: no page's state changes while the optimizer runs, on the thread that runs the program))
+                        std::unordered_set<std::uintptr_t> readable;
+                        auto const memoryWord = [&readable](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
                         {
                             auto const& x = external_memory(aMemory);
                             if (!x.fixed || aWidth > 8u || aAddress > x.size || x.size - aAddress < aWidth)
                                 return {};
+                            constexpr std::uintptr_t PageMask = ~std::uintptr_t{ 0xFFFu };
+                            auto const* const address = x.base + aAddress;
+                            auto const first = reinterpret_cast<std::uintptr_t>(address) & PageMask;
+                            auto const last = (reinterpret_cast<std::uintptr_t>(address) + aWidth - 1u) & PageMask;
                             std::uint64_t word = 0u;
-                            if (!read_memory(x.base + aAddress, &word, aWidth))
+                            if (readable.contains(first) && readable.contains(last))
+                            {
+                                std::memcpy(&word, address, aWidth);
+                                return word;
+                            }
+                            if (!read_memory(address, &word, aWidth))
                                 return {};
+                            readable.insert(first);
+                            readable.insert(last);
                             return word;
                         };
                         return optimizer::optimize(m.description, aFunction, aOptions, inlinable, memoryWord);
@@ -7280,10 +7463,36 @@ namespace neos
                         // (deopts: where the baseline's code has a frame to leave for (else none))
                         // (a function optimized again more than twice (its deopts were taken): without deopts (its slow paths call))
                         options.deopt = m.backend && m.deopt && m.deoptFrames.size() > f && m.deoptFrames[f].valid;
+                        // (a frame (of a function: its code's) that the code can leave for at a call (see optimizer::deopt::frames): one
+                        // that the baseline made (where it is left for at the call, and where the call returns to))
+                        auto const deopt_frame = [&m](std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
+                            std::uint32_t aLocals)
+                        {
+                            auto const point = m.deoptPoints.find(aPosition);
+                            return point != m.deoptPoints.end() && point->second.function == aFunction && point->second.arguments == aArguments &&
+                                point->second.stack.size() == aDepth && point->second.returned != 0u && aFunction < m.deoptFrames.size() &&
+                                m.deoptFrames[aFunction].valid && m.deoptFrames[aFunction].locals.size() == aLocals;
+                        };
+                        if (options.deopt)
+                            options.deoptFrame = deopt_frame;
+                        options.maxDeoptValues = MaxDeoptValues;
                         auto const deopts_valid = [&](optimizer::result const& aResult)
                         {
                             for (auto const& x : aResult.deopts)
                             {
+                                if (!x.frames.empty())
+                                {
+                                    std::size_t values = x.arguments;
+                                    for (auto const& frame : x.frames)
+                                    {
+                                        values += frame.locals.size() + frame.depth;
+                                        if (!deopt_frame(frame.function, frame.position, frame.arguments, frame.depth, static_cast<std::uint32_t>(frame.locals.size())))
+                                            return false;
+                                    }
+                                    if (x.frames.front().function != f || values > MaxDeoptValues)
+                                        return false;
+                                    continue;
+                                }
                                 auto const point = m.deoptPoints.find(x.call);
                                 if (point == m.deoptPoints.end() || point->second.function != f || point->second.arguments != x.arguments ||
                                     point->second.stack.size() != x.depth || m.deoptFrames[f].locals.size() != x.locals ||
@@ -7306,10 +7515,26 @@ namespace neos
                             // (the locals that the function's own code reads after each deopt's call: the others are not the deopt's)
                             std::vector<std::size_t> positions;
                             for (auto const& x : r.deopts)
-                                positions.push_back(x.call);
+                                if (x.frames.empty())
+                                    positions.push_back(x.call);
                             auto live = optimizer::live_locals(m.description, f, positions);
-                            for (std::size_t k = 0u; k < r.deopts.size(); ++k)
-                                r.deopts[k].live = std::move(live[k]);
+                            for (std::size_t k = 0u, p = 0u; k < r.deopts.size(); ++k)
+                                if (r.deopts[k].frames.empty())
+                                    r.deopts[k].live = std::move(live[p++]);
+                            // (and each frame's (its function's code after its call))
+                            std::map<std::uint32_t, std::vector<std::pair<optimizer::deopt::frame*, std::size_t>>> framesOf;
+                            for (auto& x : r.deopts)
+                                for (auto& frame : x.frames)
+                                    framesOf[frame.function].emplace_back(&frame, frame.position);
+                            for (auto& [function, frames] : framesOf)
+                            {
+                                std::vector<std::size_t> framePositions;
+                                for (auto const& e : frames)
+                                    framePositions.push_back(e.second);
+                                auto frameLive = optimizer::live_locals(m.description, function, framePositions);
+                                for (std::size_t k = 0u; k < frames.size(); ++k)
+                                    frames[k].first->live = std::move(frameLive[k]);
+                            }
                         }
                         // (code that the optimizer did not change: optimized only by the optimizing code generator (its registers))
                         if (r.tokens.empty() || (r.inlined == 0u && r.folded == 0u && !m.backend))
@@ -7639,6 +7864,15 @@ namespace neos
                                 ++aVersion->deoptCounts[aDeopt];
                                 if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
                                     return;
+                                // (seldom (as a share of its calls since it was optimized, or since its deopts were last counted again):
+                                // the code stays (a deopt then costs less than the calls would), its deopts counted again)
+                                if (aVersion->calls / aVersion->deoptsTaken >= CallsPerSeldomDeopt)
+                                {
+                                    aVersion->deoptsTaken = 0u;
+                                    aVersion->calls = 0u;
+                                    std::fill(aVersion->deoptCounts.begin(), aVersion->deoptCounts.end(), 0u);
+                                    return;
+                                }
                             }
                             // (the inlined code that left often (e.g. a cache's misses, an allocator's slow path) calls instead: optimized 
                             // again; a guard that fails again: not inlined)
@@ -7660,7 +7894,8 @@ namespace neos
                             ++m.recompiles[f];
                             m.counters[f] = RecompileCalls;
                             if (m.verbose != 0u)
-                                std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "");
+                                std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "",
+                                    d.frames.empty() ? "" : ", frames");
                         }
                         catch (...)
                         {

@@ -94,15 +94,38 @@ namespace neos
                     // frame of its own) whose code has had no effect (and that has not set its parameters) is made by the function's own code
                     // instead (its frame made from the optimized code's values: the function's locals, the operand stack below the call's
                     // arguments, and its arguments), e.g. where a speculation fails, or where the inlined code would call)
+                    //
+                    // Where the inlined code is within inlined calls of functions with frames of their own (e.g. a language's functions), and
+                    // has had no effect since the innermost of those called it (though they have), the code leaves for the frames of all of
+                    // them (as V8's deoptimizer makes the frames of a FrameState's chain): the function's own frame and those of the inlined 
+                    // calls but the innermost are made as they are while the call that each makes runs (each one's code continues after its
+                    // call returns: the next frame returns there); the innermost's code makes the call (of the function without a frame of 
+                    // its own) whose code left (see deopt::frames).
                     struct deopt
                     {
-                        std::size_t call = 0u;          ///< (the call's position (the outermost inlined call's))
+                        // (a frame that the code leaves for (deopt::frames): a function's, at a call (its position) that it makes)
+                        struct frame
+                        {
+                            std::uint32_t function = 0u;
+                            std::size_t position = 0u;      ///< (its call's position (in the function's code))
+                            std::uint32_t arguments = 0u;   ///< (its call's (a call_indirect's: and its index))
+                            std::uint32_t depth = 0u;       ///< (its operand stack's height below its call's arguments)
+                            std::vector<std::uint32_t> locals;  ///< (its locals (parameters first): the optimized code's (NoLocal: constants))
+                            std::vector<std::uint64_t> constants;   ///< (by local: those that are constants)
+                            std::vector<bool> live;         ///< (its locals that its code may read after its call (empty: all))
+                        };
+                        static constexpr std::uint32_t NoLocal = ~std::uint32_t{};
+                        std::size_t call = 0u;          ///< (the call's position (the outermost inlined call's; frames: the innermost's))
                         std::uint32_t callee = 0u;
                         std::uint32_t arguments = 0u;
                         std::uint32_t depth = 0u;       ///< (the operand stack's height below its arguments)
                         std::uint32_t locals = 0u;      ///< (the function's (its parameters and locals))
                         bool guard = false;             ///< (a guard failed (a speculation's value changed), else the inlined code would call)
                         std::vector<bool> live;         ///< (the function's locals that its own code may read after the call (empty: all))
+                        std::vector<frame> frames;      ///< (if not empty: the frames that it leaves for, outermost (the function's own) first;
+                                                        ///< the last's call is the call (of a function without a frame of its own) that the
+                                                        ///< code makes instead; its values (see the optimizing code generator) are each 
+                                                        ///< frame's locals and operand stack, then the call's arguments)
                     };
 
                     struct options
@@ -119,8 +142,14 @@ namespace neos
                         std::size_t maxInlinedTokens = 2000u;   ///< (an inlined call whose code (after folding) is larger is not inlined...)
                         std::size_t maxInlinedCost = 400u;      ///< (... nor one with more instructions that are code (see rewriter::inline_call) ...)
                         std::size_t maxGuards = 16u;            ///< (... nor one with more guards)
-                        std::size_t maxInlines = 128u;          ///< (the calls inlined in a function)
+                        std::size_t maxInlines = 512u;          ///< (the calls inlined in a function)
                         bool deopt = false;                     ///< (the code leaves for the function's own (see deopt), rather than calls)
+                        // (where the code can leave for frames of inlined calls (see deopt::frames): whether a function (with aLocals 
+                        // locals) can be left for at a call (at aPosition, of aArguments arguments, aDepth below them) that it makes; if 
+                        // none, it does not)
+                        std::function<bool(std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
+                            std::uint32_t aLocals)> deoptFrame;
+                        std::size_t maxDeoptValues = 4096u;     ///< (a deopt's values (its frames' locals and stacks, and its call's arguments))
                     };
 
                     // (an inlined call that has guards: the call's position, and its guards)

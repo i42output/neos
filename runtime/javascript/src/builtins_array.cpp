@@ -620,9 +620,23 @@ namespace neos::javascript_runtime
             return make_string(std::move(result));
         }
 
+        bool plain_prototypes();
+
         value array_pop(value aThis, arguments, value, function_object&)
         {
             auto const o = to_object(aThis);
+            if (auto* a = as_array(o); a != nullptr && !a->sparse && a->extensible && a->lengthWritable && a->length != 0u &&
+                a->elements.size() == a->length && a->proto == the_realm().arrayPrototype && plain_prototypes())
+            {
+                // (a plain array: its last element (a hole's value is undefined: its prototypes have no elements), as the steps below
+                // would leave it (no trailing holes))
+                auto const element = a->elements.back();
+                a->elements.pop_back();
+                while (!a->elements.empty() && a->elements.back() == Empty)
+                    a->elements.pop_back();
+                --a->length;
+                return element == Empty ? Undefined : element;
+            }
             auto const len = length_of_array_like(o);
             if (len == 0.0)
             {

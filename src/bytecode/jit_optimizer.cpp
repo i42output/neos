@@ -545,35 +545,120 @@ namespace neos
                             // (its code: the outermost inlined call's arguments, then the deopt's number, and the intrinsic (it does not return))
                             void emit_deopt(inline_context const& aOutermost, bool aGuard)
                             {
-                                auto const& callee = iModule.functions[aOutermost.callee];
-                                auto const& parameters = *callee.parameters;
+                                auto const arguments = emit_deopt_call(aOutermost);
+                                auto const& f = iModule.functions[iFunction];
+                                iDeopts.push_back(deopt{ aOutermost.call, aOutermost.callee, arguments, aOutermost.depth,
+                                    static_cast<std::uint32_t>(f.parameters->size() + f.locals->size()), aGuard });
+                            }
+                            // (the deopt's code: the inlined call's arguments (a call_indirect's: then its index), the deopt's number (the next),
+                            // and the intrinsic (it does not return)): the arguments' number
+                            std::uint32_t emit_deopt_call(inline_context const& aCall)
+                            {
+                                auto const& parameters = *iModule.functions[aCall.callee].parameters;
                                 for (std::size_t i = 0u; i < parameters.size(); ++i)
                                 {
-                                    if (aOutermost.constantParameters[i])
+                                    if (aCall.constantParameters[i])
                                     {
                                         emit(const_op(parameters[i]));
-                                        emit(const_token(parameters[i], aOutermost.constantParameters[i]->bits));
+                                        emit(const_token(parameters[i], aCall.constantParameters[i]->bits));
                                     }
                                     else
                                     {
                                         emit(0x20u);
-                                        emit(aOutermost.locals[i]);
+                                        emit(aCall.locals[i]);
                                     }
                                 }
-                                // (a call_indirect's: then its index)
-                                if (aOutermost.indirect)
+                                if (aCall.indirect)
                                 {
                                     emit(0x41u);
-                                    emit(*aOutermost.indirect);
+                                    emit(*aCall.indirect);
                                 }
                                 emit(0x41u);
                                 emit(iDeopts.size());
                                 emit(0x10u);
                                 emit(intrinsics::deopt(iModule));
                                 emit(0x00u);
+                                return static_cast<std::uint32_t>(parameters.size() + (aCall.indirect ? 1u : 0u));
+                            }
+                            // (a call within inlined calls of functions without frames of their own (e.g. a language's helpers' slow paths)
+                            // that are within inlined calls of functions with frames of their own (e.g. the language's functions) that have
+                            // had effects: if the innermost of the calls without frames has had none, the code leaves for the frames of the
+                            // function and of the calls with frames (see deopt::frames): the innermost makes that call)
+                            bool emit_frames_deopt()
+                            {
+                                if (!iOptions.deopt || !iOptions.deoptFrame || iInlines.size() < 2u || iDeopts.size() >= 60000u)
+                                    return false;
+                                std::size_t framed = 0u;
+                                while (framed < iInlines.size() && !iModule.functions[iInlines[framed].callee].frameless)
+                                    ++framed;
+                                if (framed == 0u || framed == iInlines.size())
+                                    return false;
+                                for (auto i = framed; i < iInlines.size(); ++i)
+                                    if (!iModule.functions[iInlines[i].callee].frameless)
+                                        return false;
+                                auto const& made = iInlines[framed];
+                                if (!effect_free(made) || made.parametersSet || iOptions.noDeopt.contains(made.site) || iOptions.noDeopt.contains(iInlines[0].call))
+                                    return false;
+                                auto const arguments_of = [&](inline_context const& aCall)
+                                {
+                                    return static_cast<std::uint32_t>(iModule.functions[aCall.callee].parameters->size() + (aCall.indirect ? 1u : 0u));
+                                };
                                 auto const& f = iModule.functions[iFunction];
-                                iDeopts.push_back(deopt{ aOutermost.call, aOutermost.callee, static_cast<std::uint32_t>(parameters.size() + (aOutermost.indirect ? 1u : 0u)), aOutermost.depth,
-                                    static_cast<std::uint32_t>(f.parameters->size() + f.locals->size()), aGuard });
+                                auto const ownLocals = static_cast<std::uint32_t>(f.parameters->size() + f.locals->size());
+                                std::vector<deopt::frame> frames;
+                                deopt::frame own;
+                                own.function = iFunction;
+                                own.position = iInlines[0].site;
+                                own.arguments = arguments_of(iInlines[0]);
+                                own.depth = iInlines[0].depth;
+                                for (std::uint32_t l = 0u; l < ownLocals; ++l)
+                                    own.locals.push_back(l);
+                                own.constants.assign(ownLocals, 0u);
+                                frames.push_back(std::move(own));
+                                for (std::size_t j = 0u; j < framed; ++j)
+                                {
+                                    auto const& c = iInlines[j];
+                                    auto const& next = iInlines[j + 1u];
+                                    if (next.depth < c.depth)
+                                        return false;
+                                    deopt::frame frame;
+                                    frame.function = c.callee;
+                                    frame.position = next.site;
+                                    frame.arguments = arguments_of(next);
+                                    frame.depth = next.depth - c.depth;
+                                    frame.locals = c.locals;
+                                    frame.constants.assign(c.locals.size(), 0u);
+                                    for (std::size_t i = 0u; i < c.locals.size(); ++i)
+                                        if (c.locals[i] == NoLocal)
+                                        {
+                                            if (i >= c.constantParameters.size() || !c.constantParameters[i])
+                                                return false;
+                                            frame.constants[i] = c.constantParameters[i]->bits;
+                                        }
+                                    frames.push_back(std::move(frame));
+                                }
+                                // (locals whose values are known constants here: the constants (their code may have been removed))
+                                for (auto& frame : frames)
+                                    for (std::size_t l = 0u; l < frame.locals.size(); ++l)
+                                        if (auto const local = frame.locals[l]; local != NoLocal && local < iConstants.size() && iConstants[local])
+                                        {
+                                            frame.constants[l] = iConstants[local]->bits;
+                                            frame.locals[l] = NoLocal;
+                                        }
+                                std::size_t values = arguments_of(made);
+                                for (auto const& frame : frames)
+                                {
+                                    values += frame.locals.size() + frame.depth;
+                                    if (!iOptions.deoptFrame(frame.function, frame.position, frame.arguments, frame.depth, static_cast<std::uint32_t>(frame.locals.size())))
+                                        return false;
+                                }
+                                if (values > iOptions.maxDeoptValues)
+                                    return false;
+                                auto const arguments = emit_deopt_call(made);
+                                deopt d{ made.site, made.callee, arguments, made.depth, ownLocals, false };
+                                d.frames = std::move(frames);
+                                iDeopts.push_back(std::move(d));
+                                return true;
                             }
                             inline_context* speculating()
                             {
@@ -1236,7 +1321,7 @@ namespace neos
                                 auto const& callee = iModule.functions[aCallee];
                                 // (the origin of an inlined call's code is the outermost call's)
                                 auto const callPosition = aInline != nullptr ? iInlines.front().call : aPosition;
-                                if (inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition))
+                                if (inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition) && !iLarge.contains(aCallee))
                                 {
                                     // (inlined if its code, after folding, is small enough; else called)
                                     snapshot const before = take_snapshot();
@@ -1251,6 +1336,13 @@ namespace neos
                                     // (a call within inlined code (of a function without a frame of its own: e.g. a language's helper's slow
                                     // path) that has had no effect: the function's own code makes the outermost inlined call instead)
                                     emit_deopt(iInlines.front(), false);
+                                    unwind();
+                                    iReachable = false;
+                                    return;
+                                }
+                                if (aInline != nullptr && !iInlines.empty() && iModule.functions[iInlines.back().callee].frameless && !callee.checked &&
+                                    !(callee.plugin && callee.plugin->common) && emit_frames_deopt())
+                                {
                                     unwind();
                                     iReachable = false;
                                     return;
@@ -1345,8 +1437,7 @@ namespace neos
                                 } const framedScope{ iFramedInlines, !callee.frameless };
                                 inline_context c;
                                 c.site = aSite;
-                                if (iInlines.empty())
-                                    c.indirect = iIndirect;     // (the outermost's: its deopts make the call_indirect)
+                                c.indirect = iIndirect;     // (its deopts make the call_indirect)
                                 iIndirect.reset();
                                 c.callee = aCallee;
                                 c.call = aPosition;
@@ -1473,6 +1564,8 @@ namespace neos
                                     bool const large = size > iOptions.maxInlinedTokens || cost > iOptions.maxInlinedCost || done.guardCount > iOptions.maxGuards;
                                     if (large)
                                     {
+                                        // (and not inlined again (its code is as large where it is called again))
+                                        iLarge.insert(aCallee);
                                         iOrigin = saveOrigin;
                                         return false;
                                     }
@@ -1615,6 +1708,7 @@ namespace neos
                             bool iUnreachableEnd = false;
                             bool iInliningOff = false;
                             std::optional<std::uint32_t> iIndirect;     ///< (the call being made is a call_indirect's (its index))
+                            std::set<std::uint32_t> iLarge;             ///< (functions whose inlined code was too large)
                             std::size_t iMaxTokens = 0u;
                             std::size_t iInlined = 0u;
                             std::size_t iFolded = 0u;

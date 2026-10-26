@@ -613,6 +613,42 @@ namespace neos
                                                 std::vector<value> arguments(d.arguments);
                                                 for (auto a = arguments.size(); a-- > 0u;)
                                                     arguments[a] = pop();
+                                                if (!d.frames.empty())
+                                                {
+                                                    // (frames (see optimizer::deopt::frames): each one's locals (the optimized code's, or
+                                                    // constants; a local that its code does not read after its call: 0) and its operand stack
+                                                    // (the next part of the operand stack's), then the call's arguments)
+                                                    std::vector<value> operands;
+                                                    std::size_t height = 0u;
+                                                    for (auto const& frame : d.frames)
+                                                    {
+                                                        auto const& fd = iModule.functions.at(frame.function);
+                                                        auto const parameterCount = fd.parameters->size();
+                                                        // (the function's own frame: its description's locals are the optimized code's (its own first))
+                                                        if (frame.locals.size() > parameterCount + fd.locals->size() || height + frame.depth > iStack.size())
+                                                            throw unsupported{ "deopt state" };
+                                                        for (std::size_t l = 0u; l < frame.locals.size(); ++l)
+                                                        {
+                                                            auto const type = l < parameterCount ? (*fd.parameters)[l] : (*fd.locals)[l - parameterCount];
+                                                            auto const local = frame.locals[l];
+                                                            if (local == optimizer::deopt::NoLocal)
+                                                                operands.push_back(add(type == I32 ? 0x41u : type == I64 ? 0x42u : type == F32 ? 0x43u : 0x44u, type, {},
+                                                                    frame.constants[l]));
+                                                            else if (local >= iLocals || iVariableTypes[local] != type)
+                                                                throw unsupported{ "deopt state" };
+                                                            else if (l < frame.live.size() && !frame.live[l])
+                                                                operands.push_back(zero(type));
+                                                            else
+                                                                operands.push_back(read(static_cast<variable>(local), iCurrent));
+                                                        }
+                                                        for (std::uint32_t e = 0u; e < frame.depth; ++e)
+                                                            operands.push_back(iStack[height + e]);
+                                                        height += frame.depth;
+                                                    }
+                                                    operands.insert(operands.end(), arguments.begin(), arguments.end());
+                                                    terminate(Deopt, std::move(operands), {}, index);
+                                                    break;
+                                                }
                                                 if (d.locals > iLocals || iStack.size() < d.depth)
                                                     throw unsupported{ "deopt state" };
                                                 std::vector<value> operands;
