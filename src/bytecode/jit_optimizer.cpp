@@ -48,6 +48,7 @@
 #include <string>
 #include <neos/runtime/plugin.h>
 #include <map>
+#include <unordered_map>
 #include "jit_optimizer.hpp"
 
 namespace neos
@@ -398,6 +399,7 @@ namespace neos
                             std::vector<std::uint64_t> guards;          ///< (the guards' code)
                             std::size_t guardCount = 0u;
                             std::optional<std::uint32_t> indirect;      ///< (a call_indirect's (its index a constant: the callee's): the index)
+                            std::uint32_t chainContext = 0u;            ///< (the inlined calls' sites, to it (see chain_origin): their number)
                         };
 
                         struct frame
@@ -409,8 +411,10 @@ namespace neos
                             bool liveArm = true;                        ///< (ConstantIf: the arm that is (true: then, false: else) kept)
                             bool inElse = false;
                             std::vector<std::uint32_t> written;         ///< (locals it sets)
-                            knowledge entry;            ///< (If: the locals' constants at its start)
-                            knowledge thenExit;
+                            std::size_t logMark = 0u;   ///< (If: the knowledge log's size at its start (see iKnowledgeLog))
+                            std::size_t elseMark = 0u;  ///< (If, its else arm: the log's size at its start)
+                            std::vector<std::pair<std::uint32_t, std::optional<known>>> thenExit;  ///< (If: the locals that its then arm changed, 
+                                                                                                    ///< and their constants at its end)
                             bool thenReachable = false;
                             std::optional<std::size_t> inlined;         ///< (Inline: its inline_context)
                             std::uint64_t startEffects = 0u;            ///< (the effects at its start (see rewriter::iEffects))
@@ -444,6 +448,7 @@ namespace neos
                                 for (auto t : *f.locals)
                                     iLocalTypes.push_back(t);
                                 iConstants.assign(iLocalTypes.size(), std::nullopt);
+                                iKnownSeen.assign(iLocalTypes.size(), 0u);
                                 for (std::size_t i = f.parameters->size(); i < iLocalTypes.size(); ++i)
                                     iConstants[i] = known{};     // (a local (not a parameter) starts as 0)
                                 iParameters = f.parameters->size();
@@ -571,12 +576,42 @@ namespace neos
                             void forget_written(frame const& aFrame)
                             {
                                 for (auto l : aFrame.written)
-                                    iConstants[l] = std::nullopt;
+                                    set_known(l, std::nullopt);
+                            }
+                            // (a local's constant changes: logged (the local and what it was), so that a frame's arm or an inlined call that
+                            // is not kept can be undone (rather than the locals' constants copied))
+                            void set_known(std::size_t aLocal, std::optional<known> aValue)
+                            {
+                                iKnowledgeLog.emplace_back(static_cast<std::uint32_t>(aLocal), iConstants[aLocal]);
+                                iConstants[aLocal] = aValue;
+                            }
+                            void undo_known(std::size_t aMark)
+                            {
+                                while (iKnowledgeLog.size() > aMark)
+                                {
+                                    auto const& [l, v] = iKnowledgeLog.back();
+                                    iConstants[l] = v;
+                                    iKnowledgeLog.pop_back();
+                                }
+                            }
+                            // (the locals changed since aMark, each once, with what each was at aMark)
+                            std::vector<std::pair<std::uint32_t, std::optional<known>>> changed_since(std::size_t aMark)
+                            {
+                                std::vector<std::pair<std::uint32_t, std::optional<known>>> result;
+                                for (auto i = aMark; i < iKnowledgeLog.size(); ++i)
+                                    if (iKnownSeen[iKnowledgeLog[i].first] != iSeenEpoch)
+                                    {
+                                        iKnownSeen[iKnowledgeLog[i].first] = iSeenEpoch;
+                                        result.push_back(iKnowledgeLog[i]);
+                                    }
+                                ++iSeenEpoch;
+                                return result;
                             }
                             std::uint32_t new_local(std::uint8_t aType)
                             {
                                 iLocalTypes.push_back(aType);
                                 iConstants.push_back(std::nullopt);
+                                iKnownSeen.push_back(0u);
                                 return static_cast<std::uint32_t>(iLocalTypes.size() - 1u);
                             }
                             // (a constant that came from speculations has been folded: they are useful)
@@ -792,8 +827,8 @@ namespace neos
                                     if (op == 0x21u || op == 0x22u)
                                     {
                                         auto const l = static_cast<std::size_t>(iTokens[p + 1u]);
-                                        if (l < aLocals.size() && aLocals[l] != NoLocal)
-                                            iConstants[aLocals[l]] = std::nullopt;
+                                        if (l < aLocals.size() && aLocals[l] != NoLocal && iConstants[aLocals[l]])
+                                            set_known(aLocals[l], std::nullopt);
                                     }
                                     else if (op == 0x10u)
                                     {
@@ -842,21 +877,69 @@ namespace neos
                                 bool reachable = aReachable;
                                 if (f.kind == frame::If)
                                 {
-                                    // (the locals' constants: those that both arms (or the then arm and the if's start) end with)
-                                    knowledge const& other = f.inElse ? f.thenExit : f.entry;
+                                    // (the locals' constants: those that both arms (or the then arm and the if's start) end with (only the locals
+                                    // that either changed can differ; a local made since its start was not known then))
                                     bool const otherReachable = f.inElse ? f.thenReachable : true;
                                     if (!aReachable)
                                     {
-                                        auto const size = iConstants.size();
-                                        iConstants = other;
-                                        iConstants.resize(size);    // (locals made since its start: not known)
+                                        // (the other's: the then arm's end (its start's, and its changes), or the start's)
+                                        if (f.inElse)
+                                        {
+                                            undo_known(f.elseMark);
+                                            for (auto const& [l, v] : f.thenExit)
+                                                set_known(l, v);
+                                        }
+                                        else
+                                            undo_known(f.logMark);
                                     }
                                     else if (otherReachable)
-                                        for (std::size_t i = 0u; i < iConstants.size(); ++i)
-                                            if (i >= other.size() || !iConstants[i] || !other[i] || iConstants[i]->bits != other[i]->bits)
-                                                iConstants[i] = std::nullopt;
-                                            else
-                                                iConstants[i]->from = merged(iConstants[i]->from, other[i]->from);
+                                    {
+                                        auto const merge = [&](std::uint32_t aLocal, std::optional<known> const& aOther)
+                                        {
+                                            auto const& c = iConstants[aLocal];
+                                            if (!c || !aOther || c->bits != aOther->bits)
+                                            {
+                                                if (c)
+                                                    set_known(aLocal, std::nullopt);
+                                            }
+                                            else if (auto const from = merged(c->from, aOther->from); from != c->from)
+                                                set_known(aLocal, known{ c->bits, from });
+                                        };
+                                        if (f.inElse)
+                                        {
+                                            // (the else arm's changes (what they were at its start: the if's start's), and the then arm's)
+                                            auto const elseChanged = changed_since(f.elseMark);
+                                            std::vector<std::optional<known>> atStart;
+                                            for (auto const& [l, v] : elseChanged)
+                                            {
+                                                std::optional<known> other = v;
+                                                for (auto const& t : f.thenExit)
+                                                    if (t.first == l)
+                                                    {
+                                                        other = t.second;
+                                                        break;
+                                                    }
+                                                atStart.push_back(other);
+                                            }
+                                            for (std::size_t k = 0u; k < elseChanged.size(); ++k)
+                                                merge(elseChanged[k].first, atStart[k]);
+                                            for (auto const& [l, v] : f.thenExit)
+                                            {
+                                                bool inElse = false;
+                                                for (auto const& e : elseChanged)
+                                                    if (e.first == l)
+                                                    {
+                                                        inElse = true;
+                                                        break;
+                                                    }
+                                                if (!inElse)
+                                                    merge(l, v);
+                                            }
+                                        }
+                                        else
+                                            for (auto const& [l, v] : changed_since(f.logMark))
+                                                merge(l, v);
+                                    }
                                     reachable = aReachable || otherReachable;
                                 }
                                 if (f.branched)
@@ -996,7 +1079,7 @@ namespace neos
                                             emit(op);
                                             emit(type);
                                             begin_frame(frame::If, type);
-                                            iFrames.back().entry = iConstants;
+                                            iFrames.back().logMark = iKnowledgeLog.size();
                                         }
                                         break;
                                     case 0x05:
@@ -1013,13 +1096,17 @@ namespace neos
                                                 throw cannot_optimize{ "else without if" };
                                             if (!unreachableEnd)
                                                 result_to(f);
-                                            f.thenExit = iConstants;
+                                            // (the then arm's changes (their constants at its end); the constants at the if's start again (a local made
+                                            // since then (by the then arm) was not known))
+                                            f.thenExit.clear();
+                                            for (auto const& [l, v] : changed_since(f.logMark))
+                                                f.thenExit.emplace_back(l, iConstants[l]);
                                             f.thenReachable = !unreachableEnd;
                                             f.thenEffects = iEffects;
                                             iEffects = f.startEffects;
                                             f.inElse = true;
-                                            iConstants = f.entry;
-                                            iConstants.resize(iLocalTypes.size());   // (locals made since its start (by the then arm): not known)
+                                            undo_known(f.logMark);
+                                            f.elseMark = iKnowledgeLog.size();
                                             unwind();
                                             emit(op);
                                         }
@@ -1198,7 +1285,7 @@ namespace neos
                                             if (l == NoLocal)
                                                 throw cannot_optimize{ "a constant parameter is set" };
                                             auto v = pop();
-                                            iConstants[l] = v.constant ? std::optional<known>{ known{ v.bits, v.from } } : std::nullopt;
+                                            set_known(l, v.constant ? std::optional<known>{ known{ v.bits, v.from } } : std::nullopt);
                                             written(l);
                                             // (a constant's tee: its set, and the constant (again))
                                             auto const at = emit(v.constant ? 0x21u : op);
@@ -1474,7 +1561,7 @@ namespace neos
                                 std::size_t out;
                                 std::vector<bool> deleted;
                                 std::vector<slot> stack;
-                                knowledge constants;
+                                std::size_t knowledgeLog;
                                 std::size_t locals;
                                 std::size_t constantSets;
                                 std::size_t sites;
@@ -1488,7 +1575,7 @@ namespace neos
                             };
                             snapshot take_snapshot() const
                             {
-                                snapshot s{ iOut.size(), iDeleted, iStack, iConstants, iLocalTypes.size(), iConstantSets.size(), iSites.size(), iDeopts.size(), iEffects, iGuards, iInlined, iFolded, {}, iOrigin };
+                                snapshot s{ iOut.size(), iDeleted, iStack, iKnowledgeLog.size(), iLocalTypes.size(), iConstantSets.size(), iSites.size(), iDeopts.size(), iEffects, iGuards, iInlined, iFolded, {}, iOrigin };
                                 for (auto const& f : iFrames)
                                     s.written.push_back(f.written.size());
                                 return s;
@@ -1499,7 +1586,9 @@ namespace neos
                                 iOrigins.resize(aSnapshot.out);
                                 iDeleted = aSnapshot.deleted;
                                 iStack = aSnapshot.stack;
-                                iConstants = aSnapshot.constants;
+                                undo_known(aSnapshot.knowledgeLog);
+                                iConstants.resize(aSnapshot.locals);
+                                iKnownSeen.resize(aSnapshot.locals);
                                 iLocalTypes.resize(aSnapshot.locals);
                                 iConstantSets.resize(aSnapshot.constantSets);
                                 iSites.resize(aSnapshot.sites);
@@ -1521,6 +1610,13 @@ namespace neos
                             // of its own: the inline chain (the code's position, then the calls')
                             std::size_t chain_origin(std::size_t aPosition)
                             {
+                                // (the chain's number, by the inlined calls' (see chain_context) and the position: made once)
+                                auto const context = iInlines.empty() ? 0u : iInlines.back().chainContext;
+                                if (aPosition > 0xFFFFFFFFu)
+                                    throw cannot_optimize{ "inline chains" };
+                                auto const key = (std::uint64_t{ context } << 32u) | aPosition;
+                                if (auto const known = iChainIdsByContext.find(key); known != iChainIdsByContext.end())
+                                    return InlineChainToken | known->second;
                                 std::vector<std::size_t> chain;
                                 chain.reserve(iInlines.size() + 1u);
                                 chain.push_back(aPosition);
@@ -1528,13 +1624,26 @@ namespace neos
                                     chain.push_back(c->site);
                                 auto existing = iChainIds.find(chain);
                                 if (existing != iChainIds.end())
+                                {
+                                    iChainIdsByContext.emplace(key, existing->second);
                                     return InlineChainToken | existing->second;
+                                }
                                 auto const id = static_cast<std::size_t>(iChains.size());
                                 if (id >= InlineChainToken)
                                     throw cannot_optimize{ "inline chains" };
                                 iChainIds.emplace(chain, id);
+                                iChainIdsByContext.emplace(key, id);
                                 iChains.push_back(std::move(chain));
                                 return InlineChainToken | id;
+                            }
+                            // (the number of a chain of inlined calls' sites: the chain to the call that makes it (aContext's), and its site)
+                            std::uint32_t chain_context(std::uint32_t aContext, std::size_t aSite)
+                            {
+                                if (aSite > 0xFFFFFFFFu)
+                                    throw cannot_optimize{ "inline chains" };
+                                auto const key = (std::uint64_t{ aContext } << 32u) | aSite;
+                                auto const [where, inserted] = iChainContexts.try_emplace(key, static_cast<std::uint32_t>(iChainContexts.size() + 1u));
+                                return where->second;
                             }
                             bool inline_call(std::uint32_t aCallee, std::size_t aPosition, std::size_t aSite, bool aCold = false)
                             {
@@ -1613,11 +1722,11 @@ namespace neos
                                         emit(const_token(parameters[i], *arguments[i]));
                                         emit(0x21u);
                                         emit(locals[i]);
-                                        iConstants[locals[i]] = known{ *arguments[i] & mask_of(parameters[i]), argumentsFrom[i] };
+                                        set_known(locals[i], known{ *arguments[i] & mask_of(parameters[i]), argumentsFrom[i] });
                                         written(locals[i]);
                                     }
                                     else if (locals[i] != NoLocal)
-                                        iConstants[locals[i]] = std::nullopt;
+                                        set_known(locals[i], std::nullopt);
                                 for (std::size_t i = parameters.size(); i < locals.size(); ++i)
                                 {
                                     auto const l = locals[i];
@@ -1625,11 +1734,12 @@ namespace neos
                                     emit(0u);
                                     auto const set = emit(0x21u);
                                     emit(l);
-                                    iConstants[l] = known{};
+                                    set_known(l, known{});
                                     written(l);
                                     iConstantSets.push_back(constant_set{ l, set, at, at + 2u });
                                 }
                                 c.locals = locals;
+                                c.chainContext = chain_context(iInlines.empty() ? 0u : iInlines.back().chainContext, c.site);
                                 iInlines.push_back(std::move(c));
                                 ++iInlined;
                                 auto& context = iInlines.back();
@@ -1821,12 +1931,17 @@ namespace neos
                             std::vector<std::size_t> iOrigins;
                             std::size_t iFramedInlines = 0u;            ///< (the inlined calls being processed of functions with frames of their own)
                             std::map<std::vector<std::size_t>, std::size_t> iChainIds;
+                            std::unordered_map<std::uint64_t, std::size_t> iChainIdsByContext;     ///< (see chain_origin)
+                            std::unordered_map<std::uint64_t, std::uint32_t> iChainContexts;      ///< (see chain_context)
                             std::vector<std::vector<std::size_t>> iChains;
                             std::vector<bool> iDeleted;
                             std::size_t iOrigin = 0u;
                             std::vector<std::uint8_t> iLocalTypes;
                             std::size_t iParameters = 0u;
                             knowledge iConstants;
+                            std::vector<std::pair<std::uint32_t, std::optional<known>>> iKnowledgeLog;  ///< (see set_known)
+                            std::vector<std::uint32_t> iKnownSeen;      ///< (see changed_since)
+                            std::uint32_t iSeenEpoch = 1u;
                             std::set<speculation_key> const* iAllowed = nullptr;    ///< (the speculations that may be made (null: all))
                             std::set<speculation_key> iUseful;                     ///< (the speculations that constants that were folded came from)
                             std::vector<std::vector<std::uint32_t>> iPool{ {} };
@@ -1853,6 +1968,23 @@ namespace neos
                     std::optional<std::uint64_t> fold_integer(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY)
                     {
                         return fold(aOp, aX, aY);
+                    }
+
+                    std::vector<bool> parameters_read(module_description const& aModule, std::uint32_t aFunction)
+                    {
+                        auto const& f = aModule.functions[aFunction];
+                        std::vector<bool> result(f.parameters->size(), f.imported);
+                        if (f.imported)
+                            return result;
+                        auto const& tokens = *aModule.tokens;
+                        for (auto p = f.codeBegin; p < f.codeEnd;)
+                        {
+                            auto const op = static_cast<std::uint8_t>(tokens[p]);
+                            if (op == 0x20u && p + 1u < f.codeEnd && tokens[p + 1u] < result.size())
+                                result[static_cast<std::size_t>(tokens[p + 1u])] = true;
+                            p += 1u + immediates(op, tokens, p);
+                        }
+                        return result;
                     }
 
                     std::vector<std::vector<bool>> live_locals(module_description const& aModule, std::uint32_t aFunction, std::vector<std::size_t> const& aPositions)

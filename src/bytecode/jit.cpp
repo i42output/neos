@@ -255,6 +255,8 @@ namespace neos
                                                                         ///< (it left there often))
                     std::vector<std::map<std::size_t, std::uint32_t>> guardFailures;
                     std::vector<std::map<std::size_t, std::uint32_t>> deoptStrikes;   ///< (the times that inlined calls' deopts made the function optimized again)
+                    std::vector<std::vector<bool>> parametersRead;      ///< (each function's parameters that its code reads (see optimizer::parameters_read):
+                                                                        ///< made (once) before the first optimization; optimized code's calls pass only those)
                     std::vector<std::vector<std::size_t>> inlineChains;  ///< (optimized code's inline chains (see optimizer::InlineChainToken): 
                                                                         ///< the frames of calls within inlined calls, innermost first)
                     std::vector<tier_version const*> currentVersion;
@@ -6835,8 +6837,13 @@ namespace neos
                                 return;
                             }
                             iArgumentRax.reset();
+                            // (the parameters that the callee reads (it is known: its code is the same in every tier): the others are not 
+                            // passed)
+                            static std::vector<bool> const sAll;
+                            auto const& read = callee < iTier.parametersRead.size() ? iTier.parametersRead[callee] : sAll;
                             for (std::size_t p = 0u; p < i.operands.size(); ++p)
-                                argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
+                                if (p >= read.size() || read[p])
+                                    argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(i.operands.size(), c.results->size())));
                             // (System V: the callee may call native code, which does not preserve xmm8-xmm15: those that hold values across
                             // the call are saved around it)
@@ -7997,6 +8004,13 @@ namespace neos
                         job->version->sites = r.sites;
                         job->version->deopts = r.deopts;
                         job->version->deoptCounts.assign(r.deopts.size(), 0u);
+                        if (m.parametersRead.empty())
+                        {
+                            // (from the module's own code (an optimization's description has its function's optimized code))
+                            m.parametersRead.resize(m.description.functions.size());
+                            for (std::uint32_t g = 0u; g < m.description.functions.size(); ++g)
+                                m.parametersRead[g] = optimizer::parameters_read(m.description, g);
+                        }
                         job->description = m.description;
                         auto& d = job->description;
                         d.tokens = &r.tokens;
@@ -8021,12 +8035,25 @@ namespace neos
                             auto const from = std::chrono::steady_clock::now();
                             auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts);
                             auto const built_at = std::chrono::steady_clock::now();
+                            // (cached loads' words: read safely (this runs while the program runs: its pages' states may change))
+                            auto const memoryWord = [](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
+                            {
+                                if (aMemory == 0u || aMemory > NEOS_RT_EXTERNAL_MEMORIES)
+                                    return {};
+                                auto const& x = external_memory(aMemory);
+                                if (!x.fixed || aWidth > 8u || aAddress > x.size || x.size - aAddress < aWidth)
+                                    return {};
+                                std::uint64_t word = 0u;
+                                if (!read_memory(x.base + aAddress, &word, aWidth))
+                                    return {};
+                                return word;
+                            };
                             ssa::optimize(function, d, [](std::uint32_t aMemory) -> std::uint64_t
                             {
                                 if (aMemory == 0u || aMemory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(aMemory).fixed)
                                     return 0u;
                                 return external_memory(aMemory).size;
-                            });
+                            }, memoryWord);
                             auto const ssa_at = std::chrono::steady_clock::now();
                             optimizing_generator generator{ d, *aJob.module, aJob.version.get(), function };
                             generator.generate(aJob.callSites);

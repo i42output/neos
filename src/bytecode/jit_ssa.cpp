@@ -895,6 +895,55 @@ namespace neos
                         // offset made from it: the handle's (an offset that is 16 byte aligned and below 2^36 (masked): the same offset)): a value
                         // whose bits are all known is a constant; an and that clears no bit that may be 1, an or that sets none that is not
                         // 1, a shift right then left that drops no bit that may be 1, an extension of a wrap that drops none: their operand)
+                        // (a cached load (optimizer::MemargCached: its word does not change while what the code checked first is the same) at a
+                        // constant address of a fixed external memory: the word's value now)
+                        bool fold_cached_loads(function& aFunction, std::function<std::optional<std::uint64_t>(std::uint32_t, std::uint64_t, std::uint32_t)> const& aMemoryWord)
+                        {
+                            bool changed = false;
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    auto& i = aFunction.values[v];
+                                    if (i.dead || !i.load() || (i.imm0 & optimizer::MemargCached) == 0u || i.operands.size() != 1u || (i.type != I32 && i.type != I64))
+                                        continue;
+                                    auto const& a = aFunction.values[i.operands[0]];
+                                    if (!a.constant())
+                                        continue;
+                                    std::uint32_t width = 0u;
+                                    bool sign = false;
+                                    switch (i.op)
+                                    {
+                                    case 0x28u: case 0x34u: case 0x35u: width = 4u; sign = i.op == 0x34u; break;
+                                    case 0x29u: width = 8u; break;
+                                    case 0x2Cu: case 0x2Du: case 0x30u: case 0x31u: width = 1u; sign = i.op == 0x2Cu || i.op == 0x30u; break;
+                                    case 0x2Eu: case 0x2Fu: case 0x32u: case 0x33u: width = 2u; sign = i.op == 0x2Eu || i.op == 0x32u; break;
+                                    default: continue;
+                                    }
+                                    auto const memory = static_cast<std::uint32_t>(i.imm0 >> 32u);
+                                    auto const address = a.imm0 + i.imm1;
+                                    if (memory == 0u || address < a.imm0)
+                                        continue;
+                                    auto const word = aMemoryWord(memory, address, width);
+                                    if (!word)
+                                        continue;
+                                    std::uint64_t value = *word;
+                                    if (sign && width < 8u)
+                                    {
+                                        auto const shift = 64u - 8u * width;
+                                        value = static_cast<std::uint64_t>(static_cast<std::int64_t>(value << shift) >> shift);
+                                    }
+                                    if (i.type == I32)
+                                        value &= 0xFFFFFFFFu;
+                                    i.op = i.type == I32 ? 0x41u : 0x42u;
+                                    i.imm0 = value;
+                                    i.imm1 = 0u;
+                                    i.flags = 0u;
+                                    i.operands.clear();
+                                    changed = true;
+                                }
+                            return changed;
+                        }
+
                         bool fold_known_bits(function& aFunction)
                         {
                             auto& values = aFunction.values;
@@ -4089,13 +4138,16 @@ namespace neos
                         }
                     }
 
-                    void optimize(function& aFunction, module_description const&, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible)
+                    void optimize(function& aFunction, module_description const&, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible,
+                        std::function<std::optional<std::uint64_t>(std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth)> const& aMemoryWord)
                     {
+                        auto const cached = [&]() { return aMemoryWord && fold_cached_loads(aFunction, aMemoryWord); };
                         if (fold_assumed(aFunction))
                             finish(aFunction);
                         for (int pass = 0; pass < 4; ++pass)
                         {
-                            bool changed = fold_known_bits(aFunction);
+                            bool changed = cached();
+                            changed = fold_known_bits(aFunction) || changed;
                             changed = fold_constants(aFunction) || changed;
                             finish(aFunction);
                             changed = simplify(aFunction) || changed;
@@ -4167,7 +4219,8 @@ namespace neos
                             }
                             for (int pass = 0; pass < 2; ++pass)
                             {
-                                bool changed = fold_known_bits(aFunction);
+                                bool changed = cached();
+                                changed = fold_known_bits(aFunction) || changed;
                                 changed = fold_constants(aFunction) || changed;
                                 finish(aFunction);
                                 changed = simplify(aFunction) || changed;

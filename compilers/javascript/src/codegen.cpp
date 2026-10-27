@@ -5900,8 +5900,10 @@ namespace neos::compilers::javascript
         iCode.push_back(0x7Fu);
         iControls.push_back(control{ control_kind::Block });
         {
+            // (an object's class and a function's dispatch key do not change: cached loads (code that knows the callee (e.g. a holder's
+            // property's value) knows them))
             cell_of(aCallee);
-            mem_load(opcode::I32LoadMem8U, jsl::ObjectClass, alias::Header);
+            cached_load(opcode::I32LoadMem8U, jsl::ObjectClass, alias::Header);
             i32(static_cast<std::int32_t>(jsl::ClassFunction));
             op(opcode::I32Eq);
             op(opcode::If);
@@ -5909,7 +5911,7 @@ namespace neos::compilers::javascript
             iControls.push_back(control{ control_kind::Block });
             {
                 cell_of(aCallee);
-                mem_load(opcode::I64LoadMem, jsl::FunctionDispatch, alias::Function);
+                cached_load(opcode::I64LoadMem, jsl::FunctionDispatch, alias::Function);
                 property_site_at(aSite);
                 site_load(opcode::I64LoadMem, jsl::SiteDispatch);
                 op(opcode::I64Eq);

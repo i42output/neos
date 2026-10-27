@@ -42,6 +42,7 @@
 #include <neos/neos.hpp>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 #include <neos/bytecode/vm/jit.hpp>
@@ -134,8 +135,11 @@ namespace neos
                     // unsupported if it uses an instruction that the representation does not have)
                     function build(module_description const& aModule, std::uint32_t aFunction, std::vector<std::uint64_t> const& aTokens,
                         std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts = {});
-                    // (aAccessible: the size of a fixed external memory (0: not fixed): its accesses that are within it are not checked)
-                    void optimize(function& aFunction, module_description const& aModule, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible = {});
+                    // (aAccessible: the size of a fixed external memory (0: not fixed): its accesses that are within it are not checked; 
+                    // aMemoryWord: a word of a fixed external memory (its value now, if it can be read): cached loads (optimizer::MemargCached)
+                    // at constant addresses are constants)
+                    void optimize(function& aFunction, module_description const& aModule, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible = {},
+                        std::function<std::optional<std::uint64_t>(std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth)> const& aMemoryWord = {});
                     // (the blocks' order (reverse postorder) and the values' uses, after the code changes)
                     void finish(function& aFunction);
                 }

@@ -135,7 +135,7 @@ namespace neos
                         std::set<std::size_t> noInline;         ///< (calls (their tokens' positions) not to inline)
                         std::set<std::size_t> noDeopt;          ///< (inlined calls (their positions) whose code's calls are made (not deopts))
                         std::size_t maxInlineDepth = 4u;
-                        std::size_t maxCalleeTokens = 4000u;    ///< (a callee larger than this is not inlined)
+                        std::size_t maxCalleeTokens = 6000u;    ///< (a callee larger than this is not inlined)
                         std::size_t maxFramedCalleeTokens = 600u;   ///< (... nor one with a frame of its own larger than this)
                         std::size_t maxTokens = 60000u;         ///< (the function's code may grow to this, by inlining...)
                         std::size_t maxGrowth = 6u;             ///< (... and to this many times its size (and 2000 tokens))
@@ -184,6 +184,9 @@ namespace neos
 
                     // (an integer instruction's result for constant operands (aY: a binary one's), if it is folded (not if it traps))
                     std::optional<std::uint64_t> fold_integer(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY);
+
+                    // (the parameters of a function that its code reads (local.get): a call (whose callee is known) need not pass the others)
+                    std::vector<bool> parameters_read(module_description const& aModule, std::uint32_t aFunction);
 
                     // (the locals (parameters, then locals) of a function that its code may read after each of the positions (of its 
                     // instructions) before it sets them: by position)
