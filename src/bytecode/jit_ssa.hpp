@@ -89,8 +89,11 @@ namespace neos
                     enum flag : std::uint8_t
                     {
                         Unchecked = 0x01u,  ///< (a memory access that is within its memory: not checked)
-                        Volatile = 0x02u    ///< (not to be removed (e.g. a load that may trap))
+                        Volatile = 0x02u,   ///< (not to be removed (e.g. a load that may trap))
+                        Scaled = 0x0Cu      ///< (an unchecked access's address: its operand shifted left by these bits (>> 2: 1 to 3), as an
+                                            ///< address's index is scaled)
                     };
+                    constexpr unsigned ScaledShift = 2u;
 
                     struct instruction
                     {

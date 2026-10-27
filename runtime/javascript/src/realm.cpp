@@ -97,12 +97,6 @@ namespace neos::javascript_runtime
         return false;
     }
 
-    realm& the_realm()
-    {
-        auto& h = the_heap();
-        return h.currentRealm != nullptr ? *h.currentRealm : *h.mainRealm;
-    }
-
     void global_mirror_update(realm& aRealm, value aName)
     {
         auto const m = aRealm.mirrors.find(aName);

@@ -580,9 +580,9 @@ namespace neos
                                 emit8(b);
                             modrm_mem(aReg, aBase, aDisp);
                         }
-                        // [base + index * 8]
-                        // ([aBase + aIndex + aDisp] (aIndex not rsp); aByteReg: aReg is a byte register (spl, bpl, sil and dil need a rex))
-                        void op_bi(std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aBase, int aIndex, std::int32_t aDisp, int aPrefix = -1, bool aByteReg = false)
+                        // ([aBase + aIndex << aScale + aDisp] (aIndex not rsp; aScale: 0 to 3); aByteReg: aReg is a byte register (spl, bpl, sil
+                        // and dil need a rex))
+                        void op_bi(std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aBase, int aIndex, std::int32_t aDisp, int aPrefix = -1, bool aByteReg = false, unsigned aScale = 0u)
                         {
                             lengthenable();
                             if (aPrefix >= 0)
@@ -590,16 +590,23 @@ namespace neos
                             rex(aW, aReg, aIndex, aBase, aByteReg && aReg >= 4 && aReg < 8);
                             for (auto b : aOpcode)
                                 emit8(b);
-                            if (fits_i8(aDisp))
+                            auto const sib = static_cast<std::uint8_t>(((aScale & 3u) << 6) | ((aIndex & 7) << 3) | (aBase & 7));
+                            if (aDisp == 0 && (aBase & 7) != 5)
+                            {
+                                // (no displacement (rbp and r13 as the base need one))
+                                emit8(static_cast<std::uint8_t>(0x04u | ((aReg & 7) << 3)));
+                                emit8(sib);
+                            }
+                            else if (fits_i8(aDisp))
                             {
                                 emit8(static_cast<std::uint8_t>(0x44u | ((aReg & 7) << 3)));
-                                emit8(static_cast<std::uint8_t>(((aIndex & 7) << 3) | (aBase & 7)));
+                                emit8(sib);
                                 emit8(static_cast<std::uint8_t>(static_cast<std::int8_t>(aDisp)));
                             }
                             else
                             {
                                 emit8(static_cast<std::uint8_t>(0x84u | ((aReg & 7) << 3)));
-                                emit8(static_cast<std::uint8_t>(((aIndex & 7) << 3) | (aBase & 7)));
+                                emit8(sib);
                                 emit32(static_cast<std::uint32_t>(aDisp));
                             }
                         }
@@ -5670,6 +5677,12 @@ namespace neos
                                 return l.reg;
                             if (just_stored(aValue, aScratch))
                                 return aScratch;
+                            if (just_stored(aValue, iStoredFrom.reg))
+                            {
+                                // (another register has it: a move (as the load: an i32's zero extended), not a load of what was just stored)
+                                a.mov_rr(is_wide_type(f.values[aValue].type), aScratch, iStoredFrom.reg);
+                                return aScratch;
+                            }
                             a.load(is_wide_type(f.values[aValue].type), aScratch, RBP, l.disp);
                             return aScratch;
                         }
@@ -5696,6 +5709,11 @@ namespace neos
                                 return l.reg;
                             if (just_stored(aValue, aScratch))
                                 return aScratch;
+                            if (just_stored(aValue, iStoredFrom.reg))
+                            {
+                                a.movapd(aScratch, iStoredFrom.reg);
+                                return aScratch;
+                            }
                             a.movf_load(type == ssa::F64, aScratch, RBP, l.disp);
                             return aScratch;
                         }
@@ -6389,8 +6407,9 @@ namespace neos
                                 std::vector<bool> inBlock(f.values.size(), false);
                                 for (std::size_t c = 0u; c + 1u < last; ++c)
                                     inBlock[code[c]] = true;
-                                // (the tree: its connectives' operands are its nodes; its leaves are comparisons, or (an or's operand) other i32s 
-                                // (tested: not 0), which are not deferred (an and's: not (a & b is not a && b unless they are 0 or 1)))
+                                // (the tree: its connectives' operands are its nodes; its leaves are comparisons, or (an or's operand, or a
+                                // comparison that is not deferred (used elsewhere)) other i32s (tested: not 0), which are not deferred (an and's:
+                                // not others (a & b is not a && b unless they are 0 or 1)))
                                 std::vector<value> pending{ root };
                                 std::vector<value> underOr;
                                 while (!pending.empty() && valid)
@@ -6400,7 +6419,9 @@ namespace neos
                                     auto const& i = f.values[v];
                                     if (v >= inBlock.size() || !inBlock[v] || i.dead || i.type != ssa::I32 || f.uses[v] != 1u || !comparison(i.op) && !connective(i.op))
                                     {
-                                        if (v != root && std::find(underOr.begin(), underOr.end(), v) != underOr.end() && !i.dead && i.type == ssa::I32 && i.op != ssa::Phi)
+                                        // (a value leaf: an or's operand; or an and's that is 0 or 1 (a comparison: a & b is a && b))
+                                        if (v != root && !i.dead && i.type == ssa::I32 && i.op != ssa::Phi &&
+                                            (std::find(underOr.begin(), underOr.end(), v) != underOr.end() || comparison(i.op)))
                                             continue;
                                         valid = false;
                                         break;
@@ -6463,13 +6484,19 @@ namespace neos
                             if (!iDeferred[v])
                             {
                                 // (an i32 that is not a comparison (see defer_conditions): true if it is not 0)
-                                auto const r = gpr(v, RAX);
-                                a.test_rr(false, r, r);
-                                if (aNext == aFalse)
-                                    a.jcc(NE, aTrue);
+                                std::uint8_t cc = NE;
+                                if (auto const flags = flags_of(v))
+                                    cc = *flags;
                                 else
                                 {
-                                    a.jcc(E, aFalse);
+                                    auto const r = gpr(v, RAX);
+                                    a.test_rr(false, r, r);
+                                }
+                                if (aNext == aFalse)
+                                    a.jcc(cc, aTrue);
+                                else
+                                {
+                                    a.jcc(invert(cc), aFalse);
                                     if (aNext != aTrue)
                                         a.jmp(aTrue);
                                 }
@@ -6682,6 +6709,8 @@ namespace neos
                                 floatNe = iPending.floatNe;
                                 iPending = {};
                             }
+                            else if (auto const flags = flags_of(i.operands[0]))
+                                cc = *flags;
                             else
                             {
                                 auto const c = gpr(i.operands[0], RAX);
@@ -7065,9 +7094,12 @@ namespace neos
                             std::int32_t offset = disp;
                             auto const address = i.operands[0];
                             bool const fixed = memoryIndex != 0u && external_memory(memoryIndex).fixed;
-                            bool const within = fixed && constant(address) && bits(address) <= external_memory(memoryIndex).size &&
+                            auto const scale = static_cast<unsigned>((i.flags & ssa::Scaled) >> ssa::ScaledShift);
+                            bool const within = scale == 0u && fixed && constant(address) && bits(address) <= external_memory(memoryIndex).size &&
                                 bits(address) + static_cast<std::uint64_t>(disp) + x.width <= external_memory(memoryIndex).size;
                             bool const unchecked = (i.flags & ssa::Unchecked) != 0u || within;
+                            if (scale != 0u && (!fixed || !unchecked))
+                                throw std::logic_error("neos::jit: scaled access");
                             if (within && fits_i32(static_cast<std::int64_t>(bits(address) + static_cast<std::uint64_t>(disp))))
                             {
                                 // (within it: no check)
@@ -7138,7 +7170,7 @@ namespace neos
                             auto const access_at = [&](std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aPrefix, bool aByte)
                             {
                                 if (index >= 0)
-                                    a.op_bi(aOpcode, aW, aReg, base, index, offset, aPrefix, aByte);
+                                    a.op_bi(aOpcode, aW, aReg, base, index, offset, aPrefix, aByte, scale);
                                 else
                                     a.op_rm(aOpcode, aW, aReg, base, offset, aPrefix);
                             };
@@ -7149,6 +7181,22 @@ namespace neos
                                 {
                                     auto const r = xmm(value, 0);
                                     access_at({ 0x0Fu, x.opcode0 }, false, r, x.prefix, false);
+                                    return;
+                                }
+                                if (constant(value) && (x.width < 8u || fits_i32(static_cast<std::int64_t>(bits(value)))))
+                                {
+                                    // (a constant: an immediate)
+                                    auto const b = bits(value);
+                                    access_at({ x.width == 1u ? std::uint8_t{ 0xC6u } : std::uint8_t{ 0xC7u } }, x.w, 0, x.prefix, false);
+                                    if (x.width == 1u)
+                                        a.emit8(static_cast<std::uint8_t>(b));
+                                    else if (x.width == 2u)
+                                    {
+                                        a.emit8(static_cast<std::uint8_t>(b));
+                                        a.emit8(static_cast<std::uint8_t>(b >> 8u));
+                                    }
+                                    else
+                                        a.emit32(static_cast<std::uint32_t>(b));
                                     return;
                                 }
                                 int r = gpr(value, RAX);
@@ -7299,6 +7347,23 @@ namespace neos
                             a.setcc(aCc, r);
                             a.movzx8(r, r);
                             defined(v, r);
+                            // (the flags have its condition until code is emitted (see flags_of))
+                            iFlags = flags_from{ v, aCc, a.events() };
+                        }
+                        // (a comparison whose value was just made (nothing emitted since: setcc, movzx and a store do not change the flags):
+                        // its condition, in the flags)
+                        struct flags_from
+                        {
+                            value v = ssa::None;
+                            std::uint8_t cc = 0u;
+                            std::uint64_t events = 0u;
+                        };
+                        flags_from iFlags;
+                        std::optional<std::uint8_t> flags_of(value aValue) const
+                        {
+                            if (iFlags.v == aValue && iFlags.events == a.events())
+                                return iFlags.cc;
+                            return {};
                         }
                         void float_equality(value v, bool aEqual)
                         {

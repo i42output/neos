@@ -392,7 +392,7 @@ namespace neos::javascript_runtime
         std::uint64_t compiledLimit;
         std::uint64_t megamorphic;          ///< (the region offset of the gets' cache of own data properties by shape and key (see megamorphic_entry))
         std::uint64_t bump[Classes];        ///< (each size class's run of free slots: the next's region offset (0: none) ...
-        std::uint64_t bumpLimit[Classes];   ///< (... and the end's)
+        std::uint64_t bumpLimit[Classes];   ///< (... and the end's (0 when there is none: compiled code finds a slot beyond it))
         std::uint64_t plainArrays[3];       ///< (compiled code's push stub: %Array.prototype%'s shape, its prototype (%Object.prototype%) and that
                                             ///< one's shape when they were last plain (see remember_plain_arrays); all ones: not known)
     };
@@ -488,7 +488,8 @@ namespace neos::javascript_runtime
                 }
             return *result;
         }
-        static constexpr unsigned HandleShift = 4u;     ///< (a handle: its cell's offset in the region >> HandleShift)
+        static constexpr unsigned HandleShift = 3u;     ///< (a handle: its cell's offset in the region >> HandleShift (compiled code finds a cell
+                                                        ///< at its handle scaled by 8: an address's index))
         cell* find(std::uint32_t aHandle) const;        ///< (gc.cpp: the live cell whose handle it is (null if none))
         static cell& at(std::uint32_t aHandle)
         {
@@ -1516,7 +1517,11 @@ namespace neos::javascript_runtime
         std::unordered_map<value, std::vector<unsigned long long*>> mirrors;
     };
 
-    realm& the_realm();                     ///< (the current realm: the realm of the function running)
+    inline realm& the_realm()               ///< (the current realm: the realm of the function running)
+    {
+        auto& h = the_heap();
+        return h.currentRealm != nullptr ? *h.currentRealm : *h.mainRealm;
+    }
     void global_mirror_update(realm& aRealm, value aName);  ///< (a global binding changed (its mirrors, if it has any, are updated))
     void global_object_changed(object& aObject, value aKey);    ///< (a property of a global object with mirrors changed)
     bool is_object_prototype(object const& aObject);    ///< (a realm's %Object.prototype% (an immutable prototype exotic object))

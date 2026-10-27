@@ -71,7 +71,7 @@ namespace neos::javascript_runtime
 
         constexpr std::size_t PageShift = 16u;
         constexpr std::size_t PageSize = std::size_t{ 1u } << PageShift;
-        constexpr std::size_t RegionSize = std::size_t{ 64u } << 30u;      // (address space only: pages are committed when used)
+        constexpr std::size_t RegionSize = std::size_t{ 32u } << 30u;      // (address space only: pages are committed when used)
         constexpr std::size_t PageCount = RegionSize / PageSize;
         // (address space after the region, never committed: compiled code's accesses of a cell (a handle's offset and a field's) are 
         // within the region and this, so that an optimizing tier can prove them within the memory (and not check them))
@@ -837,6 +837,7 @@ namespace neos::javascript_runtime
         std::size_t iHandleOffset = 0u;
         std::uint64_t iStress = 0u;
         bool iQuarantine = false;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> iSweptRuns;     ///< (a page's free runs, as sweep_page finds them)
         std::uint64_t iVerbose = 0u;
         int iPauses = 0;
         bool iCollecting = false;
@@ -1293,7 +1294,7 @@ namespace neos::javascript_runtime
         auto const first = static_cast<std::uint32_t>(region_offset(start) >> heap::HandleShift);
         auto const step = slotSize >> heap::HandleShift;
         auto const count = PageSize / slotSize;
-        thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>> tRuns;
+        auto& tRuns = iSweptRuns;   // (the collector's: a thread_local's access is not cheap (the runtime is a module loaded at run time))
         tRuns.clear();
         std::uint64_t runStart = 0u;
         bool inRun = false;

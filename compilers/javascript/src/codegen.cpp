@@ -1985,10 +1985,7 @@ namespace neos::compilers::javascript
             get(list);
             volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
             op(opcode::I64GtU);
-            get(slot);
-            op(opcode::I64Eqz);
-            op(opcode::I32Ior);
-            branch(refill, true);
+            branch(refill, true);   // (no run (0): its limit is 0 too)
             get(state);
             volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
             get(entry);
@@ -2116,10 +2113,7 @@ namespace neos::compilers::javascript
         get(list);
         volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
         op(opcode::I64GtU);
-        get(slot);
-        op(opcode::I64Eqz);
-        op(opcode::I32Ior);
-        branch(slow, true);
+        branch(slow, true);     // (no run (0): its limit is 0 too)
         get(state);
         volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
         get(entry);
@@ -2239,10 +2233,7 @@ namespace neos::compilers::javascript
         get(list);
         volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
         op(opcode::I64GtU);
-        get(slot);
-        op(opcode::I64Eqz);
-        op(opcode::I32Ior);
-        branch(slow, true);
+        branch(slow, true);     // (no run (0): its limit is 0 too)
         get(state);
         volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
         get(entry);
@@ -5953,19 +5944,21 @@ namespace neos::compilers::javascript
         iControls.push_back(control{ control_kind::Block });
         i32(1);
         op(opcode::Else);
+        // (the same tags (their xor's top 16 bits: 0), the lhs's (its top 16 bits) a string's or a bigint's)
         get(aLhs);
-        constant(0xFFFF000000000000ull);
-        op(opcode::I64And);
-        tee(iScratch);
         get(aRhs);
-        constant(0xFFFF000000000000ull);
-        op(opcode::I64And);
+        op(opcode::I64Xor);
+        i64(48);
+        op(opcode::I64ShrU);
+        op(opcode::I64Eqz);
+        get(aLhs);
+        i64(48);
+        op(opcode::I64ShrS);    // (a tag's top 16 bits, sign extended: small (negative) immediates)
+        tee(iScratch);
+        i64(static_cast<std::int64_t>(values::TagString) >> 48);
         op(opcode::I64Eq);
         get(iScratch);
-        constant(values::TagString);
-        op(opcode::I64Eq);
-        get(iScratch);
-        constant(values::TagBigInt);
+        i64(static_cast<std::int64_t>(values::TagBigInt) >> 48);
         op(opcode::I64Eq);
         op(opcode::I32Ior);
         op(opcode::I32And);
@@ -5974,7 +5967,7 @@ namespace neos::compilers::javascript
         iControls.push_back(control{ control_kind::Block });
         {
             get(iScratch);
-            constant(values::TagString);
+            i64(static_cast<std::int64_t>(values::TagString) >> 48);
             op(opcode::I64Eq);
             get(aLhs);
             get(aRhs);

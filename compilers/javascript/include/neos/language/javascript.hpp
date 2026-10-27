@@ -240,7 +240,7 @@ namespace neos::language::javascript
     namespace layout
     {
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
-        inline constexpr std::uint32_t HandleShift = 4u;            ///< (a cell's offset: its handle << HandleShift)
+        inline constexpr std::uint32_t HandleShift = 3u;            ///< (a cell's offset: its handle << HandleShift (an address's index scaled by 8))
         inline constexpr std::uint32_t ObjectProto = 16u;           ///< (value: an object's prototype)
         inline constexpr std::uint32_t ObjectShape = 24u;           ///< (u64: its properties' shape (0: none: a dictionary))
         inline constexpr std::uint32_t ObjectValues = 32u;          ///< (u64: a shape's: the offset of its properties' values (value))

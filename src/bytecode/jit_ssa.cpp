@@ -951,7 +951,6 @@ namespace neos
                             std::vector<std::uint64_t> ones(values.size(), 0u);
                             std::vector<bool> done(values.size(), false);
                             auto const width = [&](value v) -> std::uint64_t { return values[v].type == I32 ? 0xFFFFFFFFull : ~std::uint64_t{}; };
-                            auto const highest = [](std::uint64_t x) -> int { return x == 0u ? -1 : 63 - std::countl_zero(x); };
                             replacements replaced;
                             bool changed = false;
                             for (auto b : aFunction.order)
@@ -963,8 +962,9 @@ namespace neos
                                     for (auto& o : i.operands)
                                         o = replaced.resolved(o);
                                     auto const mask = width(v);
-                                    auto const m = [&](std::size_t n) { auto const o = i.operands[n]; return done[o] ? may[o] : width(o); };
-                                    auto const k = [&](std::size_t n) { auto const o = i.operands[n]; return done[o] ? ones[o] : std::uint64_t{ 0u }; };
+                                    // (a constant (wherever it is: constants are where they are used): its bits)
+                                    auto const m = [&](std::size_t n) { auto const o = i.operands[n]; return values[o].constant() && (values[o].type == I32 || values[o].type == I64) ? values[o].imm0 & width(o) : done[o] ? may[o] : width(o); };
+                                    auto const k = [&](std::size_t n) { auto const o = i.operands[n]; return values[o].constant() && (values[o].type == I32 || values[o].type == I64) ? values[o].imm0 & width(o) : done[o] ? ones[o] : std::uint64_t{ 0u }; };
                                     auto const c = [&](std::size_t n) -> std::optional<std::uint64_t>
                                     {
                                         auto const& x = values[i.operands[n]];
@@ -1061,18 +1061,18 @@ namespace neos
                                             }
                                         }
                                     }
-                                    else if (op == 0x7Cu || op == 0x6Au)
+                                    else if ((op == 0x7Cu || op == 0x6Au) && i.operands.size() == 2u)
                                     {
-                                        // (add: no bit above the highest that may be 1 (and one), none below the lowest)
-                                        auto const a = m(0), bb = m(1);
-                                        auto const top = std::max(highest(a), highest(bb)) + 1;
-                                        auto const low = std::min(a == 0u ? 64 : std::countr_zero(a), bb == 0u ? 64 : std::countr_zero(bb));
-                                        if (top < 63)
-                                            pm = ((std::uint64_t{ 1u } << (top + 1)) - 1u) & mask;
-                                        if (low < 64)
-                                            pm &= ~((std::uint64_t{ 1u } << low) - 1u);
-                                        else
-                                            pm = 0u;
+                                        // (add: a bit of the sum is known where both operands' bits and the carry into it are known: the sums of 
+                                        // the operands' largest (the bits that may be 1) and of their smallest (the bits that are 1) values give 
+                                        // the carries (each sum's bit is the operands' bits and its carry in, xor'd))
+                                        auto const am = m(0), ak = k(0), bm = m(1), bk = k(1);
+                                        auto const largest = am + bm, smallest = ak + bk;
+                                        auto const carryKnownZero = ~(largest ^ am ^ bm);
+                                        auto const carryKnownOne = smallest ^ ak ^ bk;
+                                        auto const known = ((~am | ak) & (~bm | bk) & (carryKnownZero | carryKnownOne)) & mask;
+                                        pm = ((largest & known) | ~known) & mask;
+                                        po = smallest & known & mask;
                                     }
                                     else if (op == 0xA7u && i.operands.size() == 1u)
                                     {
@@ -1425,6 +1425,65 @@ namespace neos
                             case 10u: return aA >= aB;
                             default: return {};
                             }
+                        }
+
+                        // (an i64 eq or ne of an and with a mask of high bits (its only use) and a constant (none of whose bits are below the
+                        // mask's): of the and's operand shifted right (past the mask's low zeros) and the constant shifted so (no 64 bit
+                        // immediate))
+                        bool narrow_masked_comparisons(function& aFunction)
+                        {
+                            bool changed = false;
+                            auto& values = aFunction.values;
+                            count_uses(aFunction);
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    if (values[v].dead || (values[v].op != 0x51u && values[v].op != 0x52u) || values[v].operands.size() != 2u)
+                                        continue;
+                                    for (std::size_t n = 0u; n < 2u; ++n)
+                                    {
+                                        auto const a = values[v].operands[n];
+                                        auto const c = values[v].operands[1u - n];
+                                        if (!values[c].constant() || values[c].type != I64 || values[a].dead || values[a].op != 0x83u ||
+                                            values[a].type != I64 || values[a].operands.size() != 2u || aFunction.uses[a] != 1u)
+                                            continue;
+                                        std::size_t const mo = values[values[a].operands[1]].op == 0x42u ? 1u : values[values[a].operands[0]].op == 0x42u ? 0u : 2u;
+                                        if (mo == 2u)
+                                            continue;
+                                        auto const mask = values[values[a].operands[mo]].imm0;
+                                        if (mask == 0u || (mask & 1u) != 0u)
+                                            continue;
+                                        auto const shift = static_cast<unsigned>(std::countr_zero(mask));
+                                        if ((mask >> shift) != (~std::uint64_t{} >> shift) || shift < 32u || (values[c].imm0 & ~mask) != 0u)
+                                            continue;
+                                        auto const x = values[a].operands[1u - mo];
+                                        auto const block = values[a].block;
+                                        instruction s;
+                                        s.op = 0x42u;
+                                        s.type = I64;
+                                        s.imm0 = shift;
+                                        s.block = block;
+                                        values.push_back(s);
+                                        auto const sv = static_cast<value>(values.size() - 1u);
+                                        // (the constant's top bit set (e.g. a NaN box's tag): an arithmetic shift, so that the constant is small
+                                        // and negative (an 8 bit immediate))
+                                        bool const arithmetic = (values[c].imm0 >> 63u) != 0u;
+                                        instruction k;
+                                        k.op = 0x42u;
+                                        k.type = I64;
+                                        k.imm0 = arithmetic ? static_cast<std::uint64_t>(static_cast<std::int64_t>(values[c].imm0) >> shift) : values[c].imm0 >> shift;
+                                        k.block = values[v].block;
+                                        values.push_back(k);
+                                        auto const kv = static_cast<value>(values.size() - 1u);
+                                        auto& ai = values[a];
+                                        ai.op = arithmetic ? 0x87u : 0x88u;
+                                        ai.operands = { x, sv };
+                                        values[v].operands[1u - n] = kv;
+                                        changed = true;
+                                        break;
+                                    }
+                                }
+                            return changed;
                         }
 
                         bool simplify(function& aFunction)
@@ -2996,6 +3055,165 @@ namespace neos
                             return changed;
                         }
 
+                        // (a small block (pure instructions, then a jump) with a phi that has a constant operand, whose values are used only
+                        // in it and by its successor's phis: a copy for each of its predecessors (its phis: their operands from it), so that
+                        // the copies' code can be folded (e.g. what an inlined call's result is tested for, its result a constant on one path))
+                        bool duplicate_tails(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            count_uses(aFunction);
+                            bool changed = false;
+                            std::size_t copies = 0u;
+                            std::size_t const count = blocks.size();
+                            for (std::uint32_t b = 1u; b < count && copies < 32u; ++b)
+                            {
+                                if (!blocks[b].reachable || blocks[b].loopHeader || blocks[b].successors.size() != 1u)
+                                    continue;
+                                auto const preds = blocks[b].predecessors;
+                                auto const c = blocks[b].successors[0];
+                                if (preds.size() < 2u || preds.size() > 4u || c == b || blocks[c].loopHeader)
+                                    continue;
+                                bool ok = true;
+                                for (std::size_t k = 0u; k < preds.size() && ok; ++k)
+                                    for (std::size_t q = k + 1u; q < preds.size(); ++q)
+                                        if (preds[k] == preds[q] || preds[k] == b)
+                                            ok = false;
+                                if (!ok || std::count(blocks[c].predecessors.begin(), blocks[c].predecessors.end(), b) != 1)
+                                    continue;
+                                std::vector<value> phis, body;
+                                value jump = None;
+                                for (auto v : blocks[b].code)
+                                {
+                                    auto const& i = values[v];
+                                    if (i.dead)
+                                        continue;
+                                    if (i.op == Phi)
+                                        phis.push_back(v);
+                                    else if (i.op == Jump)
+                                        jump = v;
+                                    else if (jump != None || i.terminator() || !pure(i))
+                                        ok = false;
+                                    else
+                                        body.push_back(v);
+                                }
+                                if (!ok || jump == None || phis.empty() || body.size() > 8u)
+                                    continue;
+                                bool constantOperand = false;
+                                for (auto ph : phis)
+                                {
+                                    if (values[ph].operands.size() != preds.size())
+                                        ok = false;
+                                    for (auto o : values[ph].operands)
+                                        if (o == None)
+                                            ok = false;
+                                        else if (values[o].constant())
+                                            constantOperand = true;
+                                }
+                                if (!ok || !constantOperand)
+                                    continue;
+                                // (its values: used only in it and by its successor's phis)
+                                auto const kb = static_cast<std::size_t>(std::find(blocks[c].predecessors.begin(), blocks[c].predecessors.end(), b) - blocks[c].predecessors.begin());
+                                std::unordered_map<value, std::uint32_t> local;
+                                for (auto v : phis)
+                                    local.emplace(v, 0u);
+                                for (auto v : body)
+                                    local.emplace(v, 0u);
+                                for (auto v : body)
+                                    for (auto o : values[v].operands)
+                                        if (auto l = local.find(o); l != local.end())
+                                            ++l->second;
+                                for (auto v : blocks[c].code)
+                                {
+                                    if (values[v].op != Phi)
+                                        break;
+                                    if (values[v].dead)
+                                        continue;
+                                    for (std::size_t n = 0u; n < values[v].operands.size(); ++n)
+                                        if (auto l = local.find(values[v].operands[n]); l != local.end())
+                                        {
+                                            if (n != kb)
+                                                ok = false;
+                                            ++l->second;
+                                        }
+                                }
+                                for (auto const& [v, n] : local)
+                                    if (aFunction.uses[v] != n)
+                                        ok = false;
+                                if (!ok)
+                                    continue;
+                                // (the copies)
+                                std::vector<std::uint32_t> made;
+                                std::vector<std::unordered_map<value, value>> maps(preds.size());
+                                for (std::size_t k = 0u; k < preds.size(); ++k)
+                                {
+                                    auto const nb = static_cast<std::uint32_t>(blocks.size());
+                                    blocks.push_back(block{});
+                                    blocks[nb].predecessors = { preds[k] };
+                                    blocks[nb].successors = { c };
+                                    blocks[nb].loopDepth = blocks[b].loopDepth;
+                                    blocks[nb].reachable = true;
+                                    auto& map = maps[k];
+                                    for (auto ph : phis)
+                                        map[ph] = values[ph].operands[k];
+                                    for (auto v : body)
+                                    {
+                                        instruction x = values[v];
+                                        x.block = nb;
+                                        for (auto& o : x.operands)
+                                            if (auto m = map.find(o); m != map.end())
+                                                o = m->second;
+                                        values.push_back(std::move(x));
+                                        map[v] = static_cast<value>(values.size() - 1u);
+                                        blocks[nb].code.push_back(map[v]);
+                                    }
+                                    instruction j;
+                                    j.op = Jump;
+                                    j.type = Void;
+                                    j.block = nb;
+                                    j.origin = values[jump].origin;
+                                    values.push_back(std::move(j));
+                                    blocks[nb].code.push_back(static_cast<value>(values.size() - 1u));
+                                    for (auto& s : blocks[preds[k]].successors)
+                                        if (s == b)
+                                        {
+                                            s = nb;
+                                            break;
+                                        }
+                                    made.push_back(nb);
+                                }
+                                // (the successor: the copies as its predecessors instead, its phis' operands from them)
+                                auto& cp = blocks[c].predecessors;
+                                cp.erase(cp.begin() + static_cast<std::ptrdiff_t>(kb));
+                                cp.insert(cp.begin() + static_cast<std::ptrdiff_t>(kb), made.begin(), made.end());
+                                for (auto v : blocks[c].code)
+                                {
+                                    if (values[v].op != Phi)
+                                        break;
+                                    auto& ops = values[v].operands;
+                                    if (ops.size() <= kb)
+                                        continue;
+                                    auto const o = ops[kb];
+                                    std::vector<value> from;
+                                    for (std::size_t k = 0u; k < preds.size(); ++k)
+                                    {
+                                        auto const m = maps[k].find(o);
+                                        from.push_back(m != maps[k].end() ? m->second : o);
+                                    }
+                                    ops.erase(ops.begin() + static_cast<std::ptrdiff_t>(kb));
+                                    ops.insert(ops.begin() + static_cast<std::ptrdiff_t>(kb), from.begin(), from.end());
+                                }
+                                for (auto v : blocks[b].code)
+                                    values[v].dead = true;
+                                blocks[b].predecessors.clear();
+                                blocks[b].successors.clear();
+                                blocks[b].reachable = false;
+                                copies += preds.size();
+                                changed = true;
+                            }
+                            return changed;
+                        }
+
                         // (a block that jumps to a block that has no other predecessor: the two are one (the second's code (its phis are 
                         // trivial: their operands) follows the first's))
                         bool merge_blocks(function& aFunction)
@@ -4102,6 +4320,121 @@ namespace neos
 
                         // (a branch on a comparison that is not just before it (or that has other uses): a copy of the comparison just before
                         // it (so that the code generator fuses them, rather than making its value (0 or 1) and testing that))
+                        // (an unchecked access (within its memory) of a 64 bit address that adds (or subtracts) a constant: the constant in its
+                        // offset (the same address: it wraps as the add does))
+                        void fold_address_offsets(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    auto& i = values[v];
+                                    if (i.dead || !(i.load() || i.store()) || (i.flags & Unchecked) == 0u || (i.imm0 >> 32u) == 0u || i.operands.empty())
+                                        continue;
+                                    for (int depth = 0; depth < 4; ++depth)
+                                    {
+                                        auto const& a = values[i.operands[0]];
+                                        if (a.dead || a.type != I64 || (a.op != 0x7Cu && a.op != 0x7Du) || a.operands.size() != 2u)
+                                            break;
+                                        std::size_t const k = values[a.operands[1]].op == 0x42u ? 1u : a.op == 0x7Cu && values[a.operands[0]].op == 0x42u ? 0u : 2u;
+                                        if (k == 2u)
+                                            break;
+                                        auto const c = static_cast<std::int64_t>(values[a.operands[k]].imm0);
+                                        auto const offset = static_cast<std::int64_t>(i.imm1) + (a.op == 0x7Cu ? c : -c);
+                                        if (c < -0x7FFFFFFFll || c > 0x7FFFFFFFll || offset < 0 || offset > 0x7FFFFFFFll)
+                                            break;
+                                        i.imm1 = static_cast<std::uint64_t>(offset);
+                                        i.operands[0] = a.operands[1u - k];
+                                    }
+                                }
+                        }
+
+                        // (an unchecked access (of a 64 bit address) whose address is a value shifted left by 1 to 3 bits: the value, scaled
+                        // (see Scaled: the same address, as the shift wraps))
+                        void fold_scaled_indexes(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    auto& i = values[v];
+                                    if (i.dead || !(i.load() || i.store()) || (i.flags & Unchecked) == 0u || (i.flags & Scaled) != 0u || (i.imm0 >> 32u) == 0u || i.operands.empty())
+                                        continue;
+                                    auto const& a = values[i.operands[0]];
+                                    if (a.dead || a.op != 0x86u || a.type != I64 || a.operands.size() != 2u || !values[a.operands[1]].constant())
+                                        continue;
+                                    auto const shift = values[a.operands[1]].imm0 & 63u;
+                                    if (shift < 1u || shift > 3u || values[a.operands[0]].constant())
+                                        continue;
+                                    i.flags = static_cast<std::uint8_t>(i.flags | (shift << ScaledShift));
+                                    i.operands[0] = a.operands[0];
+                                }
+                        }
+
+                        // (a store (that cannot trap) that a later store in its block (that cannot trap) to the same address (its base and
+                        // the bytes) overwrites with nothing between that may read it, trap or leave (a call, a deopt...): dead)
+                        void eliminate_dead_stores(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            static constexpr std::uint8_t sWidths[] = { 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4, 4, 8, 4, 8, 1, 2, 1, 2, 4 };
+                            struct covered { std::uint64_t memory; value address; std::uint64_t offset; std::uint32_t width; std::size_t memoryClass; };
+                            std::vector<covered> later;
+                            auto const class_of = [](instruction const& aAccess) { return static_cast<std::size_t>((aAccess.imm0 >> optimizer::MemargClassShift) & optimizer::MemargClassMask); };
+                            for (auto b : aFunction.order)
+                            {
+                                later.clear();
+                                auto const& code = aFunction.blocks[b].code;
+                                for (auto c = code.size(); c-- > 0u;)
+                                {
+                                    auto& i = values[code[c]];
+                                    if (i.dead)
+                                        continue;
+                                    if (i.store() && !i.operands.empty())
+                                    {
+                                        bool const unchecked = (i.flags & Unchecked) != 0u && (i.flags & Volatile) == 0u;
+                                        if (!unchecked)
+                                        {
+                                            later.clear();
+                                            continue;
+                                        }
+                                        auto const memory = i.imm0 >> 32u;
+                                        std::uint32_t const width = sWidths[i.op - 0x28u];
+                                        bool overwritten = false;
+                                        for (auto const& l : later)
+                                            if (l.memory == memory && l.address == i.operands[0] && l.offset <= i.imm1 && i.imm1 + width <= l.offset + l.width)
+                                            {
+                                                overwritten = true;
+                                                break;
+                                            }
+                                        if (overwritten)
+                                        {
+                                            i.dead = true;
+                                            continue;
+                                        }
+                                        if (later.size() < 64u)
+                                            later.push_back(covered{ memory, i.operands[0], i.imm1, width, class_of(i) });
+                                        continue;
+                                    }
+                                    if (i.load())
+                                    {
+                                        if ((i.flags & Unchecked) == 0u)
+                                        {
+                                            later.clear();
+                                            continue;
+                                        }
+                                        // (what it may read: not overwritten)
+                                        auto const memory = i.imm0 >> 32u;
+                                        auto const lc = class_of(i);
+                                        std::erase_if(later, [&](covered const& l) { return l.memory == memory && (lc == 0u || l.memoryClass == 0u || l.memoryClass == lc); });
+                                        continue;
+                                    }
+                                    if (pure(i) || i.op == 0x23u || i.op == 0x24u)
+                                        continue;
+                                    later.clear();
+                                }
+                            }
+                        }
+
                         void rematerialize_conditions(function& aFunction)
                         {
                             auto& values = aFunction.values;
@@ -4151,6 +4484,7 @@ namespace neos
                             changed = fold_constants(aFunction) || changed;
                             finish(aFunction);
                             changed = simplify(aFunction) || changed;
+                            changed = narrow_masked_comparisons(aFunction) || changed;
                             if (!changed)
                                 break;
                         }
@@ -4210,6 +4544,11 @@ namespace neos
                                 threaded = true;
                                 finish(aFunction);
                             }
+                            if (duplicate_tails(aFunction))
+                            {
+                                threaded = true;
+                                finish(aFunction);
+                            }
                             threaded = decide_branches(aFunction) || threaded;
                             threaded = merge_equal_successors(aFunction) || threaded;
                             if (sink_conversions(aFunction))
@@ -4243,6 +4582,9 @@ namespace neos
                         for (auto& i : aFunction.values)
                             if (i.op == Assume)
                                 i.dead = true;
+                        fold_address_offsets(aFunction);
+                        eliminate_dead_stores(aFunction);
+                        fold_scaled_indexes(aFunction);
                         count_uses(aFunction);
                         rematerialize_conditions(aFunction);
                         eliminate_dead_code(aFunction);
