@@ -904,9 +904,6 @@ namespace neos
                                     if (i.op >= 0x45u && i.op <= 0xC4u)
                                     {
                                         auto const n = numeric_of(static_cast<std::uint8_t>(i.op));
-                                        if (n.operand == F32 || n.operand == F64)
-                                            if (i.op != 0xBCu && i.op != 0xBDu)
-                                                continue;
                                         auto const* x = constant(0u);
                                         auto const* y = n.count == 2u ? constant(1u) : x;
                                         if (x == nullptr || y == nullptr)
@@ -2203,6 +2200,7 @@ namespace neos
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
                             bool changed = false;
+                            count_uses(aFunction);
                             for (std::uint32_t e = 1u; e < blocks.size(); ++e)
                             {
                                 auto& E = blocks[e];
@@ -2213,6 +2211,8 @@ namespace neos
                                     continue;
                                 bool only = true;
                                 value jump = None;
+                                // (its phis: used only by the target's phis (their operands for it: the predecessors' operands then))
+                                std::vector<value> ownPhis;
                                 for (auto v : E.code)
                                 {
                                     auto const& i = values[v];
@@ -2220,6 +2220,8 @@ namespace neos
                                         continue;
                                     if (i.op == Jump)
                                         jump = v;
+                                    else if (i.op == Phi && !E.loopHeader)
+                                        ownPhis.push_back(v);
                                     else
                                     {
                                         only = false;
@@ -2242,6 +2244,8 @@ namespace neos
                                 for (auto p : E.predecessors)
                                     if (p == target || std::find(S.predecessors.begin(), S.predecessors.end(), p) != S.predecessors.end())
                                         clash = true;
+                                if (clash && !ownPhis.empty())
+                                    continue;
                                 if (clash)
                                 {
                                     // (E's only predecessor branches to E and to the target, whose phis have the same operands for both: it 
@@ -2291,6 +2295,26 @@ namespace neos
                                 auto const index = static_cast<std::size_t>(std::find(S.predecessors.begin(), S.predecessors.end(), e) - S.predecessors.begin());
                                 if (index >= S.predecessors.size())
                                     continue;
+                                if (!ownPhis.empty())
+                                {
+                                    bool used = false;
+                                    for (auto x : ownPhis)
+                                    {
+                                        std::uint32_t expected = 0u;
+                                        for (auto v : S.code)
+                                        {
+                                            auto const& i = values[v];
+                                            if (i.op != Phi)
+                                                break;
+                                            if (!i.dead && index < i.operands.size() && i.operands[index] == x)
+                                                ++expected;
+                                        }
+                                        if (values[x].operands.size() != E.predecessors.size() || aFunction.uses[x] != expected)
+                                            used = true;
+                                    }
+                                    if (used)
+                                        continue;
+                                }
                                 auto const preds = E.predecessors;
                                 for (auto p : preds)
                                     for (auto& s : blocks[p].successors)
@@ -2308,13 +2332,24 @@ namespace neos
                                         continue;
                                     auto const operand = i.operands[index];
                                     i.operands.erase(i.operands.begin() + static_cast<std::ptrdiff_t>(index));
-                                    i.operands.insert(i.operands.begin() + static_cast<std::ptrdiff_t>(index), preds.size(), operand);
+                                    if (operand != None && values[operand].op == Phi && values[operand].block == e && !values[operand].dead)
+                                    {
+                                        // (E's phi: its operand for each of E's predecessors)
+                                        auto const operands = values[operand].operands;
+                                        i.operands.insert(i.operands.begin() + static_cast<std::ptrdiff_t>(index), operands.begin(), operands.end());
+                                    }
+                                    else
+                                        i.operands.insert(i.operands.begin() + static_cast<std::ptrdiff_t>(index), preds.size(), operand);
                                 }
+                                for (auto x : ownPhis)
+                                    values[x].dead = true;
                                 E.predecessors.clear();
                                 E.successors.clear();
                                 E.reachable = false;
                                 values[jump].dead = true;
                                 changed = true;
+                                if (!ownPhis.empty())
+                                    count_uses(aFunction);
                             }
                             return changed;
                         }
@@ -2593,6 +2628,253 @@ namespace neos
                         // (a block (not a loop's header) that has only phis (and constants) and a branch on one of them: a predecessor whose
                         // operand of it is a constant goes to the successor that the constant chooses instead (its phis used only by the 
                         // branch and its successors' phis: their operands for the predecessor are the phis' operands for it))
+                        // (a phi (of a block that has no other code but comparisons of it with constants and its branch) whose operand from a 
+                        // predecessor that jumps to it is a constant, or a boolean made from a condition (i64.add(i64.extend_i32_u(c), k)): the
+                        // predecessor goes to where the comparisons (of the block and of its successors that have only comparisons of it, each 
+                        // with that one predecessor) lead with that value (or each of the two: it branches on the condition), if the phi is
+                        // used nowhere else but in deopts' blocks that the comparisons lead to (e.g. an inlined predicate's result, then 
+                        // converted to a condition: true, false, else a deopt))
+                        bool thread_known_values(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            count_uses(aFunction);
+                            bool changed = false;
+                            // (a comparison of the phi with a constant: its result for the phi's value (none if it is not one))
+                            auto const decided = [&](value aCondition, value aPhi, std::uint64_t aValue) -> std::optional<bool>
+                            {
+                                auto const& c = values[aCondition];
+                                if (c.dead)
+                                    return {};
+                                if ((c.op == 0x45u || c.op == 0x50u) && c.operands.size() == 1u && c.operands[0] == aPhi)
+                                    return evaluate_comparison(c.op, aValue, 0u);
+                                if (c.operands.size() != 2u)
+                                    return {};
+                                if (c.operands[0] == aPhi && values[c.operands[1]].constant())
+                                    return evaluate_comparison(c.op, aValue, values[c.operands[1]].imm0);
+                                if (c.operands[1] == aPhi && values[c.operands[0]].constant())
+                                    return evaluate_comparison(c.op, values[c.operands[0]].imm0, aValue);
+                                return {};
+                            };
+                            // (a block of the walk: its code (but constants) a comparison of the phi and its branch on it)
+                            auto const comparing = [&](std::uint32_t aBlock, value aPhi, bool aOwn) -> value
+                            {
+                                auto const& X = blocks[aBlock];
+                                if (!X.reachable || X.loopHeader || X.successors.size() != 2u || X.successors[0] == X.successors[1] || X.code.empty())
+                                    return None;
+                                auto const br = X.code.back();
+                                if (values[br].op != Branch || values[br].dead || values[br].operands.size() != 1u)
+                                    return None;
+                                auto const c = values[br].operands[0];
+                                if (values[c].block != aBlock || aFunction.uses[c] != 1u)
+                                    return None;
+                                for (auto v : X.code)
+                                {
+                                    auto const& i = values[v];
+                                    if (i.dead || i.constant() || v == br || v == c || (aOwn && v == aPhi))
+                                        continue;
+                                    return None;
+                                }
+                                return c;
+                            };
+                            for (std::uint32_t b = 1u; b < blocks.size(); ++b)
+                            {
+                                auto& B = blocks[b];
+                                if (!B.reachable || B.predecessors.size() < 2u)
+                                    continue;
+                                // (its one phi)
+                                value phi = None;
+                                for (auto v : B.code)
+                                    if (values[v].op == Phi && !values[v].dead)
+                                    {
+                                        if (phi != None)
+                                        {
+                                            phi = None;
+                                            break;
+                                        }
+                                        phi = v;
+                                    }
+                                if (phi == None || values[phi].operands.size() != B.predecessors.size())
+                                    continue;
+                                if (comparing(b, phi, true) == None)
+                                    continue;
+                                // (the walk's blocks: B, then successors (of one predecessor) that compare the phi)
+                                std::vector<std::uint32_t> walk{ b };
+                                std::vector<value> conditions{ comparing(b, phi, true) };
+                                for (std::size_t w = 0u; w < walk.size(); ++w)
+                                    for (auto s : blocks[walk[w]].successors)
+                                        if (s != b && blocks[s].predecessors.size() == 1u && std::find(walk.begin(), walk.end(), s) == walk.end())
+                                            if (auto const c = comparing(s, phi, false); c != None)
+                                            {
+                                                walk.push_back(s);
+                                                conditions.push_back(c);
+                                            }
+                                // (the phi's uses: the walk's comparisons, and deopts in blocks of one predecessor of the walk's)
+                                std::uint32_t uses = 0u;
+                                for (auto c : conditions)
+                                {
+                                    auto const& i = values[c];
+                                    for (auto o : i.operands)
+                                        if (o == phi)
+                                            ++uses;
+                                }
+                                for (auto x : walk)
+                                    for (auto s : blocks[x].successors)
+                                    {
+                                        if (std::find(walk.begin(), walk.end(), s) != walk.end() || blocks[s].predecessors.size() != 1u || !blocks[s].successors.empty())
+                                            continue;
+                                        for (auto v : blocks[s].code)
+                                            if (!values[v].dead)
+                                                for (auto o : values[v].operands)
+                                                    if (o == phi)
+                                                        ++uses;
+                                    }
+                                if (aFunction.uses[phi] != uses)
+                                    continue;
+                                // (where the walk leads with a value: the block (not one of the walk's), and the walk's block it is reached from)
+                                auto const destination = [&](std::uint64_t aValue) -> std::optional<std::pair<std::uint32_t, std::uint32_t>>
+                                {
+                                    auto x = b;
+                                    for (std::size_t steps = 0u; steps <= walk.size(); ++steps)
+                                    {
+                                        auto const at = static_cast<std::size_t>(std::find(walk.begin(), walk.end(), x) - walk.begin());
+                                        if (at >= walk.size())
+                                            return {};
+                                        auto const taken = decided(conditions[at], phi, aValue);
+                                        if (!taken)
+                                            return {};
+                                        auto const s = blocks[x].successors[*taken ? 0u : 1u];
+                                        if (std::find(walk.begin(), walk.end(), s) == walk.end())
+                                        {
+                                            // (not a deopt's block that uses the phi (it is reached only through the walk))
+                                            if (blocks[s].successors.empty())
+                                                for (auto v : blocks[s].code)
+                                                    for (auto o : values[v].operands)
+                                                        if (o == phi)
+                                                            return {};
+                                            return std::make_pair(s, x);
+                                        }
+                                        x = s;
+                                    }
+                                    return {};
+                                };
+                                // (a destination's phis: their operands for the predecessor (their operand for the walk's block: not a value of 
+                                // the walk's blocks))
+                                auto const operands_for = [&](std::uint32_t aTarget, std::uint32_t aFrom, std::vector<value>& aOperands)
+                                {
+                                    auto const& T = blocks[aTarget];
+                                    auto const index = static_cast<std::size_t>(std::find(T.predecessors.begin(), T.predecessors.end(), aFrom) - T.predecessors.begin());
+                                    if (index >= T.predecessors.size())
+                                        return false;
+                                    aOperands.clear();
+                                    for (auto v : T.code)
+                                    {
+                                        auto const& j = values[v];
+                                        if (j.op != Phi)
+                                            break;
+                                        auto const x = index < j.operands.size() ? j.operands[index] : None;
+                                        if (x != None && std::find(walk.begin(), walk.end(), values[x].block) != walk.end() && !values[x].constant())
+                                            return false;
+                                        aOperands.push_back(x);
+                                    }
+                                    return true;
+                                };
+                                auto const add_edge = [&](std::uint32_t aFrom, std::uint32_t aTarget, std::vector<value> const& aOperands)
+                                {
+                                    auto& T = blocks[aTarget];
+                                    T.predecessors.push_back(aFrom);
+                                    std::size_t k = 0u;
+                                    for (auto v : T.code)
+                                    {
+                                        auto& j = values[v];
+                                        if (j.op != Phi)
+                                            break;
+                                        j.operands.push_back(aOperands[k++]);
+                                    }
+                                };
+                                auto const remove_predecessor = [&](std::size_t aIndex)
+                                {
+                                    B.predecessors.erase(B.predecessors.begin() + static_cast<std::ptrdiff_t>(aIndex));
+                                    auto& j = values[phi];
+                                    j.operands.erase(j.operands.begin() + static_cast<std::ptrdiff_t>(aIndex));
+                                };
+                                auto const free_target = [&](std::uint32_t aFrom, std::uint32_t aTarget)
+                                {
+                                    return aTarget != aFrom && std::find(blocks[aTarget].predecessors.begin(), blocks[aTarget].predecessors.end(), aFrom) == blocks[aTarget].predecessors.end();
+                                };
+                                for (std::size_t k = 0u; k < B.predecessors.size() && B.predecessors.size() > 1u;)
+                                {
+                                    auto const p = B.predecessors[k];
+                                    auto& P = blocks[p];
+                                    auto const operand = values[phi].operands[k];
+                                    bool const jumps = P.successors.size() == 1u && P.successors[0] == b && p != b && !P.code.empty() && values[P.code.back()].op == Jump &&
+                                        std::count(B.predecessors.begin(), B.predecessors.end(), p) == 1;
+                                    if (!jumps || operand == None)
+                                    {
+                                        ++k;
+                                        continue;
+                                    }
+                                    auto const& c = values[operand];
+                                    std::vector<value> operandsTrue, operandsFalse;
+                                    if (c.constant())
+                                    {
+                                        auto const d = destination(c.imm0);
+                                        if (!d || !free_target(p, d->first) || !operands_for(d->first, d->second, operandsTrue))
+                                        {
+                                            ++k;
+                                            continue;
+                                        }
+                                        add_edge(p, d->first, operandsTrue);
+                                        P.successors[0] = d->first;
+                                        remove_predecessor(k);
+                                        changed = true;
+                                        continue;
+                                    }
+                                    // (a boolean made from a condition)
+                                    value condition = None;
+                                    std::uint64_t base = 0u;
+                                    if (c.op == 0x7Cu && c.operands.size() == 2u)
+                                        for (std::size_t n = 0u; n < 2u; ++n)
+                                        {
+                                            auto const& z = values[c.operands[n]];
+                                            auto const& k0 = values[c.operands[1u - n]];
+                                            if (!k0.constant() || z.op != 0xADu || z.operands.size() != 1u)
+                                                continue;
+                                            auto const& x = values[z.operands[0]];
+                                            if (x.dead || x.type != I32 || !(x.op >= 0x45u && x.op <= 0x66u))
+                                                continue;
+                                            condition = z.operands[0];
+                                            base = k0.imm0;
+                                            break;
+                                        }
+                                    if (condition == None)
+                                    {
+                                        ++k;
+                                        continue;
+                                    }
+                                    auto const dTrue = destination(base + 1u);
+                                    auto const dFalse = destination(base);
+                                    if (!dTrue || !dFalse || dTrue->first == dFalse->first || !free_target(p, dTrue->first) || !free_target(p, dFalse->first) ||
+                                        !operands_for(dTrue->first, dTrue->second, operandsTrue) || !operands_for(dFalse->first, dFalse->second, operandsFalse))
+                                    {
+                                        ++k;
+                                        continue;
+                                    }
+                                    add_edge(p, dTrue->first, operandsTrue);
+                                    add_edge(p, dFalse->first, operandsFalse);
+                                    auto& jump = values[P.code.back()];
+                                    jump.op = Branch;
+                                    jump.operands = { condition };
+                                    P.successors = { dTrue->first, dFalse->first };
+                                    remove_predecessor(k);
+                                    changed = true;
+                                }
+                                if (changed)
+                                    count_uses(aFunction);
+                            }
+                            return changed;
+                        }
+
                         bool thread_branches(function& aFunction)
                         {
                             auto& blocks = aFunction.blocks;
@@ -2690,17 +2972,108 @@ namespace neos
                                 }
                                 if (!ok)
                                     continue;
+                                // (a value that is 0 or 1: a comparison's, or an and, or or of them)
+                                auto const boolean = [&](value aValue)
+                                {
+                                    auto const& x = values[aValue];
+                                    if (x.dead || x.type != I32)
+                                        return false;
+                                    if (x.op >= 0x45u && x.op <= 0x66u)
+                                        return true;
+                                    if ((x.op == 0x71u || x.op == 0x72u) && x.operands.size() == 2u)
+                                        for (auto o : x.operands)
+                                        {
+                                            auto const& y = values[o];
+                                            if (y.dead || y.type != I32 || !(y.op >= 0x45u && y.op <= 0x66u))
+                                                return false;
+                                        }
+                                    return x.op == 0x71u || x.op == 0x72u;
+                                };
                                 for (std::size_t k = 0u; k < B.predecessors.size();)
                                 {
                                     auto const& c = values[values[cond].operands[k]];
                                     auto const p = B.predecessors[k];
-                                    if (!c.constant() || std::count(B.predecessors.begin(), B.predecessors.end(), p) != 1)
+                                    std::optional<bool> knownTaken;     // (a boolean compared with neither of its values: known)
+                                    if (!c.constant() && comparison != None && std::count(B.predecessors.begin(), B.predecessors.end(), p) == 1)
+                                    {
+                                        // (a predecessor whose operand is a boolean made from a condition (i64.add(i64.extend_i32_u(c), k)),
+                                        // compared (eq, ne) with k or k + 1: it branches on the condition itself (to B's successors))
+                                        auto& P = blocks[p];
+                                        auto const& cmp = values[comparison];
+                                        value condition = None;
+                                        bool inverted = false;
+                                        bool const jumps = P.successors.size() == 1u && P.successors[0] == b && p != b && !P.code.empty() && values[P.code.back()].op == Jump;
+                                        if ((cmp.op == 0x51u || cmp.op == 0x52u) && c.op == 0x7Cu && c.operands.size() == 2u)
+                                            for (std::size_t n = 0u; n < 2u; ++n)
+                                            {
+                                                auto const& z = values[c.operands[n]];
+                                                auto const& k0 = values[c.operands[1u - n]];
+                                                if (!k0.constant() || z.op != 0xADu || z.operands.size() != 1u || !boolean(z.operands[0]))
+                                                    continue;
+                                                if (comparand == k0.imm0 + 1u)
+                                                    inverted = false;
+                                                else if (comparand == k0.imm0)
+                                                    inverted = true;
+                                                else
+                                                {
+                                                    knownTaken = cmp.op == 0x52u;
+                                                    break;
+                                                }
+                                                if (!jumps)
+                                                    break;
+                                                if (cmp.op == 0x52u)
+                                                    inverted = !inverted;
+                                                condition = z.operands[0];
+                                                break;
+                                            }
+                                        auto const t0 = B.successors[inverted ? 1u : 0u];
+                                        auto const t1 = B.successors[inverted ? 0u : 1u];
+                                        if (condition != None && t0 != p && t1 != p &&
+                                            std::find(blocks[t0].predecessors.begin(), blocks[t0].predecessors.end(), p) == blocks[t0].predecessors.end() &&
+                                            std::find(blocks[t1].predecessors.begin(), blocks[t1].predecessors.end(), p) == blocks[t1].predecessors.end())
+                                        {
+                                            for (auto const t : { t0, t1 })
+                                            {
+                                                auto const s = t == B.successors[0] ? 0u : 1u;
+                                                auto& T = blocks[t];
+                                                T.predecessors.push_back(p);
+                                                for (auto w : T.code)
+                                                {
+                                                    auto& j = values[w];
+                                                    if (j.op != Phi)
+                                                        break;
+                                                    auto x = indices[s] < j.operands.size() ? j.operands[indices[s]] : None;
+                                                    if (x != None && values[x].op == Phi && values[x].block == b)
+                                                        x = values[x].operands[k];
+                                                    j.operands.push_back(x);
+                                                }
+                                            }
+                                            auto& jump = values[P.code.back()];
+                                            jump.op = Branch;
+                                            jump.operands = { condition };
+                                            P.successors = { t0, t1 };
+                                            B.predecessors.erase(B.predecessors.begin() + static_cast<std::ptrdiff_t>(k));
+                                            for (auto w : B.code)
+                                            {
+                                                auto& j = values[w];
+                                                if (j.op != Phi)
+                                                    break;
+                                                if (k < j.operands.size())
+                                                    j.operands.erase(j.operands.begin() + static_cast<std::ptrdiff_t>(k));
+                                            }
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
+                                    if ((!c.constant() && !knownTaken) || std::count(B.predecessors.begin(), B.predecessors.end(), p) != 1)
                                     {
                                         ++k;
                                         continue;
                                     }
                                     std::uint32_t s;
-                                    if (comparison == None)
+                                    if (knownTaken)
+                                        s = *knownTaken ? 0u : 1u;
+                                    else if (comparison == None)
                                         s = (c.imm0 & 0xFFFFFFFFu) != 0u ? 0u : 1u;
                                     else
                                     {
@@ -3398,6 +3771,11 @@ namespace neos
                             bool threaded = thread_branches(aFunction);
                             if (threaded)
                                 finish(aFunction);
+                            if (thread_known_values(aFunction))
+                            {
+                                threaded = true;
+                                finish(aFunction);
+                            }
                             threaded = decide_branches(aFunction) || threaded;
                             threaded = merge_equal_successors(aFunction) || threaded;
                             if (sink_conversions(aFunction))

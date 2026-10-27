@@ -39,6 +39,7 @@
 #include <neos/neos.hpp>
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -156,6 +157,97 @@ namespace neos
                         std::uint64_t mask_of(std::uint8_t aType) { return (aType == I32 || aType == F32) ? 0xFFFFFFFFull : ~std::uint64_t{}; }
 
                         // (an integer instruction's result for constant operands (none if it traps, or is not folded))
+                        // (a floating point operation's result (its bits), if its operands are constants: not if it is NaN (its bits are
+                        // the code's), nor a conversion that traps)
+                        std::optional<std::uint64_t> fold_float(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY)
+                        {
+                            auto const f32 = [](std::uint64_t aBits) { return std::bit_cast<float>(static_cast<std::uint32_t>(aBits)); };
+                            auto const f64 = [](std::uint64_t aBits) { return std::bit_cast<double>(aBits); };
+                            auto const r32 = [](float aValue) -> std::optional<std::uint64_t>
+                            {
+                                if (std::isnan(aValue))
+                                    return {};
+                                return std::uint64_t{ std::bit_cast<std::uint32_t>(aValue) };
+                            };
+                            auto const r64 = [](double aValue) -> std::optional<std::uint64_t>
+                            {
+                                if (std::isnan(aValue))
+                                    return {};
+                                return std::bit_cast<std::uint64_t>(aValue);
+                            };
+                            auto const b = [](bool aValue) { return std::optional<std::uint64_t>{ aValue ? 1u : 0u }; };
+                            auto const x32 = f32(aX), y32 = f32(aY);
+                            auto const x64 = f64(aX), y64 = f64(aY);
+                            // (min and max: not of NaNs or zeros (their signs))
+                            auto const ordered32 = !std::isnan(x32) && !std::isnan(y32) && !(x32 == 0.0f && y32 == 0.0f);
+                            auto const ordered64 = !std::isnan(x64) && !std::isnan(y64) && !(x64 == 0.0 && y64 == 0.0);
+                            // (a truncation: if it is within the result's range)
+                            auto const trunc_in = [](double aValue, double aLow, double aHigh) { return !std::isnan(aValue) && std::trunc(aValue) >= aLow && std::trunc(aValue) < aHigh; };
+                            switch (aOp)
+                            {
+                            case 0x5B: return b(x32 == y32);
+                            case 0x5C: return b(x32 != y32);
+                            case 0x5D: return b(x32 < y32);
+                            case 0x5E: return b(x32 > y32);
+                            case 0x5F: return b(x32 <= y32);
+                            case 0x60: return b(x32 >= y32);
+                            case 0x61: return b(x64 == y64);
+                            case 0x62: return b(x64 != y64);
+                            case 0x63: return b(x64 < y64);
+                            case 0x64: return b(x64 > y64);
+                            case 0x65: return b(x64 <= y64);
+                            case 0x66: return b(x64 >= y64);
+                            case 0x8B: return r32(std::fabs(x32));
+                            case 0x8C: return r32(-x32);
+                            case 0x8D: return r32(std::ceil(x32));
+                            case 0x8E: return r32(std::floor(x32));
+                            case 0x8F: return r32(std::trunc(x32));
+                            case 0x90: return r32(std::nearbyint(x32));
+                            case 0x91: return r32(std::sqrt(x32));
+                            case 0x92: return r32(x32 + y32);
+                            case 0x93: return r32(x32 - y32);
+                            case 0x94: return r32(x32 * y32);
+                            case 0x95: return r32(x32 / y32);
+                            case 0x96: if (!ordered32) return {}; return r32(std::min(x32, y32));
+                            case 0x97: if (!ordered32) return {}; return r32(std::max(x32, y32));
+                            case 0x98: return r32(std::copysign(x32, y32));
+                            case 0x99: return r64(std::fabs(x64));
+                            case 0x9A: return r64(-x64);
+                            case 0x9B: return r64(std::ceil(x64));
+                            case 0x9C: return r64(std::floor(x64));
+                            case 0x9D: return r64(std::trunc(x64));
+                            case 0x9E: return r64(std::nearbyint(x64));
+                            case 0x9F: return r64(std::sqrt(x64));
+                            case 0xA0: return r64(x64 + y64);
+                            case 0xA1: return r64(x64 - y64);
+                            case 0xA2: return r64(x64 * y64);
+                            case 0xA3: return r64(x64 / y64);
+                            case 0xA4: if (!ordered64) return {}; return r64(std::min(x64, y64));
+                            case 0xA5: if (!ordered64) return {}; return r64(std::max(x64, y64));
+                            case 0xA6: return r64(std::copysign(x64, y64));
+                            case 0xA8: if (!trunc_in(x32, -2147483648.0, 2147483648.0)) return {}; return std::uint64_t{ static_cast<std::uint32_t>(static_cast<std::int32_t>(x32)) };
+                            case 0xA9: if (!trunc_in(x32, 0.0, 4294967296.0)) return {}; return std::uint64_t{ static_cast<std::uint32_t>(x32) };
+                            case 0xAA: if (!trunc_in(x64, -2147483648.0, 2147483648.0)) return {}; return std::uint64_t{ static_cast<std::uint32_t>(static_cast<std::int32_t>(x64)) };
+                            case 0xAB: if (!trunc_in(x64, 0.0, 4294967296.0)) return {}; return std::uint64_t{ static_cast<std::uint32_t>(x64) };
+                            case 0xAE: if (!trunc_in(x32, -9223372036854775808.0, 9223372036854775808.0)) return {}; return static_cast<std::uint64_t>(static_cast<std::int64_t>(x32));
+                            case 0xAF: if (!trunc_in(x32, 0.0, 18446744073709551616.0)) return {}; return static_cast<std::uint64_t>(x32);
+                            case 0xB0: if (!trunc_in(x64, -9223372036854775808.0, 9223372036854775808.0)) return {}; return static_cast<std::uint64_t>(static_cast<std::int64_t>(x64));
+                            case 0xB1: if (!trunc_in(x64, 0.0, 18446744073709551616.0)) return {}; return static_cast<std::uint64_t>(x64);
+                            case 0xB2: return r32(static_cast<float>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aX))));
+                            case 0xB3: return r32(static_cast<float>(static_cast<std::uint32_t>(aX)));
+                            case 0xB4: return r32(static_cast<float>(static_cast<std::int64_t>(aX)));
+                            case 0xB5: return r32(static_cast<float>(aX));
+                            case 0xB6: return r32(static_cast<float>(x64));
+                            case 0xB7: return r64(static_cast<double>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aX))));
+                            case 0xB8: return r64(static_cast<double>(static_cast<std::uint32_t>(aX)));
+                            case 0xB9: return r64(static_cast<double>(static_cast<std::int64_t>(aX)));
+                            case 0xBA: return r64(static_cast<double>(aX));
+                            case 0xBB: return r64(static_cast<double>(x32));
+                            default:
+                                return {};
+                            }
+                        }
+
                         std::optional<std::uint64_t> fold(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY)
                         {
                             auto const x32 = static_cast<std::uint32_t>(aX);
@@ -260,7 +352,7 @@ namespace neos
                             case 0xC0: return u32(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(x32))));
                             case 0xC1: return u32(static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(x32))));
                             default:
-                                return {};
+                                return fold_float(aOp, aX, aY);
                             }
                         }
 
@@ -584,7 +676,7 @@ namespace neos
                             // that are within inlined calls of functions with frames of their own (e.g. the language's functions) that have
                             // had effects: if the innermost of the calls without frames has had none, the code leaves for the frames of the
                             // function and of the calls with frames (see deopt::frames): the innermost makes that call)
-                            bool emit_frames_deopt()
+                            bool emit_frames_deopt(bool aAtStart = false)
                             {
                                 if (!iOptions.deopt || !iOptions.deoptFrame || iInlines.size() < 2u || iDeopts.size() >= 60000u)
                                     return false;
@@ -597,7 +689,8 @@ namespace neos
                                     if (!iModule.functions[iInlines[i].callee].frameless)
                                         return false;
                                 auto const& made = iInlines[framed];
-                                if (!effect_free(made) || made.parametersSet || iOptions.noDeopt.contains(made.site) || iOptions.noDeopt.contains(iInlines[0].call))
+                                // (at its start (aAtStart), a call that sets its parameters has not yet: it can be made again)
+                                if (!effect_free(made) || (made.parametersSet && !aAtStart) || iOptions.noDeopt.contains(made.site) || iOptions.noDeopt.contains(iInlines[0].call))
                                     return false;
                                 auto const arguments_of = [&](inline_context const& aCall)
                                 {
@@ -1268,7 +1361,7 @@ namespace neos
                                 {
                                     auto const y = pop();
                                     auto const x = pop();
-                                    if (x.constant && y.constant && aNumeric.operand != F32 && aNumeric.operand != F64)
+                                    if (x.constant && y.constant)
                                         if (auto const r = fold(aOp, x.bits, y.bits))
                                         {
                                             erase(x.begin, x.end);
@@ -1285,7 +1378,7 @@ namespace neos
                                     return;
                                 }
                                 auto const x = pop();
-                                if (x.constant && (aNumeric.operand == I32 || aNumeric.operand == I64 || aOp == 0xBC || aOp == 0xBD))
+                                if (x.constant)
                                     if (auto const r = fold(aOp, x.bits, 0u))
                                     {
                                         erase(x.begin, x.end);
@@ -1321,6 +1414,17 @@ namespace neos
                                 auto const& callee = iModule.functions[aCallee];
                                 // (the origin of an inlined call's code is the outermost call's)
                                 auto const callPosition = aInline != nullptr ? iInlines.front().call : aPosition;
+                                // (a call that the function's own code has never made (of a function without a frame of its own, in the code
+                                // of one with a frame of its own): the code leaves there (deopt) rather than inline it)
+                                if (iOptions.deopt && iOptions.coldCall && callee.frameless && !callee.imported && !callee.checked &&
+                                    (iInlines.empty() || !iModule.functions[iInlines.back().callee].frameless) &&
+                                    inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition) && iOptions.coldCall(aPosition))
+                                {
+                                    snapshot const before = take_snapshot();
+                                    if (inline_call(aCallee, aInline != nullptr ? callPosition : aPosition, aPosition, true))
+                                        return;
+                                    restore(before);
+                                }
                                 if (inlinable(aCallee, aInline != nullptr ? iInlines.front().call : aPosition) && !iLarge.contains(aCallee))
                                 {
                                     // (inlined if its code, after folding, is small enough; else called)
@@ -1401,6 +1505,8 @@ namespace neos
                                 iOrigin = aSnapshot.origin;
                                 iReachable = true;
                                 iUnreachableEnd = false;
+                                // (the code that grew too large was not kept: inlining is on again, unless the code is still too large)
+                                iInliningOff = iOut.size() > iMaxTokens;
                             }
                             // (false if it is not inlined after all (the caller restores the state before it))
                             // (the origin of code (its position) within inlined calls of which one (at least) is of a function with a frame
@@ -1422,7 +1528,7 @@ namespace neos
                                 iChains.push_back(std::move(chain));
                                 return InlineChainToken | id;
                             }
-                            bool inline_call(std::uint32_t aCallee, std::size_t aPosition, std::size_t aSite)
+                            bool inline_call(std::uint32_t aCallee, std::size_t aPosition, std::size_t aSite, bool aCold = false)
                             {
                                 auto const& callee = iModule.functions[aCallee];
                                 auto const& parameters = *callee.parameters;
@@ -1520,7 +1626,27 @@ namespace neos
                                 ++iInlined;
                                 auto& context = iInlines.back();
                                 auto const deoptsBefore = iDeopts.size();
-                                bool const reached = process(callee.codeBegin, callee.codeEnd, &context, context.locals);
+                                // (a call that has never been made (aCold): the code leaves at its start, if it can (else it is inlined))
+                                bool left = false;
+                                if (aCold)
+                                {
+                                    if (iInlines.size() == 1u)
+                                    {
+                                        if (!iOptions.noDeopt.contains(context.call) && iDeopts.size() < 60000u)
+                                        {
+                                            emit_deopt(context, false);
+                                            left = true;
+                                        }
+                                    }
+                                    else
+                                        left = emit_frames_deopt(true);
+                                    if (left)
+                                    {
+                                        unwind();
+                                        iReachable = false;
+                                    }
+                                }
+                                bool const reached = left ? false : process(callee.codeBegin, callee.codeEnd, &context, context.locals);
                                 // (its block's end)
                                 emit(0x0Bu);
                                 end_frame(reached);

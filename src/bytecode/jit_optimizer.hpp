@@ -150,6 +150,9 @@ namespace neos
                         std::function<bool(std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
                             std::uint32_t aLocals)> deoptFrame;
                         std::size_t maxDeoptValues = 4096u;     ///< (a deopt's values (its frames' locals and stacks, and its call's arguments))
+                        // (a call (its position: in a function with a frame of its own) that has never been made (its function's code 
+                        // has run often enough): the code leaves there (a deopt), rather than inline (or make) it; if none, none are)
+                        std::function<bool(std::size_t aPosition)> coldCall;
                     };
 
                     // (an inlined call that has guards: the call's position, and its guards)

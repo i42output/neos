@@ -305,9 +305,16 @@ namespace neos
                         std::size_t returned = 0u;      ///< (the code's offset where its call returns to (0: none))
                         std::uint32_t arguments = 0u;
                         std::vector<deopt_slot> stack;
+                        std::uint32_t const* made = nullptr;    ///< (a call of a function with a frame of its own: set once the code has
+                                                                ///< made it (see callFlags))
                     };
                     std::vector<deopt_frame> deoptFrames;
                     std::unordered_map<std::size_t, deopt_point> deoptPoints;
+                    // (the calls (deopt points) of functions with frames of their own that their code has made: optimized code leaves
+                    // (deopts) at a call that has never been made (once its function has been called often enough, see warm_function),
+                    // rather than inline it (as V8's optimizing compiler leaves where its feedback says that code has not run))
+                    std::deque<std::uint32_t> callFlags;
+                    std::int32_t tierCalls = 0;                         ///< (the calls before a function is optimized)
                 };
 
                 void compiled_module_deleter::operator()(compiled_module* aModule) const
@@ -356,6 +363,7 @@ namespace neos
                     {
                     public:
                         bytes code;
+                        std::uint64_t iEvents = 0u;     ///< (see events)
                     private:
                         static constexpr std::size_t NoFixup = ~std::size_t{};
                         struct label
@@ -388,8 +396,11 @@ namespace neos
                     public:
                         std::size_t offset() const { return iInCold ? iCold.size() : code.size(); }
                         std::size_t new_label() { iLabels.emplace_back(); return iLabels.size() - 1u; }
+                        // (changes as code is emitted or a label bound: unchanged, a register has what it had)
+                        std::uint64_t events() const { return iEvents; }
                         void bind(std::size_t aLabel)
                         {
+                            ++iEvents;
                             if (!iInCold && iLastJump)
                             {
                                 if (iLastJump->second == aLabel)
@@ -444,8 +455,8 @@ namespace neos
                             barrier();
                         }
                         bool in_cold() const { return iInCold; }
-                        void begin_cold() { iInCold = true; }
-                        void end_cold() { iInCold = false; }
+                        void begin_cold() { iInCold = true; ++iEvents; }
+                        void end_cold() { iInCold = false; ++iEvents; }
                         // (the end of a function: its cold code follows it)
                         void append_cold()
                         {
@@ -505,6 +516,7 @@ namespace neos
                     public:
                         void emit8(std::uint8_t aByte)
                         {
+                            ++iEvents;
                             if (!iInCold)
                             {
                                 iLastJump.reset();
@@ -1369,6 +1381,7 @@ namespace neos
                                 iCounters = aOutput.counters.data();
                                 aOutput.deoptFrames.resize(iModule.functions.size());
                                 iDeoptFrames = &aOutput.deoptFrames;
+                                iCallFlags = &aOutput.callFlags;
                             }
                             trampoline();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
@@ -3461,6 +3474,7 @@ namespace neos
                                 for (auto const& e : iStack)
                                     d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
+                                call_made(d.point);
                                 iDeoptPoints.push_back(std::move(d));
                             }
                             iOutgoing = std::max(iOutgoing, base + 8 * static_cast<std::int32_t>(std::max(n, results.size())));
@@ -3532,6 +3546,17 @@ namespace neos
                                     push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
                             }
                         }
+                        // (a deopt point's call, in a function with a frame of its own: its flag is set when it is made (here: where a deopt
+                        // resumes too), see compiled_module::callFlags; rax is free (the call's arguments are in the outgoing area))
+                        void call_made(compiled_module::deopt_point& aPoint)
+                        {
+                            if (iCallFlags == nullptr || iFunction == nullptr || iFunction->frameless)
+                                return;
+                            iCallFlags->push_back(0u);
+                            aPoint.made = &iCallFlags->back();
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aPoint.made), true);
+                            a.store_imm(false, RAX, 0, 1);
+                        }
                         // call_indirect (of a function of the program (the table is its functions) of a type; its index is the last 
                         // operand): its index and type checked against the table (see compiled_module::indirect), then called as call calls
                         void call_indirect(std::uint32_t aType, std::size_t aPosition)
@@ -3564,6 +3589,7 @@ namespace neos
                                 for (auto const& e : iStack)
                                     d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
+                                call_made(d.point);
                                 iDeoptPoints.push_back(std::move(d));
                             }
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(n + 1u, results.size())));
@@ -4866,6 +4892,7 @@ namespace neos
                         };
                         std::vector<compiled_module::deopt_frame>* iDeoptFrames = nullptr;
                         std::vector<pending_deopt_point> iDeoptPoints;
+                        std::deque<std::uint32_t>* iCallFlags = nullptr;   ///< (see compiled_module::callFlags)
                         std::uint32_t iFunctionIndex = 0u;
                         // function state
                         function_description const* iFunction = nullptr;
@@ -4956,6 +4983,7 @@ namespace neos
                             split_critical_edges();
                             choose_memory_base();
                             check_supported();
+                            defer_conditions();
                             number();
                             liveness();
                             allocate();
@@ -5185,6 +5213,7 @@ namespace neos
                         void liveness()
                         {
                             iHome.assign(f.values.size(), false);
+                            iDeoptAtLocation.assign(f.values.size(), false);
                             auto const n = f.values.size();
                             auto const words = (n + 63u) / 64u;
                             std::vector<std::vector<std::uint64_t>> liveIn(f.blocks.size());
@@ -5273,7 +5302,22 @@ namespace neos
                                     }
                                     if (i.op == ssa::Deopt)
                                     {
-                                        // (a deopt's values: read from their homes (each is stored there when it is made: see home): they
+                                        // (a deopt whose block has no other code (that would need a location): its values are read where 
+                                        // they are at its predecessors' ends (they are live there; not in its block, which may be laid out 
+                                        // far away: the path to it runs no other code))
+                                        bool atLocation = !block.predecessors.empty() && !block.loopHeader;
+                                        for (auto w : block.code)
+                                            if (w != v && !f.values[w].dead && needs_location(w))
+                                                atLocation = false;
+                                        if (atLocation)
+                                        {
+                                            iDeoptAtLocation[v] = true;
+                                            for (auto op : i.operands)
+                                                if (needs_location(op))
+                                                    set(live, op);
+                                            continue;
+                                        }
+                                        // (else its values: read from their homes (each is stored there when it is made: see home): they
                                         // are not live here)
                                         for (auto op : i.operands)
                                             if (needs_location(op))
@@ -5326,6 +5370,34 @@ namespace neos
                                 if (i.start <= i.end && needs_location(i.v))
                                     order.push_back(&i);
                             std::sort(order.begin(), order.end(), [](interval const* x, interval const* y) { return x->start < y->start || (x->start == y->start && x->v < y->v); });
+                            // (each value's spill cost: its definition and uses, each weighed by its block's loop depth (8 times for each))
+                            std::vector<double> weight(f.values.size(), 0.0);
+                            {
+                                auto const scale = [&](std::uint32_t aBlock) { return static_cast<double>(1u << (3u * std::min<std::uint32_t>(f.blocks[aBlock].loopDepth, 4u))); };
+                                for (auto b : f.order)
+                                {
+                                    auto const k = scale(b);
+                                    for (auto v : f.blocks[b].code)
+                                    {
+                                        auto const& x = f.values[v];
+                                        if (x.dead)
+                                            continue;
+                                        weight[v] += k;
+                                        if (x.op == ssa::Phi)
+                                        {
+                                            for (std::size_t o = 0u; o < x.operands.size() && o < f.blocks[b].predecessors.size(); ++o)
+                                                if (x.operands[o] != ssa::None)
+                                                    weight[x.operands[o]] += scale(f.blocks[b].predecessors[o]);
+                                            continue;
+                                        }
+                                        if (x.op == ssa::Deopt)
+                                            continue;
+                                        for (auto o : x.operands)
+                                            if (o != ssa::None)
+                                                weight[o] += k;
+                                    }
+                                }
+                            }
                             std::vector<interval*> active;
                             std::vector<bool> gprFree(16, false), xmmFree(16, false);
                             for (auto r : CallerSavedGprs)
@@ -5390,12 +5462,14 @@ namespace neos
                                 }
                                 if (reg < 0)
                                 {
-                                    // (none free: the interval (this or an active one) that ends last is in the frame)
+                                    // (none free: the interval (this or an active one) whose spill costs least (its uses' weight, for the 
+                                    // length that it is in the frame), else that ends last, is in the frame)
                                     interval* victim = nullptr;
+                                    auto const cost = [&](interval const* x) { return weight[x->v] / static_cast<double>(std::max<std::uint32_t>(x->end - i->start, 1u)); };
                                     for (auto* x : active)
-                                        if (x->xmm == i->xmm && (victim == nullptr || x->end > victim->end))
+                                        if (x->xmm == i->xmm && (victim == nullptr || cost(x) < cost(victim) || (cost(x) == cost(victim) && x->end > victim->end)))
                                             victim = x;
-                                    if (victim != nullptr && victim->end > i->end)
+                                    if (victim != nullptr && (cost(victim) < cost(i) || (cost(victim) == cost(i) && victim->end > i->end)))
                                     {
                                         reg = iLocations[victim->v].reg;
                                         spill(victim->v);
@@ -5583,6 +5657,8 @@ namespace neos
                             auto const& l = where(aValue);
                             if (l.kind == location::Register)
                                 return l.reg;
+                            if (just_stored(aValue, aScratch))
+                                return aScratch;
                             a.load(is_wide_type(f.values[aValue].type), aScratch, RBP, l.disp);
                             return aScratch;
                         }
@@ -5607,6 +5683,8 @@ namespace neos
                             auto const& l = where(aValue);
                             if (l.kind == location::Register)
                                 return l.reg;
+                            if (just_stored(aValue, aScratch))
+                                return aScratch;
                             a.movf_load(type == ssa::F64, aScratch, RBP, l.disp);
                             return aScratch;
                         }
@@ -5643,8 +5721,19 @@ namespace neos
                                     a.movf_store(type == ssa::F64, RBP, l.disp, aReg);
                                 else
                                     a.store(true, RBP, l.disp, aReg);
+                                // (the register has its value until code is emitted (see gpr, xmm))
+                                iStoredFrom = stored_from{ aValue, aReg, a.events() };
                             }
                         }
+                        // (a value just stored to its slot from a register (nothing emitted since): the register has it)
+                        struct stored_from
+                        {
+                            value v = ssa::None;
+                            int reg = 0;
+                            std::uint64_t events = 0u;
+                        };
+                        stored_from iStoredFrom;
+                        bool just_stored(value aValue, int aReg) const { return iStoredFrom.v == aValue && iStoredFrom.reg == aReg && iStoredFrom.events == a.events(); }
                         // (a value as an operand of an integer instruction: an immediate (aImmediate: if it fits), a register or a slot)
                         struct operand
                         {
@@ -5681,7 +5770,7 @@ namespace neos
                         // --- code
                         void emit_function()
                         {
-                            iDeferred.assign(f.values.size(), false);
+                            iDeferred.resize(f.values.size(), false);
                             layout();
                             for (auto b : f.order)
                                 iBlockLabels.emplace(b, a.new_label());
@@ -5707,14 +5796,14 @@ namespace neos
                             for (int x = 8; x < 16; ++x)
                                 if (iUsedCalleeXmms[x])
                                     a.movf_store(true, RBP, iXmmSave[x], x);
-                            for (std::size_t o = 0u; o < f.order.size(); ++o)
+                            auto const emission = emission_order();
+                            for (std::size_t o = 0u; o < emission.size(); ++o)
                             {
-                                auto const b = f.order[o];
-                                iNext = o + 1u < f.order.size() ? f.order[o + 1u] : ~std::uint32_t{};
+                                auto const b = emission[o];
+                                iNext = o + 1u < emission.size() ? emission[o + 1u] : ~std::uint32_t{};
                                 if (f.blocks[b].loopHeader)
                                     a.align_executable(LoopAlignment);
                                 a.bind(iBlockLabels[b]);
-                                defer_and_branch(b);
                                 auto const& code = f.blocks[b].code;
                                 if (!iHomeSlots.empty())
                                     for (auto v : code)
@@ -5730,7 +5819,14 @@ namespace neos
                                     if (f.values[v].dead || f.values[v].op == ssa::Phi)
                                         continue;
                                     iCurrentBlock = b;
-                                    iNextInstruction = c + 1u < code.size() ? code[c + 1u] : ssa::None;
+                                    // (the next instruction that has code: not dead, nor a constant (they are where they are used))
+                                    iNextInstruction = ssa::None;
+                                    for (auto n = c + 1u; n < code.size(); ++n)
+                                        if (!f.values[code[n]].dead && !f.values[code[n]].constant())
+                                        {
+                                            iNextInstruction = code[n];
+                                            break;
+                                        }
                                     instruction(v);
                                     if (!iHomeSlots.empty() && !iDeferred[v])
                                         store_home(v);
@@ -5751,6 +5847,52 @@ namespace neos
                             std::int32_t const raw = iFrameBelowPushed + std::max(iOutgoing, ShadowSpace);
                             std::int32_t const total = (pushed + raw + 15) & ~15;
                             a.patch32(frameSizePatch, static_cast<std::uint32_t>(total - pushed));
+                        }
+                        // (the order the blocks' code is in: the blocks that are likely to run (in the order), then those that are not (a deopt's,
+                        // a trap's, one that calls an import (a language's runtime: e.g. a cache's miss), and those that only they lead to), so
+                        // that the code that runs is together (fewer of the instruction cache's lines); the registers' allocation is by the
+                        // order (the code of a path is the same wherever its blocks are))
+                        std::vector<std::uint32_t> emission_order() const
+                        {
+                            std::vector<bool> cold(f.blocks.size(), false);
+                            for (auto b : f.order)
+                            {
+                                if (b == f.order.front() || f.blocks[b].loopHeader)
+                                    continue;
+                                for (auto v : f.blocks[b].code)
+                                {
+                                    auto const& i = f.values[v];
+                                    if (i.dead)
+                                        continue;
+                                    if (i.op == ssa::Deopt || i.op == ssa::Trap ||
+                                        (i.op == 0x10u && i.imm0 < iModule.functions.size() && iModule.functions[static_cast<std::size_t>(i.imm0)].imported))
+                                    {
+                                        cold[b] = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            // (and those whose predecessors are all cold (in the order: a loop's back edges are not followed))
+                            for (auto b : f.order)
+                            {
+                                auto const& block = f.blocks[b];
+                                if (cold[b] || b == f.order.front() || block.loopHeader || block.predecessors.empty())
+                                    continue;
+                                bool all = true;
+                                for (auto p : block.predecessors)
+                                    if (!cold[p])
+                                        all = false;
+                                cold[b] = all;
+                            }
+                            std::vector<std::uint32_t> result;
+                            result.reserve(f.order.size());
+                            for (auto b : f.order)
+                                if (!cold[b])
+                                    result.push_back(b);
+                            for (auto b : f.order)
+                                if (cold[b])
+                                    result.push_back(b);
+                            return result;
                         }
                         // (a deopt (see optimizer::deopt): its values to the thread's deopt buffer; reported; this frame left (as its epilogue
                         // leaves it); the function's frame made as the baseline's code has it where it makes the call (its locals, its
@@ -5773,7 +5915,7 @@ namespace neos
                                     a.mov_ri(RAX, narrow ? (bits(x) & 0xFFFFFFFFull) : bits(x), true);
                                     a.store(true, R11, disp, RAX);
                                 }
-                                else if (iHome[x])
+                                else if (iHome[x] && !iDeoptAtLocation[v])
                                 {
                                     a.load(!narrow, RAX, RBP, home_of(x));
                                     a.store(true, R11, disp, RAX);
@@ -6140,33 +6282,157 @@ namespace neos
                             auto const& next = f.values[iNextInstruction];
                             return next.op == ssa::Branch && next.operands[0] == aValue && f.uses[aValue] == 1u;
                         }
-                        // (a branch on the and of two comparisons (each used only by it, just before it): the comparisons' branches (see
-                        // branch))
-                        static bool integer_comparison(std::uint16_t aOp) { return (aOp >= 0x46u && aOp <= 0x4Fu) || (aOp >= 0x51u && aOp <= 0x5Au); }
-                        void defer_and_branch(std::uint32_t aBlock)
+                        // (a branch on a condition that is ands, ors and eqzs (each used only by the one that uses it) of comparisons (each
+                        // used only by it): the comparisons' branches (short circuited, see branch); they are moved (they have no effects) to
+                        // the block's end (before its branch), after its other instructions (so that their operands are live there), unless
+                        // a call is among those)
+                        static bool comparison(std::uint16_t aOp) { return (aOp >= 0x45u && aOp <= 0x66u); }
+                        static bool connective(std::uint16_t aOp) { return aOp == 0x71u || aOp == 0x72u || aOp == 0x45u; }
+                        void defer_conditions()
                         {
-                            // (the block's last instructions that have code (not constants, nor dead))
-                            auto const& all = f.blocks[aBlock].code;
-                            std::vector<value> code;
-                            for (auto c = all.size(); c-- > 0u && code.size() < 4u;)
-                                if (!f.values[all[c]].dead && !f.values[all[c]].constant())
-                                    code.insert(code.begin(), all[c]);
-                            if (code.size() < 4u)
+                            iDeferred.assign(f.values.size(), false);
+                            for (std::uint32_t b = 0u; b < f.blocks.size(); ++b)
+                            {
+                                auto& block = f.blocks[b];
+                                if (!block.reachable || block.successors.size() != 2u)
+                                    continue;
+                                auto& code = block.code;
+                                std::size_t last = code.size();
+                                while (last > 0u && f.values[code[last - 1u]].dead)
+                                    --last;
+                                if (last == 0u || f.values[code[last - 1u]].op != ssa::Branch)
+                                    continue;
+                                auto const root = f.values[code[last - 1u]].operands[0];
+                                std::vector<value> tree;
+                                std::size_t connectives = 0u;
+                                bool valid = true;
+                                std::vector<bool> inBlock(f.values.size(), false);
+                                for (std::size_t c = 0u; c + 1u < last; ++c)
+                                    inBlock[code[c]] = true;
+                                // (the tree: its connectives' operands are its nodes; its leaves are comparisons)
+                                std::vector<value> pending{ root };
+                                while (!pending.empty() && valid)
+                                {
+                                    auto const v = pending.back();
+                                    pending.pop_back();
+                                    auto const& i = f.values[v];
+                                    if (v >= inBlock.size() || !inBlock[v] || i.dead || i.type != ssa::I32 || f.uses[v] != 1u || !comparison(i.op) && !connective(i.op))
+                                    {
+                                        valid = false;
+                                        break;
+                                    }
+                                    tree.push_back(v);
+                                    bool const node = (i.op == 0x71u || i.op == 0x72u) || (i.op == 0x45u && i.operands[0] < inBlock.size() &&
+                                        inBlock[i.operands[0]] && f.uses[i.operands[0]] == 1u && f.values[i.operands[0]].type == ssa::I32 &&
+                                        (comparison(f.values[i.operands[0]].op) || connective(f.values[i.operands[0]].op)));
+                                    if (node)
+                                    {
+                                        if (i.op != 0x45u)
+                                            ++connectives;
+                                        for (auto o : i.operands)
+                                            pending.push_back(o);
+                                    }
+                                }
+                                if (!valid || connectives == 0u)
+                                    continue;
+                                // (the tree's nodes are moved after the block's other instructions: not if a call is among those (after the
+                                // first of them))
+                                std::vector<bool> member(f.values.size(), false);
+                                for (auto v : tree)
+                                    member[v] = true;
+                                std::size_t first = last;
+                                for (std::size_t c = 0u; c + 1u < last; ++c)
+                                    if (member[code[c]])
+                                    {
+                                        first = c;
+                                        break;
+                                    }
+                                for (std::size_t c = first; c + 1u < last && valid; ++c)
+                                    if (!member[code[c]] && !f.values[code[c]].dead && (is_call(f.values[code[c]]) || f.values[code[c]].op == ssa::Deopt))
+                                        valid = false;
+                                if (!valid)
+                                    continue;
+                                std::vector<value> reordered;
+                                reordered.reserve(code.size());
+                                for (std::size_t c = 0u; c + 1u < last; ++c)
+                                    if (!member[code[c]])
+                                        reordered.push_back(code[c]);
+                                for (std::size_t c = 0u; c + 1u < last; ++c)
+                                    if (member[code[c]])
+                                        reordered.push_back(code[c]);
+                                for (std::size_t c = last - 1u; c < code.size(); ++c)
+                                    reordered.push_back(code[c]);
+                                code = std::move(reordered);
+                                for (auto v : tree)
+                                    iDeferred[v] = true;
+                            }
+                        }
+                        // (a deferred condition's code (see defer_conditions): branches to aTrue or aFalse (aNext: the label that is bound
+                        // next, if either))
+                        void deferred_condition(value v, std::size_t aTrue, std::size_t aFalse, std::optional<std::size_t> aNext)
+                        {
+                            auto const& i = f.values[v];
+                            bool const node = i.op == 0x71u || i.op == 0x72u || (i.op == 0x45u && iDeferred[i.operands[0]]);
+                            iDeferred[v] = false;
+                            if (node && i.op == 0x45u)
+                            {
+                                deferred_condition(i.operands[0], aFalse, aTrue, aNext);
                                 return;
-                            auto const branch = code[code.size() - 1u];
-                            auto const conjunction = code[code.size() - 2u];
-                            auto const& b = f.values[branch];
-                            auto const& c = f.values[conjunction];
-                            if (b.op != ssa::Branch || b.operands[0] != conjunction || c.op != 0x71u || c.dead || f.uses[conjunction] != 1u)
+                            }
+                            if (node)
+                            {
+                                auto const middle = a.new_label();
+                                if (i.op == 0x71u)
+                                    deferred_condition(i.operands[0], middle, aFalse, middle);
+                                else
+                                    deferred_condition(i.operands[0], aTrue, middle, middle);
+                                a.bind(middle);
+                                deferred_condition(i.operands[1], aTrue, aFalse, aNext);
                                 return;
-                            auto const x = code[code.size() - 3u];
-                            auto const y = code[code.size() - 4u];
-                            if (x == y || !((c.operands[0] == x && c.operands[1] == y) || (c.operands[0] == y && c.operands[1] == x)))
+                            }
+                            iForceFused = v;
+                            instruction(v);
+                            iForceFused = ssa::None;
+                            if (iPending.compare != v)
+                                throw std::logic_error("neos::jit: deferred condition");
+                            auto const pending = iPending;
+                            iPending = {};
+                            if (pending.floatEq)
+                            {
+                                // (equal: E and not P)
+                                a.jcc(P, aFalse);
+                                if (aNext == aFalse)
+                                    a.jcc(E, aTrue);
+                                else
+                                {
+                                    a.jcc(NE, aFalse);
+                                    if (aNext != aTrue)
+                                        a.jmp(aTrue);
+                                }
                                 return;
-                            for (auto o : { x, y })
-                                if (f.values[o].dead || !integer_comparison(f.values[o].op) || f.uses[o] != 1u)
-                                    return;
-                            iDeferred[x] = iDeferred[y] = iDeferred[conjunction] = true;
+                            }
+                            if (pending.floatNe)
+                            {
+                                // (not equal: NE or P)
+                                a.jcc(P, aTrue);
+                                if (aNext == aFalse)
+                                    a.jcc(NE, aTrue);
+                                else
+                                {
+                                    a.jcc(E, aFalse);
+                                    if (aNext != aTrue)
+                                        a.jmp(aTrue);
+                                }
+                                return;
+                            }
+                            if (aNext == aFalse)
+                                a.jcc(pending.cc, aTrue);
+                            else
+                            {
+                                a.jcc(invert(pending.cc), aFalse);
+                                if (aNext != aTrue)
+                                    a.jmp(aTrue);
+                            }
                         }
                         void instruction(value v)
                         {
@@ -6294,21 +6560,13 @@ namespace neos
                             auto const whenFalse = successors[1];
                             if (iDeferred[i.operands[0]])
                             {
-                                // (the and of two comparisons: each one's branch to the false successor)
-                                auto const& conjunction = f.values[i.operands[0]];
-                                for (auto o : conjunction.operands)
-                                {
-                                    iDeferred[o] = false;
-                                    iForceFused = o;
-                                    instruction(o);
-                                    iForceFused = ssa::None;
-                                    if (iPending.compare != o)
-                                        throw std::logic_error("neos::jit: and of comparisons");
-                                    a.jcc(invert(iPending.cc), iBlockLabels[whenFalse]);
-                                    iPending = {};
-                                }
-                                if (whenTrue != iNext)
-                                    a.jmp(iBlockLabels[whenTrue]);
+                                // (a condition of comparisons: their branches (see defer_conditions))
+                                std::optional<std::size_t> next;
+                                if (whenTrue == iNext)
+                                    next = iBlockLabels[whenTrue];
+                                else if (whenFalse == iNext)
+                                    next = iBlockLabels[whenFalse];
+                                deferred_condition(i.operands[0], iBlockLabels[whenTrue], iBlockLabels[whenFalse], next);
                                 return;
                             }
                             std::uint8_t cc = NE;
@@ -7323,49 +7581,66 @@ namespace neos
                         std::unordered_map<std::uint32_t, std::vector<value>> iSavesAtCalls;   ///< (by the calls' positions: see saves_at_calls)
                         std::unordered_map<value, std::int32_t> iCallSaveSlots;
                         std::vector<bool> iHome;                                ///< (values that deopts read (from their homes))
+                        std::vector<bool> iDeoptAtLocation;                     ///< (deopts that read their values where they are (see liveness))
                         std::unordered_map<value, std::int32_t> iHomeSlots;     ///< (values in registers: their homes)
                         value iForceFused = ssa::None;
                         std::vector<std::pair<std::size_t, std::size_t>> iCallSites;
                         std::unordered_map<std::uint32_t, std::uint32_t> iLiveXmmsAtCalls;
                     };
 
+                    // (code's start within its pages (a multiple of 64 bytes, below a page): different for each allocation, so that the
+                    // code that runs first (a function's entry: its blocks that run come first) is not at the same offset in its page as
+                    // the others' (their cache lines would then compete for the same sets of the instruction cache))
+                    std::size_t executable_offset()
+                    {
+                        static std::atomic<std::uint32_t> sNext = 0u;
+                        return static_cast<std::size_t>((sNext.fetch_add(1u, std::memory_order_relaxed) * 37u) % 64u) * 64u;
+                    }
+
                     void* allocate_executable(bytes const& aCode, std::size_t& aSize)
                     {
                         aSize = aCode.size();
+                        auto const offset = executable_offset();
+                        auto const total = aSize + offset;
 #if defined(_WIN32)
-                        void* memory = ::VirtualAlloc(nullptr, aSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                        void* memory = ::VirtualAlloc(nullptr, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                         if (memory == nullptr)
                             return nullptr;
-                        std::memcpy(memory, aCode.data(), aCode.size());
+                        auto* const code = static_cast<std::uint8_t*>(memory) + offset;
+                        std::memcpy(code, aCode.data(), aCode.size());
                         DWORD old;
-                        if (!::VirtualProtect(memory, aSize, PAGE_EXECUTE_READ, &old))
+                        if (!::VirtualProtect(memory, total, PAGE_EXECUTE_READ, &old))
                         {
                             ::VirtualFree(memory, 0, MEM_RELEASE);
                             return nullptr;
                         }
-                        ::FlushInstructionCache(::GetCurrentProcess(), memory, aSize);
-                        return memory;
+                        ::FlushInstructionCache(::GetCurrentProcess(), memory, total);
+                        return code;
 #else
-                        void* memory = ::mmap(nullptr, aSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                        void* memory = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                         if (memory == MAP_FAILED)
                             return nullptr;
-                        std::memcpy(memory, aCode.data(), aCode.size());
-                        if (::mprotect(memory, aSize, PROT_READ | PROT_EXEC) != 0)
+                        auto* const code = static_cast<std::uint8_t*>(memory) + offset;
+                        std::memcpy(code, aCode.data(), aCode.size());
+                        if (::mprotect(memory, total, PROT_READ | PROT_EXEC) != 0)
                         {
-                            ::munmap(memory, aSize);
+                            ::munmap(memory, total);
                             return nullptr;
                         }
-                        return memory;
+                        return code;
 #endif
                     }
 
                     void free_executable(void* aMemory, std::size_t aSize)
                     {
+                        // (the allocation's start: the page that the code is in (its offset is below a page))
+                        auto const address = reinterpret_cast<std::uintptr_t>(aMemory);
+                        auto const base = address & ~std::uintptr_t{ 4095u };
 #if defined(_WIN32)
                         (void)aSize;
-                        ::VirtualFree(aMemory, 0, MEM_RELEASE);
+                        ::VirtualFree(reinterpret_cast<void*>(base), 0, MEM_RELEASE);
 #else
-                        ::munmap(aMemory, aSize);
+                        ::munmap(reinterpret_cast<void*>(base), aSize + (address - base));
 #endif
                     }
 
@@ -7410,6 +7685,7 @@ namespace neos
 
                     constexpr std::int32_t NotAgain = std::numeric_limits<std::int32_t>::max();
                     constexpr std::uint32_t MaxRecompiles = 16u;        ///< (then without speculation)
+                    constexpr std::int32_t WarmCalls = 64;              ///< (a function's calls before a call it has never made is cold (see callFlags))
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
                     constexpr std::uint64_t CallsPerSeldomDeopt = 1000u;    ///< (an optimized function's calls per deopt (at least) that do not make it
@@ -7474,7 +7750,23 @@ namespace neos
                                 m.deoptFrames[aFunction].valid && m.deoptFrames[aFunction].locals.size() == aLocals;
                         };
                         if (options.deopt)
+                        {
                             options.deoptFrame = deopt_frame;
+                            // (a call that has never been made, in a function that has been called often enough: optimized code leaves 
+                            // there (see compiled_module::callFlags))
+                            options.coldCall = [&m](std::size_t aPosition)
+                            {
+                                auto const point = m.deoptPoints.find(aPosition);
+                                if (point == m.deoptPoints.end() || point->second.made == nullptr || *point->second.made != 0u)
+                                    return false;
+                                auto const g = point->second.function;
+                                if (g >= m.counters.size())
+                                    return false;
+                                if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
+                                    return true;
+                                return m.counters[g] <= m.tierCalls - std::min(m.tierCalls, WarmCalls);
+                            };
+                        }
                         options.maxDeoptValues = MaxDeoptValues;
                         auto const deopts_valid = [&](optimizer::result const& aResult)
                         {
@@ -7690,6 +7982,13 @@ namespace neos
                             std::fprintf(stderr, "[tier2] f%u%s: %zu inlined, %zu folded, %zu guards; %zu tokens (was %zu), %zu bytes; %lld us after (total %llu us compiling)\n", f, optimizing ? " (ssa)" : "", r.inlined, r.folded, r.guards,
                                 r.tokens.size(), m.description.functions[f].codeEnd - m.description.functions[f].codeBegin, code.size(), static_cast<long long>(us),
                                 static_cast<unsigned long long>(m.compileMicroseconds));
+                            if (m.verbose >= 2u)
+                            {
+                                std::size_t frames = 0u;
+                                for (auto const& x : r.deopts)
+                                    frames += x.frames.empty() ? 0u : 1u;
+                                std::fprintf(stderr, "[tier2] f%u: %zu deopts (%zu with frames)\n", f, r.deopts.size(), frames);
+                            }
                             std::fprintf(stderr, "[tier2] phases (total): optimizer %llu, ssa build %llu, ssa optimize+generate %llu us\n",
                                 (unsigned long long)m.phaseMicroseconds[0], (unsigned long long)m.phaseMicroseconds[1], (unsigned long long)m.phaseMicroseconds[2]);
                         }
@@ -8051,6 +8350,7 @@ namespace neos
                             auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
                             auto const n = m.description.functions.size();
                             m.counters.assign(n, calls);
+                            m.tierCalls = calls;
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
                             m.noInline.resize(n);
