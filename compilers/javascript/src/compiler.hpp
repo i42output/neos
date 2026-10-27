@@ -309,6 +309,8 @@ namespace neos::compilers::javascript
         void property_site_at(std::uint32_t aSite);
         void string_lengths_differ();
         void strict_equality(std::uint32_t aLhs, std::uint32_t aRhs);
+        void strict_equality_of_others(std::uint32_t aLhs, std::uint32_t aRhs);
+        static bool number_literal_operand(node const* aNode);   ///< (a binary expression one of whose operands is a number literal)
         void loose_equality(std::uint32_t aLhs, std::uint32_t aRhs, bool aNotEqual, std::string const& aRuntime);
         void dispatch_number(std::uint32_t aNumber);  ///< (a call of the program's function (see dispatch): its number, before its arguments)
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)

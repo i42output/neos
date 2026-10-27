@@ -153,6 +153,9 @@ namespace neos
                         // (a call (its position: in a function with a frame of its own) that has never been made (its function's code 
                         // has run often enough): the code leaves there (a deopt), rather than inline (or make) it; if none, none are)
                         std::function<bool(std::size_t aPosition)> coldCall;
+                        // (the speculations (see result::useful) that an earlier optimization of the function found useful: only those are
+                        // made (the optimizer then runs once, unless some of them are not useful now); if none, any are)
+                        std::set<std::pair<std::uint64_t, std::uint64_t>> const* usefulHint = nullptr;
                     };
 
                     // (an inlined call that has guards: the call's position, and its guards)
@@ -180,6 +183,7 @@ namespace neos
                         std::size_t inlined = 0u;
                         std::size_t folded = 0u;
                         std::size_t guards = 0u;
+                        std::set<std::pair<std::uint64_t, std::uint64_t>> useful;  ///< (the speculations whose values were folded (see options::usefulHint))
                     };
 
                     // (an integer instruction's result for constant operands (aY: a binary one's), if it is folded (not if it traps))

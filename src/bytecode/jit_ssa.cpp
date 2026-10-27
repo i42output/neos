@@ -4349,6 +4349,203 @@ namespace neos
                                 }
                         }
 
+                        // (a value without effects (or a load that cannot trap, with nothing after it in its block that may store or call) 
+                        // that a block computes, all of whose uses are where only one of its successors leads (that successor's only 
+                        // predecessor is it): computed there (e.g. what only a slow path uses is not computed on the fast path))
+                        bool sink_values(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            auto const& order = aFunction.order;
+                            if (order.size() < 2u)
+                                return false;
+                            constexpr std::uint32_t Undefined = ~std::uint32_t{};
+                            // (dominators (as number_values), then the dominator tree's intervals (a block dominates another whose interval
+                            // is within its own))
+                            std::vector<std::uint32_t> position(blocks.size(), Undefined);
+                            for (std::uint32_t i = 0u; i < order.size(); ++i)
+                                position[order[i]] = i;
+                            std::vector<std::uint32_t> idom(blocks.size(), Undefined);
+                            idom[order[0]] = order[0];
+                            for (bool changed = true; changed;)
+                            {
+                                changed = false;
+                                for (std::size_t i = 1u; i < order.size(); ++i)
+                                {
+                                    auto const b = order[i];
+                                    std::uint32_t d = Undefined;
+                                    for (auto p : blocks[b].predecessors)
+                                    {
+                                        if (position[p] == Undefined || idom[p] == Undefined)
+                                            continue;
+                                        if (d == Undefined)
+                                        {
+                                            d = p;
+                                            continue;
+                                        }
+                                        auto x = p;
+                                        auto y = d;
+                                        while (x != y)
+                                        {
+                                            while (position[x] > position[y])
+                                                x = idom[x];
+                                            while (position[y] > position[x])
+                                                y = idom[y];
+                                        }
+                                        d = x;
+                                    }
+                                    if (d != Undefined && idom[b] != d)
+                                    {
+                                        idom[b] = d;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            std::vector<std::vector<std::uint32_t>> children(blocks.size());
+                            for (std::size_t i = 1u; i < order.size(); ++i)
+                                if (idom[order[i]] != Undefined)
+                                    children[idom[order[i]]].push_back(order[i]);
+                            std::vector<std::uint32_t> enter(blocks.size(), 0u), leave(blocks.size(), 0u);
+                            {
+                                std::uint32_t clock = 0u;
+                                std::vector<std::pair<std::uint32_t, std::size_t>> stack{ { order[0], 0u } };
+                                enter[order[0]] = clock++;
+                                while (!stack.empty())
+                                {
+                                    auto& [b, next] = stack.back();
+                                    if (next < children[b].size())
+                                    {
+                                        auto const c = children[b][next++];
+                                        enter[c] = clock++;
+                                        stack.emplace_back(c, 0u);
+                                        continue;
+                                    }
+                                    leave[b] = clock++;
+                                    stack.pop_back();
+                                }
+                            }
+                            auto const dominates = [&](std::uint32_t aA, std::uint32_t aB) { return position[aB] != Undefined && enter[aA] <= enter[aB] && leave[aB] <= leave[aA]; };
+                            // (each value's uses' blocks (a phi's operand: its predecessor's))
+                            std::vector<std::vector<std::uint32_t>> users(values.size());
+                            for (auto b : order)
+                                for (auto v : blocks[b].code)
+                                {
+                                    auto const& i = values[v];
+                                    if (i.dead)
+                                        continue;
+                                    for (std::size_t n = 0u; n < i.operands.size(); ++n)
+                                    {
+                                        auto const o = i.operands[n];
+                                        if (o == None)
+                                            continue;
+                                        users[o].push_back(i.op == Phi && n < blocks[b].predecessors.size() ? blocks[b].predecessors[n] : b);
+                                    }
+                                }
+                            bool changed = false;
+                            for (auto b : order)
+                            {
+                                auto& A = blocks[b];
+                                if (A.successors.size() < 2u || A.code.empty())
+                                    continue;
+                                auto const terminator = A.code.back();
+                                if (values[terminator].op != Branch && values[terminator].op != Switch)
+                                    continue;
+                                std::vector<std::vector<value>> moved(A.successors.size());
+                                bool effects = false;   // (a store or call after (below) the value)
+                                for (auto c = A.code.size() - 1u; c-- > 0u;)
+                                {
+                                    auto const v = A.code[c];
+                                    auto& i = values[v];
+                                    if (i.dead || i.constant() || i.op == Phi)
+                                        continue;
+                                    bool const load = i.load();
+                                    if (!pure(i) || (load && effects) || (i.flags & Volatile) != 0u)
+                                    {
+                                        if (i.store() || i.call() || !pure(i))
+                                            effects = true;
+                                        continue;
+                                    }
+                                    auto const& u = users[v];
+                                    if (u.empty())
+                                        continue;
+                                    std::optional<std::size_t> target;
+                                    for (std::size_t k = 0u; k < A.successors.size() && !target; ++k)
+                                    {
+                                        auto const s = A.successors[k];
+                                        if (s == b || blocks[s].predecessors.size() != 1u)
+                                            continue;
+                                        if (std::all_of(u.begin(), u.end(), [&](std::uint32_t aBlock) { return aBlock != b && dominates(s, aBlock); }))
+                                            target = k;
+                                    }
+                                    if (!target)
+                                        continue;
+                                    auto const s = A.successors[*target];
+                                    moved[*target].push_back(v);
+                                    A.code[c] = None;
+                                    i.block = s;
+                                    // (its operands are used there now)
+                                    for (auto o : i.operands)
+                                        if (o != None)
+                                            for (auto& x : users[o])
+                                                if (x == b)
+                                                {
+                                                    x = s;
+                                                    break;
+                                                }
+                                    changed = true;
+                                }
+                                if (!changed)
+                                    continue;
+                                std::erase(A.code, None);
+                                for (std::size_t k = 0u; k < moved.size(); ++k)
+                                {
+                                    if (moved[k].empty())
+                                        continue;
+                                    auto& S = blocks[A.successors[k]].code;
+                                    std::size_t phis = 0u;
+                                    while (phis < S.size() && values[S[phis]].op == Phi)
+                                        ++phis;
+                                    // (in their order (they were found last first))
+                                    S.insert(S.begin() + static_cast<std::ptrdiff_t>(phis), moved[k].rbegin(), moved[k].rend());
+                                }
+                            }
+                            return changed;
+                        }
+
+                        // (an i64 eq or ne of a value shifted right by 48 (its only use: e.g. a NaN box's tag) and a constant (of 16 bits, as 
+                        // the shift extends): of the value's top 16 bits (see Top16: no shift's value (a register) is made))
+                        void fold_top16_comparisons(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            count_uses(aFunction);
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    auto& i = values[v];
+                                    if (i.dead || (i.op != 0x51u && i.op != 0x52u) || i.operands.size() != 2u || i.flags != 0u)
+                                        continue;
+                                    for (std::size_t n = 0u; n < 2u; ++n)
+                                    {
+                                        auto const s = i.operands[n];
+                                        auto const c = i.operands[1u - n];
+                                        auto const& x = values[s];
+                                        if (!values[c].constant() || x.dead || (x.op != 0x87u && x.op != 0x88u) || x.type != I64 || x.operands.size() != 2u ||
+                                            aFunction.uses[s] != 1u || !values[x.operands[1]].constant() || (values[x.operands[1]].imm0 & 63u) != 48u ||
+                                            values[x.operands[0]].constant())
+                                            continue;
+                                        auto const k = static_cast<std::int64_t>(values[c].imm0);
+                                        bool const fits = x.op == 0x88u ? (k >= 0 && k <= 0xFFFF) : (k >= -0x8000 && k <= 0x7FFF);
+                                        if (!fits)
+                                            break;
+                                        auto const y = x.operands[0];
+                                        values[s].dead = true;
+                                        i.operands = { y, c };
+                                        i.flags = Top16;
+                                        break;
+                                    }
+                                }
+                        }
+
                         // (an unchecked access (of a 64 bit address) whose address is a value shifted left by 1 to 3 bits: the value, scaled
                         // (see Scaled: the same address, as the shift wraps))
                         void fold_scaled_indexes(function& aFunction)
@@ -4582,9 +4779,11 @@ namespace neos
                         for (auto& i : aFunction.values)
                             if (i.op == Assume)
                                 i.dead = true;
+                        sink_values(aFunction);
                         fold_address_offsets(aFunction);
                         eliminate_dead_stores(aFunction);
                         fold_scaled_indexes(aFunction);
+                        fold_top16_comparisons(aFunction);
                         count_uses(aFunction);
                         rematerialize_conditions(aFunction);
                         eliminate_dead_code(aFunction);

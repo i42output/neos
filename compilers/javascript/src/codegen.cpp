@@ -1927,6 +1927,12 @@ namespace neos::compilers::javascript
         {
             begin(control_kind::Block);
             auto const next = iControls.size() - 1u;
+            // (an entry that is not used: nor are those after it (entries are used first to last), so that code that knows the site
+            // reads none of theirs)
+            get(entry);
+            mem_load(opcode::I32LoadMem8U, e * layout::SiteEntrySize + layout::SiteKind, alias::Site);
+            op(opcode::I32Eqz);
+            branch(slow, true);
             get(entry);
             mem_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteFunction, alias::Site);
             get(callee);
@@ -4751,12 +4757,126 @@ namespace neos::compilers::javascript
         // (the dispatch: case tests in order, then the default)
         std::optional<std::size_t> defaultClause;
         for (std::size_t i = 0u; i < n; ++i)
+            if (clauses[i]->is(construct::Default))
+                defaultClause = i;
+        // (a clause's block (the first clause's innermost), as a branch's depth from where it is)
+        auto const clause_depth = [&](std::size_t aClause) { return static_cast<std::uint32_t>(depth_of(exit + n - aClause)); };
+        auto const otherwise = [&]()
+        {
+            if (defaultClause)
+            {
+                op(opcode::Br);
+                u32(clause_depth(*defaultClause));
+            }
+            else
+                branch(exit);
+        };
+        // (cases that are all integers (literals, int32): a number that is one of them (an int32: as its integer) is dispatched as 
+        // integers (an index's table if they are dense, else integer tests in order); a value that is not a number is none of them)
+        std::vector<std::pair<std::int32_t, std::size_t>> integers;
+        for (std::size_t i = 0u; i < n; ++i)
         {
             if (clauses[i]->is(construct::Default))
-            {
-                defaultClause = i;
                 continue;
+            auto const* test = clauses[i]->child(0u);
+            while (test->is(construct::Parenthesized) && test->size() == 1u)
+                test = test->child(0u);
+            bool legacy = false;
+            std::optional<double> number;
+            if (test->is(construct::Number))
+                number = number_value(test->source, legacy);
+            if (!number || legacy || *number != std::trunc(*number) || *number < -2147483648.0 || *number > 2147483647.0 || 
+                (*number == 0.0 && std::signbit(*number)))
+            {
+                integers.clear();
+                break;
             }
+            integers.emplace_back(static_cast<std::int32_t>(*number), i);
+        }
+        if (integers.size() >= 4u)
+        {
+            auto const [low, high] = std::minmax_element(integers.begin(), integers.end());
+            auto const min = low->first;
+            auto const max = high->first;
+            auto const number = local(F64);
+            auto const index = local(I32);
+            // (not a number: none of them)
+            get(discriminant);
+            constant(values::TagSpecial);
+            op(opcode::I64GeU);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            otherwise();
+            end_control();
+            // (a number outside their range (or NaN), or not an integer: none of them)
+            get(discriminant);
+            op(opcode::F64ReinterpretI64);
+            tee(number);
+            f64(static_cast<double>(min));
+            op(opcode::F64Ge);
+            get(number);
+            f64(static_cast<double>(max));
+            op(opcode::F64Le);
+            op(opcode::I32And);
+            op(opcode::I32Eqz);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            otherwise();
+            end_control();
+            get(number);
+            op(opcode::I32SConvertF64);
+            tee(index);
+            op(opcode::F64SConvertI32);
+            get(number);
+            op(opcode::F64Ne);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            otherwise();
+            end_control();
+            // (integer tests: a binary search of their values (sorted, the first clause of each), then in order when few)
+            std::vector<std::pair<std::int32_t, std::size_t>> sorted;
+            for (auto const& e : integers)
+                if (std::none_of(sorted.begin(), sorted.end(), [&](auto const& x) { return x.first == e.first; }))
+                    sorted.push_back(e);
+            std::sort(sorted.begin(), sorted.end());
+            std::function<void(std::size_t, std::size_t)> search = [&](std::size_t aBegin, std::size_t aEnd)
+            {
+                if (aEnd - aBegin <= 4u)
+                {
+                    for (auto k = aBegin; k < aEnd; ++k)
+                    {
+                        get(index);
+                        i32(sorted[k].first);
+                        op(opcode::I32Eq);
+                        op(opcode::BrIf);
+                        u32(clause_depth(sorted[k].second));
+                    }
+                    otherwise();
+                    return;
+                }
+                auto const middle = aBegin + (aEnd - aBegin) / 2u;
+                get(index);
+                i32(sorted[middle].first);
+                op(opcode::I32LtS);
+                op(opcode::If);
+                iCode.push_back(0x40u);
+                iControls.push_back(control{ control_kind::Block });
+                search(aBegin, middle);
+                op(opcode::Else);
+                search(middle, aEnd);
+                end_control();
+            };
+            search(0u, sorted.size());
+            otherwise();
+        }
+        else
+        for (std::size_t i = 0u; i < n; ++i)
+        {
+            if (clauses[i]->is(construct::Default))
+                continue;
             expression(clauses[i]->child(0u));
             auto const test = temporary();
             set(test);
@@ -4765,13 +4885,8 @@ namespace neos::compilers::javascript
             op(opcode::BrIf);
             u32(static_cast<std::uint32_t>(i));
         }
-        if (defaultClause)
-        {
-            op(opcode::Br);
-            u32(static_cast<std::uint32_t>(*defaultClause));
-        }
-        else
-            branch(exit);
+        if (integers.size() < 4u)
+            otherwise();
         for (std::size_t i = 0u; i < n; ++i)
         {
             end_control();
@@ -5936,6 +6051,29 @@ namespace neos::compilers::javascript
         op(opcode::F64ReinterpretI64);
         op(opcode::F64Eq);
         op(opcode::Else);
+        strict_equality_of_others(aLhs, aRhs);
+        end_control();
+    }
+
+    bool function_generator::number_literal_operand(node const* aNode)
+    {
+        // (a binary expression one of whose operands is a number literal)
+        for (std::size_t i = 0u; i < aNode->size() && i < 2u; ++i)
+        {
+            auto const* operand = aNode->child(i);
+            while (operand->is(construct::Parenthesized) && operand->size() == 1u)
+                operand = operand->child(0u);
+            bool legacy = false;
+            if (operand->is(construct::Number) && number_value(operand->source, legacy))   // (not a BigInt's)
+                return true;
+        }
+        return false;
+    }
+
+    void function_generator::strict_equality_of_others(std::uint32_t aLhs, std::uint32_t aRhs)
+    {
+        // (-> i32: IsStrictlyEqual(lhs, rhs) of values that are not both numbers: the same if they are the same (bits), else different 
+        // unless both are strings (of the same length) or both are bigints (the runtime's))
         get(aLhs);
         get(aRhs);
         op(opcode::I64Eq);
@@ -5988,7 +6126,6 @@ namespace neos::compilers::javascript
         }
         op(opcode::Else);
         i32(0);
-        end_control();
         end_control();
         end_control();
     }
@@ -7266,60 +7403,16 @@ namespace neos::compilers::javascript
             op(opcode::Else);
             if (aNode->is(construct::StrictEqual) || aNode->is(construct::StrictNotEqual))
             {
-                // (not both numbers: the same value if they are the same (bits), else different unless both are strings or both
-                // are bigints (the runtime's))
-                bool const notEqual = aNode->is(construct::StrictNotEqual);
-                get(lhs);
-                get(rhs);
-                op(opcode::I64Eq);
-                op(opcode::If);
-                iCode.push_back(0x7Eu);
-                iControls.push_back(control{ control_kind::Block });
-                constant(notEqual ? values::False : values::True);
-                op(opcode::Else);
-                get(lhs);
-                constant(0xFFFF000000000000ull);
-                op(opcode::I64And);
-                tee(iScratch);
-                get(rhs);
-                constant(0xFFFF000000000000ull);
-                op(opcode::I64And);
-                op(opcode::I64Eq);
-                get(iScratch);
-                constant(values::TagString);
-                op(opcode::I64Eq);
-                get(iScratch);
-                constant(values::TagBigInt);
-                op(opcode::I64Eq);
-                op(opcode::I32Ior);
-                op(opcode::I32And);
-                op(opcode::If);
-                iCode.push_back(0x7Eu);
-                iControls.push_back(control{ control_kind::Block });
-                {
-                    // (strings of different lengths are different; else the runtime's)
-                    get(iScratch);
-                    constant(values::TagString);
-                    op(opcode::I64Eq);
-                    get(lhs);
-                    get(rhs);
-                    string_lengths_differ();
-                    op(opcode::I32And);
-                    op(opcode::If);
-                    iCode.push_back(0x7Eu);
-                    iControls.push_back(control{ control_kind::Block });
-                    constant(notEqual ? values::True : values::False);
-                    op(opcode::Else);
-                    get(lhs);
-                    get(rhs);
-                    slow_runtime(sOperations.at(aNode->kind), { I64, I64 }, I64);
-                    check();
-                    end_control();
-                }
-                op(opcode::Else);
-                constant(notEqual ? values::True : values::False);
-                end_control();
-                end_control();
+                // (not both numbers: an i32, as a boolean value (a number literal's: different))
+                if (number_literal_operand(aNode))
+                    i32(0);
+                else
+                    strict_equality_of_others(lhs, rhs);
+                if (aNode->is(construct::StrictNotEqual))
+                    op(opcode::I32Eqz);
+                op(opcode::I64UConvertI32);
+                constant(values::False);
+                op(opcode::I64Add);
             }
             else if (aNode->is(construct::Equal) || aNode->is(construct::NotEqual))
                 loose_equality(lhs, rhs, aNode->is(construct::NotEqual), sOperations.at(aNode->kind));
@@ -10910,62 +11003,20 @@ namespace neos::compilers::javascript
         op(opcode::Else);
         if (aNode->is(construct::StrictEqual) || aNode->is(construct::StrictNotEqual))
         {
-            // (not both numbers: the same if they are the same (bits), else different unless both are strings or both are bigints (the
-            // runtime's))
-            bool const notEqual = aNode->is(construct::StrictNotEqual);
-            get(lhs);
-            get(rhs);
+            // (not both numbers (a number literal's: different))
+            if (number_literal_operand(aNode))
+                i32(0);
+            else
+                strict_equality_of_others(lhs, rhs);
+            if (aNode->is(construct::StrictNotEqual))
+                op(opcode::I32Eqz);
+        }
+        else if (aNode->is(construct::Equal) || aNode->is(construct::NotEqual))
+        {
+            // (IsLooselyEqual: as the expression's (the runtime's only for what it does not know), its boolean value tested)
+            loose_equality(lhs, rhs, aNode->is(construct::NotEqual), comparison->second.second);
+            constant(values::True);
             op(opcode::I64Eq);
-            op(opcode::If);
-            iCode.push_back(0x7Fu);
-            iControls.push_back(control{ control_kind::Block });
-            i32(notEqual ? 0 : 1);
-            op(opcode::Else);
-            get(lhs);
-            constant(0xFFFF000000000000ull);
-            op(opcode::I64And);
-            tee(iScratch);
-            get(rhs);
-            constant(0xFFFF000000000000ull);
-            op(opcode::I64And);
-            op(opcode::I64Eq);
-            get(iScratch);
-            constant(values::TagString);
-            op(opcode::I64Eq);
-            get(iScratch);
-            constant(values::TagBigInt);
-            op(opcode::I64Eq);
-            op(opcode::I32Ior);
-            op(opcode::I32And);
-            op(opcode::If);
-            iCode.push_back(0x7Fu);
-            iControls.push_back(control{ control_kind::Block });
-            {
-                // (strings of different lengths are different; else the runtime's)
-                get(iScratch);
-                constant(values::TagString);
-                op(opcode::I64Eq);
-                get(lhs);
-                get(rhs);
-                string_lengths_differ();
-                op(opcode::I32And);
-                op(opcode::If);
-                iCode.push_back(0x7Fu);
-                iControls.push_back(control{ control_kind::Block });
-                i32(notEqual ? 1 : 0);
-                op(opcode::Else);
-                get(lhs);
-                get(rhs);
-                slow_runtime(comparison->second.second, { I64, I64 }, I64);
-                check();
-                constant(values::True);
-                op(opcode::I64Eq);
-                end_control();
-            }
-            op(opcode::Else);
-            i32(notEqual ? 1 : 0);
-            end_control();
-            end_control();
         }
         else
         {

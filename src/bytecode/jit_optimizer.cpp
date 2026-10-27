@@ -2141,14 +2141,19 @@ namespace neos
                         try
                         {
                             // (with speculation: again, with only the speculations whose values were folded (a guard of a value that is not
-                            // folded costs more than it saves))
-                            rewriter first{ aModule, aFunction, aOptions, aInlinable, aMemoryWord, nullptr };
+                            // folded costs more than it saves); with those that an earlier optimization found useful: once, if they are now)
+                            rewriter first{ aModule, aFunction, aOptions, aInlinable, aMemoryWord, aOptions.usefulHint };
                             auto r = first.run();
                             if (first.speculations() == 0u || first.useful().size() == first.speculations())
+                            {
+                                r.useful = first.useful();
                                 return r;
+                            }
                             auto const useful = first.useful();
                             rewriter second{ aModule, aFunction, aOptions, aInlinable, aMemoryWord, &useful };
-                            return second.run();
+                            auto r2 = second.run();
+                            r2.useful = useful;
+                            return r2;
                         }
                         catch (cannot_optimize const&)
                         {

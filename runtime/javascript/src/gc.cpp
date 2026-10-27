@@ -1299,16 +1299,19 @@ namespace neos::javascript_runtime
         std::uint64_t runStart = 0u;
         bool inRun = false;
         constexpr std::size_t Ahead = 8u;   // (slots: their words are fetched before they are read (the loop is bound by memory's latency))
+        // (the collector's state that the loop reads: locals (the runs' growth would otherwise make them read again each time))
+        auto const handleOffset = iHandleOffset;
+        bool const quarantine = iQuarantine;
         for (std::size_t i = 0u; i < count; ++i)
         {
             auto* const slot = start + i * slotSize;
 #if defined(__GNUC__) || defined(__clang__)
             if (i + Ahead < count)
-                __builtin_prefetch(slot + Ahead * slotSize + iHandleOffset, 1);
+                __builtin_prefetch(slot + Ahead * slotSize + handleOffset, 1);
 #endif
             auto const handle = first + static_cast<std::uint32_t>(i) * step;
             std::uint32_t h;
-            std::memcpy(&h, slot + iHandleOffset, sizeof(h));
+            std::memcpy(&h, slot + handleOffset, sizeof(h));
             bool free = true;
             if (h == handle)
             {
@@ -1319,7 +1322,7 @@ namespace neos::javascript_runtime
                     live = true;
                     free = false;
                 }
-                else if (iQuarantine)
+                else if (quarantine)
                 {
                     free_cell(c, h);
                     free = false;
@@ -1331,10 +1334,10 @@ namespace neos::javascript_runtime
                         static_cast<object*>(c)->extra_if() == nullptr))
                         c->~cell();
                     std::uint32_t const none = 0u;
-                    std::memcpy(slot + iHandleOffset, &none, sizeof(none));
+                    std::memcpy(slot + handleOffset, &none, sizeof(none));
                 }
             }
-            else if (iQuarantine)
+            else if (quarantine)
                 free = false;
             if (free)
             {

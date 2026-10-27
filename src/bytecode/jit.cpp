@@ -248,6 +248,11 @@ namespace neos
                     std::uint64_t compileMicroseconds = 0u;
                     std::uint64_t phaseMicroseconds[4] = {};
                     std::vector<std::int32_t> counters;
+                    std::vector<std::int32_t> loopCounters;             ///< (each function's (with a frame) loops' iterations before it is optimized
+                                                                        ///< (see tier_loop))
+                    std::int32_t loopIterations = 0;
+                    std::vector<std::uint8_t> loopTriggered;            ///< (an optimization that its loops started: its calls not yet made 
+                                                                        ///< are not cold (its code after the loop has not run yet))
                     std::vector<std::uint8_t> tierState;                ///< (0: not optimized, 1: optimized, 2: not to be optimized)
                     std::vector<std::uint32_t> recompiles;
                     std::vector<std::set<std::size_t>> noInline;        ///< (calls (their positions) not to inline (their guards failed))
@@ -257,12 +262,16 @@ namespace neos
                     std::vector<std::map<std::size_t, std::uint32_t>> deoptStrikes;   ///< (the times that inlined calls' deopts made the function optimized again)
                     std::vector<std::vector<bool>> parametersRead;      ///< (each function's parameters that its code reads (see optimizer::parameters_read):
                                                                         ///< made (once) before the first optimization; optimized code's calls pass only those)
-                    std::vector<std::vector<std::size_t>> inlineChains;  ///< (optimized code's inline chains (see optimizer::InlineChainToken): 
-                                                                        ///< the frames of calls within inlined calls, innermost first)
+                    std::vector<std::optional<std::set<std::pair<std::uint64_t, std::uint64_t>>>> usefulSpeculations;  ///< (each function's last
+                                                                        ///< optimization's useful speculations (see optimizer::options::usefulHint))
+                    std::deque<std::vector<std::size_t>> inlineChains;  ///< (optimized code's inline chains (see optimizer::InlineChainToken):
+                                                                        ///< the frames of calls within inlined calls, innermost first; added
+                                                                        ///< by optimizations (in the background): see chainsMutex)
+                    mutable std::mutex chainsMutex;                     ///< (inlineChains' size and elements (a chain's reference remains valid))
                     std::vector<tier_version const*> currentVersion;
                     std::vector<std::unique_ptr<tier_version>> versions;
-                    // (optimization in the background (see tier_worker): a function's optimized code is made on a thread of its own (its 
-                    // optimizer runs here: it reads the program's memory); tierState 3 while it is)
+                    // (optimization in the background (see tier_worker): a function's optimization (its optimizer and its code) is made on
+                    // another thread (installed here); tierState 3 while it is)
                     struct tier_job;
                     bool background = true;
                     std::vector<std::shared_ptr<tier_job>> jobs;        ///< (by function: its optimization in the background)
@@ -325,7 +334,7 @@ namespace neos
                     delete aModule;
                 }
 
-                // (an optimization's code made in the background: the optimizer's result (made before), then its code)
+                // (an optimization made in the background: the optimizer's result, then its code)
                 struct compiled_module::tier_job
                 {
                     compiled_module* module = nullptr;
@@ -333,6 +342,8 @@ namespace neos
                     std::chrono::steady_clock::time_point start;
                     optimizer::result result;
                     optimizer::options options;
+                    std::optional<std::set<std::pair<std::uint64_t, std::uint64_t>>> hint;   ///< (see options::usefulHint)
+                    bool rewritten = false;             ///< (the optimizer optimized it (else it is not optimized))
                     std::unique_ptr<tier_version> version;
                     module_description description;     ///< (the module's, the function's code the optimizer's)
                     std::vector<std::uint8_t> code;
@@ -658,6 +669,40 @@ namespace neos
                         void store_imm(bool aW, int aBase, std::int32_t aDisp, std::int32_t aImm) { op_rm({ 0xC7 }, aW, 0, aBase, aDisp); emit32(static_cast<std::uint32_t>(aImm)); }
                         void lea(int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x8D }, true, aDst, aBase, aDisp); }
                         void movsxd(int aDst, int aSrc) { op_rr({ 0x63 }, true, aDst, aSrc); }
+                        // (BMI2: aDst = aSrc rotated right by aCount (64 bits; the flags unchanged))
+                        void rorx(int aDst, int aSrc, std::uint8_t aCount)
+                        {
+                            lengthenable();
+                            emit8(0xC4u);
+                            emit8(static_cast<std::uint8_t>(((aDst & 8) ? 0x00u : 0x80u) | 0x40u | ((aSrc & 8) ? 0x00u : 0x20u) | 0x03u));
+                            emit8(0xFBu);   // (W1, no vvvv, L0, F2)
+                            emit8(0xF0u);
+                            emit8(static_cast<std::uint8_t>(0xC0u | ((aDst & 7) << 3) | (aSrc & 7)));
+                            emit8(aCount);
+                        }
+                        // (cmp aReg's low 16 bits, aImm)
+                        void cmp16_ri(int aReg, std::uint16_t aImm)
+                        {
+                            auto const start = offset();
+                            lengthenable();
+                            emit8(0x66u);
+                            rex(false, 0, 0, aReg);
+                            auto const value = static_cast<std::int16_t>(aImm);
+                            if (value >= -128 && value <= 127)
+                            {
+                                emit8(0x83u);
+                                emit8(static_cast<std::uint8_t>(0xF8u | (aReg & 7)));
+                                emit8(static_cast<std::uint8_t>(static_cast<std::int8_t>(value)));
+                            }
+                            else
+                            {
+                                emit8(0x81u);
+                                emit8(static_cast<std::uint8_t>(0xF8u | (aReg & 7)));
+                                emit8(static_cast<std::uint8_t>(aImm));
+                                emit8(static_cast<std::uint8_t>(aImm >> 8u));
+                            }
+                            fusable(7, start);
+                        }
                         void movzx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xB6 }, false, aDst, aSrc, -1, true); }
                         void movzx8_load(int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x0F, 0xB6 }, false, aDst, aBase, aDisp); }
                         void movsx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xBE }, false, aDst, aSrc, -1, true); }
@@ -1007,6 +1052,31 @@ namespace neos
 #endif
                     }
 
+                    bool query_bmi2()
+                    {
+#if defined(NEOS_JIT_NO_BMI2)
+                        return false; // (testing: shifts)
+#elif defined(_MSC_VER)
+                        int r[4];
+                        __cpuid(r, 0);
+                        if (r[0] < 7)
+                            return false;
+                        __cpuidex(r, 7, 0);
+                        return ((r[1] >> 8) & 1) != 0;
+#else
+                        unsigned a, b, c, d;
+                        if (!__get_cpuid_count(7u, 0u, &a, &b, &c, &d))
+                            return false;
+                        return ((b >> 8) & 1u) != 0u;
+#endif
+                    }
+
+                    bool has_bmi2()
+                    {
+                        static bool const sBmi2 = query_bmi2();
+                        return sBmi2;
+                    }
+
                     bool has_sse41()
                     {
                         // (asked once: CPUID can be slow (e.g. in a virtual machine, where it exits to the hypervisor), and a program that
@@ -1303,6 +1373,7 @@ namespace neos
                     // (the optimizing tier's helpers, that generated code calls: a function's counter has reached 0 (its optimized 
                     // code's address, or null to go on with its code); a guard of an optimized function's inlined call failed)
                     void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept;
+                    void tier_loop(context* aContext, std::uint32_t aFunction) noexcept;
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept;
                     void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept;
 
@@ -1389,6 +1460,7 @@ namespace neos
                             if (aOutput.tiering)
                             {
                                 iCounters = aOutput.counters.data();
+                                iLoopCounters = aOutput.loopCounters.data();
                                 aOutput.deoptFrames.resize(iModule.functions.size());
                                 iDeoptFrames = &aOutput.deoptFrames;
                                 iCallFlags = &aOutput.callFlags;
@@ -2329,6 +2401,47 @@ namespace neos
                             a.jcc(E, resume);
                             a.jmp_r(RAX);
                             a.end_cold();
+                        }
+                        // (the optimizing tier: a loop's head (of a function with a frame of its own, in its own code): the function's loop
+                        // counter is decremented; at 0, tier_loop (the function is optimized: its later calls run its optimized code, while
+                        // this one continues here). At a loop's head, the operand stack is in memory (see flush): RAX is free; every
+                        // register that native code does not preserve is saved around the call)
+                        void loop_counter()
+                        {
+                            if (iLoopCounters == nullptr || iTier != nullptr || iFunction->frameless)
+                                return;
+                            iTeeCache.reset();
+                            a.barrier();
+                            auto const cold = a.new_label();
+                            auto const resume = a.new_label();
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&iLoopCounters[iFunctionIndex]), true);
+                            a.emit8(0xFFu);     // dec dword [rax]
+                            a.emit8(0x08u);
+                            a.jcc(E, cold);
+                            a.barrier();
+                            a.bind(resume);
+                            // (cold code (unless the loop is in cold code: then where it is, jumped over))
+                            slow_path(cold, resume, [&]()
+                            {
+                                static constexpr int Saved[] = { RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11 };
+                                constexpr std::int32_t GprsAt = ShadowSpace;
+                                constexpr std::int32_t XmmsAt = GprsAt + 8 * static_cast<std::int32_t>(std::size(Saved));
+                                constexpr std::int32_t Size = (XmmsAt + 16 * 16 + 15) & ~15;   // (rsp stays aligned)
+                                a.sub_rsp_imm32(Size);
+                                for (std::size_t i = 0u; i < std::size(Saved); ++i)
+                                    a.store(true, RSP, GprsAt + 8 * static_cast<std::int32_t>(i), Saved[i]);
+                                for (int x = 0; x < 16; ++x)
+                                    a.movdqu_store(RSP, XmmsAt + 16 * x, x);
+                                a.mov_rr(true, NativeIntegerArguments[0], R15);
+                                a.mov_ri(NativeIntegerArguments[1], iFunctionIndex, false);
+                                a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&tier_loop), true);
+                                a.call_r(RAX);
+                                for (int x = 0; x < 16; ++x)
+                                    a.movdqu_load(x, RSP, XmmsAt + 16 * x);
+                                for (std::size_t i = 0u; i < std::size(Saved); ++i)
+                                    a.load(true, Saved[i], RSP, GprsAt + 8 * static_cast<std::int32_t>(i));
+                                a.lea(RSP, RSP, Size);
+                            });
                         }
                         void function(std::uint32_t aIndex)
                         {
@@ -4495,6 +4608,8 @@ namespace neos
                                         if (c.headEnd == 0u)
                                             a.align_executable(LoopAlignment);   // (its head is where a branch back goes)
                                         a.bind(c.label);
+                                        if (c.headEnd == 0u)
+                                            loop_counter();
                                     }
                                     iControl.push_back(c);
                                 }
@@ -4604,6 +4719,7 @@ namespace neos
                                     c.bodyLabel = a.new_label();
                                     a.align_executable(LoopAlignment);   // (a rotated loop's body is where a branch back goes)
                                     a.bind(*c.bodyLabel);
+                                    loop_counter();
                                 }
                                 break;
                             case 0x0F:
@@ -4898,6 +5014,7 @@ namespace neos
                         std::vector<std::pair<std::size_t, std::size_t>> iCallSites; ///< (labels where calls return, and their tokens)
                         bytes iCode;
                         std::int32_t* iCounters = nullptr;              ///< (the optimizing tier's counters (see compiled_module::counters))
+                        std::int32_t* iLoopCounters = nullptr;          ///< (... and its loop counters)
                         compiled_module* iTier = nullptr;               ///< (the optimizing tier: the module whose function is compiled)
                         std::vector<std::size_t> const* iOrigins = nullptr;
                         compiled_module::tier_version const* iTierVersion = nullptr;
@@ -4964,6 +5081,7 @@ namespace neos
                             std::uint32_t start = ~std::uint32_t{};
                             std::uint32_t end = 0u;
                             bool crossesCall = false;
+                            bool crossesHotCall = false;    ///< (a call that is not in cold code (see cold_blocks): a callee saved register then)
                             bool xmm = false;
                             value v = ssa::None;
                         };
@@ -4986,7 +5104,7 @@ namespace neos
                         static constexpr std::size_t MaxValues = 60000u;
                     public:
                         optimizing_generator(module_description const& aModule, compiled_module& aTier, compiled_module::tier_version const* aVersion, ssa::function& aFunction) :
-                            iModule{ aModule }, iTier{ aTier }, iVersion{ aVersion }, f{ aFunction }, iSse41{ has_sse41() }
+                            iModule{ aModule }, iTier{ aTier }, iVersion{ aVersion }, f{ aFunction }, iSse41{ has_sse41() }, iBmi2{ has_bmi2() }
                         {
                             for (std::size_t i = 0u; i < TrapCount; ++i)
                                 iTrapLabels[i] = a.new_label();
@@ -5205,6 +5323,7 @@ namespace neos
                             iPosition.assign(f.values.size(), 0u);
                             iBlockStart.assign(f.blocks.size(), 0u);
                             iBlockEnd.assign(f.blocks.size(), 0u);
+                            auto const cold = cold_blocks();
                             std::uint32_t p = 2u;
                             for (auto b : f.order)
                             {
@@ -5220,7 +5339,11 @@ namespace neos
                                         p += 2u;
                                     }
                                     if (!f.values[v].dead && is_call(f.values[v]))
+                                    {
                                         iCalls.push_back(iPosition[v]);
+                                        if (!cold[b])
+                                            iHotCalls.push_back(iPosition[v]);
+                                    }
                                 }
                                 iBlockEnd[b] = p;
                                 p += 2u;
@@ -5371,12 +5494,15 @@ namespace neos
                             }
                             // (the calls that each interval spans)
                             std::sort(iCalls.begin(), iCalls.end());
+                            std::sort(iHotCalls.begin(), iHotCalls.end());
                             for (auto& i : iIntervals)
                             {
                                 if (i.start > i.end)
                                     continue;
                                 auto const c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start);
                                 i.crossesCall = c != iCalls.end() && *c < i.end;
+                                auto const h = std::upper_bound(iHotCalls.begin(), iHotCalls.end(), i.start);
+                                i.crossesHotCall = h != iHotCalls.end() && *h < i.end;
                             }
                         }
                         // --- register allocation
@@ -5466,14 +5592,14 @@ namespace neos
                                 // saves_at_calls)), else the frame)
                                 if (i->xmm)
                                 {
-                                    if (!i->crossesCall)
+                                    if (!i->crossesHotCall)
                                         pick(CallerSavedXmms, std::size(CallerSavedXmms));
                                     pick(CalleeSavedXmms, std::size(CalleeSavedXmms));
                                     pick(CallerSavedXmms, std::size(CallerSavedXmms));
                                 }
                                 else
                                 {
-                                    if (!i->crossesCall)
+                                    if (!i->crossesHotCall)
                                         pick(CallerSavedGprs, std::size(CallerSavedGprs));
                                     pick(CalleeSavedGprs, std::size(CalleeSavedGprs));
                                     pick(CallerSavedGprs, std::size(CallerSavedGprs));
@@ -5884,6 +6010,20 @@ namespace neos
                         // order (the code of a path is the same wherever its blocks are))
                         std::vector<std::uint32_t> emission_order() const
                         {
+                            auto const cold = cold_blocks();
+                            std::vector<std::uint32_t> result;
+                            result.reserve(f.order.size());
+                            for (auto b : f.order)
+                                if (!cold[b])
+                                    result.push_back(b);
+                            for (auto b : f.order)
+                                if (cold[b])
+                                    result.push_back(b);
+                            return result;
+                        }
+                        // (the blocks that are not likely to run (see emission_order))
+                        std::vector<bool> cold_blocks() const
+                        {
                             std::vector<bool> cold(f.blocks.size(), false);
                             for (auto b : f.order)
                             {
@@ -5927,15 +6067,7 @@ namespace neos
                                         all = false;
                                 cold[b] = all;
                             }
-                            std::vector<std::uint32_t> result;
-                            result.reserve(f.order.size());
-                            for (auto b : f.order)
-                                if (!cold[b])
-                                    result.push_back(b);
-                            for (auto b : f.order)
-                                if (cold[b])
-                                    result.push_back(b);
-                            return result;
+                            return cold;
                         }
                         // (a block whose code is only a jump that moves nothing (e.g. an edge's of phis whose operands are where they are (see
                         // split_critical_edges)): it has no code; its label is its successor's, and a branch to it is to its successor)
@@ -7284,6 +7416,22 @@ namespace neos
                                 auto first = i.operands[0];
                                 auto second = i.operands[1];
                                 auto cc = sCcs[op - (w ? 0x51u : 0x46u)];
+                                if ((i.flags & ssa::Top16) != 0u)
+                                {
+                                    // (the first's top 16 bits and the constant's low 16 bits (see ssa::Top16): BMI2's rotate, else a shift)
+                                    auto const x = gpr(first, RAX);
+                                    if (iBmi2)
+                                        a.rorx(RAX, x, 48u);
+                                    else
+                                    {
+                                        if (x != RAX)
+                                            a.mov_rr(true, RAX, x);
+                                        a.shift_ri(5, true, RAX, 48u);
+                                    }
+                                    a.cmp16_ri(RAX, static_cast<std::uint16_t>(bits(second)));
+                                    condition(v, cc);
+                                    return;
+                                }
                                 if (constant(first) && !constant(second))
                                 {
                                     // (a constant first: second, then the constant (the relation swapped))
@@ -7760,6 +7908,7 @@ namespace neos
                         compiled_module::tier_version const* iVersion;
                         ssa::function& f;
                         bool const iSse41;
+                        bool const iBmi2;          ///< (BMI2: rorx (see ssa::Top16))
                         std::size_t iTrapLabels[TrapCount] = {};
                         std::size_t iTrapFromContext = 0u;
                         std::size_t iEpilogue = 0u;
@@ -7770,6 +7919,7 @@ namespace neos
                         std::vector<std::uint32_t> iBlockStart;
                         std::vector<std::uint32_t> iBlockEnd;
                         std::vector<std::uint32_t> iCalls;
+                        std::vector<std::uint32_t> iHotCalls;   ///< (the calls that are not in cold code)
                         std::vector<interval> iIntervals;
                         std::vector<location> iLocations;
                         std::vector<value> iSpills;
@@ -7896,6 +8046,7 @@ namespace neos
                     constexpr std::uint32_t MaxRecompiles = 16u;        ///< (then without speculation)
                     constexpr std::int32_t WarmCalls = 64;              ///< (a function's calls before a call it has never made is cold (see callFlags))
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
+                    constexpr std::int32_t RecompileCallsAfterDeopts = 200; ///< (... whose code left often for its own (not a guard's))
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
                     constexpr std::uint32_t DeoptStrikes = 2u;              ///< (an inlined call whose deopts made the function optimized again this often:
                                                                             ///< its code calls rather than deopts (e.g. a cache's miss: optimized again, 
@@ -7903,38 +8054,88 @@ namespace neos
                     constexpr std::uint64_t CallsPerSeldomDeopt = 1000u;    ///< (an optimized function's calls per deopt (at least) that do not make it
                                                                             ///< optimized again)
 
+                    // (the optimizer, on any thread (an optimization's job runs it in the background, while the program runs): it reads 
+                    // the module's code (which does not change), and the program's memory and globals (each word's value is one that it
+                    // has had: speculations' guards check their values when the code runs; cached loads' values may be any that their 
+                    // words have had))
                     optimizer::result run_optimizer(compiled_module& aModule, std::uint32_t aFunction, optimizer::options const& aOptions)
                     {
                         auto& m = aModule;
                         auto const inlinable = [&](std::uint32_t aCallee) { return m.description.functions[aCallee].inlinable; };
                         // (the program's memory is read safely (its pages may not be committed); a page that has been read once is read
-                        // directly (here: no page's state changes while the optimizer runs, on the thread that runs the program))
+                        // directly (here, a committed page does not become unreadable: a page is decommitted by madvise (it reads as 
+                        // zeros); on Windows, a decommitted page cannot be read: always read safely))
+#if !defined(_WIN32)
                         std::unordered_set<std::uintptr_t> readable;
-                        auto const memoryWord = [&readable](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
+#endif
+                        auto const memoryWord = [&](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
                         {
                             auto const& x = external_memory(aMemory);
                             if (!x.fixed || aWidth > 8u || aAddress > x.size || x.size - aAddress < aWidth)
                                 return {};
-                            constexpr std::uintptr_t PageMask = ~std::uintptr_t{ 0xFFFu };
                             auto const* const address = x.base + aAddress;
+                            std::uint64_t word = 0u;
+#if !defined(_WIN32)
+                            constexpr std::uintptr_t PageMask = ~std::uintptr_t{ 0xFFFu };
                             auto const first = reinterpret_cast<std::uintptr_t>(address) & PageMask;
                             auto const last = (reinterpret_cast<std::uintptr_t>(address) + aWidth - 1u) & PageMask;
-                            std::uint64_t word = 0u;
                             if (readable.contains(first) && readable.contains(last))
                             {
                                 std::memcpy(&word, address, aWidth);
                                 return word;
                             }
+#endif
                             if (!read_memory(address, &word, aWidth))
                                 return {};
+#if !defined(_WIN32)
                             readable.insert(first);
                             readable.insert(last);
+#endif
                             return word;
                         };
                         return optimizer::optimize(m.description, aFunction, aOptions, inlinable, memoryWord);
                     }
 
-                    // (an optimization's first part (its optimizer: here, as it reads the program's memory): its job (null: not optimized))
+                    // (a frame (of a function: its code's) that optimized code can leave for at a call (see optimizer::deopt::frames): one
+                    // that the baseline made (where it is left for at the call, and where the call returns to); the baseline's frames and 
+                    // deopt points do not change once the module's code is made)
+                    bool deopt_frame_valid(compiled_module const& m, std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
+                        std::uint32_t aLocals)
+                    {
+                        auto const point = m.deoptPoints.find(aPosition);
+                        return point != m.deoptPoints.end() && point->second.function == aFunction && point->second.arguments == aArguments &&
+                            point->second.stack.size() == aDepth && point->second.returned != 0u && aFunction < m.deoptFrames.size() &&
+                            m.deoptFrames[aFunction].valid && m.deoptFrames[aFunction].locals.size() == aLocals;
+                    }
+
+                    // (whether an optimizer's result's deopts can leave for the baseline's frames)
+                    bool deopts_valid(compiled_module const& m, std::uint32_t f, optimizer::result const& aResult)
+                    {
+                        for (auto const& x : aResult.deopts)
+                        {
+                            if (!x.frames.empty())
+                            {
+                                std::size_t values = x.arguments;
+                                for (auto const& frame : x.frames)
+                                {
+                                    values += frame.locals.size() + frame.depth;
+                                    if (!deopt_frame_valid(m, frame.function, frame.position, frame.arguments, frame.depth, static_cast<std::uint32_t>(frame.locals.size())))
+                                        return false;
+                                }
+                                if (x.frames.front().function != f || values > MaxDeoptValues)
+                                    return false;
+                                continue;
+                            }
+                            auto const point = m.deoptPoints.find(x.call);
+                            if (point == m.deoptPoints.end() || point->second.function != f || point->second.arguments != x.arguments ||
+                                point->second.stack.size() != x.depth || m.deoptFrames[f].locals.size() != x.locals ||
+                                std::size_t{ x.locals } + x.depth + x.arguments > MaxDeoptValues)
+                                return false;
+                        }
+                        return true;
+                    }
+
+                    // (an optimization's first part (here, on the program's thread): its job, with the optimizer's options)
                     std::shared_ptr<compiled_module::tier_job> prepare_optimization(compiled_module& aModule, std::uint32_t aFunction)
                     {
                         auto& m = aModule;
@@ -7951,72 +8152,115 @@ namespace neos
                         // (deopts: where the baseline's code has a frame to leave for (else none))
                         // (a function optimized again more than twice (its deopts were taken): without deopts (its slow paths call))
                         options.deopt = m.backend && m.deopt && m.deoptFrames.size() > f && m.deoptFrames[f].valid;
-                        // (a frame (of a function: its code's) that the code can leave for at a call (see optimizer::deopt::frames): one
-                        // that the baseline made (where it is left for at the call, and where the call returns to))
-                        auto const deopt_frame = [&m](std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
-                            std::uint32_t aLocals)
-                        {
-                            auto const point = m.deoptPoints.find(aPosition);
-                            return point != m.deoptPoints.end() && point->second.function == aFunction && point->second.arguments == aArguments &&
-                                point->second.stack.size() == aDepth && point->second.returned != 0u && aFunction < m.deoptFrames.size() &&
-                                m.deoptFrames[aFunction].valid && m.deoptFrames[aFunction].locals.size() == aLocals;
-                        };
+                        bool const fromLoop = f < m.loopTriggered.size() && m.loopTriggered[f] != 0u;
                         if (options.deopt)
                         {
-                            options.deoptFrame = deopt_frame;
+                            options.deoptFrame = [&m](std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
+                                std::uint32_t aLocals)
+                            {
+                                return deopt_frame_valid(m, aFunction, aPosition, aArguments, aDepth, aLocals);
+                            };
                             // (a call that has never been made, in a function that has been called often enough: optimized code leaves 
                             // there (see compiled_module::callFlags))
-                            options.coldCall = [&m](std::size_t aPosition)
-                            {
-                                auto const point = m.deoptPoints.find(aPosition);
-                                if (point == m.deoptPoints.end() || point->second.made == nullptr || *point->second.made != 0u)
-                                    return false;
-                                auto const g = point->second.function;
-                                if (g >= m.counters.size())
-                                    return false;
-                                if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
-                                    return true;
-                                return m.counters[g] <= m.tierCalls - std::min(m.tierCalls, WarmCalls);
-                            };
+                            // (the call's flag and the functions' counters and states are the program's (the optimizer may run while it 
+                            // runs): words read as they are (a call made, or a function optimized, since: its code calls, or deopts once))
+                            // (an optimization that the function's loops started: none (its code after its loops has not run yet))
+                            if (!fromLoop)
+                                options.coldCall = [&m](std::size_t aPosition)
+                                {
+                                    auto const point = m.deoptPoints.find(aPosition);
+                                    if (point == m.deoptPoints.end() || point->second.made == nullptr || *point->second.made != 0u)
+                                        return false;
+                                    auto const g = point->second.function;
+                                    if (g >= m.counters.size())
+                                        return false;
+                                    if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
+                                        return true;
+                                    return m.counters[g] <= m.tierCalls - std::min(m.tierCalls, WarmCalls);
+                                };
                         }
                         options.maxDeoptValues = MaxDeoptValues;
-                        auto const deopts_valid = [&](optimizer::result const& aResult)
+                        if (m.usefulSpeculations.size() < m.description.functions.size())
+                            m.usefulSpeculations.resize(m.description.functions.size());
+                        if (options.speculation && m.usefulSpeculations[f])
+                            job->hint = *m.usefulSpeculations[f];
+                        if (m.parametersRead.empty())
                         {
-                            for (auto const& x : aResult.deopts)
-                            {
-                                if (!x.frames.empty())
-                                {
-                                    std::size_t values = x.arguments;
-                                    for (auto const& frame : x.frames)
-                                    {
-                                        values += frame.locals.size() + frame.depth;
-                                        if (!deopt_frame(frame.function, frame.position, frame.arguments, frame.depth, static_cast<std::uint32_t>(frame.locals.size())))
-                                            return false;
-                                    }
-                                    if (x.frames.front().function != f || values > MaxDeoptValues)
-                                        return false;
-                                    continue;
-                                }
-                                auto const point = m.deoptPoints.find(x.call);
-                                if (point == m.deoptPoints.end() || point->second.function != f || point->second.arguments != x.arguments ||
-                                    point->second.stack.size() != x.depth || m.deoptFrames[f].locals.size() != x.locals ||
-                                    std::size_t{ x.locals } + x.depth + x.arguments > MaxDeoptValues)
-                                    return false;
-                            }
-                            return true;
-                        };
-                        auto& r = job->result;
+                            // (from the module's own code (an optimization's description has its function's optimized code))
+                            m.parametersRead.resize(m.description.functions.size());
+                            for (std::uint32_t g = 0u; g < m.description.functions.size(); ++g)
+                                m.parametersRead[g] = optimizer::parameters_read(m.description, g);
+                        }
+                        return job;
+                    }
+
+                    // (an optimization's optimizer (on any thread: see run_optimizer): whether it optimized the function (its result, and
+                    // the job's version and description: the function's code the optimizer's))
+                    bool rewrite_optimization(compiled_module::tier_job& aJob)
+                    {
+                        auto& m = *aJob.module;
+                        auto const f = aJob.function;
+                        auto& options = aJob.options;
+                        auto& r = aJob.result;
+                        options.usefulHint = aJob.hint ? &*aJob.hint : nullptr;
                         r = run_optimizer(m, f, options);
-                        if (!r.deopts.empty() && !deopts_valid(r))
+                        if (!r.deopts.empty() && !deopts_valid(m, f, r))
                         {
                             if (m.verbose != 0u)
                                 std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
                             options.deopt = false;
                             r = run_optimizer(m, f, options);
                         }
+                        options.usefulHint = nullptr;
+                        aJob.hint.reset();
+                        // (code that the optimizer did not change: optimized only by the optimizing code generator (its registers))
+                        if (r.tokens.empty() || (r.inlined == 0u && r.folded == 0u && !m.backend))
+                        {
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: not optimized\n", f);
+                            return false;
+                        }
+                        if (!r.chains.empty())
+                        {
+                            // (its inline chains: the module's (their indices in its origins); none if there are too many (the outermost
+                            // calls' positions instead: their frames only))
+                            std::lock_guard<std::mutex> lock{ m.chainsMutex };
+                            auto const base = m.inlineChains.size();
+                            bool const room = base + r.chains.size() < optimizer::InlineChainToken;
+                            for (auto& o : r.origins)
+                                if ((o & optimizer::InlineChainToken) != 0u)
+                                {
+                                    auto const index = o & ~optimizer::InlineChainToken;
+                                    o = room ? (optimizer::InlineChainToken | (base + index)) : r.chains[index].back();
+                                }
+                            if (room)
+                                for (auto& c : r.chains)
+                                    m.inlineChains.push_back(std::move(c));
+                            r.chains.clear();
+                        }
+                        aJob.version = std::make_unique<compiled_module::tier_version>();
+                        aJob.version->function = f;
+                        aJob.version->sites = r.sites;
+                        aJob.version->deopts = r.deopts;
+                        aJob.version->deoptCounts.assign(r.deopts.size(), 0u);
+                        aJob.description = m.description;
+                        auto& d = aJob.description;
+                        d.tokens = &r.tokens;
+                        d.functions[f].codeBegin = 0u;
+                        d.functions[f].codeEnd = r.tokens.size();
+                        d.functions[f].locals = &r.locals;
+                        aJob.phases[0] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - aJob.start).count());
+                        aJob.rewritten = true;
+                        return true;
+                    }
+
+                    // (the locals that the function's own code reads after each of its optimized code's deopts' calls (the others are not
+                    // the deopts'), and after each of their frames' (their functions' code after their calls); from the module's own code
+                    // (which does not change): made where the optimized code is (in the background), not by the program's thread)
+                    void deopts_live(compiled_module const& m, std::uint32_t f, optimizer::result& r)
+                    {
                         if (!r.deopts.empty())
                         {
-                            // (the locals that the function's own code reads after each deopt's call: the others are not the deopt's)
                             std::vector<std::size_t> positions;
                             for (auto const& x : r.deopts)
                                 if (x.frames.empty())
@@ -8040,50 +8284,6 @@ namespace neos
                                     frames[k].first->live = std::move(frameLive[k]);
                             }
                         }
-                        // (code that the optimizer did not change: optimized only by the optimizing code generator (its registers))
-                        if (r.tokens.empty() || (r.inlined == 0u && r.folded == 0u && !m.backend))
-                        {
-                            if (m.verbose != 0u)
-                                std::fprintf(stderr, "[tier2] f%u: not optimized\n", f);
-                            return nullptr;
-                        }
-                        if (!r.chains.empty())
-                        {
-                            // (its inline chains: the module's (their indices in its origins); none if there are too many (the outermost
-                            // calls' positions instead: their frames only))
-                            auto const base = m.inlineChains.size();
-                            bool const room = base + r.chains.size() < optimizer::InlineChainToken;
-                            for (auto& o : r.origins)
-                                if ((o & optimizer::InlineChainToken) != 0u)
-                                {
-                                    auto const index = o & ~optimizer::InlineChainToken;
-                                    o = room ? (optimizer::InlineChainToken | (base + index)) : r.chains[index].back();
-                                }
-                            if (room)
-                                for (auto& c : r.chains)
-                                    m.inlineChains.push_back(std::move(c));
-                            r.chains.clear();
-                        }
-                        job->version = std::make_unique<compiled_module::tier_version>();
-                        job->version->function = f;
-                        job->version->sites = r.sites;
-                        job->version->deopts = r.deopts;
-                        job->version->deoptCounts.assign(r.deopts.size(), 0u);
-                        if (m.parametersRead.empty())
-                        {
-                            // (from the module's own code (an optimization's description has its function's optimized code))
-                            m.parametersRead.resize(m.description.functions.size());
-                            for (std::uint32_t g = 0u; g < m.description.functions.size(); ++g)
-                                m.parametersRead[g] = optimizer::parameters_read(m.description, g);
-                        }
-                        job->description = m.description;
-                        auto& d = job->description;
-                        d.tokens = &r.tokens;
-                        d.functions[f].codeBegin = 0u;
-                        d.functions[f].codeEnd = r.tokens.size();
-                        d.functions[f].locals = &r.locals;
-                        job->phases[0] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - job->start).count());
-                        return job;
                     }
 
                     // (an optimization's second part (on any thread: it reads only what does not change): its code (by the optimizing code
@@ -8098,6 +8298,7 @@ namespace neos
                         try
                         {
                             auto const from = std::chrono::steady_clock::now();
+                            deopts_live(*aJob.module, f, r);
                             auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts);
                             auto const built_at = std::chrono::steady_clock::now();
                             // (cached loads' words: read safely (this runs while the program runs: its pages' states may change))
@@ -8154,6 +8355,14 @@ namespace neos
                         auto& r = aJob.result;
                         auto& d = aJob.description;
                         auto& version = aJob.version;
+                        if (aJob.options.speculation)
+                            m.usefulSpeculations[f] = std::move(r.useful);
+                        if (!aJob.rewritten)
+                        {
+                            // (not optimized)
+                            m.tierState[f] = 2u;
+                            return nullptr;
+                        }
                         compiled_module::tier_chunk chunk;
                         chunk.callSites = std::move(aJob.callSites);
                         bytes code = std::move(aJob.code);
@@ -8244,7 +8453,12 @@ namespace neos
                                 std::lock_guard<std::mutex> lock{ iMutex };
                                 if (!iStarted)
                                 {
-                                    std::thread{ [this]() { run(); } }.detach();
+                                    // (a thread for each processor but the program's (at most 8): optimizations are made sooner (a program's
+                                    // functions are optimized as it starts, while it runs their baseline code))
+                                    auto const processors = std::thread::hardware_concurrency();
+                                    auto const threads = std::clamp<unsigned>(processors > 1u ? processors - 1u : 1u, 1u, 8u);
+                                    for (unsigned t = 0u; t < threads; ++t)
+                                        std::thread{ [this]() { run(); } }.detach();
                                     iStarted = true;
                                 }
                                 iQueue.push_back(std::move(aJob));
@@ -8274,7 +8488,15 @@ namespace neos
                                         continue;
                                     ++job->module->jobsInFlight;
                                 }
-                                generate_optimization(*job);
+                                try
+                                {
+                                    if (rewrite_optimization(*job))
+                                        generate_optimization(*job);
+                                }
+                                catch (...)
+                                {
+                                    job->rewritten = false;
+                                }
                                 {
                                     std::lock_guard<std::mutex> lock{ iMutex };
                                     --job->module->jobsInFlight;
@@ -8313,20 +8535,17 @@ namespace neos
                         if (m.tierState[f] != 0u)
                             return nullptr;
                         auto job = prepare_optimization(m, f);
-                        if (!job)
-                        {
-                            m.tierState[f] = 2u;
-                            return nullptr;
-                        }
                         if (m.background && m.backend)
                         {
+                            // (its optimizer and its code in the background)
                             m.tierState[f] = 3u;
                             m.jobs[f] = job;
                             tier_worker::instance().add(job);
                             m.counters[f] = PollCalls;
                             return nullptr;
                         }
-                        generate_optimization(*job);
+                        if (rewrite_optimization(*job))
+                            generate_optimization(*job);
                         return install_optimization(m, *job);
                     }
 
@@ -8342,6 +8561,38 @@ namespace neos
                         {
                             m.tierState[aFunction] = 2u;
                             return nullptr;
+                        }
+                    }
+
+                    constexpr std::int32_t PollIterations = 1000;   ///< (a loop's iterations before a function whose optimization is being made
+                                                                    ///< looks again)
+
+                    // (a function's loops have run often enough (see code_generator::loop_counter): it is optimized (its later calls run
+                    // its optimized code; the call whose loop it is continues in its own code (there is no entry into optimized code at
+                    // a loop)))
+                    void tier_loop(context* aContext, std::uint32_t aFunction) noexcept
+                    {
+                        auto& m = *aContext->module;
+                        auto const f = aFunction;
+                        m.loopCounters[f] = NotAgain;
+                        try
+                        {
+                            if (m.tierState[f] == 0u)
+                            {
+                                m.loopTriggered[f] = 1u;
+                                optimize_function(m, f);
+                                m.loopTriggered[f] = 0u;
+                            }
+                            else if (m.tierState[f] == 3u)
+                                optimize_function(m, f);
+                            // (being made: the loop looks again (as do the function's calls))
+                            if (m.tierState[f] == 3u)
+                                m.loopCounters[f] = PollIterations;
+                        }
+                        catch (...)
+                        {
+                            m.loopTriggered[f] = 0u;
+                            m.tierState[f] = 2u;
                         }
                     }
 
@@ -8369,6 +8620,7 @@ namespace neos
                             m.currentVersion[f] = nullptr;
                             ++m.recompiles[f];
                             m.counters[f] = RecompileCalls;
+                            m.loopCounters[f] = m.loopIterations;
                             if (m.verbose != 0u)
                                 std::fprintf(stderr, "[tier2] f%u: a guard failed (site %u)\n", f, aSite);
                         }
@@ -8427,7 +8679,9 @@ namespace neos
                             m.tierState[f] = 0u;
                             m.currentVersion[f] = nullptr;
                             ++m.recompiles[f];
-                            m.counters[f] = RecompileCalls;
+                            // (a guard's: once its words' values have settled; else (calls that its code had not made, now made): soon)
+                            m.counters[f] = d.guard ? RecompileCalls : RecompileCallsAfterDeopts;
+                            m.loopCounters[f] = m.loopIterations;
                             if (m.verbose != 0u)
                                 std::fprintf(stderr, "[tier2] f%u: deopt %u (call@%zu%s%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "",
                                     d.frames.empty() ? "" : ", frames");
@@ -8587,6 +8841,9 @@ namespace neos
                             auto const n = m.description.functions.size();
                             m.counters.assign(n, calls);
                             m.tierCalls = calls;
+                            m.loopIterations = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_LOOPS").value_or(10000), 1, NotAgain));
+                            m.loopCounters.assign(n, m.loopIterations);
+                            m.loopTriggered.assign(n, 0u);
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
                             m.noInline.resize(n);
@@ -8708,9 +8965,15 @@ namespace neos
                             // (a call within inlined calls (of functions with frames of their own): the frames of the code and of the 
                             // calls that inlined it (innermost first: each the frame's address plus twice its depth in the inlined calls))
                             auto const index = static_cast<std::size_t>(token & 0x7FFFFFFFu);
-                            if (index >= aModule.inlineChains.size())
+                            std::vector<std::size_t> const* found = nullptr;
+                            {
+                                std::lock_guard<std::mutex> lock{ aModule.chainsMutex };
+                                if (index < aModule.inlineChains.size())
+                                    found = &aModule.inlineChains[index];
+                            }
+                            if (found == nullptr)
                                 return;
-                            auto const& chain = aModule.inlineChains[index];
+                            auto const& chain = *found;
                             for (std::size_t k = 0u; k < chain.size(); ++k)
                                 if (!aVisit(chain[k], frame + 2u * static_cast<std::uint64_t>(chain.size() - 1u - k)))
                                     return;
