@@ -564,6 +564,9 @@ namespace neos::javascript_runtime
         collector* iCollector = nullptr;
         shape* iRootShape = nullptr;
         std::vector<shape*> iTypeRootShapes;
+    public:
+        std::vector<shape*> watchedRootShapes;      ///< (watched objects' shapes' roots (see watch))
+    private:
         std::size_t iShapes = 0u;
         struct local_object
         {
@@ -895,6 +898,8 @@ namespace neos::javascript_runtime
         std::uint8_t attributes = 0u;   ///< (... and its attributes)
         std::uint32_t count = 0u;       ///< (its keys)
         std::uint64_t epoch = 0u;       ///< (the collection that last marked its keys (see mark_keys))
+        std::uint64_t* validity = nullptr;  ///< (a watched object's shape (its own: see watch): the object's validity word (in the region),
+                                            ///< which each change of its properties changes; its transitions' are the same)
         shape* transition(value aKey, std::uint8_t aAttributes);  ///< (the shape with aKey added; null if there are no more shapes)
         std::optional<std::uint32_t> position(value aKey);  ///< (a key's position)
         std::span<slot const> slots();  ///< (its keys and their attributes, by position)
@@ -973,6 +978,7 @@ namespace neos::javascript_runtime
         {
             if (&aOther != this)
             {
+                changed();
                 release_dictionary();
                 iShape = aOther.iShape;
                 iValues = std::move(aOther.iValues);
@@ -989,17 +995,31 @@ namespace neos::javascript_runtime
                                                 ///< transition for its key)
         void remove(value aKey);
         void reserve(std::size_t aCapacity);
-        void forget_storage() { iValues.forget(); }  ///< (its values' storage, if it has none (e.g. its cell's for another use))
-        void use_storage(value* aStorage, std::size_t aCapacity) { iValues.use_storage(aStorage, aCapacity); }  ///< (its values' (it has
+        void forget_storage() { changed(); iValues.forget(); }  ///< (its values' storage, if it has none (e.g. its cell's for another use))
+        void use_storage(value* aStorage, std::size_t aCapacity) { changed(); iValues.use_storage(aStorage, aCapacity); }  ///< (its values' (it has
                                                 ///< none): storage that is not its own (e.g. in its object's cell))
         void make_dictionary();                 ///< (no shape (its layout its own) from now on)
-        void set_root(shape* aRoot) { iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
+        void set_root(shape* aRoot) { changed(); iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
         std::size_t size() const { return iShape != nullptr ? iValues.size() : entries().size() - deleted(); }
         std::size_t slots() const { return iShape != nullptr ? iValues.size() : entries().size(); }   ///< (its positions (a dictionary's 
                                                 ///< include deleted ones))
         property_ref at(std::uint32_t aPosition) { return property_ref{ *this, aPosition }; }   ///< (a property by its position)
         value value_at(std::uint32_t aPosition) const { return iValues[aPosition]; }    ///< (a shape's data property's value (by its position))
-        void set_value_at(std::uint32_t aPosition, value aValue) { iValues[aPosition] = aValue; }   ///< (... set)
+        void set_value_at(std::uint32_t aPosition, value aValue) { changed(); iValues[aPosition] = aValue; }   ///< (... set)
+        // (a watched object's table (its shape has a validity word: see watch): each change of its properties (its shape, values or 
+        // their storage) changes the word)
+        void changed()
+        {
+            if (iShape != nullptr)
+            {
+                if (iShape->validity != nullptr)
+                    ++*iShape->validity;
+            }
+            else if (auto* const d = dictionary_of(); d != nullptr && d->validity != nullptr)
+                ++*d->validity;
+        }
+        std::uint64_t* watch_dictionary();      ///< (a dictionary's validity word (made if it has none): see watch)
+        void reshape(shape* aShape) { changed(); iShape = aShape; }    ///< (its shape: one of the same keys (and positions))
         template <typename F>
         void for_each(F&& aFunction) const
         {
@@ -1036,6 +1056,7 @@ namespace neos::javascript_runtime
             region_vector<property> entries;
             std::unique_ptr<std::unordered_map<value, std::uint32_t>> index;
             std::uint32_t deleted = 0u;
+            std::uint64_t* validity = nullptr;  ///< (a watched object's (see watch))
         };
         dictionary* dictionary_of() const { return iDictionary != 0u ? reinterpret_cast<dictionary*>(gRegionBase + iDictionary) : nullptr; }
         dictionary& dict();     ///< (made if it has none)
@@ -1209,6 +1230,11 @@ namespace neos::javascript_runtime
         std::unique_ptr<object_extra> iExtra;
     };
 
+    // (an object whose properties compiled code uses as a holder's (a get's site's: a prototype's, %String.prototype%'s), checking its
+    // validity word rather than its shape: its shape is made its own (a copy of its keys from a root of its own), with a validity word
+    // that each change of its properties changes (see property_table::changed); no site stores to it (its sets are the runtime's);
+    // its validity word (null: it has no shape, or there are no more shapes))
+    std::uint64_t* watch(object& aObject);
     value make_object(value aPrototype);                ///< (an ordinary object)
     value make_object();                                ///< (with %Object.prototype%)
     inline object& obj(value aObject) { return cell_of<object>(aObject); }

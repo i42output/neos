@@ -217,7 +217,7 @@ namespace neos::compilers::javascript
         // set (object, key, value, strict, site -> result), callee numbers (callee, site -> number))
         // (the alias classes of the runtime's heap's words (see the VM's optimizer::MemargClassShift): a store of one class does not 
         // change a word of another; Any: any word (the default))
-        enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header };
+        enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header, Validity };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
         enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, Count };
         void generate_stub(stub aStub);
@@ -299,6 +299,8 @@ namespace neos::compilers::javascript
         void volatile_load(opcode aOpcode, std::uint32_t aOffset, bool aHeapOffset, alias aAlias);
         void offset_load(std::uint32_t aOffset, alias aAlias);
         void site_load(opcode aOpcode, std::uint32_t aOffset);  ///< (as mem_load, a site's entry's field (a cached load))
+        void cached_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias, bool aHeapOffset = false);  ///< (a cached load of a word that
+                                                                ///< the code has checked does not change (e.g. a watched holder's property))
         void cell_of(std::uint32_t aValue);         ///< (the address of an object's cell (aValue: the local that has it))
         void environment_slot(std::uint32_t aHops, std::uint32_t aSlot);  ///< (environment -> the address of its (or an outer one's) slot)
         void callee_number_of(std::uint32_t aCallee, std::optional<std::uint32_t> aSite);    ///< (-> the callee's number for the dispatcher (else -1))
@@ -312,6 +314,7 @@ namespace neos::compilers::javascript
         void dispatch(std::uint32_t aNumber);         ///< (... its arguments -> its result: the call)
         static constexpr std::int64_t TailCallDepth = 1024;  ///< (tail calls made as calls (nested) before they are made by the caller)
         void check();               ///< (the i64 on the stack: an exception branches to the innermost handler)
+        void assume_not_exception();    ///< (the i64 on the stack is not an exception (neos::assume): optimized code knows it)
         void check_void();          ///< (a call that returned Exception or Undefined (dropped))
         void function_index(function_info& aFunction, bool aBody = false);
         void string_value(std::string_view aText);  ///< (a string literal (its JavaScript value, UTF-16 as WTF-8))

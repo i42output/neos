@@ -907,6 +907,8 @@ namespace neos::javascript_runtime
         delete h->iRootShape;
         for (auto* s : h->iTypeRootShapes)
             delete s;
+        for (auto* s : h->watchedRootShapes)
+            delete s;
         delete h->commonNames;
         delete c;
         tHeap = nullptr;

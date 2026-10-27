@@ -450,6 +450,8 @@ namespace neos
                                     d.call = jit::import_call::ObjectRetain;
                                 else if (*f.import == "neos::object_release")
                                     d.call = jit::import_call::ObjectRelease;
+                                else if (*f.import == "neos::assume")
+                                    d.call = jit::import_call::Assume;
                                 else if (!d.checked)
                                     d.plugin = plugin_function(*f.import);
                                 if (d.plugin)
@@ -1707,6 +1709,7 @@ namespace neos
                         Exit,
                         Allocate,
                         Checked,
+                        Assume,
                         Runtime
                     };
                     import_kind resolve_import(std::uint32_t aFunction)
@@ -1727,7 +1730,8 @@ namespace neos
                             { "neos::object_release", import_kind::ObjectRelease },
                             { "neos::raise", import_kind::Raise },  // (an error: the program stops)
                             { "neos::exit", import_kind::Exit },    // (the program stops: its exit status)
-                            { "neos::allocate", import_kind::Allocate } // (memory (zeroed) of a size: its address)
+                            { "neos::allocate", import_kind::Allocate }, // (memory (zeroed) of a size: its address)
+                            { "neos::assume", import_kind::Assume }     // (the program's claim that its operand is not 0: nothing is done)
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
@@ -1924,6 +1928,8 @@ namespace neos
                             throw exit_request{ static_cast<std::int32_t>(as_i32(aBuffer[0])) };
                         case import_kind::Allocate:
                             aBuffer[0] = of_u32(allocate(as_u32(aBuffer[0])));
+                            break;
+                        case import_kind::Assume:
                             break;
                         case import_kind::Checked:
                             {

@@ -80,8 +80,9 @@ namespace neos
                         Switch,             ///< (operand: the index (i32); successors: the targets, then the default)
                         Return,             ///< (operands: the results)
                         Trap,               ///< (imm0: the trap: unreachable)
-                        Deopt               ///< (leaves for the function's own code (see optimizer::deopt; imm0: its number): operands: the
+                        Deopt,              ///< (leaves for the function's own code (see optimizer::deopt; imm0: its number): operands: the
                                             ///< function's locals, the operand stack below the call's arguments, the arguments)
+                        Assume              ///< (neos::assume (see import_call::Assume): operand: a condition that is not 0 here (no code))
                     };
 
                     enum flag : std::uint8_t

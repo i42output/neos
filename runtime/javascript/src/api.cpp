@@ -1445,6 +1445,17 @@ namespace neos::javascript_runtime
                 return f != nullptr && f->dispatch != ~std::uint64_t{} ? f->dispatch : 0u;
             }
 
+            // (a get's holder (the receiver's prototype, or %String.prototype%): watched (see watch); the entry has its validity word (its 
+            // offset in the region, and its value): compiled code checks it rather than the holder's shape, then knows its properties)
+            void watch_holder(site& aEntry, object& aHolder)
+            {
+                if (auto const* word = watch(aHolder))
+                {
+                    aEntry.added = region_offset(word);
+                    aEntry.prototypes[1].shape = *word;
+                }
+            }
+
             // (a get's site: where the lookup found the property (if it can be remembered) and the function that it found)
             void remember_get(std::int32_t aSite, value aObject, value aKey, value aResult)
             {
@@ -1487,10 +1498,11 @@ namespace neos::javascript_runtime
                                 return;
                             e.kind = jsl::SiteOwn;
                             e.position = p.position();
-                            // (and the megamorphic cache's (for sites whose entries do not have it))
+                            // (and the megamorphic cache's (for sites whose entries do not have it); a watched object's property is not
+                            // one that a set can store (its sets are the runtime's: see watch))
                             auto& state = the_heap().the_allocation_state();
                             auto* const table = reinterpret_cast<megamorphic_entry*>(gRegionBase + state.megamorphic);
-                            table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, p->writable() ? 1u : 0u, 0u };
+                            table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, p->writable() && layout->validity == nullptr ? 1u : 0u, 0u };
                             return;
                         }
                         auto prototype = o.proto;
@@ -1499,9 +1511,11 @@ namespace neos::javascript_runtime
                             auto& holder = obj(prototype);
                             if (!cacheable(holder))
                                 return;
+                            auto const p = holder.properties.find(aKey);
+                            if (p && !p->accessor() && depth == 0u)
+                                watch_holder(e, holder);
                             auto const* holderLayout = holder.properties.layout();
                             e.prototypes[depth] = { prototype, shape_word(holderLayout) };
-                            auto const p = holder.properties.find(aKey);
                             if (!p && holderLayout == nullptr)
                                 return;     // (a prototype that does not have it is compared by its shape)
                             if (p)
@@ -1525,6 +1539,7 @@ namespace neos::javascript_runtime
                         auto& holder = obj(prototype);
                         if (auto const p = holder.properties.find(aKey); p && !p->accessor())
                         {
+                            watch_holder(e, holder);
                             e.kind = jsl::SiteString;
                             e.prototypes[0] = { prototype, shape_word(holder.properties.layout()) };
                             e.position = p.position();
@@ -1896,6 +1911,9 @@ namespace neos::javascript_runtime
             // (remembered: a writable data property that the receiver has, or the one that it added)
             auto& o = obj(aObject);
             auto const* after = o.properties.layout();
+            // (a watched object's sets are the runtime's (see watch))
+            if (before->validity != nullptr || (after != nullptr && after->validity != nullptr))
+                return result;
             site e{};
             e.key = aKey;
             e.shape = shape_word(before);

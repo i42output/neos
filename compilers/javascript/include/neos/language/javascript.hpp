@@ -290,6 +290,12 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t SitePrototype = 24u;         ///< (value: the receiver's prototype; then its shape (u64), the
                                                                     ///< prototype's prototype and its shape)
         inline constexpr std::uint32_t SiteAdded = 56u;             ///< (u64: a set that adds the property: the receiver's shape after)
+        inline constexpr std::uint32_t SiteValidity = SiteAdded;    ///< (u64: a get's holder's (Holder, String): the region offset of its validity 
+                                                                    ///< word (0: none), which changes when the holder's properties change; 
+                                                                    ///< compiled code that finds the word's value the entry's (SiteValidityValue)
+                                                                    ///< knows the holder's properties (their values: cached loads))
+        inline constexpr std::uint32_t SiteValidityValue = SitePrototype + 24u;    ///< (u64: the validity word's value (the second prototype's
+                                                                    ///< shape's field: a holder's entry has one prototype))
         inline constexpr std::uint32_t SiteFunction = 64u;          ///< (value: the property's value, a function of the program's ...)
         inline constexpr std::uint32_t SiteNumber = 72u;            ///< (i32: ... whose number (for the dispatcher) this is (else -1))
         inline constexpr std::uint32_t SiteSlotSize = 76u;          ///< (u32: a new expression's (SiteConstruct): the size of the object's slot)

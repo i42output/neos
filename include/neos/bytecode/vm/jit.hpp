@@ -93,7 +93,9 @@ namespace neos
                     Host,           ///< through the host function (compile's aHost)
                     Plugin,         ///< a runtime plugin function (function_description::plugin), directly if its signature allows
                     ObjectRetain,   ///< neos::object_retain (host_interface::objectRetain)
-                    ObjectRelease   ///< neos::object_release (host_interface::objectRelease)
+                    ObjectRelease,  ///< neos::object_release (host_interface::objectRelease)
+                    Assume          ///< neos::assume (i32): no call (no code): the program's claim that its operand is not 0 where the
+                                    ///< call is (optimized code may assume it (see ssa::Assume))
                 };
 
                 struct function_description

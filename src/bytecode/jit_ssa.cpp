@@ -41,6 +41,7 @@
 #include <cmath>
 #include <array>
 #include <bit>
+#include <limits>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -662,6 +663,13 @@ namespace neos
                                                 terminate(Deopt, std::move(operands), {}, index);
                                                 break;
                                             }
+                                            if (callee < iModule.functions.size() && iModule.functions[callee].imported && iModule.functions[callee].call == import_call::Assume)
+                                            {
+                                                // (neos::assume: its condition (not a call))
+                                                auto const condition = pop();
+                                                add(Assume, Void, { condition });
+                                                break;
+                                            }
                                             if (callee == optimizer::intrinsics::guard_failed(iModule))
                                                 parameters = { I32 };
                                             else if (callee < iModule.functions.size())
@@ -813,10 +821,10 @@ namespace neos
                                 return true;
                             if (op >= 0x45u && op <= 0xC4u)
                             {
-                                // (integer division and float to integer truncation may trap)
+                                // (integer division and float to integer truncation may trap (a truncation that cannot: Unchecked))
                                 if ((op >= 0x6Du && op <= 0x70u) || (op >= 0x7Fu && op <= 0x82u))
                                     return false;
-                                if ((op >= 0xA8u && op <= 0xABu) || (op >= 0xAEu && op <= 0xB1u))
+                                if (((op >= 0xA8u && op <= 0xABu) || (op >= 0xAEu && op <= 0xB1u)) && (aInstruction.flags & Unchecked) == 0u)
                                     return false;
                                 return true;
                             }
@@ -882,6 +890,322 @@ namespace neos
                                         o = resolved(o);
                             }
                         };
+
+                        // (the bits of integers that may be 1 and that are 1 (e.g. a tagged value (a handle | a tag): its tag is known; a cell's
+                        // offset made from it: the handle's (an offset that is 16 byte aligned and below 2^36 (masked): the same offset)): a value
+                        // whose bits are all known is a constant; an and that clears no bit that may be 1, an or that sets none that is not
+                        // 1, a shift right then left that drops no bit that may be 1, an extension of a wrap that drops none: their operand)
+                        bool fold_known_bits(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            std::vector<std::uint64_t> may(values.size(), ~std::uint64_t{});
+                            std::vector<std::uint64_t> ones(values.size(), 0u);
+                            std::vector<bool> done(values.size(), false);
+                            auto const width = [&](value v) -> std::uint64_t { return values[v].type == I32 ? 0xFFFFFFFFull : ~std::uint64_t{}; };
+                            auto const highest = [](std::uint64_t x) -> int { return x == 0u ? -1 : 63 - std::countl_zero(x); };
+                            replacements replaced;
+                            bool changed = false;
+                            for (auto b : aFunction.order)
+                                for (auto v : aFunction.blocks[b].code)
+                                {
+                                    auto& i = values[v];
+                                    if (i.dead || (i.type != I32 && i.type != I64))
+                                        continue;
+                                    for (auto& o : i.operands)
+                                        o = replaced.resolved(o);
+                                    auto const mask = width(v);
+                                    auto const m = [&](std::size_t n) { auto const o = i.operands[n]; return done[o] ? may[o] : width(o); };
+                                    auto const k = [&](std::size_t n) { auto const o = i.operands[n]; return done[o] ? ones[o] : std::uint64_t{ 0u }; };
+                                    auto const c = [&](std::size_t n) -> std::optional<std::uint64_t>
+                                    {
+                                        auto const& x = values[i.operands[n]];
+                                        if (x.constant())
+                                            return x.imm0 & width(i.operands[n]);
+                                        return {};
+                                    };
+                                    std::uint64_t pm = mask, po = 0u;
+                                    auto const op = i.op;
+                                    if (i.constant())
+                                    {
+                                        pm = po = i.imm0 & mask;
+                                    }
+                                    else if (op == Phi)
+                                    {
+                                        pm = 0u;
+                                        po = mask;
+                                        for (std::size_t n = 0u; n < i.operands.size(); ++n)
+                                        {
+                                            if (i.operands[n] == v)
+                                                continue;
+                                            pm |= m(n);
+                                            po &= k(n);
+                                        }
+                                    }
+                                    else if ((op == 0x71u || op == 0x83u) && i.operands.size() == 2u)
+                                    {
+                                        // (and(or(a, K), M) where K and M have no bit in common: and(a, M))
+                                        for (std::size_t n = 0u; n < 2u; ++n)
+                                            if (auto const kk = c(1u - n))
+                                                for (int depth = 0; depth < 4; ++depth)
+                                                {
+                                                    auto const& x = values[i.operands[n]];
+                                                    if (x.dead || x.op != (op == 0x71u ? 0x72u : 0x84u) || x.operands.size() != 2u)
+                                                        break;
+                                                    bool rewritten = false;
+                                                    for (std::size_t q = 0u; q < 2u; ++q)
+                                                        if (auto const& y = values[x.operands[1u - q]]; y.constant() && (y.imm0 & *kk & mask) == 0u)
+                                                        {
+                                                            i.operands[n] = replaced.resolved(x.operands[q]);
+                                                            rewritten = changed = true;
+                                                            break;
+                                                        }
+                                                    if (!rewritten)
+                                                        break;
+                                                }
+                                        pm = m(0) & m(1);
+                                        po = k(0) & k(1);
+                                        for (std::size_t n = 0u; n < 2u; ++n)
+                                            if (auto const kk = c(1u - n); kk && (m(n) & ~*kk & mask) == 0u && values[i.operands[n]].type == i.type)
+                                            {
+                                                // (an and that clears no bit that may be 1)
+                                                replaced.add(v, i.operands[n]);
+                                                i.dead = true;
+                                                changed = true;
+                                                break;
+                                            }
+                                    }
+                                    else if ((op == 0x72u || op == 0x84u) && i.operands.size() == 2u)
+                                    {
+                                        pm = m(0) | m(1);
+                                        po = k(0) | k(1);
+                                        for (std::size_t n = 0u; n < 2u; ++n)
+                                            if (auto const kk = c(1u - n); kk && (*kk & ~k(n) & mask) == 0u && values[i.operands[n]].type == i.type)
+                                            {
+                                                // (an or that sets no bit that is not 1)
+                                                replaced.add(v, i.operands[n]);
+                                                i.dead = true;
+                                                changed = true;
+                                                break;
+                                            }
+                                    }
+                                    else if ((op == 0x74u || op == 0x86u || op == 0x76u || op == 0x88u) && i.operands.size() == 2u && c(1u))
+                                    {
+                                        auto const s = static_cast<int>(*c(1u) & (op <= 0x76u ? 31u : 63u));
+                                        bool const left = op == 0x74u || op == 0x86u;
+                                        pm = (left ? m(0) << s : m(0) >> s) & mask;
+                                        po = (left ? k(0) << s : k(0) >> s) & mask;
+                                        if (left && s != 0)
+                                        {
+                                            // (a shift right then left by the same that drops no bit that may be 1)
+                                            auto const& x = values[i.operands[0]];
+                                            if ((x.op == (op == 0x74u ? 0x76u : 0x88u)) && x.operands.size() == 2u && !x.dead)
+                                            {
+                                                auto const& xs = values[x.operands[1]];
+                                                auto const y = replaced.resolved(x.operands[0]);
+                                                auto const ym = done[y] ? may[y] : width(y);
+                                                if (xs.constant() && static_cast<int>(xs.imm0 & (op <= 0x76u ? 31u : 63u)) == s && (ym & ((std::uint64_t{ 1u } << s) - 1u)) == 0u && values[y].type == i.type)
+                                                {
+                                                    replaced.add(v, y);
+                                                    i.dead = true;
+                                                    changed = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else if (op == 0x7Cu || op == 0x6Au)
+                                    {
+                                        // (add: no bit above the highest that may be 1 (and one), none below the lowest)
+                                        auto const a = m(0), bb = m(1);
+                                        auto const top = std::max(highest(a), highest(bb)) + 1;
+                                        auto const low = std::min(a == 0u ? 64 : std::countr_zero(a), bb == 0u ? 64 : std::countr_zero(bb));
+                                        if (top < 63)
+                                            pm = ((std::uint64_t{ 1u } << (top + 1)) - 1u) & mask;
+                                        if (low < 64)
+                                            pm &= ~((std::uint64_t{ 1u } << low) - 1u);
+                                        else
+                                            pm = 0u;
+                                    }
+                                    else if (op == 0xA7u && i.operands.size() == 1u)
+                                    {
+                                        pm = m(0) & 0xFFFFFFFFu;
+                                        po = k(0) & 0xFFFFFFFFu;
+                                    }
+                                    else if (op == 0xADu && i.operands.size() == 1u)
+                                    {
+                                        pm = m(0) & 0xFFFFFFFFu;
+                                        po = k(0) & 0xFFFFFFFFu;
+                                        // (an extension of a wrap that drops no bit that may be 1)
+                                        auto const& x = values[i.operands[0]];
+                                        if (x.op == 0xA7u && !x.dead && x.operands.size() == 1u)
+                                        {
+                                            auto const y = replaced.resolved(x.operands[0]);
+                                            if (values[y].type == I64 && ((done[y] ? may[y] : ~std::uint64_t{}) & ~0xFFFFFFFFull) == 0u)
+                                            {
+                                                replaced.add(v, y);
+                                                i.dead = true;
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                    else if ((op == 0x46u || op == 0x47u || op == 0x51u || op == 0x52u) && i.operands.size() == 2u)
+                                    {
+                                        // (equality of values whose bits differ where both are known: not equal)
+                                        pm = 1u;
+                                        auto const a = i.operands[0], bb = i.operands[1];
+                                        auto const am = values[a].constant() ? (values[a].imm0 & width(a)) : m(0), ak = values[a].constant() ? (values[a].imm0 & width(a)) : k(0);
+                                        auto const bm = values[bb].constant() ? (values[bb].imm0 & width(bb)) : m(1), bk = values[bb].constant() ? (values[bb].imm0 & width(bb)) : k(1);
+                                        if (((ak & ~bm) | (bk & ~am)) != 0u)
+                                            pm = po = (op == 0x47u || op == 0x52u) ? 1u : 0u;
+                                    }
+                                    else if (op == 0x2Du || op == 0x31u) pm = 0xFFu;
+                                    else if (op == 0x2Fu || op == 0x33u) pm = 0xFFFFu;
+                                    else if (op == 0x35u) pm = 0xFFFFFFFFu;
+                                    else if (op >= 0x45u && op <= 0x66u) pm = 1u;
+                                    if (i.dead)
+                                    {
+                                        auto const to = replaced.resolved(v);
+                                        may[v] = done[to] ? may[to] : width(to);
+                                        ones[v] = done[to] ? ones[to] : 0u;
+                                        done[v] = true;
+                                        continue;
+                                    }
+                                    po &= pm;
+                                    may[v] = pm;
+                                    ones[v] = po;
+                                    done[v] = true;
+                                    // (all of its bits known: a constant (an instruction without effects))
+                                    if (pm == po && !i.constant() && op != Phi && op != Param && pure(i))
+                                    {
+                                        i.op = i.type == I32 ? 0x41u : 0x42u;
+                                        i.imm0 = pm;
+                                        i.operands.clear();
+                                        i.flags = 0u;
+                                        changed = true;
+                                    }
+                                }
+                            replaced.apply(aFunction);
+                            return changed;
+                        }
+
+                        // (what neos::assume claims (ssa::Assume): that a value (defined in the assume's block, before it: every path to the 
+                        // assume passes its definition, and its value does not change) is not a constant (x != C, or eqz(x == C)); a phi 
+                        // of such values (each not the same constant) is not it either; comparisons of them with the constant are constants)
+                        bool fold_assumed(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            std::vector<std::optional<std::uint64_t>> excluded(values.size());
+                            bool any = false;
+                            auto const not_equal = [&](value aCondition, value& aValue, std::uint64_t& aBits) -> bool
+                            {
+                                auto const* c = &values[aCondition];
+                                bool negated = false;
+                                if (c->op == 0x45u && c->operands.size() == 1u)
+                                {
+                                    c = &values[c->operands[0]];
+                                    negated = true;
+                                }
+                                bool const ne = c->op == 0x47u || c->op == 0x52u;
+                                bool const eq = c->op == 0x46u || c->op == 0x51u;
+                                if (c->dead || c->operands.size() != 2u || !(negated ? eq : ne))
+                                    return false;
+                                for (std::size_t n = 0u; n < 2u; ++n)
+                                    if (auto const& k = values[c->operands[n]]; k.constant() && !values[c->operands[1u - n]].constant())
+                                    {
+                                        aValue = c->operands[1u - n];
+                                        aBits = k.imm0;
+                                        return true;
+                                    }
+                                return false;
+                            };
+                            for (auto const& b : aFunction.blocks)
+                                for (std::size_t k = 0u; k < b.code.size(); ++k)
+                                {
+                                    auto const& a = values[b.code[k]];
+                                    if (a.dead || a.op != Assume || a.operands.size() != 1u)
+                                        continue;
+                                    value x = None;
+                                    std::uint64_t bits = 0u;
+                                    if (!not_equal(a.operands[0], x, bits) || values[x].block != a.block || values[x].op == Phi)
+                                        continue;
+                                    // (defined before the assume, in its block)
+                                    bool before = false;
+                                    for (std::size_t j = 0u; j < k; ++j)
+                                        if (b.code[j] == x)
+                                        {
+                                            before = true;
+                                            break;
+                                        }
+                                    if (!before)
+                                        continue;
+                                    excluded[x] = bits;
+                                    any = true;
+                                }
+                            if (!any)
+                                return false;
+                            for (bool grew = true; grew;)
+                            {
+                                grew = false;
+                                for (auto bi : aFunction.order)
+                                    for (auto v : aFunction.blocks[bi].code)
+                                    {
+                                        auto const& p = values[v];
+                                        if (p.op != Phi)
+                                            break;
+                                        if (p.dead || excluded[v] || p.operands.empty())
+                                            continue;
+                                        std::optional<std::uint64_t> common;
+                                        bool all = true;
+                                        for (auto o : p.operands)
+                                        {
+                                            if (o == v)
+                                                continue;
+                                            if (o >= excluded.size() || !excluded[o] || (common && *common != *excluded[o]))
+                                            {
+                                                all = false;
+                                                break;
+                                            }
+                                            common = excluded[o];
+                                        }
+                                        if (all && common)
+                                        {
+                                            excluded[v] = common;
+                                            grew = true;
+                                        }
+                                    }
+                            }
+                            bool changed = false;
+                            for (auto bi : aFunction.order)
+                                for (auto v : aFunction.blocks[bi].code)
+                                {
+                                    auto& i = values[v];
+                                    bool const ne = i.op == 0x47u || i.op == 0x52u;
+                                    bool const eq = i.op == 0x46u || i.op == 0x51u;
+                                    if (i.dead || !(ne || eq) || i.operands.size() != 2u)
+                                        continue;
+                                    for (std::size_t n = 0u; n < 2u; ++n)
+                                    {
+                                        auto const x = i.operands[1u - n];
+                                        auto const& k = values[i.operands[n]];
+                                        if (!k.constant() || x >= excluded.size() || !excluded[x] || *excluded[x] != k.imm0 || values[x].type != k.type)
+                                            continue;
+                                        // (not an assume's own condition)
+                                        bool assumed = false;
+                                        for (auto u : aFunction.blocks[bi].code)
+                                            if (auto const& a = values[u]; a.op == Assume && !a.dead && !a.operands.empty() &&
+                                                (a.operands[0] == v || (values[a.operands[0]].op == 0x45u && !values[a.operands[0]].operands.empty() && values[a.operands[0]].operands[0] == v)))
+                                                assumed = true;
+                                        if (assumed)
+                                            break;
+                                        i.op = 0x41u;
+                                        i.type = I32;
+                                        i.imm0 = ne ? 1u : 0u;
+                                        i.operands.clear();
+                                        changed = true;
+                                        break;
+                                    }
+                                }
+                            return changed;
+                        }
 
                         bool fold_constants(function& aFunction)
                         {
@@ -1615,6 +1939,57 @@ namespace neos
                                     return values[equalTo[aValue]].imm0;
                                 return {};
                             };
+                            // (an f64 that branches that dominate the block decided is within the range of a signed truncation (i32's or, aWide,
+                            // i64's): not NaN, and above the least integer minus one and below the greatest plus one (x >= C, x > C, x < C,
+                            // x <= C (or below an integer's conversion), and and of them, and eqz of them))
+                            auto const in_range = [&](value aValue, bool aWide) -> bool
+                            {
+                                double lower = -std::numeric_limits<double>::infinity();
+                                double upper = std::numeric_limits<double>::infinity();
+                                bool upperInclusive = true;
+                                std::function<void(value, bool, int)> consider = [&](value aCondition, bool aTrue, int aDepth)
+                                {
+                                    auto const& c = values[aCondition];
+                                    if (c.dead || aDepth <= 0)
+                                        return;
+                                    if (c.op == 0x45u && c.operands.size() == 1u)
+                                    {
+                                        consider(c.operands[0], !aTrue, aDepth - 1);
+                                        return;
+                                    }
+                                    if (c.op == 0x71u && c.operands.size() == 2u && aTrue)
+                                    {
+                                        consider(c.operands[0], true, aDepth - 1);
+                                        consider(c.operands[1], true, aDepth - 1);
+                                        return;
+                                    }
+                                    if (!aTrue || c.op < 0x63u || c.op > 0x66u || c.operands.size() != 2u || replaced.resolved(c.operands[0]) != aValue)
+                                        return;
+                                    // (a constant, or (an upper bound) an integer's conversion: at most its greatest)
+                                    auto const& k = values[replaced.resolved(c.operands[1])];
+                                    double bound;
+                                    if (k.op == 0x44u)
+                                        bound = std::bit_cast<double>(k.imm0);
+                                    else if ((c.op == 0x63u || c.op == 0x65u) && (k.op == 0xB7u || k.op == 0xB8u))
+                                        bound = k.op == 0xB7u ? 2147483647.0 : 4294967295.0;
+                                    else
+                                        return;
+                                    switch (c.op)
+                                    {
+                                    case 0x63u: if (bound <= upper) { upper = bound; upperInclusive = false; } break;   // (lt)
+                                    case 0x65u: if (bound < upper) { upper = bound; upperInclusive = true; } break;     // (le)
+                                    case 0x64u: case 0x66u: lower = std::max(lower, bound); break;                       // (gt, ge)
+                                    default: break;
+                                    }
+                                };
+                                for (auto c : knownOrder)
+                                    if (known[c] >= 0)
+                                        consider(c, known[c] != 0, 4);
+                                // (lower: not NaN (a comparison with it is false for NaN))
+                                double const least = aWide ? -9223372036854775808.0 : -2147483648.0;
+                                double const limit = aWide ? 9223372036854775808.0 : 2147483648.0;
+                                return lower > least - 1.0 && (upper < limit || (!upperInclusive && upper <= limit));
+                            };
                             // (a value that is a multiple of aAlignment (a power of two))
                             std::function<bool(value, std::uint64_t, int)> aligned = [&](value aValue, std::uint64_t aAlignment, int aDepth) -> bool
                             {
@@ -1858,6 +2233,8 @@ namespace neos
                                         epoch[Globals] = ++epochs;
                                         continue;
                                     }
+                                    if ((i.op == 0xAAu || i.op == 0xB0u) && (i.flags & Unchecked) == 0u && i.operands.size() == 1u && in_range(i.operands[0], i.op == 0xB0u))
+                                        i.flags |= Unchecked;   // (its operand is within its range: it cannot trap)
                                     std::vector<std::uint64_t> k;
                                     if (i.load())
                                         k = memory_key(i.op, i.type, i.imm0, i.imm1, i.operands[0], epoch[class_of(i)]);
@@ -3714,14 +4091,19 @@ namespace neos
 
                     void optimize(function& aFunction, module_description const&, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible)
                     {
+                        if (fold_assumed(aFunction))
+                            finish(aFunction);
                         for (int pass = 0; pass < 4; ++pass)
                         {
-                            bool changed = fold_constants(aFunction);
+                            bool changed = fold_known_bits(aFunction);
+                            changed = fold_constants(aFunction) || changed;
                             finish(aFunction);
                             changed = simplify(aFunction) || changed;
                             if (!changed)
                                 break;
                         }
+                        if (fold_assumed(aFunction))
+                            finish(aFunction);
                         number_values(aFunction);
                         decide_branches(aFunction);
                         for (int pass = 0; pass < 2; ++pass)
@@ -3785,7 +4167,8 @@ namespace neos
                             }
                             for (int pass = 0; pass < 2; ++pass)
                             {
-                                bool changed = fold_constants(aFunction);
+                                bool changed = fold_known_bits(aFunction);
+                                changed = fold_constants(aFunction) || changed;
                                 finish(aFunction);
                                 changed = simplify(aFunction) || changed;
                                 if (!changed)
@@ -3803,6 +4186,10 @@ namespace neos
                             if (!threaded && !merged)
                                 break;
                         }
+                        // (assumes: no code (their conditions' code, only theirs: none))
+                        for (auto& i : aFunction.values)
+                            if (i.op == Assume)
+                                i.dead = true;
                         count_uses(aFunction);
                         rematerialize_conditions(aFunction);
                         eliminate_dead_code(aFunction);

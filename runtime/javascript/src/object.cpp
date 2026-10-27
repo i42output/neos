@@ -88,6 +88,7 @@ namespace neos::javascript_runtime
         next->key = aKey;
         next->attributes = aAttributes;
         next->count = count + 1u;
+        next->validity = validity;
         if (iManyTransitions)
             iManyTransitions->emplace(k, next);
         else
@@ -178,6 +179,7 @@ namespace neos::javascript_runtime
     void property_ref::set_data(value aData)
     {
         auto& t = *iTable;
+        t.changed();
         if (t.iShape == nullptr)
             t.entries()[iPosition].data = aData;
         else if ((t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u)
@@ -190,6 +192,7 @@ namespace neos::javascript_runtime
     {
         // (attributes that change: its layout is its own from now on (no shape))
         auto& t = *iTable;
+        t.changed();
         if (t.iShape != nullptr && t.iShape->slots()[iPosition].attributes != aAttributes)
             t.make_dictionary();
         if (t.iShape == nullptr)
@@ -224,6 +227,7 @@ namespace neos::javascript_runtime
     {
         if (iDictionary == 0u)
             return;
+        changed();
         auto* const d = dictionary_of();
         d->~dictionary();
         region_release(d);
@@ -252,6 +256,7 @@ namespace neos::javascript_runtime
 
     void property_table::reserve(std::size_t aCapacity)
     {
+        changed();
         if (iShape != nullptr)
             iValues.reserve(aCapacity);
         else
@@ -262,6 +267,7 @@ namespace neos::javascript_runtime
     {
         if (iShape == nullptr)
             return;
+        changed();
         // (its entries: its shape's keys and attributes, and its values (an accessor's getter and setter))
         auto const slots = iShape->slots();
         entries().reserve(iValues.size());
@@ -284,6 +290,7 @@ namespace neos::javascript_runtime
 
     property_ref property_table::add(value aKey, value aData, value aSetter, std::uint8_t aAttributes)
     {
+        changed();
         if (iShape != nullptr)
         {
             if (auto* const next = iShape->transition(aKey, aAttributes))
@@ -305,6 +312,7 @@ namespace neos::javascript_runtime
 
     void property_table::add(value aData, shape* aShape)
     {
+        changed();
         iValues.push_back(aData);
         iShape = aShape;
     }
@@ -314,6 +322,7 @@ namespace neos::javascript_runtime
         auto const p = find(aKey);
         if (!p)
             return;
+        changed();
         make_dictionary();      // (its layout is its own from now on)
         auto const position = p.position();
         if (index())
@@ -332,6 +341,17 @@ namespace neos::javascript_runtime
             if (index())
                 reindex();
         }
+    }
+
+    std::uint64_t* property_table::watch_dictionary()
+    {
+        auto& d = dict();
+        if (d.validity == nullptr)
+        {
+            d.validity = static_cast<std::uint64_t*>(region_allocate(sizeof(std::uint64_t)));
+            *d.validity = 1u;
+        }
+        return d.validity;
     }
 
     bool property_table::cached_value(std::uint64_t aShape, std::uint32_t aPosition, value aKey, value& aResult) const
@@ -356,6 +376,7 @@ namespace neos::javascript_runtime
     {
         if (aShape == 0u || reinterpret_cast<std::uintptr_t>(iShape) != aShape || aPosition >= iValues.size())
             return false;
+        changed();
         iValues[aPosition] = aValue;
         return true;
     }
@@ -386,6 +407,35 @@ namespace neos::javascript_runtime
         for (std::uint32_t i = 0u; i < entries().size(); ++i)
             if (entries()[i].key != 0u)
                 index()->emplace(entries()[i].key, i);
+    }
+
+    std::uint64_t* watch(object& aObject)
+    {
+        auto& t = aObject.properties;
+        auto* const current = t.layout();
+        if (current == nullptr)
+            return t.watch_dictionary();
+        if (current->validity != nullptr)
+            return current->validity;
+        // (its shape's keys, from a root of its own (a new root: shapes are not shared with any other object))
+        auto& h = the_heap();
+        if (h.shape_count() >= MaxShapes)
+            return nullptr;
+        auto* const word = static_cast<std::uint64_t*>(region_allocate(sizeof(std::uint64_t)));
+        *word = 1u;
+        auto* const root = new shape{};
+        ++h.shape_count();
+        root->validity = word;
+        h.watchedRootShapes.push_back(root);
+        auto* s = root;
+        for (auto const& slot : current->slots())
+        {
+            s = s->transition(slot.key, slot.attributes);
+            if (s == nullptr)
+                return nullptr;
+        }
+        t.reshape(s);
+        return word;
     }
 
     // --- ordinary objects

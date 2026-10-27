@@ -1412,6 +1412,14 @@ namespace neos
                                 if (aCallee >= iModule.functions.size())
                                     throw cannot_optimize{ "invalid function" };
                                 auto const& callee = iModule.functions[aCallee];
+                                if (callee.imported && callee.call == import_call::Assume)
+                                {
+                                    // (neos::assume: not a call (no effect; see ssa::Assume))
+                                    pop();
+                                    emit(0x10u);
+                                    emit(aCallee);
+                                    return;
+                                }
                                 // (the origin of an inlined call's code is the outermost call's)
                                 auto const callPosition = aInline != nullptr ? iInlines.front().call : aPosition;
                                 // (a call that the function's own code has never made (of a function without a frame of its own, in the code

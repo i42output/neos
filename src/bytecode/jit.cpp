@@ -254,6 +254,7 @@ namespace neos
                     std::vector<std::set<std::size_t>> noDeopt;         ///< (inlined calls (their positions) whose code calls rather than deopts
                                                                         ///< (it left there often))
                     std::vector<std::map<std::size_t, std::uint32_t>> guardFailures;
+                    std::vector<std::map<std::size_t, std::uint32_t>> deoptStrikes;   ///< (the times that inlined calls' deopts made the function optimized again)
                     std::vector<std::vector<std::size_t>> inlineChains;  ///< (optimized code's inline chains (see optimizer::InlineChainToken): 
                                                                         ///< the frames of calls within inlined calls, innermost first)
                     std::vector<tier_version const*> currentVersion;
@@ -3454,6 +3455,14 @@ namespace neos
                                 checked_arithmetic(*callee.checked);
                                 return;
                             }
+                            if (callee.call == import_call::Assume)
+                            {
+                                // (neos::assume: no code (its operand is not used))
+                                if (iStack.size() < iControl.back().base + 1u)
+                                    throw unsupported{ "operand stack underflow" };
+                                release(pop());
+                                return;
+                            }
                             std::int32_t const base = callee.imported ? ShadowSpace : 0;
                             std::size_t const n = parameters.size();
                             if (iStack.size() < iControl.back().base + n)
@@ -5796,7 +5805,8 @@ namespace neos
                             for (int x = 8; x < 16; ++x)
                                 if (iUsedCalleeXmms[x])
                                     a.movf_store(true, RBP, iXmmSave[x], x);
-                            auto const emission = emission_order();
+                            auto emission = emission_order();
+                            forward_empty_jumps(emission);
                             for (std::size_t o = 0u; o < emission.size(); ++o)
                             {
                                 auto const b = emission[o];
@@ -5872,7 +5882,20 @@ namespace neos
                                     }
                                 }
                             }
-                            // (and those whose predecessors are all cold (in the order: a loop's back edges are not followed))
+                            // (and those whose successors are all cold (e.g. a block of a cold path's phis' moves: its jump is then not between
+                            // the likely blocks), then those whose predecessors are all cold (in the order: a loop's back edges are not followed))
+                            for (auto o = f.order.size(); o-- > 0u;)
+                            {
+                                auto const b = f.order[o];
+                                auto const& block = f.blocks[b];
+                                if (cold[b] || b == f.order.front() || block.loopHeader || block.successors.empty())
+                                    continue;
+                                bool all = true;
+                                for (auto s : block.successors)
+                                    if (!cold[s])
+                                        all = false;
+                                cold[b] = all;
+                            }
                             for (auto b : f.order)
                             {
                                 auto const& block = f.blocks[b];
@@ -5893,6 +5916,61 @@ namespace neos
                                 if (cold[b])
                                     result.push_back(b);
                             return result;
+                        }
+                        // (a block whose code is only a jump that moves nothing (e.g. an edge's of phis whose operands are where they are (see
+                        // split_critical_edges)): it has no code; its label is its successor's, and a branch to it is to its successor)
+                        std::vector<std::uint32_t> iForward;
+                        std::uint32_t forwarded(std::uint32_t aBlock) const
+                        {
+                            for (std::size_t hops = 0u; aBlock < iForward.size() && iForward[aBlock] != aBlock && hops < iForward.size(); ++hops)
+                                aBlock = iForward[aBlock];
+                            return aBlock;
+                        }
+                        void forward_empty_jumps(std::vector<std::uint32_t>& aEmission)
+                        {
+                            iForward.resize(f.blocks.size());
+                            for (std::uint32_t b = 0u; b < f.blocks.size(); ++b)
+                                iForward[b] = b;
+                            for (auto b : aEmission)
+                            {
+                                auto const& block = f.blocks[b];
+                                if (b == f.order.front() || block.loopHeader || block.successors.size() != 1u || block.successors[0] == b)
+                                    continue;
+                                std::size_t live = 0u;
+                                bool jump = false;
+                                for (auto v : block.code)
+                                    if (!f.values[v].dead)
+                                    {
+                                        ++live;
+                                        jump = f.values[v].op == ssa::Jump;
+                                    }
+                                if (live != 1u || !jump)
+                                    continue;
+                                auto const to = block.successors[0];
+                                auto const& target = f.blocks[to];
+                                auto const index = static_cast<std::size_t>(std::find(target.predecessors.begin(), target.predecessors.end(), b) - target.predecessors.begin());
+                                bool moves = false;
+                                for (auto v : target.code)
+                                {
+                                    auto const& i = f.values[v];
+                                    if (i.op != ssa::Phi)
+                                        break;
+                                    if (i.dead || index >= i.operands.size())
+                                        continue;
+                                    auto const s = i.operands[index];
+                                    if (constant(s) || where(s).kind != where(v).kind || where(s).reg != where(v).reg || where(s).disp != where(v).disp)
+                                    {
+                                        moves = true;
+                                        break;
+                                    }
+                                }
+                                if (!moves)
+                                    iForward[b] = to;
+                            }
+                            for (auto b : aEmission)
+                                if (auto const to = forwarded(b); to != b)
+                                    iBlockLabels[b] = iBlockLabels[to];
+                            std::erase_if(aEmission, [&](std::uint32_t aBlock) { return forwarded(aBlock) != aBlock; });
                         }
                         // (a deopt (see optimizer::deopt): its values to the thread's deopt buffer; reported; this frame left (as its epilogue
                         // leaves it); the function's frame made as the baseline's code has it where it makes the call (its locals, its
@@ -6269,7 +6347,7 @@ namespace neos
                         void jump_to(std::uint32_t aTarget)
                         {
                             phi_moves(iCurrentBlock, aTarget);
-                            if (aTarget != iNext)
+                            if (forwarded(aTarget) != iNext)
                                 a.jmp(iBlockLabels[aTarget]);
                         }
                         // (a comparison that the next instruction (a branch) uses (only): its condition, not its value)
@@ -6309,8 +6387,10 @@ namespace neos
                                 std::vector<bool> inBlock(f.values.size(), false);
                                 for (std::size_t c = 0u; c + 1u < last; ++c)
                                     inBlock[code[c]] = true;
-                                // (the tree: its connectives' operands are its nodes; its leaves are comparisons)
+                                // (the tree: its connectives' operands are its nodes; its leaves are comparisons, or (an or's operand) other i32s 
+                                // (tested: not 0), which are not deferred (an and's: not (a & b is not a && b unless they are 0 or 1)))
                                 std::vector<value> pending{ root };
+                                std::vector<value> underOr;
                                 while (!pending.empty() && valid)
                                 {
                                     auto const v = pending.back();
@@ -6318,6 +6398,8 @@ namespace neos
                                     auto const& i = f.values[v];
                                     if (v >= inBlock.size() || !inBlock[v] || i.dead || i.type != ssa::I32 || f.uses[v] != 1u || !comparison(i.op) && !connective(i.op))
                                     {
+                                        if (v != root && std::find(underOr.begin(), underOr.end(), v) != underOr.end() && !i.dead && i.type == ssa::I32 && i.op != ssa::Phi)
+                                            continue;
                                         valid = false;
                                         break;
                                     }
@@ -6330,7 +6412,11 @@ namespace neos
                                         if (i.op != 0x45u)
                                             ++connectives;
                                         for (auto o : i.operands)
+                                        {
                                             pending.push_back(o);
+                                            if (i.op == 0x72u)
+                                                underOr.push_back(o);
+                                        }
                                     }
                                 }
                                 if (!valid || connectives == 0u)
@@ -6372,6 +6458,21 @@ namespace neos
                         void deferred_condition(value v, std::size_t aTrue, std::size_t aFalse, std::optional<std::size_t> aNext)
                         {
                             auto const& i = f.values[v];
+                            if (!iDeferred[v])
+                            {
+                                // (an i32 that is not a comparison (see defer_conditions): true if it is not 0)
+                                auto const r = gpr(v, RAX);
+                                a.test_rr(false, r, r);
+                                if (aNext == aFalse)
+                                    a.jcc(NE, aTrue);
+                                else
+                                {
+                                    a.jcc(E, aFalse);
+                                    if (aNext != aTrue)
+                                        a.jmp(aTrue);
+                                }
+                                return;
+                            }
                             bool const node = i.op == 0x71u || i.op == 0x72u || (i.op == 0x45u && iDeferred[i.operands[0]]);
                             iDeferred[v] = false;
                             if (node && i.op == 0x45u)
@@ -6556,8 +6657,8 @@ namespace neos
                         {
                             auto const& i = f.values[v];
                             auto const& successors = f.blocks[iCurrentBlock].successors;
-                            auto const whenTrue = successors[0];
-                            auto const whenFalse = successors[1];
+                            auto const whenTrue = forwarded(successors[0]);
+                            auto const whenFalse = forwarded(successors[1]);
                             if (iDeferred[i.operands[0]])
                             {
                                 // (a condition of comparisons: their branches (see defer_conditions))
@@ -6631,7 +6732,7 @@ namespace neos
                                 a.alu_ri(7, false, RAX, static_cast<std::int32_t>(t));
                                 a.jcc(E, iBlockLabels[successors[t]]);
                             }
-                            if (successors.back() != iNext)
+                            if (forwarded(successors.back()) != iNext)
                                 a.jmp(iBlockLabels[successors.back()]);
                         }
                         void switch_search(std::size_t aBegin, std::size_t aEnd, std::vector<std::uint32_t> const& aSuccessors)
@@ -6677,6 +6778,8 @@ namespace neos
                         }
                         // --- calls
                         // (a value stored to the outgoing area, as an argument (a word))
+                        // (rax's constant, while a call's arguments are stored (see argument): reset before them)
+                        std::optional<std::uint64_t> iArgumentRax;
                         void argument(value aValue, std::int32_t aDisp)
                         {
                             auto const type = f.values[aValue].type;
@@ -6687,11 +6790,15 @@ namespace neos
                                     a.store_imm(true, RSP, aDisp, static_cast<std::int32_t>(b));
                                 else
                                 {
-                                    a.mov_ri(RAX, b, true);
+                                    // (e.g. the same constant for several arguments: rax has it)
+                                    if (iArgumentRax != b)
+                                        a.mov_ri(RAX, b, true);
+                                    iArgumentRax = b;
                                     a.store(true, RSP, aDisp, RAX);
                                 }
                                 return;
                             }
+                            iArgumentRax.reset();
                             if (is_float_type(type))
                                 a.movf_store(type == ssa::F64, RSP, aDisp, xmm(aValue, 0));
                             else
@@ -6727,6 +6834,7 @@ namespace neos
                                 plugin_call(v, callee, c);
                                 return;
                             }
+                            iArgumentRax.reset();
                             for (std::size_t p = 0u; p < i.operands.size(); ++p)
                                 argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
                             iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(std::max(i.operands.size(), c.results->size())));
@@ -6745,6 +6853,7 @@ namespace neos
                             auto const& i = f.values[v];
                             auto const type = static_cast<std::uint32_t>(i.imm0);
                             auto const n = i.operands.size() - 1u;
+                            iArgumentRax.reset();
                             for (std::size_t p = 0u; p < n; ++p)
                                 argument(i.operands[p], 8 * static_cast<std::int32_t>(p));
                             auto const& results = *iModule.types[type].second;
@@ -6772,6 +6881,7 @@ namespace neos
                         void native_call(void const* aFunction, std::vector<value> const& aArguments, value v, bool aWithContext, std::uint64_t aImmediate = 0u,
                             bool aCanTrap = false)
                         {
+                            iArgumentRax.reset();
                             for (std::size_t p = 0u; p < aArguments.size(); ++p)
                             {
                                 auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
@@ -6783,6 +6893,7 @@ namespace neos
                                     {
                                         a.mov_ri(RAX, aImmediate, true);
                                         a.store(true, RSP, disp, RAX);
+                                        iArgumentRax.reset();
                                     }
                                 }
                                 else
@@ -6808,6 +6919,7 @@ namespace neos
                             int intIndex = 0;
                             int floatIndex = 0;
                             std::int32_t stackIndex = 0;
+                            iArgumentRax.reset();
                             for (std::size_t p = 0u; p < aArguments.size(); ++p)
                             {
                                 auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
@@ -7136,11 +7248,18 @@ namespace neos
                                 bool const d = op >= 0x61u;
                                 int const relation = op - (d ? 0x61u : 0x5Bu);   // 0 eq, 1 ne, 2 lt, 3 gt, 4 le, 5 ge
                                 bool const swap = relation == 2 || relation == 4;
-                                auto const first = swap ? i.operands[1] : i.operands[0];
-                                auto const second = swap ? i.operands[0] : i.operands[1];
+                                auto first = swap ? i.operands[1] : i.operands[0];
+                                auto second = swap ? i.operands[0] : i.operands[1];
+                                if (relation <= 1 && constant(first) && !constant(second))
+                                    std::swap(first, second);   // (equality: the constant second)
                                 auto const fx = xmm(first, 0);
-                                auto const sx = xmm(second, 1);
-                                a.ucomis(d, fx, sx);
+                                if (constant(second))
+                                    a.sse_rip(d ? 0x66 : -1, 0x2E, fx, a.constant(d ? bits(second) : (bits(second) & 0xFFFFFFFFull)));    // (ucomis x, [rip + c])
+                                else
+                                {
+                                    auto const sx = xmm(second, 1);
+                                    a.ucomis(d, fx, sx);
+                                }
                                 if (relation >= 2)
                                     condition(v, relation <= 3 ? A : AE);
                                 else
@@ -7360,6 +7479,14 @@ namespace neos
                             {
                                 static std::uint8_t const sOps[] = { 0x58, 0x5C, 0x59, 0x5E };
                                 auto const y = i.operands[1];
+                                if (constant(y))
+                                {
+                                    // (a constant: the operand is the constant's (in the code's constants))
+                                    xmm_into(i.operands[0], r);
+                                    a.sse_rip(prefix, sOps[k - 7u], r, a.constant(d ? bits(y) : (bits(y) & 0xFFFFFFFFull)));
+                                    defined(v, r);
+                                    return;
+                                }
                                 if (in_register(y) && where(y).reg == r && !(in_register(i.operands[0]) && where(i.operands[0]).reg == r))
                                     r = 0;
                                 xmm_into(i.operands[0], r);
@@ -7434,6 +7561,15 @@ namespace neos
                                 return;
                             case 0xAA: // i32.trunc_f64_s
                             case 0xB0: // i64.trunc_f64_s
+                                if ((f.values[v].flags & ssa::Unchecked) != 0u)
+                                {
+                                    // (its operand is within its range (see ssa::Unchecked): it cannot trap)
+                                    auto const xr = xmm(x, 0);
+                                    auto const r = target(v, RAX);
+                                    a.sse_rr(0xF2, 0x2C, aOp == 0xB0, r, xr);
+                                    defined(v, r);
+                                    return;
+                                }
                                 {
                                     bool const wide = aOp == 0xB0;
                                     auto const xr = xmm(x, 0);
@@ -7519,6 +7655,7 @@ namespace neos
                         void helper_call(void const* aFunction, std::vector<value> const& aArguments, value v, bool aCanTrap)
                         {
                             // (the context argument (ssa::None) is the last: as the helpers take it)
+                            iArgumentRax.reset();
                             for (std::size_t p = 0u; p < aArguments.size(); ++p)
                             {
                                 auto const disp = ShadowSpace + 8 * static_cast<std::int32_t>(p);
@@ -7688,6 +7825,9 @@ namespace neos
                     constexpr std::int32_t WarmCalls = 64;              ///< (a function's calls before a call it has never made is cold (see callFlags))
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
+                    constexpr std::uint32_t DeoptStrikes = 2u;              ///< (an inlined call whose deopts made the function optimized again this often:
+                                                                            ///< its code calls rather than deopts (e.g. a cache's miss: optimized again, 
+                                                                            ///< the code knows the cache's new entry; again: it calls))
                     constexpr std::uint64_t CallsPerSeldomDeopt = 1000u;    ///< (an optimized function's calls per deopt (at least) that do not make it
                                                                             ///< optimized again)
 
@@ -8173,16 +8313,20 @@ namespace neos
                                     return;
                                 }
                             }
-                            // (the inlined code that left often (e.g. a cache's misses, an allocator's slow path) calls instead: optimized 
-                            // again; a guard that fails again: not inlined)
+                            // (optimized again; the inlined code that left often (e.g. a cache's misses, an allocator's slow path), and the
+                            // version's other such deopts that it has left at: a strike each (see DeoptStrikes: then it calls instead); a guard
+                            // that fails again: not inlined)
+                            std::set<std::size_t> struck;
                             if (!d.guard)
-                                m.noDeopt[f].insert(d.call);
+                                struck.insert(d.call);
                             else if (++m.guardFailures[f][d.call] >= 2u)
                                 m.noInline[f].insert(d.call);
-                            // (and the version's other such deopts that it has left at (each of them: a deopt costs more than the call))
                             for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
                                 if (!aVersion->deopts[k].guard && aVersion->deoptCounts[k] >= 1u)
-                                    m.noDeopt[f].insert(aVersion->deopts[k].call);
+                                    struck.insert(aVersion->deopts[k].call);
+                            for (auto const call : struck)
+                                if (++m.deoptStrikes[f][call] >= DeoptStrikes)
+                                    m.noDeopt[f].insert(call);
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
@@ -8356,6 +8500,7 @@ namespace neos
                             m.noInline.resize(n);
                             m.noDeopt.resize(n);
                             m.guardFailures.resize(n);
+                            m.deoptStrikes.resize(n);
                             m.currentVersion.assign(n, nullptr);
                             m.savedEntries.resize(n);
                             m.jobs.resize(n);
