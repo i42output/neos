@@ -1037,7 +1037,12 @@ namespace neos::javascript_runtime
         void trace(tracer& aTracer) const;
         bool owns_nothing() const   ///< (it has no storage of its own (outside its object's cell))
         {
-            return iDictionary == 0u && (iValues.capacity() == 0u || !region_raw(iValues.data()));
+            return owns_nothing([](void const* aMemory) { return region_raw(aMemory); });
+        }
+        template <typename Raw>
+        bool owns_nothing(Raw const& aRaw) const    ///< (... aRaw: region_raw (e.g. the collector's own, while it sweeps))
+        {
+            return iDictionary == 0u && (iValues.capacity() == 0u || !aRaw(iValues.data()));
         }
         // (the property caches': a data property's value at a position (aShape: its shape (it has the shape), else (0: a dictionary)
         // the key's at the position), and a writable data property's (its shape's) value set)

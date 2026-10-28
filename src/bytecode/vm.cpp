@@ -394,8 +394,7 @@ namespace neos
                         iSerial{ ++sSerial }, iOutput{ aOutput }, iInput{ aInput }, iErrorOutput{ aErrorOutput }, iInstructions{ aInstructions }, iRestricted{ aRestricted },
                         iCompileService{ aCompileService }, iArguments{ aArguments }
                     {
-                        for (auto b : aText)
-                            iModule.push_back(static_cast<std::uint8_t>(b));
+                        iModule.assign(reinterpret_cast<std::uint8_t const*>(aText.data()), reinterpret_cast<std::uint8_t const*>(aText.data()) + aText.size());
                         parse();
                     }
                     ~machine()
@@ -589,6 +588,20 @@ namespace neos
                     {
                         return iTypes.at(iFunctions.at(aFunction).type);
                     }
+                    // (the interpreter's: see iBlocks)
+                    void block_tables()
+                    {
+                        std::call_once(iBlockTables, [this]()
+                        {
+                            iEnds.assign(iTokens.size(), 0u);
+                            iElses.assign(iTokens.size(), 0u);
+                            for (auto const& b : iBlocks)
+                            {
+                                iEnds[b.at] = b.end;
+                                iElses[b.at] = b.elseAt;
+                            }
+                        });
+                    }
                     std::vector<value> invoke(std::uint32_t aFunction, std::vector<value> aArguments)
                     {
                         if (iFunctions.at(aFunction).import)
@@ -599,6 +612,7 @@ namespace neos
                             aArguments.resize(type.results.size());
                             return aArguments;
                         }
+                        block_tables();
                         std::vector<value> stack;
                         std::vector<frame> frames;
                         activation_scope const activating{ this, nullptr, &frames, &stack };
@@ -1231,8 +1245,8 @@ namespace neos
                         // decode the body into tokens, matching blocks with their ends (and ifs with their elses)
                         reader r{ iModule, f.codeBegin };
                         auto const begin = iTokens.size();
-                        auto token = [&](std::uint64_t aValue) { iTokens.push_back(aValue); iEnds.push_back(0u); iElses.push_back(0u); };
-                        std::vector<std::size_t> open;
+                        auto token = [&](std::uint64_t aValue) { iTokens.push_back(aValue); };
+                        std::vector<std::size_t> open;  // (the blocks (see iBlocks) that are open)
                         while (r.position() < f.codeEnd)
                         {
                             auto const position = iTokens.size();
@@ -1242,15 +1256,16 @@ namespace neos
                             {
                             case 0x02: case 0x03: case 0x04:
                                 token(r.byte());
-                                open.push_back(position);
+                                open.push_back(iBlocks.size());
+                                iBlocks.push_back(block_tokens{ position, 0u, 0u });
                                 break;
                             case 0x05:
-                                iElses[open.back()] = iTokens.size();
+                                iBlocks[open.back()].elseAt = iTokens.size();
                                 break;
                             case 0x0B:
                                 if (!open.empty())
                                 {
-                                    iEnds[open.back()] = iTokens.size();
+                                    iBlocks[open.back()].end = iTokens.size();
                                     open.pop_back();
                                 }
                                 break;
@@ -1284,8 +1299,6 @@ namespace neos
                                     {
                                         r.byte();
                                         iTokens.resize(position);
-                                        iEnds.resize(position);
-                                        iElses.resize(position);
                                         if (auto const p = v & ~bytecode::PositionMarkerMask; p != 0u)
                                         {
                                             if (!iPositions.empty() && iPositions.back().first == position)
@@ -1299,8 +1312,6 @@ namespace neos
                                     {
                                         r.byte();
                                         iTokens.resize(position);
-                                        iEnds.resize(position);
-                                        iElses.resize(position);
                                         auto const line = static_cast<std::uint32_t>(v & 0xFFFFFFFFu);
                                         if (!iLines.empty() && iLines.back().first == position)
                                             iLines.back().second = line;
@@ -1977,8 +1988,18 @@ namespace neos
                     std::vector<std::string> const iArguments;
                     std::vector<std::uint8_t> iModule;
                     std::vector<std::uint64_t> iTokens;   ///< decoded function bodies
-                    std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end
+                    std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end (see block_tables)
                     std::vector<std::size_t> iElses;      ///< if token -> token after its else (0 if none)
+                    // (the blocks, loops and ifs: their tokens, and the tokens after their ends and elses (iEnds and iElses are made from
+                    // them when the interpreter first runs: the generated code does not use them))
+                    struct block_tokens
+                    {
+                        std::size_t at;
+                        std::size_t end;
+                        std::size_t elseAt;
+                    };
+                    std::vector<block_tokens> iBlocks;
+                    std::once_flag iBlockTables;
                     std::vector<function_type> iTypes;
                     std::vector<function> iFunctions;
                     linear_memory iMemory;

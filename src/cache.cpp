@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -157,9 +158,20 @@ namespace neos
         hasher& hasher::add(std::string_view aData)
         {
             add(static_cast<std::uint64_t>(aData.size()));
-            for (char c : aData)
+            // (eight bytes at a time (a program's source can be large: it is hashed each time it is run), then the rest)
+            auto const* p = aData.data();
+            auto n = aData.size();
+            for (; n >= 8u; p += 8, n -= 8u)
             {
-                iValue ^= static_cast<unsigned char>(c);
+                std::uint64_t word;
+                std::memcpy(&word, p, sizeof(word));
+                iValue ^= word;
+                iValue *= 0x100000001B3ull;
+                iValue ^= iValue >> 29u;
+            }
+            for (; n > 0u; ++p, --n)
+            {
+                iValue ^= static_cast<unsigned char>(*p);
                 iValue *= 0x100000001B3ull;
             }
             return *this;

@@ -1298,59 +1298,68 @@ namespace neos::javascript_runtime
         tRuns.clear();
         std::uint64_t runStart = 0u;
         bool inRun = false;
-        constexpr std::size_t Ahead = 8u;   // (slots: their words are fetched before they are read (the loop is bound by memory's latency))
         // (the collector's state that the loop reads: locals (the runs' growth would otherwise make them read again each time))
         auto const handleOffset = iHandleOffset;
-        bool const quarantine = iQuarantine;
-        for (std::size_t i = 0u; i < count; ++i)
+        auto const raw = [this](void const* aMemory) { return iMemory.raw(aMemory); };  // (region_raw: without finding the collector)
+        if (iQuarantine)
         {
-            auto* const slot = start + i * slotSize;
-#if defined(__GNUC__) || defined(__clang__)
-            if (i + Ahead < count)
-                __builtin_prefetch(slot + Ahead * slotSize + handleOffset, 1);
-#endif
-            auto const handle = first + static_cast<std::uint32_t>(i) * step;
-            std::uint32_t h;
-            std::memcpy(&h, slot + handleOffset, sizeof(h));
-            bool free = true;
-            if (h == handle)
+            // (testing: its dead cells are freed (and kept: they are not slots to allocate from))
+            for (std::size_t i = 0u; i < count; ++i)
             {
-                auto* const c = reinterpret_cast<cell*>(slot);
-                if (c->marked != 0u)
+                auto* const slot = start + i * slotSize;
+                auto const handle = first + static_cast<std::uint32_t>(i) * step;
+                std::uint32_t h;
+                std::memcpy(&h, slot + handleOffset, sizeof(h));
+                if (h == handle)
                 {
-                    c->marked = 0u;
-                    live = true;
-                    free = false;
+                    auto* const c = reinterpret_cast<cell*>(slot);
+                    if (c->marked != 0u)
+                    {
+                        c->marked = 0u;
+                        live = true;
+                    }
+                    else
+                        free_cell(c, h);
                 }
-                else if (quarantine)
+            }
+        }
+        else
+        {
+            // (the slots in order (memory is read in order: the processor fetches it ahead))
+            auto* slot = start;
+            auto handle = first;
+            auto offset = startOffset;
+            for (std::size_t i = 0u; i < count; ++i, slot += slotSize, handle += step, offset += slotSize)
+            {
+                std::uint32_t h;
+                std::memcpy(&h, slot + handleOffset, sizeof(h));
+                if (h == handle)
                 {
-                    free_cell(c, h);
-                    free = false;
-                }
-                else
-                {
+                    auto* const c = reinterpret_cast<cell*>(slot);
+                    if (c->marked != 0u)
+                    {
+                        // (live: a run ends)
+                        c->marked = 0u;
+                        live = true;
+                        if (inRun)
+                        {
+                            tRuns.emplace_back(runStart, offset);
+                            inRun = false;
+                        }
+                        continue;
+                    }
                     // (a dead cell: destroyed (unless it is a plain object that owns nothing outside its cell), then free)
-                    if (!(&typeid(*c) == &typeid(object) && static_cast<object*>(c)->properties.owns_nothing() &&
+                    if (!(&typeid(*c) == &typeid(object) && static_cast<object*>(c)->properties.owns_nothing(raw) &&
                         static_cast<object*>(c)->extra_if() == nullptr))
                         c->~cell();
                     std::uint32_t const none = 0u;
                     std::memcpy(slot + handleOffset, &none, sizeof(none));
                 }
-            }
-            else if (quarantine)
-                free = false;
-            if (free)
-            {
                 if (!inRun)
                 {
-                    runStart = startOffset + i * slotSize;
+                    runStart = offset;
                     inRun = true;
                 }
-            }
-            else if (inRun)
-            {
-                tRuns.emplace_back(runStart, startOffset + i * slotSize);
-                inRun = false;
             }
         }
         if (inRun)

@@ -196,6 +196,8 @@ namespace neos
                     bool is_wide(std::uint8_t aType) { return aType == I64 || aType == F64; }
                 }
 
+                constexpr std::uint64_t NoOsrLoop = ~std::uint64_t{};     ///< (see tier_loop)
+
                 class compiled_module
                 {
                 public:
@@ -232,6 +234,7 @@ namespace neos
                         mutable std::vector<std::uint32_t> deoptCounts;     ///< (each deopt's (its code left for the baseline's))
                         mutable std::uint32_t deoptsTaken = 0u;             ///< (its deopts' (not guards'): all of them)
                         mutable std::uint64_t calls = 0u;                   ///< (its code's calls (counted if it has deopts that are not guards'))
+                        std::uint64_t osrLoop = NoOsrLoop;                  ///< (code that calls continue in from a loop (see osr_entry): the loop)
                     };
                     struct tier_chunk
                     {
@@ -248,6 +251,10 @@ namespace neos
                     std::uint64_t compileMicroseconds = 0u;
                     std::uint64_t phaseMicroseconds[4] = {};
                     std::vector<std::int32_t> counters;
+                    std::uint32_t primaryMemory = 0u;                   ///< (the fixed external memory that all of its code accesses (if one): its
+                                                                        ///< address is in r14 throughout its code (set by the trampoline; no
+                                                                        ///< function saves, sets or uses r14 otherwise); 0: none (each function
+                                                                        ///< that accesses one has its address in r14, saved and set by it))
                     std::vector<std::int32_t> loopCounters;             ///< (each function's (with a frame) loops' iterations before it is optimized
                                                                         ///< (see tier_loop))
                     std::int32_t loopIterations = 0;
@@ -270,6 +277,10 @@ namespace neos
                                                                         ///< the frames of calls within inlined calls, innermost first; added
                                                                         ///< by optimizations (in the background): see chainsMutex)
                     mutable std::mutex chainsMutex;                     ///< (inlineChains' size and elements (a chain's reference remains valid))
+                    // (functions' locals' liveness (see optimizer::locals_liveness: their code does not change), found once (by optimizations,
+                    // in the background): see livenessMutex)
+                    mutable std::unordered_map<std::uint32_t, std::shared_ptr<optimizer::liveness const>> liveness;
+                    mutable std::mutex livenessMutex;
                     std::vector<tier_version const*> currentVersion;
                     std::vector<std::unique_ptr<tier_version>> versions;
                     // (optimization in the background (see tier_worker): a function's optimization (its optimizer and its code) is made on
@@ -281,6 +292,20 @@ namespace neos
                     bool closing = false;                               ///< (being destroyed: no more jobs (see tier_worker::mutex))
                     std::vector<tier_chunk> chunks;
                     std::vector<std::array<std::uint8_t, 14u>> savedEntries;    ///< (the code that an optimized function's entry had)
+                    // (calls that continue in optimized code at loops (on-stack replacement, see tier_loop): each loop's (by its token) code
+                    // (made when a call that runs the function's baseline code has run the loop often enough, once the function has been
+                    // optimized), until it leaves for the baseline's (a deopt in the loop, or a guard): then made again (at most MaxOsrCompiles
+                    // times))
+                    bool osr = true;
+                    struct osr_state
+                    {
+                        void const* entry = nullptr;
+                        tier_version const* version = nullptr;
+                        std::uint32_t compiles = 0u;
+                        std::uint32_t entries = 0u;
+                    };
+                    std::unordered_map<std::uint64_t, osr_state> osrLoops;
+                    std::unordered_map<std::size_t, bool> inLoop;       ///< (positions of functions' own code: whether each is within a loop (see deopt_taken))
                     // (deoptimization: optimized code that leaves for the function's own code (its frame made as the baseline's is, where a
                     // call (of an inlinable function: an inlined call of the optimized code's) is made): each function's frame, and each such
                     // call's (by its token): the code that makes the call (its arguments in the outgoing area) and the operand stack's slots
@@ -315,6 +340,7 @@ namespace neos
                     struct deopt_point
                     {
                         std::uint32_t function = 0u;
+                        std::uint8_t const* code = nullptr;  ///< (the code that resume and returned are offsets in (null: the module's))
                         std::size_t resume = 0u;        ///< (the code's offset)
                         std::size_t returned = 0u;      ///< (the code's offset where its call returns to (0: none))
                         std::uint32_t arguments = 0u;
@@ -329,11 +355,49 @@ namespace neos
                     // rather than inline it (as V8's optimizing compiler leaves where its feedback says that code has not run))
                     std::deque<std::uint32_t> callFlags;
                     std::int32_t tierCalls = 0;                         ///< (the calls before a function is optimized)
+                    // (deoptFrames and deoptPoints: added to as functions are compiled (see lazy), while optimizations are made in the
+                    // background (which read them))
+                    mutable std::mutex deoptMutex;
+                    // --- functions compiled when they are first called (NEOS_JIT_LAZY, default 1): the module's code has an entry for
+                    // each (at functionOffsets: 16 bytes, which first call lazy_compile (with the function's index in r11d), then jump
+                    // to its code (jmp [rip+2]; its address)); their code is in regions (chunks), one after another
+                    bool lazy = false;
+                    struct lazy_region
+                    {
+                        std::uint8_t* code = nullptr;
+                        std::size_t size = 0u;
+                        std::size_t used = 0u;
+                        std::size_t chunk = 0u;     ///< (its chunk (see chunks): its call sites)
+                    };
+                    std::vector<lazy_region> lazyRegions;
+                    std::uint32_t lazyCompiled = 0u;
                 };
 
                 void compiled_module_deleter::operator()(compiled_module* aModule) const
                 {
                     delete aModule;
+                }
+
+                namespace
+                {
+                    // (a deopt point, and a function's frame (null: none yet): see compiled_module::deoptMutex)
+                    compiled_module::deopt_point const* deopt_point_at(compiled_module const& aModule, std::size_t aPosition)
+                    {
+                        std::lock_guard<std::mutex> lock{ aModule.deoptMutex };
+                        auto const point = aModule.deoptPoints.find(aPosition);
+                        return point != aModule.deoptPoints.end() ? &point->second : nullptr;
+                    }
+                    compiled_module::deopt_frame const* deopt_frame_of(compiled_module const& aModule, std::uint32_t aFunction)
+                    {
+                        std::lock_guard<std::mutex> lock{ aModule.deoptMutex };
+                        return aFunction < aModule.deoptFrames.size() && aModule.deoptFrames[aFunction].valid ? &aModule.deoptFrames[aFunction] : nullptr;
+                    }
+                    // (the address of an offset of a deopt point's (in its function's code))
+                    std::uint64_t deopt_address(compiled_module const& aModule, compiled_module::deopt_point const& aPoint, std::size_t aOffset)
+                    {
+                        auto const* const code = aPoint.code != nullptr ? aPoint.code : static_cast<std::uint8_t const*>(aModule.code);
+                        return reinterpret_cast<std::uint64_t>(code + aOffset);
+                    }
                 }
 
                 // (an optimization made in the background: the optimizer's result, then its code)
@@ -359,8 +423,10 @@ namespace neos
                     };
                     std::vector<memory_read> reads;
                     bool background = false;            ///< (made in the background (its reads are checked when it is installed))
+                    std::uint64_t osrLoop = NoOsrLoop;  ///< (code that a call continues in from a loop (see osr_entry))
                     std::unique_ptr<tier_version> version;
-                    module_description description;     ///< (the module's, the function's code the optimizer's)
+                    module_description description;     ///< (made only for the baseline's code generator: the module's, the function's code
+                                                        ///< the optimizer's)
                     std::vector<std::uint8_t> code;
                     std::vector<std::pair<std::size_t, std::size_t>> callSites;
                     bool optimizing = false;            ///< (the optimizing code generator made it (else it is made by the baseline's: when it is
@@ -546,15 +612,38 @@ namespace neos
                         void emit8(std::uint8_t aByte)
                         {
                             ++iEvents;
-                            if (!iInCold)
+                            if (iInCold)
+                            {
+                                iCold.push_back(aByte);
+                                return;
+                            }
+                            if (iLastJump) [[unlikely]]
                             {
                                 iLastJump.reset();
                                 iBoundAfterJump.clear();
                             }
-                            out().push_back(aByte);
+                            code.push_back(aByte);
                         }
-                        void emit32(std::uint32_t aValue) { for (int i = 0; i < 4; ++i) emit8(static_cast<std::uint8_t>(aValue >> (i * 8))); }
-                        void emit64(std::uint64_t aValue) { for (int i = 0; i < 8; ++i) emit8(static_cast<std::uint8_t>(aValue >> (i * 8))); }
+                        // (little endian: as emit8 of each byte)
+                        void emit32(std::uint32_t aValue) { emit_bytes(&aValue, 4u); }
+                        void emit64(std::uint64_t aValue) { emit_bytes(&aValue, 8u); }
+                        void emit_bytes(void const* aBytes, std::size_t aCount)
+                        {
+                            static_assert(std::endian::native == std::endian::little);
+                            iEvents += aCount;
+                            auto const* const bytes = static_cast<std::uint8_t const*>(aBytes);
+                            if (iInCold)
+                            {
+                                iCold.insert(iCold.end(), bytes, bytes + aCount);
+                                return;
+                            }
+                            if (iLastJump) [[unlikely]]
+                            {
+                                iLastJump.reset();
+                                iBoundAfterJump.clear();
+                            }
+                            code.insert(code.end(), bytes, bytes + aCount);
+                        }
                         void patch32(std::size_t aPosition, std::uint32_t aValue) { std::memcpy(&code[aPosition], &aValue, sizeof(aValue)); }
                     private:
                         void rex(bool aW, int aR, int aX, int aB, bool aForce = false)
@@ -1385,10 +1474,24 @@ namespace neos
                         }
                     }
 
+                    // (an instruction that the baseline's code generator has (see code_generator::instruction))
+                    bool baseline_instruction(std::uint8_t aOp)
+                    {
+                        if (aOp <= 0x05u || (aOp >= 0x0Bu && aOp <= 0x0Du) || aOp == 0x0Fu || aOp == 0x10u || aOp == 0x11u || aOp == 0x1Au || aOp == 0x1Bu)
+                            return true;
+                        return (aOp >= 0x20u && aOp <= 0x24u) || (aOp >= 0x28u && aOp <= 0x3Eu) || (aOp >= 0x41u && aOp <= 0xC1u);
+                    }
+
                     // (the optimizing tier's helpers, that generated code calls: a function's counter has reached 0 (its optimized 
                     // code's address, or null to go on with its code); a guard of an optimized function's inlined call failed)
                     void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept;
-                    void tier_loop(context* aContext, std::uint32_t aFunction) noexcept;
+                    // (a function's loop counter has reached 0; aLoop: a loop (its token) that the call can continue in optimized code from
+                    // (else NoOsrLoop): that code's address (see code_generator::loop_counter), or null to go on with its code)
+                    constexpr std::size_t MaxOsrLocals = 64u;       ///< (a function's parameters and locals: the most that a loop's optimized code takes)
+                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop) noexcept;
+                    // (a function compiled when it is first called (see compiled_module::lazy): its code's address (null if it cannot be
+                    // compiled: the module's exception))
+                    void const* lazy_compile(context* aContext, std::uint32_t aFunction) noexcept;
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept;
                     void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept;
 
@@ -1446,6 +1549,7 @@ namespace neos
                             };
                             std::optional<condition_target> condition;
                             std::size_t bodyBegin = 0u;         ///< (a block: the position of its body)
+                            std::size_t position = 0u;          ///< (a block's or a loop's token)
                             // (a block whose body starts with a block that ends with a branch out of this one (br 1): what follows that 
                             // block is only reached by branches to its end (e.g. a slow path): its code is cold)
                             bool coldTail = false;
@@ -1457,16 +1561,20 @@ namespace neos
                             std::optional<std::size_t> bodyLabel;
                         };
                     public:
-                        code_generator(module_description const& aModule) :
-                            iModule{ aModule }, iTokens{ *aModule.tokens }, iSse41{ has_sse41() }
+                        // (aSingle: the code of one function (see generate_function and generate_lazy): no labels for the others)
+                        code_generator(module_description const& aModule, bool aSingle = false) :
+                            iModule{ aModule }, iTokens{ *aModule.tokens }, iSse41{ has_sse41() }, iSingle{ aSingle }
                         {
                             for (std::size_t i = 0u; i < TrapCount; ++i)
                                 iTrapLabels[i] = a.new_label();
                             iTrapFromContext = a.new_label();
                             iExit = a.new_label();
                             iTrampolineReturn = a.new_label();
-                            for (std::size_t f = 0u; f < aModule.functions.size(); ++f)
-                                iFunctionLabels.push_back(a.new_label());
+                            if (aSingle)
+                                iSingleLabel = a.new_label();
+                            else
+                                for (std::size_t f = 0u; f < aModule.functions.size(); ++f)
+                                    iFunctionLabels.push_back(a.new_label());
                         }
                     public:
                         void generate(compiled_module& aOutput)
@@ -1476,10 +1584,12 @@ namespace neos
                             {
                                 iCounters = aOutput.counters.data();
                                 iLoopCounters = aOutput.loopCounters.data();
+                                iOsr = aOutput.osr;
                                 aOutput.deoptFrames.resize(iModule.functions.size());
                                 iDeoptFrames = &aOutput.deoptFrames;
                                 iCallFlags = &aOutput.callFlags;
                             }
+                            aOutput.primaryMemory = iPrimaryMemory = primary_memory();
                             trampoline();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 if (!iModule.functions[f].imported)
@@ -1510,6 +1620,7 @@ namespace neos
                         {
                             iIndirect = aModule.indirect.data();
                             iTier = &aModule;
+                            iPrimaryMemory = aModule.primaryMemory;
                             iOrigins = &aOrigins;
                             iTierVersion = aVersion;
                             function(aFunction);
@@ -1535,10 +1646,161 @@ namespace neos
                             std::sort(aCallSites.begin(), aCallSites.end());
                             iCode = std::move(a.code);
                         }
-                        std::size_t function_offset(std::uint32_t aFunction) const { return a.label_offset(iFunctionLabels[aFunction]); }
+                        // (the module's code when its functions are compiled when they are first called (see compiled_module::lazy):
+                        // the trampoline, each function's entry, and lazy_compile's thunk (the entries' first jump))
+                        void generate_entries(compiled_module& aOutput)
+                        {
+                            iIndirect = aOutput.indirect.data();
+                            if (aOutput.tiering)
+                                aOutput.deoptFrames.resize(iModule.functions.size());
+                            aOutput.primaryMemory = iPrimaryMemory = primary_memory();
+                            trampoline();
+                            a.barrier();
+                            // (lazy_compile(context, the function (r11d)): its code's address (null: it could not be compiled (an exception)),
+                            // which the entry then jumps to; at an entry, the caller's registers that native code does not preserve are saved
+                            // by it, except its xmms (on System V: see tier_entry))
+                            a.align(FunctionAlignment);
+                            auto const thunk = a.new_label();
+                            a.bind(thunk);
+                            a.push(RBP);
+                            a.mov_rr(true, RBP, RSP);
+                            a.sub_rsp_imm32(Windows ? ShadowSpace : ShadowSpace + 128);
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movdqu_store(RSP, ShadowSpace + (x - 8) * 16, x);
+                            a.mov_rr(true, NativeIntegerArguments[0], R15);
+                            a.mov_rr(false, NativeIntegerArguments[1], R11);
+                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&lazy_compile), true);
+                            a.call_r(RAX);
+                            if (!Windows)
+                                for (int x = 8; x < 16; ++x)
+                                    a.movdqu_load(x, RSP, ShadowSpace + (x - 8) * 16);
+                            a.mov_rr(true, RSP, RBP);
+                            a.pop(RBP);
+                            a.test_rr(true, RAX, RAX);
+                            a.jcc(E, iTrapLabels[TrapHostException]);
+                            a.jmp_r(RAX);
+                            a.barrier();
+                            auto const thunkOffset = a.label_offset(thunk);
+                            // (each entry: mov r11d, its index; jmp the thunk (then, once it is compiled: jmp [rip+2]; its code's address))
+                            for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
+                            {
+                                if (iModule.functions[f].imported)
+                                    continue;
+                                a.align(16u);
+                                a.barrier();
+                                a.bind(iFunctionLabels[f]);
+                                auto const start = a.offset();
+                                a.emit8(0x41u);
+                                a.emit8(0xBBu);
+                                a.emit32(f);
+                                a.emit8(0xE9u);
+                                a.emit32(static_cast<std::uint32_t>(static_cast<std::int64_t>(thunkOffset) - static_cast<std::int64_t>(start + 11u)));
+                                for (int i = 0; i < 5; ++i)
+                                    a.emit8(0xCCu);
+                                a.barrier();
+                            }
+                            trap_stubs();
+                            a.emit_constants();
+                            a.resolve();
+                            for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
+                                aOutput.functionOffsets.push_back(iModule.functions[f].imported ? 0u : a.label_offset(iFunctionLabels[f]));
+                            aOutput.trampolineReturn = a.label_offset(iTrampolineReturn);
+                            aOutput.exitOffset = a.label_offset(iExit);
+                            iCode = std::move(a.code);
+                        }
+                        // (a function compiled when it is first called (see compiled_module::lazy): as generate's (its calls through the 
+                        // indirect table, its traps leaving through the module's exit); its call sites, deopt points (their offsets in its
+                        // code) and frame)
+                        struct lazy_function
+                        {
+                            std::size_t entry = 0u;
+                            std::vector<std::pair<std::size_t, std::size_t>> callSites;
+                            std::vector<std::pair<std::size_t, compiled_module::deopt_point>> deoptPoints;
+                            compiled_module::deopt_frame frame;
+                        };
+                        void generate_lazy(compiled_module& aModule, std::uint32_t aFunction, lazy_function& aOutput)
+                        {
+                            iIndirect = aModule.indirect.data();
+                            iLazy = true;
+                            if (aModule.tiering)
+                            {
+                                iCounters = aModule.counters.data();
+                                iLoopCounters = aModule.loopCounters.data();
+                                iOsr = aModule.osr;
+                                iCallFlags = &aModule.callFlags;
+                                iLazyFrame = &aOutput.frame;
+                            }
+                            iPrimaryMemory = aModule.primaryMemory;
+                            function(aFunction);
+                            auto const exit = reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(aModule.code) + aModule.exitOffset);
+                            for (std::uint32_t t = 1u; t < TrapCount; ++t)
+                            {
+                                a.bind(iTrapLabels[t]);
+                                a.store_imm(false, R15, ContextTrap, static_cast<std::int32_t>(t));
+                                a.mov_ri(RAX, t, false);
+                                a.mov_ri(RCX, exit, true);
+                                a.jmp_r(RCX);
+                            }
+                            a.bind(iTrapFromContext);
+                            a.load(false, RAX, R15, ContextTrap);
+                            a.mov_ri(RCX, exit, true);
+                            a.jmp_r(RCX);
+                            a.bind(iExit);
+                            a.bind(iTrampolineReturn);
+                            a.emit_constants();
+                            a.resolve();
+                            aOutput.entry = a.label_offset(iSingleLabel);
+                            for (auto const& site : iCallSites)
+                                aOutput.callSites.emplace_back(a.label_offset(site.first), site.second);
+                            std::sort(aOutput.callSites.begin(), aOutput.callSites.end());
+                            for (auto& d : iDeoptPoints)
+                            {
+                                d.point.resume = a.label_offset(d.label);
+                                if (d.returnLabel)
+                                    d.point.returned = a.label_offset(*d.returnLabel);
+                                aOutput.deoptPoints.emplace_back(d.position, std::move(d.point));
+                            }
+                            iCode = std::move(a.code);
+                        }
+                        std::size_t function_offset(std::uint32_t aFunction) const { return a.label_offset(function_label(aFunction)); }
                         bytes& code() { return iCode; }
                     private:
+                        std::size_t function_label(std::uint32_t aFunction) const
+                        {
+                            if (iSingle)
+                            {
+                                if (aFunction != iFunctionIndex)
+                                    throw std::logic_error("neos::jit: another function's label");
+                                return iSingleLabel;
+                            }
+                            return iFunctionLabels[aFunction];
+                        }
                         // --- module level code
+                        // (the fixed external memory that all of the module's code accesses (if it accesses one, and only one): see 
+                        // compiled_module::primaryMemory)
+                        std::uint32_t primary_memory() const
+                        {
+                            std::uint32_t primary = 0u;
+                            for (auto const& f : iModule.functions)
+                            {
+                                if (f.imported)
+                                    continue;
+                                for (std::size_t p = f.codeBegin; p < f.codeEnd;)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    if (op >= 0x28u && op <= 0x3Eu)
+                                        if (auto const memory = static_cast<std::uint32_t>(iTokens[p + 1u] >> 32u); memory != 0u)
+                                        {
+                                            if (memory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(memory).fixed || (primary != 0u && memory != primary))
+                                                return 0u;
+                                            primary = memory;
+                                        }
+                                    p += 1u + immediate_count(op, iTokens, p);
+                                }
+                            }
+                            return primary;
+                        }
                         void trampoline()
                         {
                             // std::uint32_t trampoline(context* ctx, void const* function): callee saved registers are saved,
@@ -1558,6 +1820,8 @@ namespace neos
                                 a.sub_rsp_imm32(8);
                             a.mov_rr(true, R15, NativeIntegerArguments[0]);
                             a.mov_rr(true, RAX, NativeIntegerArguments[1]);
+                            if (iPrimaryMemory != 0u)
+                                a.mov_ri(MemoryBaseRegister, reinterpret_cast<std::uint64_t>(external_memory(iPrimaryMemory).base), true);
                             a.store(true, R15, ContextSavedStackPointer, RSP);
                             a.load(false, RCX, R15, ContextArgumentCount);
                             a.load(true, RDX, R15, ContextArguments);
@@ -2418,14 +2682,19 @@ namespace neos
                             a.end_cold();
                         }
                         // (the optimizing tier: a loop's head (of a function with a frame of its own, in its own code): the function's loop
-                        // counter is decremented; at 0, tier_loop (the function is optimized: its later calls run its optimized code, while
-                        // this one continues here). At a loop's head, the operand stack is in memory (see flush): RAX is free; every
-                        // register that native code does not preserve is saved around the call)
-                        void loop_counter()
+                        // counter is decremented; at 0, tier_loop (the function is optimized: its later calls run its optimized code). At a 
+                        // loop's head, the operand stack is in memory (see flush): RAX is free; every register that native code does not
+                        // preserve is saved around the call. A loop that the call can continue in optimized code from (see osr_loop): if
+                        // tier_loop returns that code's address, its locals are its arguments (as a call's), and its results the function's
+                        // (aRotated: a rotated loop's (its counter is at its body, after its head))
+                        void loop_counter(std::size_t aLoop, control const* aRotated)
                         {
                             if (iLoopCounters == nullptr || iTier != nullptr || iFunction->frameless)
                                 return;
                             iTeeCache.reset();
+                            bool const osr = osr_loop(aRotated);
+                            if (osr)
+                                iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(iLocals.size()));
                             a.barrier();
                             auto const cold = a.new_label();
                             auto const resume = a.new_label();
@@ -2442,6 +2711,16 @@ namespace neos
                                 constexpr std::int32_t GprsAt = ShadowSpace;
                                 constexpr std::int32_t XmmsAt = GprsAt + 8 * static_cast<std::int32_t>(std::size(Saved));
                                 constexpr std::int32_t Size = (XmmsAt + 16 * 16 + 15) & ~15;   // (rsp stays aligned)
+                                constexpr std::int32_t R11At = GprsAt + 8 * 8;
+                                static_assert(Saved[8] == R11);
+                                auto const restore = [&]()
+                                {
+                                    for (int x = 0; x < 16; ++x)
+                                        a.movdqu_load(x, RSP, XmmsAt + 16 * x);
+                                    for (std::size_t i = 0u; i < std::size(Saved); ++i)
+                                        a.load(true, Saved[i], RSP, GprsAt + 8 * static_cast<std::int32_t>(i));
+                                    a.lea(RSP, RSP, Size);
+                                };
                                 a.sub_rsp_imm32(Size);
                                 for (std::size_t i = 0u; i < std::size(Saved); ++i)
                                     a.store(true, RSP, GprsAt + 8 * static_cast<std::int32_t>(i), Saved[i]);
@@ -2449,14 +2728,66 @@ namespace neos
                                     a.movdqu_store(RSP, XmmsAt + 16 * x, x);
                                 a.mov_rr(true, NativeIntegerArguments[0], R15);
                                 a.mov_ri(NativeIntegerArguments[1], iFunctionIndex, false);
+                                a.mov_ri(NativeIntegerArguments[2], osr ? aLoop : NoOsrLoop, true);
                                 a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&tier_loop), true);
                                 a.call_r(RAX);
-                                for (int x = 0; x < 16; ++x)
-                                    a.movdqu_load(x, RSP, XmmsAt + 16 * x);
-                                for (std::size_t i = 0u; i < std::size(Saved); ++i)
-                                    a.load(true, Saved[i], RSP, GprsAt + 8 * static_cast<std::int32_t>(i));
-                                a.lea(RSP, RSP, Size);
+                                if (osr)
+                                {
+                                    auto const stay = a.new_label();
+                                    a.test_rr(true, RAX, RAX);
+                                    a.jcc(E, stay);
+                                    // (the call continues in optimized code: its locals (their values here) are that code's arguments; its
+                                    // results are this call's)
+                                    a.store(true, RSP, R11At, RAX);
+                                    restore();
+                                    for (std::size_t i = 0u; i < iLocals.size(); ++i)
+                                    {
+                                        auto const& l = iLocals[i];
+                                        auto const disp = 8 * static_cast<std::int32_t>(i);
+                                        if (l.pinned)
+                                        {
+                                            if (is_float(l.type))
+                                                a.movf_store(true, RSP, disp, l.reg);
+                                            else
+                                                a.store(true, RSP, disp, l.reg);
+                                        }
+                                        else
+                                        {
+                                            a.load(true, RAX, RBP, l.disp);
+                                            a.store(true, RSP, disp, RAX);
+                                        }
+                                    }
+                                    a.call_r(R11);
+                                    // (where it returns to: a frame making a call (see walk), at the loop)
+                                    iCallSites.emplace_back(a.new_label(), origin(aLoop));
+                                    a.bind(iCallSites.back().first);
+                                    a.jmp(iEpilogue);
+                                    a.bind(stay);
+                                }
+                                restore();
                             });
+                        }
+                        // (whether a call can continue in optimized code from a loop of its function's (see tier_loop): one whose head is
+                        // at the operand stack's base, within no other loop (nor a block whose result is a condition); a rotated loop's head
+                        // (its code before its counter) only reads (the optimized code runs it again))
+                        bool osr_loop(control const* aRotated) const
+                        {
+                            if (!iStack.empty() || iLocals.size() > MaxOsrLocals || !iOsr)
+                                return false;
+                            for (auto const& c : iControl)
+                                if (&c != aRotated && (c.kind == control::Loop || c.condition))
+                                    return false;
+                            if (aRotated != nullptr)
+                                for (std::size_t p = aRotated->headBegin; p < aRotated->headEnd;)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    bool const reads = op == 0x20u || op == 0x23u || op == 0x1Au || op == 0x1Bu || (op >= 0x28u && op <= 0x35u) ||
+                                        (op >= 0x41u && op <= 0xC4u);
+                                    if (!reads)
+                                        return false;
+                                    p += 1u + immediate_count(op, iTokens, p);
+                                }
+                            return true;
                         }
                         void function(std::uint32_t aIndex)
                         {
@@ -2485,8 +2816,14 @@ namespace neos
                                     }
                                 p += 1u + immediate_count(op, iTokens, p);
                             }
+                            if (iPrimaryMemory != 0u)
+                            {
+                                // (the module's: in r14 throughout its code (neither saved nor set here; r14 holds nothing else))
+                                iMemoryBase = MemoryBaseRegister;
+                                iMemoryBaseIndex = iPrimaryMemory;
+                            }
                             choose_pinned_locals(f.codeBegin, f.codeEnd);
-                            if (iMemoryBase >= 0)
+                            if (iMemoryBase >= 0 && iPrimaryMemory == 0u)
                                 iUsedPinnedGprs.push_back(iMemoryBase);
                             // (a parameter's home is its argument's slot (the caller's outgoing arguments, which are the callee's): it is not
                             // copied)
@@ -2497,7 +2834,7 @@ namespace neos
                             iSlotsBase = locals_base() - 8 * frameLocals;
                             // prologue (aligned, so that the speed of its code (e.g. its loops' jumps) does not depend on the code before it)
                             a.align(FunctionAlignment);
-                            a.bind(iFunctionLabels[aIndex]);
+                            a.bind(function_label(aIndex));
                             // (a function that the optimizing tier inlines (it has no frame of its own: a language's helper) is not optimized
                             // itself: its callers are)
                             if (iCounters != nullptr && !iModule.functions[aIndex].frameless)
@@ -2511,7 +2848,7 @@ namespace neos
                             a.barrier(); // (it is patched: it does not move)
                             a.alu_rm(7, true, RSP, R15, ContextStackLimit);
                             a.jcc(B, iTrapLabels[TrapStackExhausted]);
-                            if (iMemoryBase >= 0)
+                            if (iMemoryBase >= 0 && iPrimaryMemory == 0u)
                                 a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
                             for (std::size_t i = 0u; i < iUsedPinnedXmms.size(); ++i)
                                 a.movf_store(true, RBP, xmm_save_disp(i), iUsedPinnedXmms[i]);
@@ -2565,9 +2902,9 @@ namespace neos
                             std::int32_t const raw = -iSlotsBase - pushed_bytes() + 8 * static_cast<std::int32_t>(iMaxDepth) + std::max(iOutgoing, ShadowSpace);
                             std::int32_t const total = (pushed_bytes() + raw + 15) & ~15;
                             a.patch32(frameSizePatch, static_cast<std::uint32_t>(total - pushed_bytes()));
-                            if (iDeoptFrames != nullptr)
+                            if (iDeoptFrames != nullptr || iLazyFrame != nullptr)
                             {
-                                auto& d = (*iDeoptFrames)[aIndex];
+                                auto& d = iDeoptFrames != nullptr ? (*iDeoptFrames)[aIndex] : *iLazyFrame;
                                 d.valid = true;
                                 for (auto r : iUsedPinnedGprs)
                                     d.pushed.push_back(static_cast<std::int8_t>(r));
@@ -3637,9 +3974,10 @@ namespace neos
                                 // the call (as the pinned registers that native code does not preserve are))
                                 save_pinned_xmms();
                                 save_pinned_gprs();
-                                if (iTier != nullptr)
+                                if (iTier != nullptr || iLazy)
                                 {
-                                    // (the optimizing tier: through the indirect table (the function's optimized code, if it has it))
+                                    // (the optimizing tier, or a function compiled when it is first called: through the indirect table (the
+                                    // function's optimized code, if it has it))
                                     a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&static_cast<compiled_module::indirect_entry const*>(iIndirect)[aFunction].target), true);
                                     a.op_rm({ 0xFFu }, false, 2, R11, 0);   // call [r11]
                                 }
@@ -4614,6 +4952,7 @@ namespace neos
                                     c.base = iStack.size();
                                     c.label = a.new_label();
                                     c.bodyBegin = aPosition + 2u;
+                                    c.position = aPosition;
                                     if (aOp == 0x02 && c.result == I32 && iStack.empty())
                                         c.condition = condition_block(aPosition + 2u);
                                     if (aOp == 0x03)
@@ -4624,7 +4963,7 @@ namespace neos
                                             a.align_executable(LoopAlignment);   // (its head is where a branch back goes)
                                         a.bind(c.label);
                                         if (c.headEnd == 0u)
-                                            loop_counter();
+                                            loop_counter(aPosition, nullptr);
                                     }
                                     iControl.push_back(c);
                                 }
@@ -4734,7 +5073,7 @@ namespace neos
                                     c.bodyLabel = a.new_label();
                                     a.align_executable(LoopAlignment);   // (a rotated loop's body is where a branch back goes)
                                     a.bind(*c.bodyLabel);
-                                    loop_counter();
+                                    loop_counter(c.position, &c);
                                 }
                                 break;
                             case 0x0F:
@@ -5041,6 +5380,11 @@ namespace neos
                             compiled_module::deopt_point point;
                         };
                         std::vector<compiled_module::deopt_frame>* iDeoptFrames = nullptr;
+                        compiled_module::deopt_frame* iLazyFrame = nullptr;     ///< (see generate_lazy)
+                        bool const iSingle = false;
+                        std::size_t iSingleLabel = 0u;
+                        bool iLazy = false;
+                        bool iOsr = false;      ///< (loops that a call can continue in optimized code from: see loop_counter)
                         std::vector<pending_deopt_point> iDeoptPoints;
                         std::deque<std::uint32_t>* iCallFlags = nullptr;   ///< (see compiled_module::callFlags)
                         std::uint32_t iFunctionIndex = 0u;
@@ -5054,6 +5398,7 @@ namespace neos
                         std::vector<int> iUsedPinnedXmms;
                         int iMemoryBase = -1;                           ///< (the register that holds a fixed external memory's address (else -1)...)
                         std::uint32_t iMemoryBaseIndex = 0u;            ///< (... that memory's index)
+                        std::uint32_t iPrimaryMemory = 0u;              ///< (see compiled_module::primaryMemory)
                         int iGprOwner[16] = {};
                         int iXmmOwner[16] = {};
                         std::vector<std::pair<bool, int>> iTemps;
@@ -5127,6 +5472,7 @@ namespace neos
                             iEpilogue = a.new_label();
                         }
                     public:
+                        static constexpr std::int32_t LeafFrameLimit = 16384;   ///< (see emit_function)
                         void generate(std::vector<std::pair<std::size_t, std::size_t>>& aCallSites)
                         {
                             if (f.values.size() > MaxValues)
@@ -5210,6 +5556,13 @@ namespace neos
                         }
                         void choose_memory_base()
                         {
+                            // (the module's (see compiled_module::primaryMemory): in r14 throughout its code)
+                            if (iTier.primaryMemory != 0u)
+                            {
+                                iMemoryBase = MemoryBaseRegister;
+                                iMemoryBaseIndex = iTier.primaryMemory;
+                                return;
+                            }
                             // (the first fixed external memory that it accesses: its address in r14)
                             for (auto const& i : f.values)
                                 if (!i.dead && (i.load() || i.store()))
@@ -5557,6 +5910,14 @@ namespace neos
                                     }
                                 }
                             }
+                            // (each value that only a phi uses: the phi (see the hints below))
+                            std::vector<value> phiUser(f.values.size(), ssa::None);
+                            for (auto b : f.order)
+                                for (auto v : f.blocks[b].code)
+                                    if (auto const& x = f.values[v]; x.op == ssa::Phi && !x.dead)
+                                        for (auto o : x.operands)
+                                            if (o != ssa::None && o < phiUser.size() && f.uses[o] == 1u)
+                                                phiUser[o] = v;
                             std::vector<interval*> active;
                             std::vector<bool> gprFree(16, false), xmmFree(16, false);
                             for (auto r : CallerSavedGprs)
@@ -5603,6 +5964,24 @@ namespace neos
                                         if (free[aRegs[r]])
                                             reg = aRegs[r];
                                 };
+                                // (a phi: the register of one of its operands (no move on that edge), if it is free; a value that only a phi
+                                // uses (allocated: e.g. a loop's, for its back edge): the phi's (of the class that it would choose))
+                                {
+                                    auto const hinted = [&](value aOther)
+                                    {
+                                        if (reg >= 0 || aOther == ssa::None || aOther >= iLocations.size())
+                                            return;
+                                        auto const& l = iLocations[aOther];
+                                        if (l.kind == location::Register && is_float_type(f.values[aOther].type) == i->xmm && free[l.reg] &&
+                                            (!i->crossesHotCall || calleeSaved(i->xmm, l.reg)))
+                                            reg = l.reg;
+                                    };
+                                    auto const& x = f.values[i->v];
+                                    if (x.op == ssa::Phi)
+                                        for (auto o : x.operands)
+                                            hinted(o);
+                                    hinted(phiUser[i->v]);
+                                }
                                 // (an interval across calls: a callee saved register, else a caller saved one (saved around the calls (see
                                 // saves_at_calls)), else the frame)
                                 if (i->xmm)
@@ -5764,7 +6143,7 @@ namespace neos
                         {
                             iPushed.clear();
                             for (auto r : CalleeSavedGprs)
-                                if (iUsedCalleeGprs[r] || r == iMemoryBase)
+                                if ((iUsedCalleeGprs[r] || r == iMemoryBase) && !(r == iMemoryBase && iTier.primaryMemory != 0u))
                                     iPushed.push_back(r);
                             std::int32_t offset = 8 * static_cast<std::int32_t>(iPushed.size());
                             for (int x = 8; x < 16; ++x)
@@ -5952,16 +6331,37 @@ namespace neos
                             a.sub_rsp_imm32(0);
                             auto const frameSizePatch = a.offset() - 4u;
                             a.barrier();
-                            a.alu_rm(7, true, RSP, R15, ContextStackLimit);
-                            a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            // (a function that makes no calls (a leaf, with a frame within the stack's headroom (see stack_limit)): the stack
+                            // is not checked (its callers' frames were))
+                            // (one whose calls are all in cold code (e.g. a cache's miss): checked before each of them instead)
+                            iCallStackChecks = !iCalls.empty() && iHotCalls.empty() && iFrameBelowPushed <= LeafFrameLimit;
+                            if ((!iCalls.empty() || iFrameBelowPushed > LeafFrameLimit) && !iCallStackChecks)
+                            {
+                                a.alu_rm(7, true, RSP, R15, ContextStackLimit);
+                                a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            }
                             if (iVersion != nullptr && std::any_of(iVersion->deopts.begin(), iVersion->deopts.end(), [](auto const& d) { return !d.guard; }))
                             {
                                 // (its calls are counted: a deopt that it seldom takes (as a share of its calls) does not make it optimized
                                 // again (see deopt_taken))
-                                a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&iVersion->calls), true);
-                                a.alu_mi(0, true, R11, 0, 1);
+                                auto const counter = reinterpret_cast<std::uint64_t>(&iVersion->calls);
+                                if (counter < 0x80000000u)
+                                {
+                                    // (add qword [counter], 1: an absolute address (one instruction))
+                                    a.emit8(0x48u);
+                                    a.emit8(0x83u);
+                                    a.emit8(0x04u);
+                                    a.emit8(0x25u);
+                                    a.emit32(static_cast<std::uint32_t>(counter));
+                                    a.emit8(0x01u);
+                                }
+                                else
+                                {
+                                    a.mov_ri(R11, counter, true);
+                                    a.alu_mi(0, true, R11, 0, 1);
+                                }
                             }
-                            if (iMemoryBase >= 0)
+                            if (iMemoryBase >= 0 && iTier.primaryMemory == 0u)
                                 a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
                             for (int x = 8; x < 16; ++x)
                                 if (iUsedCalleeXmms[x])
@@ -6036,6 +6436,22 @@ namespace neos
                                     result.push_back(b);
                             return result;
                         }
+                        // (a call (at aOrigin: see ssa::instruction::origin) that the function's own code (the baseline's, whose frames it has)
+                        // has never made (see compiled_module::callFlags): likely not to be made)
+                        bool never_made(std::size_t aOrigin) const
+                        {
+                            auto position = aOrigin;
+                            if ((aOrigin & optimizer::InlineChainToken) != 0u && (aOrigin >> 32u) == 0u)
+                            {
+                                auto const index = aOrigin & ~optimizer::InlineChainToken;
+                                std::lock_guard<std::mutex> lock{ iTier.chainsMutex };
+                                if (index >= iTier.inlineChains.size() || iTier.inlineChains[index].empty())
+                                    return false;
+                                position = iTier.inlineChains[index].front();
+                            }
+                            auto const* const point = deopt_point_at(iTier, position);
+                            return point != nullptr && point->made != nullptr && *point->made == 0u;
+                        }
                         // (the blocks that are not likely to run (see emission_order))
                         std::vector<bool> cold_blocks() const
                         {
@@ -6050,7 +6466,8 @@ namespace neos
                                     if (i.dead)
                                         continue;
                                     if (i.op == ssa::Deopt || i.op == ssa::Trap ||
-                                        (i.op == 0x10u && i.imm0 < iModule.functions.size() && iModule.functions[static_cast<std::size_t>(i.imm0)].imported))
+                                        (i.op == 0x10u && i.imm0 < iModule.functions.size() && iModule.functions[static_cast<std::size_t>(i.imm0)].imported) ||
+                                        ((i.op == 0x10u || i.op == 0x11u) && never_made(i.origin)))
                                     {
                                         cold[b] = true;
                                         break;
@@ -6146,8 +6563,12 @@ namespace neos
                         {
                             auto const& i = f.values[v];
                             auto const& d = iVersion->deopts.at(static_cast<std::size_t>(i.imm0));
-                            auto const& point = iTier.deoptPoints.at(d.call);
-                            auto const& frame = iTier.deoptFrames.at(point.function);
+                            auto const* const pointFound = deopt_point_at(iTier, d.call);
+                            auto const* const frameFound = pointFound != nullptr ? deopt_frame_of(iTier, pointFound->function) : nullptr;
+                            if (frameFound == nullptr)
+                                throw unsupported{ "deopt point" };
+                            auto const& point = *pointFound;
+                            auto const& frame = *frameFound;
                             a.load(true, R11, R15, ContextDeoptBuffer);
                             for (std::size_t o = 0u; o < i.operands.size(); ++o)
                             {
@@ -6269,7 +6690,7 @@ namespace neos
                                 a.load(true, RAX, RCX, disp);
                                 a.store(true, RSP, 8 * static_cast<std::int32_t>(arg), RAX);
                             }
-                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + point.resume), true);
+                            a.mov_ri(RAX, deopt_address(iTier, point, point.resume), true);
                             a.jmp_r(RAX);
                         }
                         // (the frames of a deopt that leaves for inlined calls' frames (see optimizer::deopt::frames), made (after this frame
@@ -6322,12 +6743,16 @@ namespace neos
                             compiled_module::deopt_point const* previous = nullptr;
                             for (auto const& d : aDeopt.frames)
                             {
-                                auto const& point = iTier.deoptPoints.at(d.position);
-                                auto const& frame = iTier.deoptFrames.at(d.function);
+                                auto const* const pointFound = deopt_point_at(iTier, d.position);
+                                auto const* const frameFound = deopt_frame_of(iTier, d.function);
+                                if (pointFound == nullptr || frameFound == nullptr)
+                                    throw unsupported{ "deopt point" };
+                                auto const& point = *pointFound;
+                                auto const& frame = *frameFound;
                                 if (previous != nullptr)
                                 {
                                     // (the previous frame's call: it returns there)
-                                    a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + previous->returned), true);
+                                    a.mov_ri(RAX, deopt_address(iTier, *previous, previous->returned), true);
                                     a.push(RAX);
                                 }
                                 a.push(RBP);
@@ -6406,7 +6831,7 @@ namespace neos
                                     else
                                         a.mov_ri(r, gprs[r].bits, true);
                                 }
-                            a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t const*>(iTier.code) + previous->resume), true);
+                            a.mov_ri(RAX, deopt_address(iTier, *previous, previous->resume), true);
                             a.jmp_r(RAX);
                         }
                         // (the moves of the phis of the successor (of the block that ends with a jump to it): a parallel move)
@@ -6465,6 +6890,18 @@ namespace neos
                                         defined(d, reg);
                                         return;
                                     }
+                                // (to a slot: from the source's register, or a constant that fits an immediate (not through a scratch register))
+                                if (where(d).kind == location::Slot && in_register(s))
+                                {
+                                    defined(d, where(s).reg);
+                                    return;
+                                }
+                                if (!x && where(d).kind == location::Slot && constant(s) && (is_wide_type(f.values[s].type) ?
+                                    fits_i32(static_cast<std::int64_t>(bits(s))) : bits(s) < 0x80000000u))   // (an i32's: zero extended, as a register's)
+                                {
+                                    a.store_imm(true, RBP, where(d).disp, static_cast<std::int32_t>(bits(s)));
+                                    return;
+                                }
                                 if (x)
                                 {
                                     auto const r = target(d, 1);
@@ -6713,6 +7150,11 @@ namespace neos
                         }
                         void instruction(value v)
                         {
+                            if (iCallStackChecks && is_call(f.values[v]) && !f.values[v].dead)
+                            {
+                                a.alu_rm(7, true, RSP, R15, ContextStackLimit);
+                                a.jcc(B, iTrapLabels[TrapStackExhausted]);
+                            }
                             if (!iSavesAtCalls.empty() && is_call(f.values[v]) && !f.values[v].dead)
                             {
                                 save_at_call(v);
@@ -7609,6 +8051,8 @@ namespace neos
                                 auto const r = target(v, RAX);
                                 if (in_register(x))
                                     a.mov_rr(false, r, where(x).reg);
+                                else if (!constant(x) && where(x).kind == location::Slot)
+                                    a.load(false, r, RBP, where(x).disp);   // (its low 32 bits: a 32 bit load zero extends)
                                 else
                                 {
                                     gpr_into(x, r);
@@ -7723,7 +8167,18 @@ namespace neos
                                     return;
                                 }
                                 if (in_register(y) && where(y).reg == r && !(in_register(i.operands[0]) && where(i.operands[0]).reg == r))
+                                {
+                                    if (k == 7u || k == 9u)
+                                    {
+                                        // (add, mul: commutative (a NaN's payload is either operand's, as wasm allows): into the register that
+                                        // the second operand is in)
+                                        auto const xx = xmm(i.operands[0], 1);
+                                        a.sse_rr(prefix, sOps[k - 7u], false, r, xx);
+                                        defined(v, r);
+                                        return;
+                                    }
                                     r = 0;
+                                }
                                 xmm_into(i.operands[0], r);
                                 auto const yx = xmm(y, 1);
                                 a.sse_rr(prefix, sOps[k - 7u], false, r, yx);
@@ -7840,8 +8295,13 @@ namespace neos
                                     int source = g;
                                     if (!wideSource && !isSigned)
                                     {
-                                        a.mov_rr(false, RAX, g);
-                                        source = RAX;
+                                        // (an unsigned i32: zero extended (a 32-bit load's register is), then converted as an i64)
+                                        auto const producer = f.values[x].op;
+                                        if (!(producer == 0x28u || producer == 0x2Du || producer == 0x2Fu) || constant(x))
+                                        {
+                                            a.mov_rr(false, RAX, g);
+                                            source = RAX;
+                                        }
                                         w = true;
                                     }
                                     auto const r = target(v, 0);
@@ -7957,6 +8417,7 @@ namespace neos
                         std::vector<bool> iHome;                                ///< (values that deopts read (from their homes))
                         std::vector<bool> iDeoptAtLocation;                     ///< (deopts that read their values where they are (see liveness))
                         std::unordered_map<value, std::int32_t> iHomeSlots;     ///< (values in registers: their homes)
+                        bool iCallStackChecks = false;  ///< (the stack is checked before each call, not in the prologue (see emit_function))
                         value iForceFused = ssa::None;
                         std::vector<std::pair<std::size_t, std::size_t>> iCallSites;
                         std::unordered_map<std::uint32_t, std::uint32_t> iLiveXmmsAtCalls;
@@ -8120,14 +8581,14 @@ namespace neos
 
                     // (a frame (of a function: its code's) that optimized code can leave for at a call (see optimizer::deopt::frames): one
                     // that the baseline made (where it is left for at the call, and where the call returns to); the baseline's frames and 
-                    // deopt points do not change once the module's code is made)
+                    // deopt points do not change once its code is made)
                     bool deopt_frame_valid(compiled_module const& m, std::uint32_t aFunction, std::size_t aPosition, std::uint32_t aArguments, std::uint32_t aDepth,
                         std::uint32_t aLocals)
                     {
-                        auto const point = m.deoptPoints.find(aPosition);
-                        return point != m.deoptPoints.end() && point->second.function == aFunction && point->second.arguments == aArguments &&
-                            point->second.stack.size() == aDepth && point->second.returned != 0u && aFunction < m.deoptFrames.size() &&
-                            m.deoptFrames[aFunction].valid && m.deoptFrames[aFunction].locals.size() == aLocals;
+                        auto const* const point = deopt_point_at(m, aPosition);
+                        auto const* const frame = deopt_frame_of(m, aFunction);
+                        return point != nullptr && point->function == aFunction && point->arguments == aArguments &&
+                            point->stack.size() == aDepth && point->returned != 0u && frame != nullptr && frame->locals.size() == aLocals;
                     }
 
                     // (whether an optimizer's result's deopts can leave for the baseline's frames)
@@ -8148,9 +8609,10 @@ namespace neos
                                     return false;
                                 continue;
                             }
-                            auto const point = m.deoptPoints.find(x.call);
-                            if (point == m.deoptPoints.end() || point->second.function != f || point->second.arguments != x.arguments ||
-                                point->second.stack.size() != x.depth || m.deoptFrames[f].locals.size() != x.locals ||
+                            auto const* const point = deopt_point_at(m, x.call);
+                            auto const* const frame = deopt_frame_of(m, f);
+                            if (point == nullptr || frame == nullptr || point->function != f || point->arguments != x.arguments ||
+                                point->stack.size() != x.depth || frame->locals.size() != x.locals ||
                                 std::size_t{ x.locals } + x.depth + x.arguments > MaxDeoptValues)
                                 return false;
                         }
@@ -8173,7 +8635,7 @@ namespace neos
                         options.inlining = m.inlining;
                         // (deopts: where the baseline's code has a frame to leave for (else none))
                         // (a function optimized again more than twice (its deopts were taken): without deopts (its slow paths call))
-                        options.deopt = m.backend && m.deopt && m.deoptFrames.size() > f && m.deoptFrames[f].valid;
+                        options.deopt = m.backend && m.deopt && deopt_frame_of(m, f) != nullptr;
                         bool const fromLoop = f < m.loopTriggered.size() && m.loopTriggered[f] != 0u;
                         if (options.deopt)
                         {
@@ -8190,10 +8652,10 @@ namespace neos
                             if (!fromLoop)
                                 options.coldCall = [&m](std::size_t aPosition)
                                 {
-                                    auto const point = m.deoptPoints.find(aPosition);
-                                    if (point == m.deoptPoints.end() || point->second.made == nullptr || *point->second.made != 0u)
+                                    auto const* const point = deopt_point_at(m, aPosition);
+                                    if (point == nullptr || point->made == nullptr || *point->made != 0u)
                                         return false;
-                                    auto const g = point->second.function;
+                                    auto const g = point->function;
                                     if (g >= m.counters.size())
                                         return false;
                                     if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
@@ -8267,12 +8729,6 @@ namespace neos
                         aJob.version->sites = r.sites;
                         aJob.version->deopts = r.deopts;
                         aJob.version->deoptCounts.assign(r.deopts.size(), 0u);
-                        aJob.description = m.description;
-                        auto& d = aJob.description;
-                        d.tokens = &r.tokens;
-                        d.functions[f].codeBegin = 0u;
-                        d.functions[f].codeEnd = r.tokens.size();
-                        d.functions[f].locals = &r.locals;
                         aJob.phases[0] = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - aJob.start).count());
                         aJob.rewritten = true;
                         return true;
@@ -8281,6 +8737,18 @@ namespace neos
                     // (the locals that the function's own code reads after each of its optimized code's deopts' calls (the others are not
                     // the deopts'), and after each of their frames' (their functions' code after their calls); from the module's own code
                     // (which does not change): made where the optimized code is (in the background), not by the program's thread)
+                    std::shared_ptr<optimizer::liveness const> liveness_of(compiled_module const& m, std::uint32_t f)
+                    {
+                        {
+                            std::lock_guard<std::mutex> lock{ m.livenessMutex };
+                            if (auto const known = m.liveness.find(f); known != m.liveness.end())
+                                return known->second;
+                        }
+                        auto found = std::make_shared<optimizer::liveness const>(optimizer::locals_liveness(m.description, f));
+                        std::lock_guard<std::mutex> lock{ m.livenessMutex };
+                        return m.liveness.try_emplace(f, std::move(found)).first->second;
+                    }
+
                     void deopts_live(compiled_module const& m, std::uint32_t f, optimizer::result& r)
                     {
                         if (!r.deopts.empty())
@@ -8289,7 +8757,7 @@ namespace neos
                             for (auto const& x : r.deopts)
                                 if (x.frames.empty())
                                     positions.push_back(x.call);
-                            auto live = optimizer::live_locals(m.description, f, positions);
+                            auto live = optimizer::live_locals(*liveness_of(m, f), positions);
                             for (std::size_t k = 0u, p = 0u; k < r.deopts.size(); ++k)
                                 if (r.deopts[k].frames.empty())
                                     r.deopts[k].live = std::move(live[p++]);
@@ -8303,7 +8771,7 @@ namespace neos
                                 std::vector<std::size_t> framePositions;
                                 for (auto const& e : frames)
                                     framePositions.push_back(e.second);
-                                auto frameLive = optimizer::live_locals(m.description, function, framePositions);
+                                auto frameLive = optimizer::live_locals(*liveness_of(m, function), framePositions);
                                 for (std::size_t k = 0u; k < frames.size(); ++k)
                                     frames[k].first->live = std::move(frameLive[k]);
                             }
@@ -8318,12 +8786,23 @@ namespace neos
                             return;
                         auto& r = aJob.result;
                         auto const f = aJob.function;
-                        auto const& d = aJob.description;
+                        // (the module's description: the SSA builder takes the optimizer's code itself, and the rest reads only other functions'
+                        // descriptions (and the function's parameters and results), which the optimizer does not change)
+                        auto const& d = aJob.module->description;
                         try
                         {
                             auto const from = std::chrono::steady_clock::now();
                             deopts_live(*aJob.module, f, r);
-                            auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts);
+                            std::optional<ssa::osr_entry> osr;
+                            if (aJob.osrLoop != NoOsrLoop)
+                            {
+                                // (from the loop: the function's parameters and its own locals are the code's parameters)
+                                osr.emplace();
+                                osr->loop = static_cast<std::size_t>(aJob.osrLoop);
+                                osr->parameters = *d.functions[f].parameters;
+                                osr->parameters.insert(osr->parameters.end(), d.functions[f].locals->begin(), d.functions[f].locals->end());
+                            }
+                            auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts, osr ? &*osr : nullptr);
                             auto const built_at = std::chrono::steady_clock::now();
                             // (cached loads' words: read safely (this runs while the program runs: its pages' states may change))
                             auto const memoryWord = [&aJob](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
@@ -8411,7 +8890,6 @@ namespace neos
                         auto& m = aModule;
                         auto const f = aJob.function;
                         auto& r = aJob.result;
-                        auto& d = aJob.description;
                         auto& version = aJob.version;
                         if (aJob.options.speculation)
                             m.usefulSpeculations[f] = std::move(r.useful);
@@ -8453,12 +8931,16 @@ namespace neos
                                 version->sites = r.sites;
                                 version->deopts.clear();
                                 version->deoptCounts.clear();
-                                d.tokens = &r.tokens;
-                                d.functions[f].codeEnd = r.tokens.size();
-                                d.functions[f].locals = &r.locals;
                             }
+                            // (the baseline's code generator reads the function's code from the description: the optimizer's)
+                            auto& d = aJob.description;
+                            d = m.description;
+                            d.tokens = &r.tokens;
+                            d.functions[f].codeBegin = 0u;
+                            d.functions[f].codeEnd = r.tokens.size();
+                            d.functions[f].locals = &r.locals;
                             chunk.callSites.clear();
-                            code_generator generator{ d };
+                            code_generator generator{ d, true };
                             generator.generate_function(m, f, r.origins, version.get(), chunk.callSites);
                             entry = generator.function_offset(f);
                             code = std::move(generator.code());
@@ -8625,6 +9107,80 @@ namespace neos
                         return install_optimization(m, *job);
                     }
 
+                    void const* lazy_compile(context* aContext, std::uint32_t aFunction) noexcept
+                    {
+                        auto& m = *aContext->module;
+                        try
+                        {
+                            code_generator::lazy_function compiled;
+                            {
+                                code_generator generator{ m.description, true };
+                                generator.generate_lazy(m, aFunction, compiled);
+                                compiled.frame.valid = compiled.frame.valid && m.tiering;
+                                bytes& code = generator.code();
+                                // (in the last region, after the code there (a new region if it has no room))
+                                constexpr std::size_t RegionSize = std::size_t{ 1u } << 20u;
+                                constexpr std::size_t Alignment = 64u;
+                                if (m.lazyRegions.empty() || m.lazyRegions.back().size - m.lazyRegions.back().used < code.size() + Alignment)
+                                {
+                                    auto const size = std::max(RegionSize, (code.size() + Alignment + 4095u) & ~std::size_t{ 4095u });
+                                    bytes empty(size, 0xCCu);
+                                    compiled_module::tier_chunk chunk;
+                                    chunk.code = allocate_executable(empty, chunk.size);
+                                    if (chunk.code == nullptr)
+                                        throw std::bad_alloc{};
+                                    compiled_module::lazy_region region;
+                                    region.code = static_cast<std::uint8_t*>(chunk.code);
+                                    region.size = chunk.size;
+                                    region.chunk = m.chunks.size();
+                                    m.chunks.push_back(std::move(chunk));
+                                    m.lazyRegions.push_back(region);
+                                }
+                                auto& region = m.lazyRegions.back();
+                                auto const at = (region.used + Alignment - 1u) & ~(Alignment - 1u);
+                                patch_code(region.code + at, code.data(), code.size());
+                                region.used = at + code.size();
+                                auto& sites = m.chunks[region.chunk].callSites;
+                                for (auto const& site : compiled.callSites)
+                                    sites.emplace_back(at + site.first, site.second);
+                                {
+                                    std::lock_guard<std::mutex> lock{ m.deoptMutex };
+                                    for (auto& [position, point] : compiled.deoptPoints)
+                                    {
+                                        point.code = region.code;
+                                        point.resume += at;
+                                        if (point.returned != 0u)
+                                            point.returned += at;
+                                        m.deoptPoints[position] = std::move(point);
+                                    }
+                                    if (compiled.frame.valid && aFunction < m.deoptFrames.size())
+                                        m.deoptFrames[aFunction] = std::move(compiled.frame);
+                                }
+                                compiled.entry += at;
+                                compiled.entry = reinterpret_cast<std::uintptr_t>(region.code + compiled.entry);
+                            }
+                            // (its entry: a jump to its code (jmp [rip+2]; int3 int3; its address))
+                            auto* const entry = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[aFunction];
+                            std::uint8_t jump[16] = { 0xFFu, 0x25u, 0x02u, 0u, 0u, 0u, 0xCCu, 0xCCu };
+                            auto const target = static_cast<std::uint64_t>(compiled.entry);
+                            std::memcpy(jump + 8, &target, sizeof(target));
+                            patch_code(entry, jump, sizeof(jump));
+                            if (m.indirect[aFunction].target == reinterpret_cast<std::uint64_t>(entry))
+                                m.indirect[aFunction].target = target;
+                            ++m.lazyCompiled;
+                            return reinterpret_cast<void const*>(target);
+                        }
+                        catch (std::exception const& e)
+                        {
+                            m.exception = std::make_exception_ptr(std::runtime_error(std::string{ "neos::jit: function " } + std::to_string(aFunction) + " cannot be compiled (" + e.what() + ")"));
+                        }
+                        catch (...)
+                        {
+                            m.exception = std::current_exception();
+                        }
+                        return nullptr;
+                    }
+
                     void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept
                     {
                         auto& m = *aContext->module;
@@ -8643,16 +9199,77 @@ namespace neos
                     constexpr std::int32_t PollIterations = 1000;   ///< (a loop's iterations before a function whose optimization is being made
                                                                     ///< looks again)
 
+                    constexpr std::uint32_t MaxOsrCompiles = 6u;    ///< (a loop's code that calls continue in (see osr_entry): made again at most)
+                    constexpr std::uint32_t MaxOsrEntries = 64u;    ///< (... entered at most (a call that left it for the baseline's continues in
+                                                                    ///< a frame of its own, within the one that entered it))
+
+                    // (code that a call running an optimized function's baseline code continues in from a loop (see code_generator::
+                    // loop_counter): optimized as the function is (here: the call runs the loop once it is made), from the loop (the 
+                    // function's parameters and its own locals are its parameters: see ssa::osr_entry); null if it cannot be)
+                    void const* osr_entry(compiled_module& aModule, std::uint32_t aFunction, std::uint64_t aLoop)
+                    {
+                        auto& m = aModule;
+                        auto const f = aFunction;
+                        auto& state = m.osrLoops[aLoop];
+                        if (state.entry != nullptr)
+                            return ++state.entries <= MaxOsrEntries ? state.entry : nullptr;
+                        if (state.compiles >= MaxOsrCompiles || state.entries >= MaxOsrEntries)
+                            return nullptr;
+                        ++state.compiles;
+                        auto job = prepare_optimization(m, f);
+                        job->osrLoop = aLoop;
+                        if (rewrite_optimization(*job))
+                            generate_optimization(*job);
+                        if (!job->optimizing)
+                        {
+                            // (not again)
+                            state.compiles = MaxOsrCompiles;
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: no code from the loop at %llu (%s)\n", f, static_cast<unsigned long long>(aLoop), job->why.c_str());
+                            return nullptr;
+                        }
+                        compiled_module::tier_chunk chunk;
+                        chunk.callSites = std::move(job->callSites);
+                        chunk.code = allocate_executable(job->code, chunk.size);
+                        if (chunk.code == nullptr)
+                            return nullptr;
+                        state.entry = chunk.code;
+                        m.chunks.push_back(std::move(chunk));
+                        job->version->osrLoop = aLoop;
+                        state.version = job->version.get();
+                        m.versions.push_back(std::move(job->version));
+                        ++state.entries;
+                        if (m.verbose != 0u)
+                            std::fprintf(stderr, "[tier2] f%u (osr at %llu): %zu inlined, %zu folded, %zu guards; %zu tokens, %zu bytes\n", f,
+                                static_cast<unsigned long long>(aLoop), job->result.inlined, job->result.folded, job->result.guards, job->result.tokens.size(),
+                                job->code.size());
+                        return state.entry;
+                    }
+
+                    // (an optimized loop's code (see osr_entry) left for the baseline's (a deopt in the loop, a guard that failed): made
+                    // again (with the function's latest options) when the call has run the loop often enough again)
+                    void osr_left(compiled_module& aModule, compiled_module::tier_version const* aVersion)
+                    {
+                        auto& m = aModule;
+                        if (auto const s = m.osrLoops.find(aVersion->osrLoop); s != m.osrLoops.end() && s->second.version == aVersion)
+                        {
+                            s->second.entry = nullptr;
+                            s->second.version = nullptr;
+                        }
+                        m.loopCounters[aVersion->function] = m.loopIterations;
+                    }
+
                     // (a function's loops have run often enough (see code_generator::loop_counter): it is optimized (its later calls run
-                    // its optimized code; the call whose loop it is continues in its own code (there is no entry into optimized code at
-                    // a loop)))
-                    void tier_loop(context* aContext, std::uint32_t aFunction) noexcept
+                    // its optimized code); the call whose loop it is continues in optimized code from the loop (aLoop, unless NoOsrLoop), 
+                    // once the function has been optimized (see osr_entry), else in its own code)
+                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop) noexcept
                     {
                         auto& m = *aContext->module;
                         auto const f = aFunction;
                         m.loopCounters[f] = NotAgain;
                         try
                         {
+                            bool const optimized = m.tierState[f] == 1u;
                             if (m.tierState[f] == 0u)
                             {
                                 m.loopTriggered[f] = 1u;
@@ -8664,12 +9281,25 @@ namespace neos
                             // (being made: the loop looks again (as do the function's calls))
                             if (m.tierState[f] == 3u)
                                 m.loopCounters[f] = PollIterations;
+                            if (aLoop != NoOsrLoop && m.osr && m.tierState[f] == 1u)
+                            {
+                                // (just optimized: later calls run its optimized code, so a loop that runs its baseline code again is a call's
+                                // that has not ended (it continues in optimized code then))
+                                if (!optimized)
+                                {
+                                    m.loopCounters[f] = PollIterations;
+                                    return nullptr;
+                                }
+                                return osr_entry(m, f, aLoop);
+                            }
                         }
                         catch (...)
                         {
                             m.loopTriggered[f] = 0u;
-                            m.tierState[f] = 2u;
+                            if (m.tierState[f] != 1u)
+                                m.tierState[f] = 2u;
                         }
+                        return nullptr;
                     }
 
                     void guard_failed(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aSite) noexcept
@@ -8684,6 +9314,13 @@ namespace neos
                                 auto const call = aVersion->sites[aSite].call;
                                 if (++m.guardFailures[f][call] >= 2u)
                                     m.noInline[f].insert(call);
+                            }
+                            if (m.loopCounters[f] == NotAgain)
+                                m.loopCounters[f] = m.loopIterations;
+                            if (aVersion->osrLoop != NoOsrLoop)
+                            {
+                                osr_left(m, aVersion);
+                                return;
                             }
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
@@ -8705,6 +9342,33 @@ namespace neos
                         }
                     }
 
+                    // (a position of a function's code that is within one of its loops)
+                    bool in_loop(module_description const& aModule, std::uint32_t aFunction, std::size_t aPosition)
+                    {
+                        auto const& f = aModule.functions[aFunction];
+                        auto const& tokens = *aModule.tokens;
+                        if (aPosition < f.codeBegin || aPosition >= f.codeEnd)
+                            return false;
+                        std::vector<bool> loops;   // (the open blocks: whether each is a loop)
+                        std::size_t open = 0u;      // (... and the loops among them)
+                        for (std::size_t p = f.codeBegin; p < aPosition;)
+                        {
+                            auto const op = static_cast<std::uint8_t>(tokens[p]);
+                            if (op == 0x02u || op == 0x03u || op == 0x04u)
+                            {
+                                loops.push_back(op == 0x03u);
+                                open += op == 0x03u ? 1u : 0u;
+                            }
+                            else if (op == 0x0Bu && !loops.empty())
+                            {
+                                open -= loops.back() ? 1u : 0u;
+                                loops.pop_back();
+                            }
+                            p += 1u + immediate_count(op, tokens, p);
+                        }
+                        return open != 0u;
+                    }
+
                     void deopt_taken(context* aContext, compiled_module::tier_version const* aVersion, std::uint32_t aDeopt) noexcept
                     {
                         // (the optimized code left for the baseline's: a call that is left at again is not inlined; the function's own code
@@ -8718,7 +9382,23 @@ namespace neos
                             if (aDeopt >= aVersion->deopts.size())
                                 return;
                             auto const& d = aVersion->deopts[aDeopt];
+                            // (the call continues in the function's own code: its loops count again (it may continue in optimized code
+                            // from one, see tier_loop))
+                            if (m.loopCounters[f] == NotAgain)
+                                m.loopCounters[f] = m.loopIterations;
+                            // (a deopt within a loop of the function's code: its call's remaining iterations are the baseline's (its code is
+                            // not entered again until its next call): optimized again at once, the call that left made (not left at))
+                            bool looping = false;
                             if (!d.guard)
+                            {
+                                // (found once for each position)
+                                auto const position = d.frames.empty() ? d.call : d.frames.front().position;
+                                auto [known, added] = m.inLoop.try_emplace(position, false);
+                                if (added)
+                                    known->second = in_loop(m.description, f, position);
+                                looping = known->second;
+                            }
+                            if (!d.guard && !looping)
                             {
                                 ++aVersion->deoptCounts[aDeopt];
                                 if (++aVersion->deoptsTaken < DeoptsBeforeReoptimizing)
@@ -8744,9 +9424,21 @@ namespace neos
                             for (std::size_t k = 0u; k < aVersion->deopts.size(); ++k)
                                 if (!aVersion->deopts[k].guard && aVersion->deoptCounts[k] >= 1u)
                                     struck.insert(aVersion->deopts[k].call);
+                            if (looping)
+                            {
+                                ++aVersion->deoptCounts[aDeopt];
+                                m.noDeopt[f].insert(d.call);
+                            }
                             for (auto const call : struck)
                                 if (++m.deoptStrikes[f][call] >= DeoptStrikes)
                                     m.noDeopt[f].insert(call);
+                            if (aVersion->osrLoop != NoOsrLoop)
+                            {
+                                osr_left(m, aVersion);
+                                if (m.verbose != 0u)
+                                    std::fprintf(stderr, "[tier2] f%u (osr): deopt %u (call@%zu%s)\n", f, aDeopt, d.call, d.guard ? ", a guard" : "");
+                                return;
+                            }
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
@@ -8897,7 +9589,8 @@ namespace neos
                                 result->indirect[f].type = result->description.functions[f].type;
                         // (the optimizing tier (NEOS_TIER2: 0 off; NEOS_TIER2_CALLS: the calls before a function is optimized; 0 without:
                         // NEOS_TIER2_SPECULATE speculation, NEOS_TIER2_INLINE inlining, NEOS_TIER2_SSA the optimizing code generator, 
-                        // NEOS_TIER2_DEOPT deoptimization, NEOS_TIER2_BACKGROUND compiling in the background; NEOS_TIER2_VERBOSE 1: what it does))
+                        // NEOS_TIER2_DEOPT deoptimization, NEOS_TIER2_BACKGROUND compiling in the background, NEOS_TIER2_OSR calls continuing in
+                        // optimized code at loops; NEOS_TIER2_VERBOSE 1: what it does))
                         {
                             auto const setting = [](char const* aName) -> std::optional<long long>
                             {
@@ -8912,6 +9605,7 @@ namespace neos
                             m.backend = setting("NEOS_TIER2_SSA").value_or(1) != 0;
                             m.deopt = setting("NEOS_TIER2_DEOPT").value_or(1) != 0;
                             m.background = setting("NEOS_TIER2_BACKGROUND").value_or(1) != 0;
+                            m.osr = m.backend && setting("NEOS_TIER2_OSR").value_or(1) != 0;
                             m.verbose = static_cast<std::uint32_t>(setting("NEOS_TIER2_VERBOSE").value_or(0));
                             auto const calls = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_CALLS").value_or(2000), 1, NotAgain));
                             auto const n = m.description.functions.size();
@@ -8931,8 +9625,28 @@ namespace neos
                             m.savedEntries.resize(n);
                             m.jobs.resize(n);
                         }
+                        // (functions compiled when they are first called (NEOS_JIT_LAZY: 0, all now): those that are not called are not
+                        // compiled (e.g. most of a large program's libraries); a module with an instruction that the code generator does not
+                        // have is not compiled (as when all are compiled now: the interpreter runs it))
+                        if (auto const text = std::getenv("NEOS_JIT_LAZY"); text == nullptr || *text == '\0' || std::strtoll(text, nullptr, 10) != 0)
+                        {
+                            result->lazy = true;
+                            auto const& tokens = *result->description.tokens;
+                            for (auto const& f : result->description.functions)
+                                if (!f.imported)
+                                    for (std::size_t p = f.codeBegin; p < f.codeEnd;)
+                                    {
+                                        auto const op = static_cast<std::uint8_t>(tokens[p]);
+                                        if (!baseline_instruction(op))
+                                            throw unsupported{ "unsupported instruction" };
+                                        p += 1u + immediate_count(op, tokens, p);
+                                    }
+                        }
                         code_generator generator{ result->description };
-                        generator.generate(*result);
+                        if (result->lazy)
+                            generator.generate_entries(*result);
+                        else
+                            generator.generate(*result);
 #if defined(NEOS_JIT_DUMP)
                         if (auto const path = std::getenv("NEOS_JIT_DUMP"))
                             if (auto file = std::fopen(path, "wb"))

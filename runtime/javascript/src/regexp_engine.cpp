@@ -2597,7 +2597,11 @@ namespace neos::javascript_runtime::regexp
                     if (end == start)
                         words = false;
                     auto const word = text.substr(start, end - start);
-                    result->words.emplace(word);
+                    if (result->words.size() <= word.size())
+                        result->words.resize(word.size() + 1u);
+                    auto& same = result->words[word.size()];
+                    if (std::find(same.begin(), same.end(), word) == same.end())
+                        same.emplace_back(word);
                     result->shortestWord = std::min(result->shortestWord, word.size());
                     result->longestWord = std::max(result->longestWord, word.size());
                     start = end + 1u;
@@ -2641,6 +2645,11 @@ namespace neos::javascript_runtime::regexp
         return result;
     }
 
+    namespace
+    {
+        match_result run(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures);
+    }
+
     match_result exec(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures)
     {
         if (aStart > aInput.size())
@@ -2648,24 +2657,37 @@ namespace neos::javascript_runtime::regexp
         if (aProgram.wordSet)
         {
             // (one of its words: the whole input (from the start))
-            if (aStart != 0u || aInput.size() < aProgram.shortestWord || aInput.size() > aProgram.longestWord || !aProgram.words.contains(aInput))
+            if (aStart != 0u || aInput.size() < aProgram.shortestWord || aInput.size() > aProgram.longestWord)
                 return match_result::NoMatch;
-            aCaptures.assign(2u, 0);
+            auto const& same = aProgram.words[aInput.size()];
+            if (std::none_of(same.begin(), same.end(), [&](std::u16string const& aWord) { return aWord[0] == aInput[0] && std::u16string_view{ aWord } == aInput; }))
+                return match_result::NoMatch;
+            aCaptures.resize(2u);
+            aCaptures[0] = 0;
             aCaptures[1] = static_cast<std::int32_t>(aInput.size());
             return match_result::Match;
         }
-        auto& state = tState;
-        state.slots.assign((aProgram.captureCount + 1u) * 2u, -1);
-        state.registers.assign(aProgram.registers * 2u, 0);
-        bool const unicode = (aProgram.flags & (FlagUnicode | FlagUnicodeSets)) != 0u;
-        auto const result = unicode ?
-            search<true>(aProgram, aInput, static_cast<std::int32_t>(aStart), aSticky, state) :
-            search<false>(aProgram, aInput, static_cast<std::int32_t>(aStart), aSticky, state);
-        if (result == match_result::Match)
-            aCaptures = state.slots;
-        state.stack.clear();
-        if (state.stack.capacity() > (1u << 16u))
-            state.stack.shrink_to_fit();
-        return result;
+        return run(aProgram, aInput, aStart, aSticky, aCaptures);
+    }
+
+    namespace
+    {
+        // (the program's thread's matcher state (a thread_local: not read for a set of words))
+        match_result run(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures)
+        {
+            auto& state = tState;
+            state.slots.assign((aProgram.captureCount + 1u) * 2u, -1);
+            state.registers.assign(aProgram.registers * 2u, 0);
+            bool const unicode = (aProgram.flags & (FlagUnicode | FlagUnicodeSets)) != 0u;
+            auto const result = unicode ?
+                search<true>(aProgram, aInput, static_cast<std::int32_t>(aStart), aSticky, state) :
+                search<false>(aProgram, aInput, static_cast<std::int32_t>(aStart), aSticky, state);
+            if (result == match_result::Match)
+                aCaptures = state.slots;
+            state.stack.clear();
+            if (state.stack.capacity() > (1u << 16u))
+                state.stack.shrink_to_fit();
+            return result;
+        }
     }
 }

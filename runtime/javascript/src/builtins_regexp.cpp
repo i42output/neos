@@ -96,8 +96,6 @@ namespace neos::javascript_runtime
             value source, flags, exec, global, ignoreCase, multiline, dotAll, unicode, unicodeSets, sticky, hasIndices;
             value execFunction;     ///< (%RegExp.prototype.exec%)
         };
-        isolate_local<keys> sKeysLocal;
-        keys& the_keys() { return *sKeysLocal; }
 
         // (the legacy static properties of %RegExp% (RegExp.$1, lastMatch, ...): the last match of a RegExp with
         // [[LegacyFeaturesEnabled]] (its substrings are made when they are read))
@@ -109,8 +107,31 @@ namespace neos::javascript_runtime
             std::int32_t captures[20] = {}; ///< (the match and $1-$9: start and end (-1: undefined))
             std::int32_t lastParen[2] = { -1, -1 };
         };
-        isolate_local<legacy_statics> sLegacyLocal;
-        legacy_statics& the_legacy() { return *sLegacyLocal; }
+
+        // (a regexp's lastIndex: its own data property's (as a regexp has it: at a position known for its shape), else as Get has it)
+        struct last_index_position
+        {
+            shape const* layout = nullptr;
+            std::uint32_t position = 0u;
+            bool writable = false;
+        };
+
+        // (the isolate's: one isolate_local (each one's access costs))
+        struct regexp_state
+        {
+            keys k;
+            legacy_statics legacy;
+            // (see has_builtin_exec: a regexp of this own shape (known not to have its own exec), whose prototype has this shape, has 
+            // the built-in at this position of its prototype's (shapes do not change: their keys' positions and attributes are known))
+            shape const* execOwn = nullptr;
+            shape const* execPrototype = nullptr;
+            std::uint32_t execPosition = 0u;
+            last_index_position lastIndex;      ///< (see known_last_index)
+        };
+        isolate_local<regexp_state> sRegExpState;
+        regexp_state& the_regexp_state() { return *sRegExpState; }
+        keys& the_keys() { return sRegExpState->k; }
+        legacy_statics& the_legacy() { return sRegExpState->legacy; }
 
         root_tracer const sRegExpRoots{ [](tracer& aTracer)
         {
@@ -136,17 +157,9 @@ namespace neos::javascript_runtime
             legacy.lastParen[1] = aCount > 0u ? aCaptures[aCount * 2u + 1u] : -1;
         }
 
-        // (a regexp's lastIndex: its own data property's (as a regexp has it: at a position known for its shape), else as Get has it)
-        struct last_index_position
+        last_index_position const* known_last_index(regexp_object& aR, regexp_state& aState)
         {
-            shape const* layout = nullptr;
-            std::uint32_t position = 0u;
-            bool writable = false;
-        };
-        last_index_position const* known_last_index(regexp_object& aR)
-        {
-            static isolate_local<last_index_position> sKnown;
-            auto& k = *sKnown;
+            auto& k = aState.lastIndex;
             auto const* layout = aR.properties.layout();
             if (layout == nullptr)
                 return nullptr;
@@ -158,6 +171,10 @@ namespace neos::javascript_runtime
                 k = last_index_position{ layout, p.position(), p->writable() };
             }
             return &k;
+        }
+        last_index_position const* known_last_index(regexp_object& aR)
+        {
+            return known_last_index(aR, the_regexp_state());
         }
         value last_index(regexp_object& aR, value aRValue)
         {
@@ -281,14 +298,18 @@ namespace neos::javascript_runtime
         {
             auto const& text = str(aS);
             auto const length = static_cast<double>(text.size());
-            auto lastIndex = to_length(last_index(aR, aRValue));
             auto const bits = aR.flagBits;
             bool const global = (bits & regexp::FlagGlobal) != 0u;
             bool const sticky = (bits & regexp::FlagSticky) != 0u;
             bool const fullUnicode = (bits & (regexp::FlagUnicode | regexp::FlagUnicodeSets)) != 0u;
+            // (ToLength(lastIndex): unless it is a number (ToLength has no effect) that is not used (neither global nor sticky))
+            auto const lastIndexValue = last_index(aR, aRValue);
+            double lastIndex = 0.0;
+            if (global || sticky || !is_number(lastIndexValue))
+                lastIndex = to_length(lastIndexValue);
             if (!global && !sticky)
                 lastIndex = 0.0;
-            auto const program = aR.matcher;
+            auto const& program = *aR.matcher;     // (a reference: not a copy of the shared pointer (its count's atomic changes))
             if (lastIndex > length)
             {
                 if (global || sticky)
@@ -301,7 +322,7 @@ namespace neos::javascript_runtime
             if (fullUnicode && start > 0u && start < text.size() && is_trail(text[start]) && is_lead(text[start - 1u]))
                 attempt = start - 1u;
             auto& captures = aCaptures;
-            auto const result = regexp::exec(*program, text, attempt, sticky, captures);
+            auto const result = regexp::exec(program, text, attempt, sticky, captures);
             if (result == regexp::match_result::Overflow)
                 throw_range_error("Maximum regular expression backtracking stack size exceeded");
             if (result == regexp::match_result::NoMatch)
@@ -317,7 +338,7 @@ namespace neos::javascript_runtime
             if (global || sticky)
                 set_last_index(aR, aRValue, number(e));
             if (aR.legacyFeaturesEnabled)
-                update_legacy_statics(aS, captures, index, program->captureCount);
+                update_legacy_statics(aS, captures, index, program.captureCount);
             else
                 the_legacy().valid = false;
             captures[0] = index;
@@ -361,11 +382,11 @@ namespace neos::javascript_runtime
             if (aKind == exec_kind::Test)
                 return True;
             auto const& text = str(aS);
-            auto const program = aR.matcher;
+            auto const& program = *aR.matcher;
             bool const hasIndices = (aR.flagBits & regexp::FlagHasIndices) != 0u;
             auto const index = captures[0];
             auto const e = captures[1];
-            auto const n = program->captureCount;
+            auto const n = program.captureCount;
             value_list elements(n + 1u, Undefined);
             elements[0] = substring(text, index, e);
             for (std::uint32_t i = 1u; i <= n; ++i)
@@ -376,7 +397,7 @@ namespace neos::javascript_runtime
             ao.put(the_names().index, number(index), AttributesDefault);
             ao.put(the_names().input, aS, AttributesDefault);
             value_list groupNames;
-            auto const groups = make_groups(*program, elements, &groupNames);
+            auto const groups = make_groups(program, elements, &groupNames);
             ao.put(the_names().groups, groups, AttributesDefault);
             if (hasIndices)
             {
@@ -392,7 +413,7 @@ namespace neos::javascript_runtime
                         pairs[i] = pair(captures[i * 2u], captures[i * 2u + 1u]);
                 auto const indices = make_array(pairs);
                 value indexGroups = Undefined;
-                if (program->hasNamedGroups)
+                if (program.hasNamedGroups)
                 {
                     indexGroups = make_object(Null);
                     for (std::uint32_t i = 1u; i <= n; ++i)
@@ -406,36 +427,32 @@ namespace neos::javascript_runtime
         }
 
         // (whether the object's exec is %RegExp.prototype.exec% (a data property that we can use without calling it))
-        bool has_builtin_exec(value aR)
+        bool has_builtin_exec(regexp_object& r, regexp_state& aState)
         {
-            auto* const r = as_regexp(aR);
-            if (r == nullptr || !r->matcher)
+            if (!r.matcher || r.proto != the_realm().regexpPrototype)
                 return false;
-            auto const& keys = the_keys();
-            if (r->proto != the_realm().regexpPrototype)
-                return false;
+            auto const& keys = aState.k;
             // (a regexp of a shape known not to have its own exec, whose prototype (of the shape it had then) has the built-in at the 
-            // position it had then (shapes do not change: their keys' positions and attributes are known))
-            struct known
-            {
-                shape const* own = nullptr;
-                shape const* prototype = nullptr;
-                std::uint32_t position = 0u;
-            };
-            static isolate_local<known> sKnown;
-            auto& k = *sKnown;
-            auto& p = obj(r->proto);
-            auto const* ownShape = r->properties.layout();
+            // position it had then)
+            auto& p = obj(r.proto);
+            auto const* ownShape = r.properties.layout();
             auto const* prototypeShape = p.properties.layout();
-            if (ownShape != nullptr && ownShape == k.own && prototypeShape != nullptr && prototypeShape == k.prototype)
-                return p.properties.value_at(k.position) == keys.execFunction;
-            if (r->own(keys.exec) != nullptr)
+            if (ownShape != nullptr && ownShape == aState.execOwn && prototypeShape != nullptr && prototypeShape == aState.execPrototype)
+                return p.properties.value_at(aState.execPosition) == keys.execFunction;
+            if (r.own(keys.exec) != nullptr)
                 return false;
             auto const exec = p.own(keys.exec);
             if (exec == nullptr || exec->accessor() || exec->data() != keys.execFunction)
                 return false;
-            k = known{ ownShape, prototypeShape, exec.position() };
+            aState.execOwn = ownShape;
+            aState.execPrototype = prototypeShape;
+            aState.execPosition = exec.position();
             return true;
+        }
+        bool has_builtin_exec(value aR)
+        {
+            auto* const r = as_regexp(aR);
+            return r != nullptr && has_builtin_exec(*r, the_regexp_state());
         }
 
         // (RegExpExec)
@@ -584,6 +601,11 @@ namespace neos::javascript_runtime
 
         value regexp_prototype_test(value aThis, arguments aArguments, value, function_object&)
         {
+            // (a RegExp whose exec is the built-in, and a string: RegExpBuiltinExec's match (as below, without the steps that change 
+            // nothing))
+            if (auto* const r = as_regexp(aThis); r != nullptr)
+                if (auto const s = argument(aArguments, 0u); is_string(s) && has_builtin_exec(*r, the_regexp_state()))
+                    return boolean(builtin_match(*r, aThis, s, the_heap().regexpCaptures));
             require_object(aThis, "test");
             auto const s = to_string(argument(aArguments, 0u));
             return boolean(regexp_exec(aThis, s, exec_kind::Test) != Null);

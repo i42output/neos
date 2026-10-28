@@ -149,14 +149,10 @@ namespace neos::javascript_runtime::regexp
         character_class firstSet;                               ///< (the code units that a match can start with)
         std::u16string prefix;                                  ///< (the literal text that a match starts with (if two or more code units))
         std::array<std::uint16_t, 256> prefixSkip = {};         ///< (its Horspool skips, by the low byte of a code unit)
-        // (a pattern that is ^(?:word|word|...)$ (no flags that change it): a match is the whole input, one of the words)
-        struct word_hash
-        {
-            using is_transparent = void;
-            std::size_t operator()(std::u16string_view aWord) const { return std::hash<std::u16string_view>{}(aWord); }
-        };
+        // (a pattern that is ^(?:word|word|...)$ (no flags that change it): a match is the whole input, one of the words (by length:
+        // few of each (e.g. a language's keywords), compared without hashing))
         bool wordSet = false;
-        std::unordered_set<std::u16string, word_hash, std::equal_to<>> words;
+        std::vector<std::vector<std::u16string>> words;
         std::size_t shortestWord = 0u;
         std::size_t longestWord = 0u;
     };

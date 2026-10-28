@@ -38,6 +38,7 @@
 
 #include <neos/neos.hpp>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -71,22 +72,24 @@ namespace neos
 
                         struct cannot_optimize : std::runtime_error { using std::runtime_error::runtime_error; };
 
-                        std::size_t immediates(std::uint8_t aOp, std::vector<std::uint64_t> const& aTokens, std::size_t aPosition)
+                        // (the number of immediates of each instruction (0xFF: br_table's, which has its count))
+                        constexpr auto sImmediates = []()
                         {
-                            switch (aOp)
-                            {
-                            case 0x02: case 0x03: case 0x04:
-                            case 0x0C: case 0x0D: case 0x10: case 0x20: case 0x21: case 0x22: case 0x23: case 0x24:
-                            case 0x3F: case 0x40:
-                            case 0x41: case 0x42: case 0x43: case 0x44:
-                                return 1u;
-                            case 0x0E:
-                                return 2u + static_cast<std::size_t>(aTokens[aPosition + 1u]);
-                            case 0x11:
-                                return 2u;
-                            default:
-                                return (aOp >= 0x28u && aOp <= 0x3Eu) ? 2u : 0u;
-                            }
+                            std::array<std::uint8_t, 256> counts{};
+                            for (auto op : { 0x02, 0x03, 0x04, 0x0C, 0x0D, 0x10, 0x20, 0x21, 0x22, 0x23, 0x24, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44 })
+                                counts[op] = 1u;
+                            for (int op = 0x28; op <= 0x3E; ++op)
+                                counts[op] = 2u;
+                            counts[0x11] = 2u;
+                            counts[0x0E] = 0xFFu;
+                            return counts;
+                        }();
+                        inline std::size_t immediates(std::uint8_t aOp, std::vector<std::uint64_t> const& aTokens, std::size_t aPosition)
+                        {
+                            auto const count = sImmediates[aOp];
+                            if (count != 0xFFu) [[likely]]
+                                return count;
+                            return 2u + static_cast<std::size_t>(aTokens[aPosition + 1u]);
                         }
 
                         // (a numeric instruction: its operands' type, their number and its result's type)
@@ -410,7 +413,7 @@ namespace neos
                             bool branched = false;                      ///< (something branches to its end)
                             bool liveArm = true;                        ///< (ConstantIf: the arm that is (true: then, false: else) kept)
                             bool inElse = false;
-                            std::vector<std::uint32_t> written;         ///< (locals it sets)
+                            std::size_t writtenMark = 0u;               ///< (the locals it sets: those of the log (see written) from here)
                             std::size_t logMark = 0u;   ///< (If: the knowledge log's size at its start (see iKnowledgeLog))
                             std::size_t elseMark = 0u;  ///< (If, its else arm: the log's size at its start)
                             std::vector<std::pair<std::uint32_t, std::optional<known>>> thenExit;  ///< (If: the locals that its then arm changed, 
@@ -439,6 +442,8 @@ namespace neos
                             }
                             std::set<speculation_key> const& useful() const { return iUseful; }
                             std::size_t speculations() const { return iSpeculations.size(); }
+                            // (the speculations made (each once: the same word may be speculated on by more than one inlined call))
+                            std::size_t distinct_speculations() const { return std::set<speculation_key>{ iSpeculations.begin(), iSpeculations.end() }.size(); }
                         public:
                             result run()
                             {
@@ -455,6 +460,13 @@ namespace neos
                                 // (inlined calls refer to their contexts while calls within them are inlined: they do not move)
                                 iInlines.reserve(iOptions.maxInlineDepth + 1u);
                                 iMaxTokens = std::min(iOptions.maxTokens, (f.codeEnd - f.codeBegin) * iOptions.maxGrowth + 4000u);
+                                {
+                                    // (room for the code and its inlined calls (they are not copied as the output grows))
+                                    auto const room = std::min<std::size_t>(iMaxTokens, 2u * (f.codeEnd - f.codeBegin) + 1024u);
+                                    iOut.reserve(room);
+                                    iOrigins.reserve(room);
+                                    iDeleted.reserve(room);
+                                }
                                 frame fn;
                                 fn.kind = frame::Function;
                                 fn.result = f.results->empty() ? NoResult : (*f.results)[0];
@@ -498,7 +510,11 @@ namespace neos
                             void erase(std::size_t aBegin, std::size_t aEnd)
                             {
                                 for (auto i = aBegin; i < aEnd; ++i)
-                                    iDeleted[i] = true;
+                                    if (!iDeleted[i])
+                                    {
+                                        iDeleted[i] = true;
+                                        iDeletions.push_back(i);
+                                    }
                             }
                             static std::uint64_t const_token(std::uint8_t aType, std::uint64_t aBits)
                             {
@@ -568,15 +584,15 @@ namespace neos
                                 iStack.resize(std::min(iStack.size(), iFrames.back().height));
                             }
                             // --- locals
+                            // (the locals set, in order (one log: a frame's are those set since its start (see frame::writtenMark)))
                             void written(std::uint32_t aLocal)
                             {
-                                for (auto& f : iFrames)
-                                    f.written.push_back(aLocal);
+                                iWritten.push_back(aLocal);
                             }
                             void forget_written(frame const& aFrame)
                             {
-                                for (auto l : aFrame.written)
-                                    set_known(l, std::nullopt);
+                                for (auto w = aFrame.writtenMark; w < iWritten.size(); ++w)
+                                    set_known(iWritten[w], std::nullopt);
                             }
                             // (a local's constant changes: logged (the local and what it was), so that a frame's arm or an inlined call that
                             // is not kept can be undone (rather than the locals' constants copied))
@@ -858,6 +874,7 @@ namespace neos
                                 f.result = aResult;
                                 f.height = iStack.size();
                                 f.startEffects = iEffects;
+                                f.writtenMark = iWritten.size();
                                 iFrames.push_back(std::move(f));
                             }
                             frame& target(std::uint64_t aDepth)
@@ -1000,9 +1017,11 @@ namespace neos
                                     auto const position = p;
                                     auto const next = p + 1u + immediates(op, iTokens, p);
                                     auto const imm = [&](std::size_t aIndex) { return iTokens[position + 1u + aIndex]; };
+                                    // (the origins that matter are calls' (see result::origins): within inlined calls of functions with frames
+                                    // of their own, a chain (made once for each call's position))
                                     if (aInline == nullptr)
                                         iOrigin = position;
-                                    else if (iFramedInlines != 0u)
+                                    else if (iFramedInlines != 0u && (op == 0x10u || op == 0x11u))
                                         iOrigin = chain_origin(position);
                                     if (!iReachable)
                                     {
@@ -1559,7 +1578,7 @@ namespace neos
                             struct snapshot
                             {
                                 std::size_t out;
-                                std::vector<bool> deleted;
+                                std::size_t deletions;      ///< (see iDeletions)
                                 std::vector<slot> stack;
                                 std::size_t knowledgeLog;
                                 std::size_t locals;
@@ -1570,21 +1589,24 @@ namespace neos
                                 std::size_t guards;
                                 std::size_t inlined;
                                 std::size_t folded;
-                                std::vector<std::size_t> written;
+                                std::size_t written;
                                 std::size_t origin;
                             };
                             snapshot take_snapshot() const
                             {
-                                snapshot s{ iOut.size(), iDeleted, iStack, iKnowledgeLog.size(), iLocalTypes.size(), iConstantSets.size(), iSites.size(), iDeopts.size(), iEffects, iGuards, iInlined, iFolded, {}, iOrigin };
-                                for (auto const& f : iFrames)
-                                    s.written.push_back(f.written.size());
-                                return s;
+                                return snapshot{ iOut.size(), iDeletions.size(), iStack, iKnowledgeLog.size(), iLocalTypes.size(), iConstantSets.size(), iSites.size(), iDeopts.size(), iEffects, iGuards, iInlined, iFolded, iWritten.size(), iOrigin };
                             }
                             void restore(snapshot const& aSnapshot)
                             {
                                 iOut.resize(aSnapshot.out);
                                 iOrigins.resize(aSnapshot.out);
-                                iDeleted = aSnapshot.deleted;
+                                // (the tokens deleted since: those before it not deleted again (the code since is not kept); a call inlined
+                                // since may have inserted its guards (moving the tokens after its start), but only after it)
+                                for (auto d = iDeletions.size(); d-- > aSnapshot.deletions;)
+                                    if (iDeletions[d] < aSnapshot.out)
+                                        iDeleted[iDeletions[d]] = false;
+                                iDeletions.resize(aSnapshot.deletions);
+                                iDeleted.resize(aSnapshot.out);
                                 iStack = aSnapshot.stack;
                                 undo_known(aSnapshot.knowledgeLog);
                                 iConstants.resize(aSnapshot.locals);
@@ -1597,8 +1619,7 @@ namespace neos
                                 iGuards = aSnapshot.guards;
                                 iInlined = aSnapshot.inlined;
                                 iFolded = aSnapshot.folded;
-                                for (std::size_t i = 0u; i < iFrames.size() && i < aSnapshot.written.size(); ++i)
-                                    iFrames[i].written.resize(aSnapshot.written[i]);
+                                iWritten.resize(aSnapshot.written);
                                 iOrigin = aSnapshot.origin;
                                 iReachable = true;
                                 iUnreachableEnd = false;
@@ -1622,16 +1643,9 @@ namespace neos
                                 chain.push_back(aPosition);
                                 for (auto c = iInlines.rbegin(); c != iInlines.rend(); ++c)
                                     chain.push_back(c->site);
-                                auto existing = iChainIds.find(chain);
-                                if (existing != iChainIds.end())
-                                {
-                                    iChainIdsByContext.emplace(key, existing->second);
-                                    return InlineChainToken | existing->second;
-                                }
                                 auto const id = static_cast<std::size_t>(iChains.size());
                                 if (id >= InlineChainToken)
                                     throw cannot_optimize{ "inline chains" };
-                                iChainIds.emplace(chain, id);
                                 iChainIdsByContext.emplace(key, id);
                                 iChains.push_back(std::move(chain));
                                 return InlineChainToken | id;
@@ -1644,6 +1658,23 @@ namespace neos
                                 auto const key = (std::uint64_t{ aContext } << 32u) | aSite;
                                 auto const [where, inserted] = iChainContexts.try_emplace(key, static_cast<std::uint32_t>(iChainContexts.size() + 1u));
                                 return where->second;
+                            }
+                            // (the parameters of a function that its code sets (found once))
+                            std::vector<bool> const& parameters_set(std::uint32_t aFunction)
+                            {
+                                if (auto const* known = iParametersSet.find(aFunction))
+                                    return *known;
+                                auto const& f = iModule.functions[aFunction];
+                                auto const count = f.parameters->size();
+                                std::vector<bool> set(count, false);
+                                for (auto p = f.codeBegin; p < f.codeEnd;)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    if ((op == 0x21u || op == 0x22u) && iTokens[p + 1u] < count)
+                                        set[static_cast<std::size_t>(iTokens[p + 1u])] = true;
+                                    p += 1u + immediates(op, iTokens, p);
+                                }
+                                return iParametersSet.emplace(aFunction, std::move(set));
                             }
                             bool inline_call(std::uint32_t aCallee, std::size_t aPosition, std::size_t aSite, bool aCold = false)
                             {
@@ -1669,14 +1700,7 @@ namespace neos
                                 c.outerEffectFree = iInlines.empty() || effect_free(iInlines.front());
                                 c.startEffects = iEffects;
                                 // (the parameters that it sets: not constants)
-                                std::vector<bool> set(parameters.size(), false);
-                                for (auto p = callee.codeBegin; p < callee.codeEnd;)
-                                {
-                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
-                                    if ((op == 0x21u || op == 0x22u) && iTokens[p + 1u] < parameters.size())
-                                        set[static_cast<std::size_t>(iTokens[p + 1u])] = true;
-                                    p += 1u + immediates(op, iTokens, p);
-                                }
+                                auto const& set = parameters_set(aCallee);
                                 for (auto x : set)
                                     c.parametersSet = c.parametersSet || x;
                                 // (its arguments (the last first): constants are its; the others are stored in new locals)
@@ -1930,11 +1954,11 @@ namespace neos
                             std::vector<std::uint64_t> iOut;
                             std::vector<std::size_t> iOrigins;
                             std::size_t iFramedInlines = 0u;            ///< (the inlined calls being processed of functions with frames of their own)
-                            std::map<std::vector<std::size_t>, std::size_t> iChainIds;
                             std::unordered_map<std::uint64_t, std::size_t> iChainIdsByContext;     ///< (see chain_origin)
                             std::unordered_map<std::uint64_t, std::uint32_t> iChainContexts;      ///< (see chain_context)
                             std::vector<std::vector<std::size_t>> iChains;
                             std::vector<bool> iDeleted;
+                            std::vector<std::size_t> iDeletions;        ///< (the tokens deleted, in order (see restore))
                             std::size_t iOrigin = 0u;
                             std::vector<std::uint8_t> iLocalTypes;
                             std::size_t iParameters = 0u;
@@ -1958,6 +1982,13 @@ namespace neos
                             bool iInliningOff = false;
                             std::optional<std::uint32_t> iIndirect;     ///< (the call being made is a call_indirect's (its index))
                             std::set<std::uint32_t> iLarge;             ///< (functions whose inlined code was too large)
+                            std::vector<std::uint32_t> iWritten;        ///< (the locals set (see written))
+                            struct parameters_sets
+                            {
+                                std::unordered_map<std::uint32_t, std::vector<bool>> sets;
+                                std::vector<bool> const* find(std::uint32_t aFunction) const { auto const s = sets.find(aFunction); return s != sets.end() ? &s->second : nullptr; }
+                                std::vector<bool> const& emplace(std::uint32_t aFunction, std::vector<bool>&& aSet) { return sets.emplace(aFunction, std::move(aSet)).first->second; }
+                            } iParametersSet;   ///< (see parameters_set)
                             std::size_t iMaxTokens = 0u;
                             std::size_t iInlined = 0u;
                             std::size_t iFolded = 0u;
@@ -1987,14 +2018,15 @@ namespace neos
                         return result;
                     }
 
-                    std::vector<std::vector<bool>> live_locals(module_description const& aModule, std::uint32_t aFunction, std::vector<std::size_t> const& aPositions)
+                    liveness locals_liveness(module_description const& aModule, std::uint32_t aFunction)
                     {
                         auto const& f = aModule.functions[aFunction];
                         auto const& tokens = *aModule.tokens;
                         auto const count = f.parameters->size() + f.locals->size();
-                        std::vector<std::vector<bool>> result(aPositions.size(), std::vector<bool>(count, true));
+                        liveness result;
+                        result.count = count;
                         // (its instructions: their positions; their control structure (each block's, loop's and if's else and end))
-                        std::vector<std::size_t> at;
+                        auto& at = result.at;
                         for (auto p = f.codeBegin; p < f.codeEnd;)
                         {
                             at.push_back(p);
@@ -2003,12 +2035,18 @@ namespace neos
                         }
                         auto const n = at.size();
                         if (n == 0u || n > 200000u || count == 0u)
+                        {
+                            at.clear();     // (none found: all live)
                             return result;
+                        }
                         auto const op_of = [&](std::size_t i) { return static_cast<std::uint8_t>(tokens[at[i]]); };
                         auto const imm = [&](std::size_t i, std::size_t k) { return tokens[at[i] + 1u + k]; };
                         constexpr std::size_t None = ~std::size_t{};
                         std::vector<std::size_t> endOf(n, None), elseOf(n, None);
-                        std::vector<std::vector<std::size_t>> successors(n);
+                        // (each instruction's successors: successors[successorsAt[i], successorsAt[i + 1]) (one vector: not one each))
+                        std::vector<std::size_t> successors;
+                        successors.reserve(n * 2u);
+                        std::vector<std::size_t> successorsAt(n + 1u, 0u);
                         struct control { std::size_t start; std::uint8_t op; };
                         std::vector<control> controls;
                         controls.push_back(control{ None, 0u });    // (the function's)
@@ -2048,9 +2086,9 @@ namespace neos
                             for (std::size_t i = 0u; i < n; ++i)
                             {
                                 auto const op = op_of(i);
-                                auto& s = successors[i];
-                                auto const next = [&]() { if (i + 1u < n) s.push_back(i + 1u); };
-                                auto const to = [&](std::size_t aTarget) { if (aTarget != None && aTarget < n) s.push_back(aTarget); };
+                                successorsAt[i] = successors.size();
+                                auto const next = [&]() { if (i + 1u < n) successors.push_back(i + 1u); };
+                                auto const to = [&](std::size_t aTarget) { if (aTarget != None && aTarget < n) successors.push_back(aTarget); };
                                 switch (op)
                                 {
                                 case 0x02u: case 0x03u:
@@ -2088,21 +2126,25 @@ namespace neos
                                     break;
                                 }
                             }
+                            successorsAt[n] = successors.size();
                         }
                         // (backwards, until nothing changes: a local is live before an instruction if it reads it, or if it is live after 
                         // it and the instruction does not set it)
                         auto const words = (count + 63u) / 64u;
-                        std::vector<std::uint64_t> live(n * words, 0u);
+                        result.words = words;
+                        auto& live = result.live;
+                        live.assign(n * words, 0u);
                         std::vector<std::uint64_t> out(words);
                         for (bool changed = true; changed;)
                         {
                             changed = false;
                             for (std::size_t i = n; i-- > 0u;)
                             {
-                                std::fill(out.begin(), out.end(), 0u);
-                                for (auto s : successors[i])
+                                for (std::size_t w = 0u; w < words; ++w)
+                                    out[w] = 0u;
+                                for (auto k = successorsAt[i]; k < successorsAt[i + 1u]; ++k)
                                     for (std::size_t w = 0u; w < words; ++w)
-                                        out[w] |= live[s * words + w];
+                                        out[w] |= live[successors[k] * words + w];
                                 auto const op = op_of(i);
                                 if (op == 0x20u || op == 0x21u || op == 0x22u)
                                 {
@@ -2123,15 +2165,29 @@ namespace neos
                                     }
                             }
                         }
+                        return result;
+                    }
+
+                    std::vector<std::vector<bool>> live_locals(liveness const& aLiveness, std::vector<std::size_t> const& aPositions)
+                    {
+                        auto const& at = aLiveness.at;
+                        auto const count = aLiveness.count;
+                        auto const words = aLiveness.words;
+                        std::vector<std::vector<bool>> result(aPositions.size(), std::vector<bool>(count, true));
                         for (std::size_t k = 0u; k < aPositions.size(); ++k)
                         {
                             auto const i = static_cast<std::size_t>(std::lower_bound(at.begin(), at.end(), aPositions[k]) - at.begin());
-                            if (i >= n || at[i] != aPositions[k])
+                            if (i >= at.size() || at[i] != aPositions[k])
                                 continue;   // (not an instruction's: all live)
                             for (std::size_t l = 0u; l < count; ++l)
-                                result[k][l] = ((live[i * words + l / 64u] >> (l % 64u)) & 1u) != 0u;
+                                result[k][l] = ((aLiveness.live[i * words + l / 64u] >> (l % 64u)) & 1u) != 0u;
                         }
                         return result;
+                    }
+
+                    std::vector<std::vector<bool>> live_locals(module_description const& aModule, std::uint32_t aFunction, std::vector<std::size_t> const& aPositions)
+                    {
+                        return live_locals(locals_liveness(aModule, aFunction), aPositions);
                     }
 
                     result optimize(module_description const& aModule, std::uint32_t aFunction, options const& aOptions,
@@ -2144,7 +2200,7 @@ namespace neos
                             // folded costs more than it saves); with those that an earlier optimization found useful: once, if they are now)
                             rewriter first{ aModule, aFunction, aOptions, aInlinable, aMemoryWord, aOptions.usefulHint };
                             auto r = first.run();
-                            if (first.speculations() == 0u || first.useful().size() == first.speculations())
+                            if (first.speculations() == 0u || first.useful().size() == first.speculations() || first.useful().size() == first.distinct_speculations())
                             {
                                 r.useful = first.useful();
                                 return r;

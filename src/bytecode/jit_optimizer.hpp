@@ -195,6 +195,17 @@ namespace neos
                     // (the locals (parameters, then locals) of a function that its code may read after each of the positions (of its 
                     // instructions) before it sets them: by position)
                     std::vector<std::vector<bool>> live_locals(module_description const& aModule, std::uint32_t aFunction, std::vector<std::size_t> const& aPositions);
+                    // (the same, found once for a function (its code does not change): its instructions' positions, and the locals live
+                    // before each (all: none found))
+                    struct liveness
+                    {
+                        std::vector<std::size_t> at;
+                        std::size_t count = 0u;     ///< (its locals)
+                        std::size_t words = 0u;     ///< (per instruction)
+                        std::vector<std::uint64_t> live;
+                    };
+                    liveness locals_liveness(module_description const& aModule, std::uint32_t aFunction);
+                    std::vector<std::vector<bool>> live_locals(liveness const& aLiveness, std::vector<std::size_t> const& aPositions);
 
                     // (aInlinable: whether a function may be inlined (its calls have no frame of their own); aMemoryWord: the word at an
                     // address of a fixed external memory (aWidth bytes, zero extended), if it is within it)

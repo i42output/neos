@@ -46,6 +46,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <memory>
 #include <neos/runtime/plugin.h>
 #include "jit_ssa.hpp"
 #include "jit_optimizer.hpp"
@@ -150,11 +151,19 @@ namespace neos
                                 std::uint32_t end = 0u;                 ///< (the block after it (a loop's: its header, which branches go to))
                                 std::uint32_t elseBlock = 0u;           ///< (an if's else (while its then arm is read))
                                 bool hasElse = false;
+                                bool osrThen = false;                   ///< (an if whose then arm has the entry at a loop: its else arm is not reached)
                                 std::size_t height = 0u;
+                            };
+                            // (an entry at a loop: a construct that has the loop (its position), and whether the loop is in its else arm)
+                            struct osr_construct
+                            {
+                                std::size_t position = 0u;
+                                bool inElse = false;
                             };
                         public:
                             builder(module_description const& aModule, std::uint32_t aFunction, std::vector<std::uint64_t> const& aTokens,
-                                std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts) :
+                                std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts,
+                                osr_entry const* aOsr) :
                                 iModule{ aModule }, iTokens{ aTokens }, iOrigins{ aOrigins }, iDeopts{ aDeopts }
                             {
                                 auto const& f = aModule.functions[aFunction];
@@ -164,6 +173,19 @@ namespace neos
                                 iVariableTypes = iFunction.parameters;
                                 iVariableTypes.insert(iVariableTypes.end(), aLocals.begin(), aLocals.end());
                                 iLocals = iVariableTypes.size();
+                                // (about a value for each token, and the phis: room for them (the values are not copied as they are added))
+                                iFunction.values.reserve(aTokens.size() + aTokens.size() / 2u);
+                                iDefinitions.reserve(aTokens.size());
+                                if (aOsr != nullptr)
+                                {
+                                    // (the entry's parameters: the first variables (the function's parameters, then its own locals))
+                                    if (aOsr->parameters.size() > iVariableTypes.size() ||
+                                        !std::equal(aOsr->parameters.begin(), aOsr->parameters.end(), iVariableTypes.begin()))
+                                        throw unsupported{ "osr entry" };
+                                    iFunction.parameters = aOsr->parameters;
+                                    osr_path(aOsr->loop);
+                                    iSeeking = true;
+                                }
                             }
                         public:
                             function build()
@@ -214,7 +236,7 @@ namespace neos
                                 iPhis.emplace_back();
                                 return static_cast<std::uint32_t>(iFunction.blocks.size() - 1u);
                             }
-                            value add(std::uint16_t aOp, std::uint8_t aType, std::vector<value> aOperands, std::uint64_t aImm0 = 0u, std::uint64_t aImm1 = 0u)
+                            value add(std::uint16_t aOp, std::uint8_t aType, operand_list aOperands, std::uint64_t aImm0 = 0u, std::uint64_t aImm1 = 0u)
                             {
                                 instruction i;
                                 i.op = aOp;
@@ -229,14 +251,23 @@ namespace neos
                                 iFunction.blocks[iCurrent].code.push_back(v);
                                 return v;
                             }
+                            // (one value for each constant (a constant is where it is used))
+                            value constant(std::uint16_t aOp, std::uint8_t aType, std::uint64_t aBits)
+                            {
+                                auto& same = aBits == flat_map64<value>::Empty ? iAllOnes[aOp - 0x41u] : iConstants[aOp - 0x41u][aBits];
+                                if (same == value{})
+                                    same = add(aOp, aType, {}, aBits) + 1u;
+                                return same - 1u;
+                            }
                             value zero(std::uint8_t aType)
                             {
+                                // (a constant: e.g. the locals' values at the entry, and deopts' locals that are not live)
                                 switch (aType)
                                 {
-                                case I32: return add(0x41u, I32, {}, 0u);
-                                case I64: return add(0x42u, I64, {}, 0u);
-                                case F32: return add(0x43u, F32, {}, 0u);
-                                default: return add(0x44u, F64, {}, 0u);
+                                case I32: return constant(0x41u, I32, 0u);
+                                case I64: return constant(0x42u, I64, 0u);
+                                case F32: return constant(0x43u, F32, 0u);
+                                default: return constant(0x44u, F64, 0u);
                                 }
                             }
                             void link(std::uint32_t aFrom, std::uint32_t aTo)
@@ -244,7 +275,7 @@ namespace neos
                                 iFunction.blocks[aFrom].successors.push_back(aTo);
                                 iFunction.blocks[aTo].predecessors.push_back(aFrom);
                             }
-                            void terminate(std::uint16_t aOp, std::vector<value> aOperands, std::vector<std::uint32_t> const& aSuccessors, std::uint64_t aImm0 = 0u)
+                            void terminate(std::uint16_t aOp, operand_list aOperands, std::vector<std::uint32_t> const& aSuccessors, std::uint64_t aImm0 = 0u)
                             {
                                 add(aOp, Void, std::move(aOperands), aImm0);
                                 for (auto s : aSuccessors)
@@ -264,8 +295,8 @@ namespace neos
                             }
                             value read(variable aVariable, std::uint32_t aBlock)
                             {
-                                if (auto const d = iDefinitions.find(key(aVariable, aBlock)); d != iDefinitions.end())
-                                    return forwarded(d->second);
+                                if (auto const* d = iDefinitions.find(key(aVariable, aBlock)))
+                                    return forwarded(*d);
                                 return read_recursive(aVariable, aBlock);
                             }
                             value read_recursive(variable aVariable, std::uint32_t aBlock)
@@ -286,6 +317,29 @@ namespace neos
                                     iCurrent = aBlock;
                                     v = zero_in(aBlock, iVariableTypes[aVariable]);
                                     iCurrent = save;
+                                }
+                                else if (!b.loopHeader)
+                                {
+                                    // (a join (not a loop's header: none of its predecessors' values are its own): a phi only if they differ)
+                                    operand_list operands;
+                                    value same = None;
+                                    bool differ = false;
+                                    for (auto p : iFunction.blocks[aBlock].predecessors)
+                                    {
+                                        auto const o = read(aVariable, p);
+                                        operands.push_back(o);
+                                        if (same == None)
+                                            same = o;
+                                        else if (o != same)
+                                            differ = true;
+                                    }
+                                    if (differ)
+                                    {
+                                        v = phi(aVariable, aBlock);
+                                        iFunction.values[v].operands = std::move(operands);
+                                    }
+                                    else
+                                        v = same;
                                 }
                                 else
                                 {
@@ -322,7 +376,7 @@ namespace neos
                             value phi_operands(variable aVariable, value aPhi)
                             {
                                 auto const block = iFunction.values[aPhi].block;
-                                std::vector<value> operands;
+                                operand_list operands;
                                 for (auto p : iFunction.blocks[block].predecessors)
                                     operands.push_back(read(aVariable, p));
                                 iFunction.values[aPhi].operands = std::move(operands);
@@ -431,11 +485,119 @@ namespace neos
                                     aPosition += 1u + immediates(op, iTokens, aPosition);
                                 }
                             }
+                            // --- an entry at a loop (see osr_entry)
+                            static bool opens(std::uint8_t aOp) { return aOp == 0x02u || aOp == 0x03u || aOp == 0x04u; }
+                            // (the loop (its token's origin aLoop: once, in the function's own code, within no other loop, at the operand stack's
+                            // base) and the constructs (blocks and ifs) that it is within)
+                            void osr_path(std::size_t aLoop)
+                            {
+                                struct open_construct
+                                {
+                                    std::size_t position = 0u;
+                                    std::uint8_t op = 0u;
+                                    bool inElse = false;
+                                };
+                                std::vector<open_construct> open;
+                                std::size_t target = ~std::size_t{};
+                                for (std::size_t p = 0u; p < iTokens.size();)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    if (op == 0x03u && p < iOrigins.size() && iOrigins[p] == aLoop)
+                                    {
+                                        if (target != ~std::size_t{})
+                                            throw unsupported{ "osr loop" };
+                                        target = p;
+                                        for (auto const& c : open)
+                                        {
+                                            if (c.op != 0x02u && c.op != 0x04u)
+                                                throw unsupported{ "osr loop" };   // (within another loop)
+                                            iOsrPath.push_back(osr_construct{ c.position, c.inElse });
+                                        }
+                                    }
+                                    if (opens(op))
+                                        open.push_back(open_construct{ p, op, false });
+                                    else if (op == 0x05u && !open.empty())
+                                        open.back().inElse = true;
+                                    else if (op == 0x0Bu && !open.empty())
+                                        open.pop_back();
+                                    p += 1u + immediates(op, iTokens, p);
+                                }
+                                if (target == ~std::size_t{})
+                                    throw unsupported{ "osr loop" };
+                                iOsrTarget = target;
+                            }
+                            // (a construct's tokens, from its opening token: after its end)
+                            void skip_construct(std::size_t& aPosition, std::size_t aEnd) const
+                            {
+                                std::size_t depth = 0u;
+                                do
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[aPosition]);
+                                    if (opens(op))
+                                        ++depth;
+                                    else if (op == 0x0Bu)
+                                        --depth;
+                                    aPosition += 1u + immediates(op, iTokens, aPosition);
+                                } while (depth > 0u && aPosition < aEnd);
+                            }
+                            // (the code before the entry's loop: not the entry's (the constructs that have the loop are entered, without code);
+                            // to the loop)
+                            void seek(std::size_t& aPosition, std::size_t aEnd)
+                            {
+                                while (aPosition < aEnd && aPosition != iOsrTarget)
+                                {
+                                    auto const op = static_cast<std::uint8_t>(iTokens[aPosition]);
+                                    auto const imm = [&](std::size_t aIndex) { return iTokens[aPosition + 1u + aIndex]; };
+                                    if (iOsrPathIndex < iOsrPath.size() && iOsrPath[iOsrPathIndex].position == aPosition)
+                                    {
+                                        auto const inElse = iOsrPath[iOsrPathIndex++].inElse;
+                                        frame f;
+                                        f.kind = op == 0x04u ? frame::If : frame::Block;
+                                        f.results = block_type(imm(0));
+                                        for (auto t : f.results)
+                                            f.resultVariables.push_back(new_variable(t));
+                                        f.end = new_block();
+                                        f.height = iStack.size();
+                                        aPosition += 1u + immediates(op, iTokens, aPosition);
+                                        if (op == 0x04u)
+                                        {
+                                            f.elseBlock = new_block();
+                                            seal(f.elseBlock);
+                                            if (inElse)
+                                            {
+                                                // (its then arm: not the entry's; to its else)
+                                                skip(aPosition, aEnd);
+                                                if (aPosition >= aEnd || static_cast<std::uint8_t>(iTokens[aPosition]) != 0x05u)
+                                                    throw unsupported{ "osr loop" };
+                                                aPosition += 1u;
+                                                f.hasElse = true;
+                                            }
+                                            else
+                                                f.osrThen = true;
+                                        }
+                                        iFrames.push_back(f);
+                                        continue;
+                                    }
+                                    if (opens(op))
+                                    {
+                                        skip_construct(aPosition, aEnd);
+                                        continue;
+                                    }
+                                    if (op == 0x05u || op == 0x0Bu)
+                                        throw unsupported{ "osr loop" };
+                                    aPosition += 1u + immediates(op, iTokens, aPosition);
+                                }
+                                if (aPosition != iOsrTarget)
+                                    throw unsupported{ "osr loop" };
+                                iSeeking = false;
+                            }
                             // --- the code
                             void read_code(std::size_t aBegin, std::size_t aEnd)
                             {
                                 for (std::size_t p = aBegin; p < aEnd;)
                                 {
+                                    if (iSeeking)
+                                        seek(p, aEnd);
                                     if (!iReachable)
                                     {
                                         skip(p, aEnd);
@@ -513,7 +675,7 @@ namespace neos
                                             iStack.resize(f.height);
                                             f.hasElse = true;
                                             iCurrent = f.elseBlock;
-                                            iReachable = true;
+                                            iReachable = !f.osrThen;    // (an entry at a loop in its then arm: its else arm is not reached)
                                         }
                                         break;
                                     case 0x0B:
@@ -536,12 +698,19 @@ namespace neos
                                                 seal(f.end);
                                                 break;
                                             }
+                                            if (f.kind == frame::Block && iReachable && iFunction.blocks[f.end].predecessors.empty())
+                                            {
+                                                // (a block that nothing branches to: its code continues where it is (its results are the
+                                                // stack's), without a block of its own)
+                                                seal(f.end);
+                                                break;
+                                            }
                                             if (iReachable)
                                             {
                                                 branch_values(f);
                                                 terminate(Jump, {}, { f.end });
                                             }
-                                            if (f.kind == frame::If && !f.hasElse)
+                                            if (f.kind == frame::If && !f.hasElse && !f.osrThen)
                                             {
                                                 // (no else: its else block goes to its end)
                                                 iCurrent = f.elseBlock;
@@ -619,7 +788,7 @@ namespace neos
                                                     // (frames (see optimizer::deopt::frames): each one's locals (the optimized code's, or
                                                     // constants; a local that its code does not read after its call: 0) and its operand stack
                                                     // (the next part of the operand stack's), then the call's arguments)
-                                                    std::vector<value> operands;
+                                                    operand_list operands;
                                                     std::size_t height = 0u;
                                                     for (auto const& frame : d.frames)
                                                     {
@@ -652,7 +821,7 @@ namespace neos
                                                 }
                                                 if (d.locals > iLocals || iStack.size() < d.depth)
                                                     throw unsupported{ "deopt state" };
-                                                std::vector<value> operands;
+                                                operand_list operands;
                                                 operands.reserve(d.locals + d.depth + d.arguments);
                                                 // (a local that the function's own code does not read before it sets it: 0)
                                                 for (std::uint32_t l = 0u; l < d.locals; ++l)
@@ -736,16 +905,16 @@ namespace neos
                                         }
                                         break;
                                     case 0x41:
-                                        iStack.push_back(add(op, I32, {}, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(imm(0))))));
+                                        iStack.push_back(constant(op, I32, static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int64_t>(imm(0))))));
                                         break;
                                     case 0x42:
-                                        iStack.push_back(add(op, I64, {}, imm(0)));
+                                        iStack.push_back(constant(op, I64, imm(0)));
                                         break;
                                     case 0x43:
-                                        iStack.push_back(add(op, F32, {}, imm(0) & 0xFFFFFFFFull));
+                                        iStack.push_back(constant(op, F32, imm(0) & 0xFFFFFFFFull));
                                         break;
                                     case 0x44:
-                                        iStack.push_back(add(op, F64, {}, imm(0)));
+                                        iStack.push_back(constant(op, F64, imm(0)));
                                         break;
                                     default:
                                         if (op >= 0x28u && op <= 0x35u)
@@ -783,7 +952,7 @@ namespace neos
                             void call(std::uint16_t aOp, std::uint64_t aImm0, std::uint64_t aImm1, std::vector<std::uint8_t> const& aParameters,
                                 std::vector<std::uint8_t> const& aResults, bool aIndirect)
                             {
-                                std::vector<value> operands(aParameters.size() + (aIndirect ? 1u : 0u));
+                                operand_list operands(aParameters.size() + (aIndirect ? 1u : 0u), value{});
                                 for (auto i = operands.size(); i-- > 0u;)
                                     operands[i] = pop();
                                 auto const c = add(aOp, aResults.empty() ? Void : aResults[0], std::move(operands), aImm0, aImm1);
@@ -800,7 +969,7 @@ namespace neos
                             function iFunction;
                             std::vector<std::uint8_t> iVariableTypes;
                             std::size_t iLocals = 0u;
-                            std::unordered_map<std::uint64_t, value> iDefinitions;
+                            flat_map64<value> iDefinitions;
                             std::vector<bool> iSealed;
                             std::vector<std::vector<std::pair<variable, value>>> iIncomplete;
                             std::vector<std::vector<value>> iPhis;
@@ -810,6 +979,13 @@ namespace neos
                             std::uint32_t iCurrent = 0u;
                             bool iReachable = true;
                             std::size_t iOrigin = 0u;
+                            // (an entry at a loop: see osr_entry)
+                            flat_map64<value> iConstants[4];    ///< (see constant: each value + 1)
+                            value iAllOnes[4] = {};
+                            bool iSeeking = false;
+                            std::size_t iOsrTarget = ~std::size_t{};
+                            std::vector<osr_construct> iOsrPath;
+                            std::size_t iOsrPathIndex = 0u;
                         };
 
                         // --- optimizations
@@ -843,6 +1019,17 @@ namespace neos
                                         if (!aFunction.values[v].dead)
                                             for (auto o : aFunction.values[v].operands)
                                                 ++aFunction.uses[o];
+                            aFunction.usesCurrent = true;
+                        }
+
+                        // (the values' uses: counted, unless they have been since the code last changed)
+                        void current_uses(function& aFunction)
+                        {
+                            if (aFunction.usesCurrent && aFunction.uses.size() == aFunction.values.size())
+                            {
+                                return;
+                            }
+                            count_uses(aFunction);
                         }
 
                         // (a branch whose condition is a constant: a jump (its other successor loses it as a predecessor))
@@ -872,7 +1059,7 @@ namespace neos
                             void add(value aFrom, value aTo)
                             {
                                 if (to.size() <= aFrom)
-                                    to.resize(aFrom + 1u, None);
+                                    to.resize(std::max<std::size_t>(aFrom + 1u, 2u * to.size()), None);    // (geometrically: values are added in order)
                                 to[aFrom] = aTo;
                             }
                             value resolved(value aValue) const
@@ -947,8 +1134,9 @@ namespace neos
                         bool fold_known_bits(function& aFunction)
                         {
                             auto& values = aFunction.values;
-                            std::vector<std::uint64_t> may(values.size(), ~std::uint64_t{});
-                            std::vector<std::uint64_t> ones(values.size(), 0u);
+                            // (a value's bits (may, ones) are read only once it is done: not initialized)
+                            std::unique_ptr<std::uint64_t[]> const may{ new std::uint64_t[values.size()] };
+                            std::unique_ptr<std::uint64_t[]> const ones{ new std::uint64_t[values.size()] };
                             std::vector<bool> done(values.size(), false);
                             auto const width = [&](value v) -> std::uint64_t { return values[v].type == I32 ? 0xFFFFFFFFull : ~std::uint64_t{}; };
                             replacements replaced;
@@ -957,6 +1145,18 @@ namespace neos
                                 for (auto v : aFunction.blocks[b].code)
                                 {
                                     auto& i = values[v];
+                                    if (!i.dead && (i.op == 0xB3u || i.op == 0xB8u) && i.operands.size() == 1u)
+                                    {
+                                        // (f32/f64.convert_i32_u of a value whose sign bit is 0: the signed conversion (no zero extension))
+                                        auto& o = i.operands[0];
+                                        o = replaced.resolved(o);
+                                        if (!values[o].constant() && values[o].type == I32 && done[o] && (may[o] & 0x80000000ull) == 0u)
+                                        {
+                                            i.op = i.op == 0xB3u ? 0xB2u : 0xB7u;
+                                            changed = true;
+                                        }
+                                        continue;
+                                    }
                                     if (i.dead || (i.type != I32 && i.type != I64))
                                         continue;
                                     for (auto& o : i.operands)
@@ -1339,16 +1539,23 @@ namespace neos
                             return changed;
                         }
 
+                        void compact_values(function& aFunction);
+
                         void eliminate_dead_code(function& aFunction)
                         {
                             // (instructions without effects whose values are not used (those of blocks that cannot be reached: none, and their
                             // operands' uses are not counted))
+                            // (a block that cannot be reached: no code (its values' are dead; a constant is where it is used, which may be
+                            // elsewhere))
                             for (auto& b : aFunction.blocks)
-                                if (!b.reachable)
+                                if (!b.reachable && !b.code.empty())
+                                {
                                     for (auto v : b.code)
-                                        if (!aFunction.values[v].constant())    // (a constant is where it is used)
+                                        if (!aFunction.values[v].constant())
                                             aFunction.values[v].dead = true;
-                            count_uses(aFunction);
+                                    b.code.clear();
+                                }
+                            current_uses(aFunction);
                             std::vector<value> work;
                             for (auto const& b : aFunction.blocks)
                                 if (b.reachable)
@@ -1367,6 +1574,16 @@ namespace neos
                                     if (--aFunction.uses[o] == 0u && pure(aFunction.values[o]) && aFunction.values[o].op != Param)
                                         work.push_back(o);
                             }
+                            // (the blocks' code without its dead values (the passes that follow do not visit them))
+                            std::size_t code = 0u;
+                            for (auto& b : aFunction.blocks)
+                            {
+                                std::erase_if(b.code, [&](value v) { return aFunction.values[v].dead; });
+                                code += b.code.size();
+                            }
+                            // (mostly dead values: the others numbered again (the passes' tables are the code's size))
+                            if (aFunction.values.size() > 4u * code + 1024u)
+                                compact_values(aFunction);
                         }
 
                         // (algebraic simplifications: x + 0, x * 1, x & ~0 ... are x; x & 0, x * 0 are 0; eqz of a comparison is its inverse
@@ -1434,7 +1651,7 @@ namespace neos
                         {
                             bool changed = false;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             for (auto b : aFunction.order)
                                 for (auto v : aFunction.blocks[b].code)
                                 {
@@ -1486,11 +1703,37 @@ namespace neos
                             return changed;
                         }
 
+                        // (a branch on i32.eqz(x): a branch on x, its successors swapped (exact for any x: e.g. a float comparison's, whose
+                        // inverse is not a comparison (NaN)), so that a comparison's flags decide it)
+                        bool invert_branches(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            bool changed = false;
+                            for (auto b : aFunction.order)
+                            {
+                                auto& B = aFunction.blocks[b];
+                                if (B.code.empty() || B.successors.size() != 2u)
+                                    continue;
+                                auto& t = values[B.code.back()];
+                                if (t.op != Branch || t.dead || t.operands.size() != 1u)
+                                    continue;
+                                auto const& c = values[t.operands[0]];
+                                if (c.dead || c.op != 0x45u || c.operands.size() != 1u || values[c.operands[0]].type != I32)
+                                    continue;
+                                t.operands[0] = c.operands[0];
+                                std::swap(B.successors[0], B.successors[1]);
+                                changed = true;
+                            }
+                            if (changed)
+                                count_uses(aFunction);
+                            return changed;
+                        }
+
                         bool simplify(function& aFunction)
                         {
                             bool changed = false;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             replacements replaced;
                             auto const new_constant = [&](std::uint8_t aType, std::uint64_t aBits, std::uint32_t aBlock) -> value
                             {
@@ -1538,7 +1781,7 @@ namespace neos
                                         // are at most -infinity's: it is not a NaN), or of a phi of such values (and constants that are at most that),
                                         // with a constant above that: known)
                                         constexpr std::uint64_t Most = 0xFFF0000000000000ull;
-                                        std::function<bool(value, int)> converted = [&](value aValue, int aDepth) -> bool
+                                        auto const converting = [&](auto const& aSelf, value aValue, int aDepth) -> bool
                                         {
                                             auto const& x = values[aValue];
                                             if (x.constant())
@@ -1548,12 +1791,13 @@ namespace neos
                                             if (x.op == ssa::Phi && aDepth > 0 && !x.operands.empty())
                                             {
                                                 for (auto o : x.operands)
-                                                    if (o == aValue || !converted(o, aDepth - 1))
+                                                    if (o == aValue || !aSelf(aSelf, o, aDepth - 1))
                                                         return false;
                                                 return true;
                                             }
                                             return false;
                                         };
+                                        auto const converted = [&](value aValue, int aDepth) { return converting(converting, aValue, aDepth); };
                                         std::optional<bool> known;
                                         auto const& a0 = values[i.operands[0]];
                                         auto const& a1 = values[i.operands[1]];
@@ -1811,6 +2055,7 @@ namespace neos
                             // ((x & M) compared (== or !=) only with constants C within M, M: ones then (at least 32) zeros: x >> the zeros,
                             // compared with C >> them)
                             std::vector<std::int32_t> candidate(values.size(), -1);     // (-1: not one; else its zeros)
+                            bool candidates = false;
                             for (auto b : aFunction.order)
                                 for (auto v : aFunction.blocks[b].code)
                                 {
@@ -1820,9 +2065,15 @@ namespace neos
                                     auto const mask = values[i.operands[1]].imm0;
                                     auto const zeros = std::countr_zero(mask);
                                     if (mask != 0u && zeros >= 32 && (mask >> zeros) == (~std::uint64_t{} >> zeros))
+                                    {
                                         candidate[v] = zeros;
+                                        candidates = true;
+                                    }
                                 }
-                            std::vector<std::vector<value>> users(values.size());
+                            if (!candidates)
+                                return changed;
+                            // (each candidate's users (candidate, user), in the code's order)
+                            std::vector<std::pair<value, value>> users;
                             for (auto b : aFunction.order)
                                 for (auto v : aFunction.blocks[b].code)
                                 {
@@ -1840,25 +2091,36 @@ namespace neos
                                         if (!fits)
                                             candidate[x] = -1;
                                         else
-                                            users[x].push_back(v);
+                                            users.emplace_back(x, v);
                                     }
                                 }
-                            for (value x = 0u; x < candidate.size(); ++x)
+                            std::stable_sort(users.begin(), users.end(), [](auto const& aL, auto const& aR) { return aL.first < aR.first; });
+                            for (std::size_t k = 0u; k < users.size();)
                             {
-                                if (candidate[x] < 0 || users[x].empty())
+                                auto const x = users[k].first;
+                                auto last = k;
+                                while (last < users.size() && users[last].first == x)
+                                    ++last;
+                                if (candidate[x] < 0)
+                                {
+                                    k = last;
                                     continue;
+                                }
                                 auto const zeros = static_cast<std::uint64_t>(candidate[x]);
                                 auto const block = values[x].block;
                                 auto const shift = new_constant(I64, zeros, block);
                                 values[x].op = 0x88u;      // (i64.shr_u)
                                 values[x].operands[1] = shift;
-                                for (auto u : users[x])
+                                for (; k < last; ++k)
+                                {
+                                    auto const u = users[k].second;
                                     for (std::size_t o = 0u; o < values[u].operands.size(); ++o)
                                         if (auto const c = values[u].operands[o]; c != x)
                                         {
                                             auto const shifted = new_constant(I64, values[c].imm0 >> zeros, block);
                                             values[u].operands[o] = shifted;
                                         }
+                                }
                                 changed = true;
                             }
                             return changed;
@@ -1924,19 +2186,90 @@ namespace neos
                             std::vector<bool> exited(blocks.size(), false);
                             // (the table of values by their keys: (operation, type, immediates, epoch (memory's), operands); scoped by the
                             // dominator tree)
-                            struct key_hash
+                            struct key
                             {
-                                std::size_t operator()(std::vector<std::uint64_t> const& aKey) const noexcept
+                                std::uint64_t words[5];
+                                std::uint32_t size = 0u;
+                                void push_back(std::uint64_t aWord) { words[size++] = aWord; }
+                                bool operator==(key const& aOther) const { return size == aOther.size && std::equal(words, words + size, aOther.words); }
+                                std::size_t hash() const noexcept
                                 {
                                     std::uint64_t h = 0x9E3779B97F4A7C15ull;
-                                    for (auto k : aKey)
-                                        h = (h ^ k) * 0x100000001B3ull + (h >> 29u);
-                                    return static_cast<std::size_t>(h);
+                                    for (std::uint32_t k = 0u; k < size; ++k)
+                                        h = (h ^ words[k]) * 0x100000001B3ull + (h >> 29u);
+                                    return static_cast<std::size_t>(h ^ (h >> 32u));
                                 }
                             };
-                            std::unordered_map<std::vector<std::uint64_t>, value, key_hash> table;
-                            table.reserve(values.size());
-                            std::vector<std::vector<std::uint64_t>> added;      // (the keys added, in order: removed as the walk leaves a block)
+                            // (open addressing (linear probing): keys are removed in the reverse of the order they were added (the walk's
+                            // scopes), so a key's slot is no other key's probe's (those were added after it, and removed first): it is
+                            // emptied)
+                            struct scoped_table
+                            {
+                                std::vector<key> keys;
+                                std::vector<value> values;
+                                std::size_t mask = 0u;
+                                std::size_t count = 0u;
+                                std::vector<key> added;     // (the keys added, in order: removed as the walk leaves a block)
+                                void reset(std::size_t aCapacity)
+                                {
+                                    std::size_t size = 64u;
+                                    while (size < aCapacity * 2u)
+                                        size *= 2u;
+                                    keys.assign(size, key{});
+                                    values.assign(size, None);
+                                    mask = size - 1u;
+                                    count = 0u;
+                                }
+                                std::size_t find_slot(key const& aKey) const
+                                {
+                                    auto i = aKey.hash() & mask;
+                                    while (keys[i].size != 0u && !(keys[i] == aKey))
+                                        i = (i + 1u) & mask;
+                                    return i;
+                                }
+                                // (the value of the key, and whether it was added (with aValue))
+                                std::pair<value, bool> try_emplace(key const& aKey, value aValue)
+                                {
+                                    if ((count + 1u) * 2u > keys.size())
+                                    {
+                                        // (larger: the keys added again, in their order)
+                                        auto const live = std::move(added);
+                                        std::vector<value> liveValues;
+                                        liveValues.reserve(live.size());
+                                        for (auto const& k : live)
+                                            liveValues.push_back(values[find_slot(k)]);
+                                        reset(keys.size());
+                                        for (std::size_t k = 0u; k < live.size(); ++k)
+                                            try_emplace(live[k], liveValues[k]);
+                                    }
+                                    auto const i = find_slot(aKey);
+                                    if (keys[i].size != 0u)
+                                        return { values[i], false };
+                                    keys[i] = aKey;
+                                    values[i] = aValue;
+                                    ++count;
+                                    added.push_back(aKey);
+                                    return { aValue, true };
+                                }
+                                void pop_to(std::size_t aMark)
+                                {
+                                    while (added.size() > aMark)
+                                    {
+                                        auto const i = find_slot(added.back());
+                                        keys[i].size = 0u;
+                                        --count;
+                                        added.pop_back();
+                                    }
+                                }
+                            };
+                            scoped_table table;
+                            {
+                                // (sized for the code's values (values has the dead too): it grows if it needs to)
+                                std::size_t code = 0u;
+                                for (auto b : order)
+                                    code += blocks[b].code.size();
+                                table.reset(code);
+                            }
                             // (memory's epochs: one for each alias class (see optimizer::MemargClassShift: class 0's changes with any store),
                             // and globals')
                             constexpr std::size_t Globals = optimizer::MemargClasses;
@@ -1947,15 +2280,18 @@ namespace neos
                             replacements replaced;
                             // (constants of the same type and bits: one value (so that instructions of them compare equal))
                             {
-                                std::unordered_map<std::uint64_t, value> constants[4];
+                                flat_map64<value> constants[4];
+                                value allOnes[4] = {};  // (flat_map64's keys are not all ones) (each: the value + 1 (0: none yet))
                                 for (std::size_t v = 0u; v < values.size(); ++v)
                                 {
                                     auto const& i = values[v];
                                     if (!i.constant() || i.dead)
                                         continue;
-                                    auto& same = constants[i.op - 0x41u];
-                                    if (auto const [where, inserted] = same.try_emplace(i.imm0, static_cast<value>(v)); !inserted)
-                                        replaced.add(static_cast<value>(v), where->second);
+                                    auto& same = i.imm0 == flat_map64<value>::Empty ? allOnes[i.op - 0x41u] : constants[i.op - 0x41u][i.imm0];
+                                    if (same == value{})
+                                        same = static_cast<value>(v) + 1u;
+                                    else
+                                        replaced.add(static_cast<value>(v), same - 1u);
                                 }
                             }
                             auto const commutative = [](std::uint16_t aOp)
@@ -1972,7 +2308,13 @@ namespace neos
                             };
                             auto const memory_key = [](std::uint16_t aOp, std::uint8_t aType, std::uint64_t aMemarg, std::uint64_t aOffset, value aAddress, std::uint64_t aEpoch)
                             {
-                                return std::vector<std::uint64_t>{ aOp | (std::uint64_t{ aType } << 16u), aMemarg >> 32u, aOffset, aEpoch, aAddress };
+                                key k;
+                                k.push_back(aOp | (std::uint64_t{ aType } << 16u));
+                                k.push_back(aMemarg >> 32u);
+                                k.push_back(aOffset);
+                                k.push_back(aEpoch);
+                                k.push_back(aAddress);
+                                return k;
                             };
                             struct frame { std::uint32_t block; std::size_t next; std::size_t mark; std::size_t knownMark; std::size_t accessMark; std::size_t equalMark; };
                             // (the memory accesses made (in the blocks being walked: those that dominate the block being numbered), with
@@ -2153,7 +2495,7 @@ namespace neos
                                         epoch[c] = same ? exitEpoch[idom[aBlock]][c] : ++epochs;
                                     }
                                 }
-                                stack.push_back(frame{ aBlock, 0u, added.size(), knownOrder.size(), accesses.size(), equalOrder.size() });
+                                stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size() });
                                 if (b.predecessors.size() == 1u && aBlock != order[0])
                                 {
                                     auto const& from = blocks[b.predecessors[0]];
@@ -2168,6 +2510,30 @@ namespace neos
                                             {
                                                 known[condition] = whenTrue ? 1 : 0;
                                                 knownOrder.push_back(condition);
+                                            }
+                                            // (a conjunction (i32.and) of comparisons that is true: each is 1; a disjunction (i32.or) that is false:
+                                            // each is 0)
+                                            if (auto const op = values[condition].op; (op == 0x71u && whenTrue) || (op == 0x72u && !whenTrue))
+                                            {
+                                                std::vector<value> pending{ condition };
+                                                for (int n = 0; !pending.empty() && n < 16; ++n)
+                                                {
+                                                    auto const term = replaced.resolved(pending.back());
+                                                    pending.pop_back();
+                                                    auto const& t = values[term];
+                                                    if (t.dead || t.constant())
+                                                        continue;
+                                                    if (t.op == op && t.operands.size() == 2u)
+                                                    {
+                                                        pending.push_back(t.operands[0]);
+                                                        pending.push_back(t.operands[1]);
+                                                    }
+                                                    else if (t.op >= 0x45u && t.op <= 0x66u && term < known.size() && known[term] < 0)
+                                                    {
+                                                        known[term] = whenTrue ? 1 : 0;
+                                                        knownOrder.push_back(term);
+                                                    }
+                                                }
                                             }
                                             // (x == C on this edge: x is C)
                                             if (auto const& c = values[condition]; !c.dead && (c.op == 0x46u || c.op == 0x47u || c.op == 0x51u || c.op == 0x52u) && c.operands.size() == 2u &&
@@ -2258,9 +2624,7 @@ namespace neos
                                                         continue;
                                                     if (e.loadOp != 0u)
                                                     {
-                                                        auto kk = memory_key(e.loadOp, e.type, st.imm0, e.offset, e.address, epoch[c]);
-                                                        if (table.try_emplace(kk, e.data).second)
-                                                            added.push_back(std::move(kk));
+                                                        table.try_emplace(memory_key(e.loadOp, e.type, st.imm0, e.offset, e.address, epoch[c]), e.data);
                                                     }
                                                     auto moved = e;
                                                     moved.epoch = epoch[c];
@@ -2301,9 +2665,7 @@ namespace neos
                                                 }
                                                 if (e.loadOp != 0u)
                                                 {
-                                                    auto kk = memory_key(e.loadOp, e.type, st.imm0, e.offset, e.address, epoch[c]);
-                                                    if (table.try_emplace(kk, e.data).second)
-                                                        added.push_back(std::move(kk));
+                                                    table.try_emplace(memory_key(e.loadOp, e.type, st.imm0, e.offset, e.address, epoch[c]), e.data);
                                                 }
                                                 auto moved = e;
                                                 moved.epoch = epoch[c];
@@ -2322,9 +2684,7 @@ namespace neos
                                         }
                                         if (load != 0u)
                                         {
-                                            auto k = memory_key(load, values[st.operands[1]].type, st.imm0, st.imm1, st.operands[0], epoch[c]);
-                                            if (table.try_emplace(k, st.operands[1]).second)
-                                                added.push_back(std::move(k));
+                                            table.try_emplace(memory_key(load, values[st.operands[1]].type, st.imm0, st.imm1, st.operands[0], epoch[c]), st.operands[1]);
                                         }
                                         if (c != 0u && width != 0u)
                                             accesses.push_back(access{ epoch[c], c, st.operands[0], st.imm0 >> 32u, st.imm1, width, load, values[st.operands[1]].type, 
@@ -2343,14 +2703,18 @@ namespace neos
                                     }
                                     if ((i.op == 0xAAu || i.op == 0xB0u) && (i.flags & Unchecked) == 0u && i.operands.size() == 1u && in_range(i.operands[0], i.op == 0xB0u))
                                         i.flags |= Unchecked;   // (its operand is within its range: it cannot trap)
-                                    std::vector<std::uint64_t> k;
+                                    key k;
                                     if (i.load())
                                         k = memory_key(i.op, i.type, i.imm0, i.imm1, i.operands[0], epoch[class_of(i)]);
                                     else if (i.op == 0x23u)
-                                        k = { i.op, i.imm0, epoch[Globals] };
-                                    else if ((i.op >= 0x45u && i.op <= 0xC4u) || i.op == 0x1Bu)
                                     {
-                                        k = { i.op | (std::uint64_t{ i.type } << 16u) };
+                                        k.push_back(i.op);
+                                        k.push_back(i.imm0);
+                                        k.push_back(epoch[Globals]);
+                                    }
+                                    else if (((i.op >= 0x45u && i.op <= 0xC4u) || i.op == 0x1Bu) && i.operands.size() <= 4u)
+                                    {
+                                        k.push_back(i.op | (std::uint64_t{ i.type } << 16u));
                                         if (commutative(i.op) && i.operands.size() == 2u)
                                         {
                                             k.push_back(std::min(i.operands[0], i.operands[1]));
@@ -2365,13 +2729,11 @@ namespace neos
                                     bool const isLoad = i.load();
                                     auto const [where, inserted] = table.try_emplace(k, v);
                                     value data = v;
-                                    if (inserted)
-                                        added.push_back(std::move(k));
-                                    else if (values[where->second].type == i.type)
+                                    if (!inserted && values[where].type == i.type)
                                     {
                                         i.dead = true;
-                                        replaced.add(v, where->second);
-                                        data = where->second;
+                                        replaced.add(v, where);
+                                        data = where;
                                     }
                                     if (!isLoad)
                                         continue;
@@ -2457,9 +2819,7 @@ namespace neos
                                     enter(child);
                                     continue;
                                 }
-                                for (auto k = added.size(); k > top.mark; --k)
-                                    table.erase(added[k - 1u]);
-                                added.resize(top.mark);
+                                table.pop_to(top.mark);
                                 for (auto k = knownOrder.size(); k > top.knownMark; --k)
                                     known[knownOrder[k - 1u]] = -1;
                                 knownOrder.resize(top.knownMark);
@@ -2580,9 +2940,10 @@ namespace neos
                     }
 
                     function build(module_description const& aModule, std::uint32_t aFunction, std::vector<std::uint64_t> const& aTokens,
-                        std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts)
+                        std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts,
+                        osr_entry const* aOsr)
                     {
-                        builder b{ aModule, aFunction, aTokens, aLocals, aOrigins, aDeopts };
+                        builder b{ aModule, aFunction, aTokens, aLocals, aOrigins, aDeopts, aOsr };
                         auto f = b.build();
                         finish(f);
                         return f;
@@ -2592,8 +2953,13 @@ namespace neos
                     {
                         // (the blocks that can be reached, in reverse postorder (a loop's blocks follow its header))
                         auto& blocks = aFunction.blocks;
+                        std::size_t wasReachable = 0u;
                         for (auto& b : blocks)
+                        {
+                            wasReachable += b.reachable ? 1u : 0u;
                             b.reachable = false;
+                        }
+                        bool pruned = false;
                         std::vector<std::uint32_t> postorder;
                         std::vector<std::pair<std::uint32_t, std::size_t>> stack{ { 0u, 0u } };
                         blocks[0].reachable = true;
@@ -2623,6 +2989,7 @@ namespace neos
                             for (std::size_t p = preds.size(); p-- > 0u;)
                                 if (!blocks[preds[p]].reachable)
                                 {
+                                    pruned = true;
                                     preds.erase(preds.begin() + static_cast<std::ptrdiff_t>(p));
                                     for (auto v : blocks[b].code)
                                     {
@@ -2649,17 +3016,21 @@ namespace neos
                             for (auto p : blocks[h].predecessors)
                                 if (blocks[p].reachable && position[p] >= position[h])
                                     blocks[h].loopHeader = true;
+                        std::vector<std::uint32_t> work;
+                        std::vector<std::uint32_t> members;
+                        std::vector<bool> in(blocks.size(), false);
                         for (auto h : aFunction.order)
                         {
                             if (!blocks[h].loopHeader)
                                 continue;
                             // (the loop's blocks: backwards from its back edges' sources to it)
-                            std::vector<std::uint32_t> work;
-                            std::vector<bool> in(blocks.size(), false);
+                            work.clear();
+                            members.clear();
                             for (auto p : blocks[h].predecessors)
                                 if (position[p] >= position[h])
                                     work.push_back(p);
                             in[h] = true;
+                            members.push_back(h);
                             while (!work.empty())
                             {
                                 auto const x = work.back();
@@ -2667,14 +3038,20 @@ namespace neos
                                 if (in[x] || !blocks[x].reachable)
                                     continue;
                                 in[x] = true;
+                                members.push_back(x);
                                 for (auto p : blocks[x].predecessors)
                                     work.push_back(p);
                             }
-                            for (std::uint32_t x = 0u; x < blocks.size(); ++x)
-                                if (in[x])
-                                    ++blocks[x].loopDepth;
+                            for (auto x : members)
+                            {
+                                ++blocks[x].loopDepth;
+                                in[x] = false;
+                            }
                         }
-                        count_uses(aFunction);
+                        // (the uses: counted again, unless they are current (the code is as it was: the blocks that can be reached are too,
+                        // as their number shows))
+                        if (pruned || postorder.size() != wasReachable || !aFunction.usesCurrent || aFunction.uses.size() != aFunction.values.size())
+                            count_uses(aFunction);
                     }
 
                     namespace
@@ -2685,7 +3062,7 @@ namespace neos
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
                             bool changed = false;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             for (std::uint32_t e = 1u; e < blocks.size(); ++e)
                             {
                                 auto& E = blocks[e];
@@ -2764,10 +3141,17 @@ namespace neos
                                         if (i.op != Phi)
                                             break;
                                         if (ie < i.operands.size())
+                                        {
+                                            if (!i.dead && i.operands[ie] != None)
+                                                --aFunction.uses[i.operands[ie]];
                                             i.operands.erase(i.operands.begin() + static_cast<std::ptrdiff_t>(ie));
+                                        }
                                     }
                                     auto& branch = values[P.code.back()];
                                     branch.op = Jump;
+                                    for (auto o : branch.operands)
+                                        if (o != None)
+                                            --aFunction.uses[o];
                                     branch.operands.clear();
                                     P.successors.assign(1u, target);
                                     E.predecessors.clear();
@@ -2816,25 +3200,39 @@ namespace neos
                                     if (index >= i.operands.size())
                                         continue;
                                     auto const operand = i.operands[index];
+                                    auto& uses = aFunction.uses;   // (kept current: as count_uses counts them)
+                                    if (!i.dead && operand != None)
+                                        --uses[operand];
                                     i.operands.erase(i.operands.begin() + static_cast<std::ptrdiff_t>(index));
                                     if (operand != None && values[operand].op == Phi && values[operand].block == e && !values[operand].dead)
                                     {
                                         // (E's phi: its operand for each of E's predecessors)
                                         auto const operands = values[operand].operands;
                                         i.operands.insert(i.operands.begin() + static_cast<std::ptrdiff_t>(index), operands.begin(), operands.end());
+                                        if (!i.dead)
+                                            for (auto o : operands)
+                                                if (o != None)
+                                                    ++uses[o];
                                     }
                                     else
+                                    {
                                         i.operands.insert(i.operands.begin() + static_cast<std::ptrdiff_t>(index), preds.size(), operand);
+                                        if (!i.dead && operand != None)
+                                            uses[operand] += static_cast<std::uint32_t>(preds.size());
+                                    }
                                 }
                                 for (auto x : ownPhis)
+                                {
+                                    for (auto o : values[x].operands)
+                                        if (o != None)
+                                            --aFunction.uses[o];
                                     values[x].dead = true;
+                                }
                                 E.predecessors.clear();
                                 E.successors.clear();
                                 E.reachable = false;
                                 values[jump].dead = true;
                                 changed = true;
-                                if (!ownPhis.empty())
-                                    count_uses(aFunction);
                             }
                             return changed;
                         }
@@ -2848,7 +3246,7 @@ namespace neos
                         bool sink_equal_operands(function& aFunction)
                         {
                             auto& blocks = aFunction.blocks;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             std::vector<std::uint32_t> position(aFunction.values.size(), 0u);
                             std::vector<std::uint32_t> lastEffect(blocks.size(), 0u);  // (1 + the position of its last store or call; 0: none)
                             for (std::uint32_t b = 0u; b < blocks.size(); ++b)
@@ -3062,7 +3460,7 @@ namespace neos
                         {
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             bool changed = false;
                             std::size_t copies = 0u;
                             std::size_t const count = blocks.size();
@@ -3282,7 +3680,7 @@ namespace neos
                         {
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             bool changed = false;
                             // (a comparison of the phi with a constant: its result for the phi's value (none if it is not one))
                             auto const decided = [&](value aCondition, value aPhi, std::uint64_t aValue) -> std::optional<bool>
@@ -3523,7 +3921,7 @@ namespace neos
                         {
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             bool changed = false;
                             for (std::uint32_t b = 1u; b < blocks.size(); ++b)
                             {
@@ -3835,10 +4233,54 @@ namespace neos
                                             return true;
                                         }
                                 }
+                                // (another comparison (0 or 1): itself, as (comparison != 0) (a second test of the same comparison (the same
+                                // value: see number_values) is then decided))
+                                if (c.op >= 0x45u && c.op <= 0x66u && c.type == I32)
+                                {
+                                    aSubject = aCondition;
+                                    aConstant = 0u;
+                                    aEqual = false;
+                                    return true;
+                                }
                                 return false;
                             };
+                            // (a branch on a conjunction (i32.and) of comparisons: on its true edge, each is true (!= 0); on a disjunction's
+                            // (i32.or) false edge, each is false (== 0))
+                            auto const terms_of = [&](value aCondition, std::vector<value>& aTerms) -> bool
+                            {
+                                auto const op = values[aCondition].op;
+                                if (op != 0x71u && op != 0x72u)
+                                    return false;
+                                aTerms.clear();
+                                std::vector<value> pending{ aCondition };
+                                while (!pending.empty() && aTerms.size() < 8u)
+                                {
+                                    auto const v = pending.back();
+                                    pending.pop_back();
+                                    auto const& x = values[v];
+                                    if (x.dead)
+                                        return false;
+                                    if (x.op == op && x.operands.size() == 2u)
+                                    {
+                                        pending.push_back(x.operands[0]);
+                                        pending.push_back(x.operands[1]);
+                                    }
+                                    else if (x.op >= 0x45u && x.op <= 0x66u && x.type == I32 && !x.constant())
+                                        aTerms.push_back(v);
+                                    else
+                                        return false;
+                                }
+                                return pending.empty() && !aTerms.empty();
+                            };
                             // (each block's test (of its branch), and the subjects that more than one test has)
-                            struct test { value subject = None; std::uint64_t constant = 0u; bool equal = false; };
+                            struct test 
+                            { 
+                                value subject = None; 
+                                std::uint64_t constant = 0u; 
+                                bool equal = false; 
+                                std::vector<value> terms;   ///< (a conjunction's (on the true edge) or a disjunction's (false edge): see terms_of)
+                                bool conjunction = false;
+                            };
                             std::vector<test> tests(blocks.size());
                             {
                                 std::unordered_map<value, std::uint32_t> counts;
@@ -3852,13 +4294,18 @@ namespace neos
                                         continue;
                                     test x;
                                     if (test_of(t.operands[0], x.subject, x.constant, x.equal))
-                                    {
-                                        tests[b] = x;
                                         ++counts[x.subject];
+                                    else if (terms_of(t.operands[0], x.terms))
+                                    {
+                                        x.conjunction = values[t.operands[0]].op == 0x71u;
+                                        for (auto const v : x.terms)
+                                            ++counts[v];
                                     }
+                                    tests[b] = std::move(x);
                                 }
                                 bool any = false;
                                 for (auto& x : tests)
+                                {
                                     if (x.subject != None)
                                     {
                                         if (counts[x.subject] < 2u)
@@ -3866,6 +4313,9 @@ namespace neos
                                         else
                                             any = true;
                                     }
+                                    std::erase_if(x.terms, [&](value v) { return counts[v] < 2u; });
+                                    any = any || !x.terms.empty();
+                                }
                                 if (!any)
                                     return false;
                             }
@@ -3878,6 +4328,38 @@ namespace neos
                             {
                                 auto const at = std::lower_bound(aFacts.begin(), aFacts.end(), aSubject, [](fact const& aFact, value aValue) { return aFact.subject < aValue; });
                                 return at != aFacts.end() && at->subject == aSubject ? &*at : nullptr;
+                            };
+                            // (that a value is a constant (aHolds), or is not, added to facts: false if they contradict it)
+                            auto const know = [&](facts& aFacts, value aSubject, std::uint64_t aConstant, bool aHolds) -> bool
+                            {
+                                bool const holds = aHolds;
+                                auto* f = find(aFacts, aSubject);
+                                if (f == nullptr)
+                                {
+                                    if (aFacts.size() >= MaxFacts)
+                                        return true;
+                                    fact n{ aSubject, holds, 1u, { aConstant } };
+                                    auto const at = std::lower_bound(aFacts.begin(), aFacts.end(), aSubject, [](fact const& aFact, value aValue) { return aFact.subject < aValue; });
+                                    aFacts.insert(at, n);
+                                    return true;
+                                }
+                                if (holds)
+                                {
+                                    if (f->in != f->contains(aConstant))
+                                        return false;
+                                    f->in = true;
+                                    f->count = 1u;
+                                    f->constants[0] = aConstant;
+                                    return true;
+                                }
+                                if (f->in)
+                                {
+                                    f->erase(aConstant);
+                                    return f->count != 0u;
+                                }
+                                if (!f->contains(aConstant) && f->count < MaxConstants)
+                                    f->add(aConstant);
+                                return true;
                             };
                             // (the facts on the edge from aFrom to aTo (aFrom's exit: its entry's, and its branch's): unreachable: false)
                             auto const edge = [&](std::uint32_t aFrom, std::uint32_t aTo, facts& aFacts) -> bool
@@ -3895,36 +4377,13 @@ namespace neos
                                 if (condition.constant())
                                     return ((condition.imm0 & 0xFFFFFFFFu) != 0u) == (F.successors[0] == aTo);
                                 auto const& x = tests[aFrom];
+                                if (!x.terms.empty() && (F.successors[0] == aTo) == x.conjunction)
+                                    for (auto const v : x.terms)
+                                        if (!know(aFacts, v, 0u, !x.conjunction))
+                                            return false;
                                 if (x.subject == None)
                                     return true;
-                                bool const holds = (F.successors[0] == aTo) == x.equal;     // (subject == constant on this edge)
-                                auto* f = find(aFacts, x.subject);
-                                if (f == nullptr)
-                                {
-                                    if (aFacts.size() >= MaxFacts)
-                                        return true;
-                                    fact n{ x.subject, holds, 1u, { x.constant } };
-                                    auto const at = std::lower_bound(aFacts.begin(), aFacts.end(), x.subject, [](fact const& aFact, value aValue) { return aFact.subject < aValue; });
-                                    aFacts.insert(at, n);
-                                    return true;
-                                }
-                                if (holds)
-                                {
-                                    if (f->in != f->contains(x.constant))
-                                        return false;
-                                    f->in = true;
-                                    f->count = 1u;
-                                    f->constants[0] = x.constant;
-                                    return true;
-                                }
-                                if (f->in)
-                                {
-                                    f->erase(x.constant);
-                                    return f->count != 0u;
-                                }
-                                if (!f->contains(x.constant) && f->count < MaxConstants)
-                                    f->add(x.constant);
-                                return true;
+                                return know(aFacts, x.subject, x.constant, (F.successors[0] == aTo) == x.equal);
                             };
                             // (two paths' facts about a value: what is known on either)
                             auto const join = [&](fact const& aA, fact const& aB, fact& aResult) -> bool
@@ -4056,7 +4515,7 @@ namespace neos
                         {
                             auto& blocks = aFunction.blocks;
                             auto& values = aFunction.values;
-                            count_uses(aFunction);
+                            current_uses(aFunction);
                             replacements replaced;
                             bool changed = false;
                             auto const source_type = [](std::uint16_t aOp) -> std::uint8_t
@@ -4199,6 +4658,72 @@ namespace neos
                                     B.code = std::move(code);
                                 }
                             }
+                            // (a conversion of a phi of constants (its only use): a phi of the converted constants (e.g. a double of an i32
+                            // phi of 1 and 2: no conversion where the paths meet))
+                            auto const converted = [](std::uint16_t aOp, std::uint64_t aBits) -> std::optional<std::uint64_t>
+                            {
+                                switch (aOp)
+                                {
+                                case 0xBDu: case 0xBFu: return aBits;
+                                case 0xB7u: return std::bit_cast<std::uint64_t>(static_cast<double>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aBits))));
+                                case 0xB8u: return std::bit_cast<std::uint64_t>(static_cast<double>(static_cast<std::uint32_t>(aBits)));
+                                case 0xADu: return aBits & 0xFFFFFFFFull;
+                                case 0xACu: return static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(static_cast<std::uint32_t>(aBits))));
+                                default: return {};
+                                }
+                            };
+                            std::vector<std::pair<std::uint32_t, value>> newPhis;
+                            for (auto const b : aFunction.order)
+                                for (auto const v : blocks[b].code)
+                                {
+                                    if (v >= aFunction.uses.size())
+                                        continue;
+                                    auto const& u = values[v];
+                                    if (u.dead || u.op == Phi || u.operands.size() != 1u || source_type(u.op) == Void)
+                                        continue;
+                                    auto const p = replaced.resolved(u.operands[0]);
+                                    if (p >= aFunction.uses.size() || values[p].dead || values[p].op != Phi || aFunction.uses[p] != 1u ||
+                                        values[p].type != source_type(u.op) || values[p].operands.empty())
+                                        continue;
+                                    bool ok = true;
+                                    for (auto o : values[p].operands)
+                                        if (o != p && (!values[o].constant() || !converted(u.op, values[o].imm0 & (values[o].type == I32 ? 0xFFFFFFFFull : ~0ull))))
+                                            ok = false;
+                                    if (!ok)
+                                        continue;
+                                    auto const pb = values[p].block;
+                                    auto const qIndex = static_cast<value>(values.size());
+                                    instruction q;
+                                    q.op = Phi;
+                                    q.type = u.type;
+                                    q.block = pb;
+                                    values.push_back(q);
+                                    std::vector<value> operands;
+                                    std::vector<value> const sources(values[p].operands.begin(), values[p].operands.end());
+                                    for (auto o : sources)
+                                    {
+                                        if (o == p)
+                                        {
+                                            operands.push_back(qIndex);
+                                            continue;
+                                        }
+                                        instruction c;
+                                        c.type = values[v].type;
+                                        c.op = c.type == I32 ? 0x41u : c.type == I64 ? 0x42u : c.type == F32 ? 0x43u : 0x44u;
+                                        c.imm0 = *converted(values[v].op, values[o].imm0 & (values[o].type == I32 ? 0xFFFFFFFFull : ~0ull));
+                                        c.block = pb;
+                                        values.push_back(c);
+                                        operands.push_back(static_cast<value>(values.size() - 1u));
+                                    }
+                                    values[qIndex].operands = operand_list(operands.begin(), operands.end());
+                                    values[p].dead = true;
+                                    values[v].dead = true;
+                                    replaced.add(v, qIndex);
+                                    newPhis.emplace_back(pb, qIndex);
+                                    changed = true;
+                                }
+                            for (auto const& [pb, q] : newPhis)
+                                blocks[pb].code.insert(blocks[pb].code.begin(), q);
                             replaced.apply(aFunction);
                             return changed;
                         }
@@ -4668,57 +5193,113 @@ namespace neos
                         }
                     }
 
+                    namespace
+                    {
+                        // (the values numbered again: those of the code (and the constants that it uses), in their order; the others (dead,
+                        // or of blocks that cannot be reached) are no longer values, so that the code generator's tables are the code's size)
+                        void compact_values(function& aFunction)
+                        {
+                            auto& values = aFunction.values;
+                            std::vector<value> number(values.size(), None);
+                            for (auto& b : aFunction.blocks)
+                            {
+                                if (!b.reachable)
+                                {
+                                    b.code.clear();
+                                    continue;
+                                }
+                                for (auto v : b.code)
+                                {
+                                    number[v] = 0u;
+                                    for (auto o : values[v].operands)
+                                        if (o != None)
+                                            number[o] = 0u;
+                                }
+                            }
+                            value next = 0u;
+                            for (std::size_t v = 0u; v < values.size(); ++v)
+                                if (number[v] != None)
+                                    number[v] = next++;
+                            if (next == values.size())
+                                return;
+                            std::vector<instruction> kept;
+                            kept.reserve(next);
+                            for (std::size_t v = 0u; v < values.size(); ++v)
+                                if (number[v] != None)
+                                {
+                                    kept.push_back(std::move(values[v]));
+                                    for (auto& o : kept.back().operands)
+                                        if (o != None)
+                                            o = number[o];
+                                }
+                            values = std::move(kept);
+                            for (auto& b : aFunction.blocks)
+                                for (auto& v : b.code)
+                                    v = number[v];
+                            count_uses(aFunction);
+                        }
+                    }
+
                     void optimize(function& aFunction, module_description const&, std::function<std::uint64_t(std::uint32_t aMemory)> const& aAccessible,
                         std::function<std::optional<std::uint64_t>(std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth)> const& aMemoryWord)
                     {
-                        auto const cached = [&]() { return aMemoryWord && fold_cached_loads(aFunction, aMemoryWord); };
-                        if (fold_assumed(aFunction))
+                        // (the values' uses are counted again only after the code changes (a pass that changes nothing: its counts are current (see
+                        // current_uses); eliminate_dead_code keeps them so)
+                        auto const changes = [&](bool aChanged) { if (aChanged) aFunction.usesCurrent = false; return aChanged; };
+                        auto const cached = [&]() { return aMemoryWord && changes(fold_cached_loads(aFunction, aMemoryWord)); };
+                        if (changes(fold_assumed(aFunction)))
                             finish(aFunction);
+                        eliminate_dead_code(aFunction);
                         for (int pass = 0; pass < 4; ++pass)
                         {
                             bool changed = cached();
-                            changed = fold_known_bits(aFunction) || changed;
-                            changed = fold_constants(aFunction) || changed;
+                            changed = changes(fold_known_bits(aFunction)) || changed;
+                            changed = changes(fold_constants(aFunction)) || changed;
                             finish(aFunction);
-                            changed = simplify(aFunction) || changed;
-                            changed = narrow_masked_comparisons(aFunction) || changed;
+                            changed = changes(simplify(aFunction)) || changed;
+                            changed = invert_branches(aFunction) || changed;
+                            changed = changes(narrow_masked_comparisons(aFunction)) || changed;
                             if (!changed)
                                 break;
+                            // (the code without its dead values, for the passes that follow)
+                            eliminate_dead_code(aFunction);
                         }
-                        if (fold_assumed(aFunction))
+                        if (changes(fold_assumed(aFunction)))
                             finish(aFunction);
                         number_values(aFunction);
-                        decide_branches(aFunction);
+                        aFunction.usesCurrent = false;
+                        changes(decide_branches(aFunction));
                         for (int pass = 0; pass < 2; ++pass)
                         {
-                            bool const changed = fold_constants(aFunction);
+                            bool const changed = changes(fold_constants(aFunction));
                             finish(aFunction);
                             if (!changed)
                                 break;
                         }
-                        if (merge_blocks(aFunction))
+                        if (changes(merge_blocks(aFunction)))
                         {
                             finish(aFunction);
                             eliminate_dead_code(aFunction);
                         }
-                        if (thread_jumps(aFunction))
+                        if (changes(thread_jumps(aFunction)))
                         {
                             finish(aFunction);
                             eliminate_dead_code(aFunction);
                         }
-                        if (merge_blocks(aFunction))
+                        if (changes(merge_blocks(aFunction)))
                             finish(aFunction);
-                        if (sink_equal_operands(aFunction))
+                        if (changes(sink_equal_operands(aFunction)))
                         {
                             finish(aFunction);
                             eliminate_dead_code(aFunction);
-                            if (thread_jumps(aFunction))
+                            if (changes(thread_jumps(aFunction)))
                                 finish(aFunction);
                             eliminate_dead_code(aFunction);
                             number_values(aFunction);
+                            aFunction.usesCurrent = false;
                             for (int pass = 0; pass < 2; ++pass)
                             {
-                                bool const changed = fold_constants(aFunction);
+                                bool const changed = changes(fold_constants(aFunction));
                                 finish(aFunction);
                                 if (!changed)
                                     break;
@@ -4726,29 +5307,29 @@ namespace neos
                         }
                         bound_accesses(aFunction, aAccessible);
                         eliminate_dead_code(aFunction);
-                        if (thread_jumps(aFunction))
+                        if (changes(thread_jumps(aFunction)))
                         {
                             finish(aFunction);
                             eliminate_dead_code(aFunction);
                         }
                         for (int round = 0; round < 4; ++round)
                         {
-                            bool threaded = thread_branches(aFunction);
+                            bool threaded = changes(thread_branches(aFunction));
                             if (threaded)
                                 finish(aFunction);
-                            if (thread_known_values(aFunction))
+                            if (changes(thread_known_values(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
                             }
-                            if (duplicate_tails(aFunction))
+                            if (changes(duplicate_tails(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
                             }
-                            threaded = decide_branches(aFunction) || threaded;
-                            threaded = merge_equal_successors(aFunction) || threaded;
-                            if (sink_conversions(aFunction))
+                            threaded = changes(decide_branches(aFunction)) || threaded;
+                            threaded = changes(merge_equal_successors(aFunction)) || threaded;
+                            if (changes(sink_conversions(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
@@ -4756,18 +5337,18 @@ namespace neos
                             for (int pass = 0; pass < 2; ++pass)
                             {
                                 bool changed = cached();
-                                changed = fold_known_bits(aFunction) || changed;
-                                changed = fold_constants(aFunction) || changed;
+                                changed = changes(fold_known_bits(aFunction)) || changed;
+                                changed = changes(fold_constants(aFunction)) || changed;
                                 finish(aFunction);
-                                changed = simplify(aFunction) || changed;
+                                changed = changes(simplify(aFunction)) || changed;
                                 if (!changed)
                                     break;
                             }
-                            bool const merged = merge_blocks(aFunction);
+                            bool const merged = changes(merge_blocks(aFunction));
                             if (merged)
                                 finish(aFunction);
                             eliminate_dead_code(aFunction);
-                            if (thread_jumps(aFunction))
+                            if (changes(thread_jumps(aFunction)))
                             {
                                 finish(aFunction);
                                 eliminate_dead_code(aFunction);
@@ -4779,6 +5360,7 @@ namespace neos
                         for (auto& i : aFunction.values)
                             if (i.op == Assume)
                                 i.dead = true;
+                        aFunction.usesCurrent = false;
                         sink_values(aFunction);
                         fold_address_offsets(aFunction);
                         eliminate_dead_stores(aFunction);
@@ -4786,7 +5368,9 @@ namespace neos
                         fold_top16_comparisons(aFunction);
                         count_uses(aFunction);
                         rematerialize_conditions(aFunction);
+                        aFunction.usesCurrent = false;
                         eliminate_dead_code(aFunction);
+                        compact_values(aFunction);
                     }
                 }
             }

@@ -40,8 +40,13 @@
 #pragma once
 
 #include <neos/neos.hpp>
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <initializer_list>
+#include <memory>
+#include <type_traits>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -97,12 +102,230 @@ namespace neos
                     };
                     constexpr unsigned ScaledShift = 2u;
 
+                    // (a map of 64 bit keys (not all ones) to trivially copyable values: open addressing (linear probing), one allocation
+                    // for all its entries (not one each, as std::unordered_map's))
+                    template <typename V>
+                    class flat_map64
+                    {
+                        static_assert(std::is_trivially_copyable_v<V>);
+                    public:
+                        static constexpr std::uint64_t Empty = ~std::uint64_t{ 0u };
+                    public:
+                        V* find(std::uint64_t aKey) noexcept
+                        {
+                            if (iCount == 0u)
+                                return nullptr;
+                            for (auto i = slot(aKey);; i = (i + 1u) & iMask)
+                            {
+                                if (iKeys[i] == aKey)
+                                    return &iValues[i];
+                                if (iKeys[i] == Empty)
+                                    return nullptr;
+                            }
+                        }
+                        V const* find(std::uint64_t aKey) const noexcept { return const_cast<flat_map64&>(*this).find(aKey); }
+                        V& operator[](std::uint64_t aKey)
+                        {
+                            if ((iCount + 1u) * 4u > iKeys.size() * 3u)
+                                grow();
+                            for (auto i = slot(aKey);; i = (i + 1u) & iMask)
+                            {
+                                if (iKeys[i] == aKey)
+                                    return iValues[i];
+                                if (iKeys[i] == Empty)
+                                {
+                                    iKeys[i] = aKey;
+                                    iValues[i] = V{};
+                                    ++iCount;
+                                    return iValues[i];
+                                }
+                            }
+                        }
+                        std::size_t size() const noexcept { return iCount; }
+                        void reserve(std::size_t aCount)
+                        {
+                            while (aCount * 4u > iKeys.size() * 3u)
+                                grow();
+                        }
+                    private:
+                        std::size_t slot(std::uint64_t aKey) const noexcept { return static_cast<std::size_t>((aKey * 0x9E3779B97F4A7C15ull) >> 32u) & iMask; }
+                        void grow()
+                        {
+                            auto const size = iKeys.empty() ? std::size_t{ 64u } : iKeys.size() * 2u;
+                            std::vector<std::uint64_t> keys(size, Empty);
+                            std::vector<V> values(size);
+                            std::swap(keys, iKeys);
+                            std::swap(values, iValues);
+                            iMask = size - 1u;
+                            for (std::size_t k = 0u; k < keys.size(); ++k)
+                                if (keys[k] != Empty)
+                                    for (auto i = slot(keys[k]);; i = (i + 1u) & iMask)
+                                        if (iKeys[i] == Empty)
+                                        {
+                                            iKeys[i] = keys[k];
+                                            iValues[i] = values[k];
+                                            break;
+                                        }
+                        }
+                    private:
+                        std::vector<std::uint64_t> iKeys;
+                        std::vector<V> iValues;
+                        std::size_t iMask = 0u;
+                        std::size_t iCount = 0u;
+                    };
+
+                    // (a vector of trivially copyable elements whose first N are in the object itself (an instruction's operands: most have
+                    // few; not an allocation each))
+                    template <typename T, std::size_t N>
+                    class small_vector
+                    {
+                        static_assert(std::is_trivially_copyable_v<T>);
+                    public:
+                        using value_type = T;
+                        using size_type = std::size_t;
+                        using iterator = T*;
+                        using const_iterator = T const*;
+                    public:
+                        small_vector() noexcept = default;
+                        small_vector(std::initializer_list<T> aValues) { assign(aValues.begin(), aValues.end()); }
+                        small_vector(std::size_t aCount, T const& aValue) { assign(aCount, aValue); }
+                        template <typename It, typename = std::enable_if_t<!std::is_integral_v<It>>>
+                        small_vector(It aFirst, It aLast) { assign(aFirst, aLast); }
+                        small_vector(small_vector const& aOther) { assign(aOther.begin(), aOther.end()); }
+                        small_vector(small_vector&& aOther) noexcept { take(aOther); }
+                        ~small_vector() { release(); }
+                        small_vector& operator=(small_vector const& aOther) { if (this != &aOther) assign(aOther.begin(), aOther.end()); return *this; }
+                        small_vector& operator=(small_vector&& aOther) noexcept { if (this != &aOther) { release(); take(aOther); } return *this; }
+                        small_vector& operator=(std::initializer_list<T> aValues) { assign(aValues.begin(), aValues.end()); return *this; }
+                        small_vector(std::vector<T> const& aValues) { assign(aValues.begin(), aValues.end()); }
+                        small_vector& operator=(std::vector<T> const& aValues) { assign(aValues.begin(), aValues.end()); return *this; }
+                    public:
+                        std::size_t size() const noexcept { return iSize; }
+                        bool empty() const noexcept { return iSize == 0u; }
+                        T* data() noexcept { return iHeap != nullptr ? iHeap : iInline; }
+                        T const* data() const noexcept { return iHeap != nullptr ? iHeap : iInline; }
+                        T* begin() noexcept { return data(); }
+                        T* end() noexcept { return data() + iSize; }
+                        T const* begin() const noexcept { return data(); }
+                        T const* end() const noexcept { return data() + iSize; }
+                        T& operator[](std::size_t aIndex) noexcept { return data()[aIndex]; }
+                        T const& operator[](std::size_t aIndex) const noexcept { return data()[aIndex]; }
+                        T& front() noexcept { return data()[0]; }
+                        T const& front() const noexcept { return data()[0]; }
+                        T& back() noexcept { return data()[iSize - 1u]; }
+                        T const& back() const noexcept { return data()[iSize - 1u]; }
+                        void clear() noexcept { iSize = 0u; }
+                        void reserve(std::size_t aCapacity) { if (aCapacity > capacity()) grow(aCapacity); }
+                        void push_back(T const& aValue) { if (iSize == capacity()) { auto const v = aValue; grow(iSize * 2u); data()[iSize++] = v; return; } data()[iSize++] = aValue; }
+                        void pop_back() noexcept { --iSize; }
+                        void resize(std::size_t aSize, T const& aValue = T{}) { reserve(aSize); for (auto i = iSize; i < aSize; ++i) data()[i] = aValue; iSize = aSize; }
+                        void assign(std::size_t aCount, T const& aValue) { auto const v = aValue; iSize = 0u; resize(aCount, v); }
+                        template <typename It>
+                        void assign(It aFirst, It aLast)
+                        {
+                            auto const count = static_cast<std::size_t>(std::distance(aFirst, aLast));
+                            if (count > capacity())
+                            {
+                                // (the source may be this vector's own elements: copied before its storage is released)
+                                small_vector copy;
+                                copy.grow(count);
+                                std::copy(aFirst, aLast, copy.data());
+                                copy.iSize = count;
+                                *this = std::move(copy);
+                                return;
+                            }
+                            std::copy(aFirst, aLast, data());
+                            iSize = count;
+                        }
+                        void assign(std::initializer_list<T> aValues) { assign(aValues.begin(), aValues.end()); }
+                        T* insert(T const* aPosition, T const& aValue)
+                        {
+                            auto const at = static_cast<std::size_t>(aPosition - data());
+                            auto const v = aValue;
+                            reserve(iSize + 1u);
+                            std::memmove(data() + at + 1u, data() + at, (iSize - at) * sizeof(T));
+                            data()[at] = v;
+                            ++iSize;
+                            return data() + at;
+                        }
+                        T* insert(T const* aPosition, std::size_t aCount, T const& aValue)
+                        {
+                            auto const at = static_cast<std::size_t>(aPosition - data());
+                            auto const v = aValue;
+                            reserve(iSize + aCount);
+                            std::memmove(data() + at + aCount, data() + at, (iSize - at) * sizeof(T));
+                            std::fill(data() + at, data() + at + aCount, v);
+                            iSize += static_cast<std::uint32_t>(aCount);
+                            return data() + at;
+                        }
+                        template <typename It>
+                        T* insert(T const* aPosition, It aFirst, It aLast)
+                        {
+                            auto const at = static_cast<std::size_t>(aPosition - data());
+                            small_vector const values(aFirst, aLast);
+                            auto const count = values.size();
+                            reserve(iSize + count);
+                            std::memmove(data() + at + count, data() + at, (iSize - at) * sizeof(T));
+                            std::copy(values.begin(), values.end(), data() + at);
+                            iSize += count;
+                            return data() + at;
+                        }
+                        T* erase(T const* aPosition) { return erase(aPosition, aPosition + 1); }
+                        T* erase(T const* aFirst, T const* aLast)
+                        {
+                            auto const at = static_cast<std::size_t>(aFirst - data());
+                            auto const count = static_cast<std::size_t>(aLast - aFirst);
+                            std::memmove(data() + at, data() + at + count, (iSize - at - count) * sizeof(T));
+                            iSize -= count;
+                            return data() + at;
+                        }
+                        bool operator==(small_vector const& aOther) const { return iSize == aOther.iSize && std::equal(begin(), end(), aOther.begin()); }
+                        operator std::vector<T>() const { return std::vector<T>(begin(), end()); }
+                    private:
+                        std::size_t capacity() const noexcept { return iHeap != nullptr ? iCapacity : N; }
+                        void grow(std::size_t aCapacity)
+                        {
+                            aCapacity = std::max<std::size_t>(aCapacity, N * 2u);
+                            auto* const heap = static_cast<T*>(::operator new(aCapacity * sizeof(T)));
+                            std::memcpy(heap, data(), iSize * sizeof(T));
+                            release();
+                            iHeap = heap;
+                            iCapacity = static_cast<std::uint32_t>(aCapacity);
+                        }
+                        void release() noexcept
+                        {
+                            if (iHeap != nullptr)
+                                ::operator delete(iHeap);
+                            iHeap = nullptr;
+                        }
+                        void take(small_vector& aOther) noexcept
+                        {
+                            iSize = aOther.iSize;
+                            if (aOther.iHeap != nullptr)
+                            {
+                                iHeap = aOther.iHeap;
+                                iCapacity = aOther.iCapacity;
+                                aOther.iHeap = nullptr;
+                            }
+                            else
+                                std::memcpy(iInline, aOther.iInline, iSize * sizeof(T));
+                            aOther.iSize = 0u;
+                        }
+                    private:
+                        T* iHeap = nullptr;
+                        std::uint32_t iSize = 0u;
+                        std::uint32_t iCapacity = 0u;
+                        T iInline[N];
+                    };
+
+                    using operand_list = small_vector<value, 3>;
+
                     struct instruction
                     {
                         std::uint16_t op = 0u;
                         std::uint8_t type = Void;   ///< (its value's type (Void: none))
                         std::uint8_t flags = 0u;
-                        std::vector<value> operands;
+                        operand_list operands;
                         std::uint64_t imm0 = 0u;    ///< (a constant's bits; a memory access's memarg; the function, global, type or parameter)
                         std::uint64_t imm1 = 0u;    ///< (a memory access's offset)
                         std::size_t origin = 0u;    ///< (the position that its call is reported at)
@@ -134,12 +357,23 @@ namespace neos
                         std::vector<std::uint8_t> results;
                         std::vector<std::uint32_t> order;       ///< (the blocks, as the code is laid out (reverse postorder))
                         std::vector<std::uint32_t> uses;        ///< (each value's uses)
+                        bool usesCurrent = false;               ///< (uses: counted since the code last changed (see optimize))
+                    };
+
+                    // (an entry at a loop (on-stack replacement): the code that a call running in the baseline's code continues in, from
+                    // the loop's head: its parameters are the function's parameters and its own locals (their values there), and the code
+                    // before the loop is not its)
+                    struct osr_entry
+                    {
+                        std::size_t loop = 0u;                  ///< (the loop's token's origin: the function's own loop (not within another loop))
+                        std::vector<std::uint8_t> parameters;   ///< (the function's parameters' and its own locals' types)
                     };
 
                     // (a function's code (aTokens, its locals aLocals (after its parameters), and aOrigins: its tokens' origins); throws
-                    // unsupported if it uses an instruction that the representation does not have)
+                    // unsupported if it uses an instruction that the representation does not have; aOsr: its code from a loop (see osr_entry))
                     function build(module_description const& aModule, std::uint32_t aFunction, std::vector<std::uint64_t> const& aTokens,
-                        std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts = {});
+                        std::vector<std::uint8_t> const& aLocals, std::vector<std::size_t> const& aOrigins, std::vector<optimizer::deopt> const& aDeopts = {},
+                        osr_entry const* aOsr = nullptr);
                     // (aAccessible: the size of a fixed external memory (0: not fixed): its accesses that are within it are not checked; 
                     // aMemoryWord: a word of a fixed external memory (its value now, if it can be read): cached loads (optimizer::MemargCached)
                     // at constant addresses are constants)
