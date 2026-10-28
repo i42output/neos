@@ -1825,6 +1825,11 @@ namespace neos
                     {
                         if (!runtime::available())
                             return {};
+                        // (an import of a namespace that has no runtime plugin (e.g. a host function: neo::print, neos::string_concat) is not 
+                        // looked for as a plugin's (else it is looked for, and not found (thrown), each time a program is compiled))
+                        auto const separator = aImport.rfind("::");
+                        if (separator == std::string::npos || !runtime::plugin_available(aImport.substr(0u, separator)))
+                            return {};
                         auto const type = iImportTypes.find(aImport);
                         if (type == iImportTypes.end())
                             return {};

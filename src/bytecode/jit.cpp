@@ -251,6 +251,8 @@ namespace neos
                     std::vector<std::int32_t> loopCounters;             ///< (each function's (with a frame) loops' iterations before it is optimized
                                                                         ///< (see tier_loop))
                     std::int32_t loopIterations = 0;
+                    std::vector<std::uint8_t> staleJobs;                ///< (each function's optimizations made in the background that were not
+                                                                        ///< installed (the program's memory had changed): then made here)
                     std::vector<std::uint8_t> loopTriggered;            ///< (an optimization that its loops started: its calls not yet made 
                                                                         ///< are not cold (its code after the loop has not run yet))
                     std::vector<std::uint8_t> tierState;                ///< (0: not optimized, 1: optimized, 2: not to be optimized)
@@ -344,6 +346,19 @@ namespace neos
                     optimizer::options options;
                     std::optional<std::set<std::pair<std::uint64_t, std::uint64_t>>> hint;   ///< (see options::usefulHint)
                     bool rewritten = false;             ///< (the optimizer optimized it (else it is not optimized))
+                    // (the words of the program's memory that its optimizer and its SSA optimizer read (the values that its code may
+                    // use: e.g. a property cache's entry's fields, which the runtime changes as the program runs). Made in the background,
+                    // they may be of different moments (e.g. an entry's fields as the runtime changes it): it is installed only if each 
+                    // word has the value read, then (as if they were read then, by the program's thread))
+                    struct memory_read
+                    {
+                        std::uint32_t memory = 0u;
+                        std::uint32_t width = 0u;
+                        std::uint64_t address = 0u;
+                        std::uint64_t value = 0u;
+                    };
+                    std::vector<memory_read> reads;
+                    bool background = false;            ///< (made in the background (its reads are checked when it is installed))
                     std::unique_ptr<tier_version> version;
                     module_description description;     ///< (the module's, the function's code the optimizer's)
                     std::vector<std::uint8_t> code;
@@ -8058,7 +8073,8 @@ namespace neos
                     // the module's code (which does not change), and the program's memory and globals (each word's value is one that it
                     // has had: speculations' guards check their values when the code runs; cached loads' values may be any that their 
                     // words have had))
-                    optimizer::result run_optimizer(compiled_module& aModule, std::uint32_t aFunction, optimizer::options const& aOptions)
+                    optimizer::result run_optimizer(compiled_module& aModule, std::uint32_t aFunction, optimizer::options const& aOptions,
+                        std::vector<compiled_module::tier_job::memory_read>* aReads = nullptr)
                     {
                         auto& m = aModule;
                         auto const inlinable = [&](std::uint32_t aCallee) { return m.description.functions[aCallee].inlinable; };
@@ -8075,6 +8091,12 @@ namespace neos
                                 return {};
                             auto const* const address = x.base + aAddress;
                             std::uint64_t word = 0u;
+                            auto const logged = [&](std::uint64_t aWord) -> std::optional<std::uint64_t>
+                            {
+                                if (aReads != nullptr)
+                                    aReads->push_back({ aMemory, aWidth, aAddress, aWord });
+                                return aWord;
+                            };
 #if !defined(_WIN32)
                             constexpr std::uintptr_t PageMask = ~std::uintptr_t{ 0xFFFu };
                             auto const first = reinterpret_cast<std::uintptr_t>(address) & PageMask;
@@ -8082,7 +8104,7 @@ namespace neos
                             if (readable.contains(first) && readable.contains(last))
                             {
                                 std::memcpy(&word, address, aWidth);
-                                return word;
+                                return logged(word);
                             }
 #endif
                             if (!read_memory(address, &word, aWidth))
@@ -8091,7 +8113,7 @@ namespace neos
                             readable.insert(first);
                             readable.insert(last);
 #endif
-                            return word;
+                            return logged(word);
                         };
                         return optimizer::optimize(m.description, aFunction, aOptions, inlinable, memoryWord);
                     }
@@ -8203,13 +8225,15 @@ namespace neos
                         auto& options = aJob.options;
                         auto& r = aJob.result;
                         options.usefulHint = aJob.hint ? &*aJob.hint : nullptr;
-                        r = run_optimizer(m, f, options);
+                        aJob.reads.clear();
+                        r = run_optimizer(m, f, options, &aJob.reads);
                         if (!r.deopts.empty() && !deopts_valid(m, f, r))
                         {
                             if (m.verbose != 0u)
                                 std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
                             options.deopt = false;
-                            r = run_optimizer(m, f, options);
+                            aJob.reads.clear();
+                            r = run_optimizer(m, f, options, &aJob.reads);
                         }
                         options.usefulHint = nullptr;
                         aJob.hint.reset();
@@ -8302,7 +8326,7 @@ namespace neos
                             auto function = ssa::build(d, f, r.tokens, r.locals, r.origins, r.deopts);
                             auto const built_at = std::chrono::steady_clock::now();
                             // (cached loads' words: read safely (this runs while the program runs: its pages' states may change))
-                            auto const memoryWord = [](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
+                            auto const memoryWord = [&aJob](std::uint32_t aMemory, std::uint64_t aAddress, std::uint32_t aWidth) -> std::optional<std::uint64_t>
                             {
                                 if (aMemory == 0u || aMemory > NEOS_RT_EXTERNAL_MEMORIES)
                                     return {};
@@ -8312,6 +8336,7 @@ namespace neos
                                 std::uint64_t word = 0u;
                                 if (!read_memory(x.base + aAddress, &word, aWidth))
                                     return {};
+                                aJob.reads.push_back({ aMemory, aWidth, aAddress, word });
                                 return word;
                             };
                             ssa::optimize(function, d, [](std::uint32_t aMemory) -> std::uint64_t
@@ -8347,6 +8372,39 @@ namespace neos
                         }
                     }
 
+                    constexpr std::uint8_t MaxStaleJobs = 2u;   ///< (a function's optimizations made in the background that were not installed
+                                                                ///< (see compiled_module::staleJobs): then made here)
+
+                    // (whether the words that an optimization (made in the background) read have the values it read (here, on the program's 
+                    // thread: they do not change while this runs; a page that has been read once is read directly))
+                    bool reads_current(compiled_module::tier_job const& aJob)
+                    {
+                        std::unordered_set<std::uintptr_t> readable;
+                        for (auto const& x : aJob.reads)
+                        {
+                            auto const& memory = external_memory(x.memory);
+                            if (!memory.fixed || x.width > 8u || x.address > memory.size || memory.size - x.address < x.width)
+                                return false;
+                            auto const* const address = memory.base + x.address;
+                            constexpr std::uintptr_t PageMask = ~std::uintptr_t{ 0xFFFu };
+                            auto const first = reinterpret_cast<std::uintptr_t>(address) & PageMask;
+                            auto const last = (reinterpret_cast<std::uintptr_t>(address) + x.width - 1u) & PageMask;
+                            std::uint64_t word = 0u;
+                            if (readable.contains(first) && readable.contains(last))
+                                std::memcpy(&word, address, x.width);
+                            else
+                            {
+                                if (!read_memory(address, &word, x.width))
+                                    return false;
+                                readable.insert(first);
+                                readable.insert(last);
+                            }
+                            if (word != x.value)
+                                return false;
+                        }
+                        return true;
+                    }
+
                     // (an optimization's last part (here): its code installed (the function's calls go there))
                     void const* install_optimization(compiled_module& aModule, compiled_module::tier_job& aJob)
                     {
@@ -8361,6 +8419,16 @@ namespace neos
                         {
                             // (not optimized)
                             m.tierState[f] = 2u;
+                            return nullptr;
+                        }
+                        if (aJob.background && !reads_current(aJob))
+                        {
+                            // (the memory that it read has changed: optimized again)
+                            ++m.staleJobs[f];
+                            m.counters[f] = 1;
+                            m.loopCounters[f] = 1;
+                            if (m.verbose != 0u)
+                                std::fprintf(stderr, "[tier2] f%u: not installed (the memory it read has changed)\n", f);
                             return nullptr;
                         }
                         compiled_module::tier_chunk chunk;
@@ -8537,7 +8605,15 @@ namespace neos
                         auto job = prepare_optimization(m, f);
                         if (m.background && m.backend)
                         {
-                            // (its optimizer and its code in the background)
+                            // (its optimizer and its code in the background (unless its optimizations made there were not installed: 
+                            // here))
+                            job->background = m.staleJobs[f] < MaxStaleJobs;
+                            if (!job->background)
+                            {
+                                if (rewrite_optimization(*job))
+                                    generate_optimization(*job);
+                                return install_optimization(m, *job);
+                            }
                             m.tierState[f] = 3u;
                             m.jobs[f] = job;
                             tier_worker::instance().add(job);
@@ -8844,6 +8920,7 @@ namespace neos
                             m.loopIterations = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_LOOPS").value_or(10000), 1, NotAgain));
                             m.loopCounters.assign(n, m.loopIterations);
                             m.loopTriggered.assign(n, 0u);
+                            m.staleJobs.assign(n, 0u);
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
                             m.noInline.resize(n);
