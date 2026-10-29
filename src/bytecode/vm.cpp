@@ -1210,8 +1210,10 @@ namespace neos
                                     auto const length = static_cast<std::size_t>(r.u());
                                     if (offset + length > iMemory.size())
                                         throw trap{ "data segment out of bounds" };
-                                    for (std::size_t i = 0u; i < length; ++i)
-                                        iMemory[offset + i] = r.byte();
+                                    if (r.position() + length > iModule.size())
+                                        throw exceptions::out_of_text();
+                                    std::memcpy(iMemory.data() + offset, iModule.data() + r.position(), length);
+                                    r.seek(r.position() + length);
                                 }
                                 break;
                             default:
@@ -2314,19 +2316,33 @@ namespace neos
                     return sContexts;
                 }
 
+                // (the thread's last one (see host_thread_context))
+                thread_local running* tLastContext = nullptr;
+                thread_local std::uint64_t tLastContextGeneration = 0u;
+
+#if defined(_MSC_VER)
+                __declspec(noinline)
+#else
+                [[gnu::noinline]]
+#endif
+                void* find_thread_context()
+                {
+                    auto& all = the_thread_contexts();
+                    std::lock_guard<std::mutex> lock{ all.mutex };
+                    tLastContextGeneration = all.generation.load(std::memory_order_relaxed);
+                    return tLastContext = &all.contexts.try_emplace(std::make_pair(tRunning.program, tRunning.native), tRunning).first->second;
+                }
+
                 void* host_thread_context()
                 {
                     // (the thread's last one is remembered, so that a runtime plugin that asks again (e.g. for each call) does not take the
-                    // lock)
+                    // lock (and finding it (the lock taken) is not inline: the remembered one's check saves no registers))
                     auto& all = the_thread_contexts();
-                    thread_local running* tLast = nullptr;
-                    thread_local std::uint64_t tLastGeneration = 0u;
-                    if (tLast != nullptr && tLast->program == tRunning.program && tLast->native == tRunning.native &&
-                        tLastGeneration == all.generation.load(std::memory_order_acquire))
-                        return tLast;
-                    std::lock_guard<std::mutex> lock{ all.mutex };
-                    tLastGeneration = all.generation.load(std::memory_order_relaxed);
-                    return tLast = &all.contexts.try_emplace(std::make_pair(tRunning.program, tRunning.native), tRunning).first->second;
+                    auto* const last = tLastContext;
+                    if (last != nullptr && last->program == tRunning.program && last->native == tRunning.native &&
+                        tLastContextGeneration == all.generation.load(std::memory_order_acquire)) [[likely]]
+                        return last;
+                    return find_thread_context();
                 }
 
                 void host_thread_attach(void* aContext)

@@ -203,10 +203,37 @@ namespace neos::javascript_runtime
     // code's ta[i])
     inline value typed_array_get_number_key(typed_array_object const& aTypedArray, double aKey)
     {
+        // (a Uint8Array's element within it: read directly)
+        auto const& t = aTypedArray;
+        if (t.type == element_type::Uint8 && !t.lengthTracking && aKey >= 0.0 && aKey < static_cast<double>(t.arrayLength))
+        {
+            auto const index = static_cast<std::size_t>(aKey);
+            auto const& b = t.buffer_object();
+            if (static_cast<double>(index) == aKey && !b.detached && t.byteOffset + t.arrayLength <= b.data.size())
+                return number(static_cast<double>(b.data[t.byteOffset + index]));
+        }
         return typed_array_get_element(aTypedArray, aKey == 0.0 ? 0.0 : aKey);
     }
     inline void typed_array_set_number_key(typed_array_object& aTypedArray, double aKey, value aValue)
     {
+        // (a byte's element (Int8Array, Uint8Array) within it set to a Number: stored directly (ToInt8 and ToUint8 are ToInt32's low byte:
+        // a Number within int32's range, truncated))
+        auto& t = aTypedArray;
+        if ((t.type == element_type::Uint8 || t.type == element_type::Int8) && is_number(aValue) && !t.lengthTracking &&
+            aKey >= 0.0 && aKey < static_cast<double>(t.arrayLength))
+        {
+            auto const index = static_cast<std::size_t>(aKey);
+            auto const x = as_number(aValue);
+            if (static_cast<double>(index) == aKey && x >= -2147483648.0 && x < 2147483648.0)
+            {
+                auto& b = t.buffer_object();
+                if (!b.detached && t.byteOffset + t.arrayLength <= b.data.size())
+                {
+                    b.data[t.byteOffset + index] = static_cast<std::uint8_t>(static_cast<std::int32_t>(x));
+                    return;
+                }
+            }
+        }
         typed_array_set_element(aTypedArray, aKey == 0.0 ? 0.0 : aKey, aValue);
     }
 

@@ -156,6 +156,9 @@ namespace neos
                         // (the speculations (see result::useful) that an earlier optimization of the function found useful: only those are
                         // made (the optimizer then runs once, unless some of them are not useful now); if none, any are)
                         std::set<std::pair<std::uint64_t, std::uint64_t>> const* usefulHint = nullptr;
+                        // (a function's block_ends (made once for it): code that is not reached (e.g. after a branch, or a constant if's
+                        // arm) is skipped by them (over its blocks, loops and ifs); if none, by reading it all)
+                        std::function<std::uint32_t const*(std::uint32_t aFunction)> blockEnds;
                     };
 
                     // (an inlined call that has guards: the call's position, and its guards)
@@ -188,6 +191,10 @@ namespace neos
 
                     // (an integer instruction's result for constant operands (aY: a binary one's), if it is folded (not if it traps))
                     std::optional<std::uint64_t> fold_integer(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY);
+
+                    // (each block's, loop's and if's end in a function's code: by position (from the code's start), the end's (also from
+                    // its start; 0 for other instructions))
+                    std::vector<std::uint32_t> block_ends(module_description const& aModule, std::uint32_t aFunction);
 
                     // (the parameters of a function that its code reads (local.get): a call (whose callee is known) need not pass the others)
                     std::vector<bool> parameters_read(module_description const& aModule, std::uint32_t aFunction);

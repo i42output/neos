@@ -1186,45 +1186,16 @@ namespace neos::javascript_runtime
             });
         }
 
-        // (a typed array's length property is %TypedArray.prototype%'s getter for the typed arrays whose objects (the typed array and its
-        // prototypes, to the getter's) have these shapes, and the getter's slot has the accessor (the last ones found: see get_length))
-        struct typed_array_length_cache
+        // (the lookup (the cache did not match): remembered if the objects are ordinary (bar the typed array) and have shapes)
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        bool typed_array_length_lookup(typed_array_object const& aTypedArray, typed_array_length_cache& aCache, realm const& aRealm)
         {
-            static constexpr std::size_t MaxDepth = 6u;
-            shape* shapes[MaxDepth] = {};
-            object const* objects[MaxDepth] = {};   ///< (the prototypes (from [1]: [0] is the typed array's place))
-            std::size_t depth = 0u;                 ///< (the typed array and its prototypes (the last: the getter's))
-            std::uint32_t position = 0u;            ///< (the getter's position in the last)
-            value accessor = Undefined;             ///< (its slot's value: the accessor (a pair of the getter and setter))
-        };
-
-        bool typed_array_length_is_getter(typed_array_object const& aTypedArray)
-        {
-            static isolate_local<typed_array_length_cache> sCache;
-            auto& cache = *sCache;
-            auto& r = the_realm();
-            // (the typed array has no length of its own: it has no properties (it has no shape: its [[Get]] is not the ordinary one))
-            if (aTypedArray.properties.size() != 0u && aTypedArray.properties.find(the_names().length))
-                return false;
-            auto const matches = [&]()
-            {
-                if (cache.depth < 2u)
-                    return false;
-                object const* o = &aTypedArray;
-                for (std::size_t d = 1u; d < cache.depth; ++d)
-                {
-                    if (o->proto == Null)
-                        return false;
-                    o = &obj(o->proto);
-                    if (o != cache.objects[d] || o->properties.layout() != cache.shapes[d] || cache.shapes[d] == nullptr)
-                        return false;
-                }
-                auto const accessor = o->properties.value_at(cache.position);
-                return accessor == cache.accessor && cell_of<accessor_pair>(accessor).getter == r.typedArrayLength;
-            };
-            if (matches())
-                return true;
-            // (the lookup, remembered if the objects are ordinary (bar the typed array) and have shapes)
+            auto& cache = aCache;
+            auto const& r = aRealm;
             cache.depth = 0u;
             object const* o = &aTypedArray;
             for (std::size_t d = 1u; d < typed_array_length_cache::MaxDepth; ++d)
@@ -1249,6 +1220,42 @@ namespace neos::javascript_runtime
                 cache.objects[d] = o;
             }
             return false;
+        }
+
+        inline bool typed_array_length_is_getter(typed_array_object const& aTypedArray)
+        {
+            // (the typed array has no length of its own: it has no properties (it has no shape: its [[Get]] is not the ordinary one))
+            if (aTypedArray.properties.size() != 0u && aTypedArray.properties.find(the_names().length))
+                return false;
+            auto& r = the_realm();
+            auto& cache = r.typedArrayLengthCache;
+            // (the cache's objects and shapes, to the getter's)
+            if (cache.depth >= 2u)
+            {
+                object const* o = &aTypedArray;
+                bool same = true;
+                for (std::size_t d = 1u; d < cache.depth; ++d)
+                {
+                    if (o->proto == Null)
+                    {
+                        same = false;
+                        break;
+                    }
+                    o = &obj(o->proto);
+                    if (o != cache.objects[d] || o->properties.layout() != cache.shapes[d] || cache.shapes[d] == nullptr)
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same)
+                {
+                    auto const accessor = o->properties.value_at(cache.position);
+                    if (accessor == cache.accessor && cell_of<accessor_pair>(accessor).getter == r.typedArrayLength)
+                        return true;
+                }
+            }
+            return typed_array_length_lookup(aTypedArray, cache, r);
         }
 
         value get_length(value aObject)

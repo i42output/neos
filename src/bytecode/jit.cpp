@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <bit>
 #include <optional>
+#include <span>
 #include <string>
 #include <initializer_list>
 #include <array>
@@ -281,6 +282,9 @@ namespace neos
                     // in the background): see livenessMutex)
                     mutable std::unordered_map<std::uint32_t, std::shared_ptr<optimizer::liveness const>> liveness;
                     mutable std::mutex livenessMutex;
+                    // (functions' blocks' ends (see optimizer::block_ends), made once each (by optimizations, in the background: the first
+                    // made is kept))
+                    std::unique_ptr<std::atomic<std::vector<std::uint32_t> const*>[]> blockEnds;
                     std::vector<tier_version const*> currentVersion;
                     std::vector<std::unique_ptr<tier_version>> versions;
                     // (optimization in the background (see tier_worker): a function's optimization (its optimizer and its code) is made on
@@ -464,7 +468,7 @@ namespace neos
                         struct label
                         {
                             std::optional<std::size_t> offset;
-                            std::vector<std::size_t> fixups; // positions of rel32 fields
+                            ssa::small_vector<std::size_t, 2> fixups; // positions of rel32 fields (most labels': one or two)
                         };
                         std::vector<label> iLabels;
                         std::map<std::uint64_t, std::size_t> iConstants;
@@ -611,22 +615,32 @@ namespace neos
                     public:
                         void emit8(std::uint8_t aByte)
                         {
-                            ++iEvents;
-                            if (iInCold)
+                            // (the code's next byte, if there is room for it (no allocation: no frame of its own); else as emit_bytes)
+                            if (!iInCold && !iLastJump && code.size() != code.capacity()) [[likely]]
                             {
-                                iCold.push_back(aByte);
+                                ++iEvents;
+                                code.push_back(aByte);
                                 return;
                             }
-                            if (iLastJump) [[unlikely]]
-                            {
-                                iLastJump.reset();
-                                iBoundAfterJump.clear();
-                            }
-                            code.push_back(aByte);
+                            emit8_slow(aByte);
+                        }
+#if defined(_MSC_VER)
+                        __declspec(noinline)
+#else
+                        [[gnu::noinline]]
+#endif
+                        void emit8_slow(std::uint8_t aByte)
+                        {
+                            emit_bytes(&aByte, 1u);
                         }
                         // (little endian: as emit8 of each byte)
                         void emit32(std::uint32_t aValue) { emit_bytes(&aValue, 4u); }
                         void emit64(std::uint64_t aValue) { emit_bytes(&aValue, 8u); }
+#if defined(_MSC_VER)
+                        __declspec(noinline)
+#else
+                        [[gnu::noinline]]
+#endif
                         void emit_bytes(void const* aBytes, std::size_t aCount)
                         {
                             static_assert(std::endian::native == std::endian::little);
@@ -911,6 +925,15 @@ namespace neos
                             within_boundary(start);
                         }
                         void call(std::size_t aLabel) { auto const start = offset(); emit8(0xE8u); fixup(aLabel); within_boundary(start); }
+                        // (aDst = the address of aLabel (lea aDst, [rip + rel32]))
+                        void lea_label(int aDst, std::size_t aLabel)
+                        {
+                            rex(true, aDst, 0, 0);
+                            emit8(0x8Du);
+                            emit8(static_cast<std::uint8_t>(0x05u | ((aDst & 7) << 3)));
+                            fixup(aLabel);
+                        }
+                        void jmp_m(int aBase, std::int32_t aDisp) { op_rm({ 0xFF }, false, 4, aBase, aDisp); }
                         // SSE
                         void sse_rr(int aPrefix, std::uint8_t aOp, bool aW, int aReg, int aRm) { op_rr({ 0x0F, aOp }, aW, aReg, aRm, aPrefix); }
                         void sse_rm(int aPrefix, std::uint8_t aOp, bool aW, int aReg, int aBase, std::int32_t aDisp) { op_rm({ 0x0F, aOp }, aW, aReg, aBase, aDisp, aPrefix); }
@@ -5725,7 +5748,9 @@ namespace neos
                             iDeoptAtLocation.assign(f.values.size(), false);
                             auto const n = f.values.size();
                             auto const words = (n + 63u) / 64u;
-                            std::vector<std::vector<std::uint64_t>> liveIn(f.blocks.size());
+                            // (each block's live values at its start (once its block is done: see liveInDone), words for each block)
+                            auto const liveIn = std::make_unique_for_overwrite<std::uint64_t[]>(f.blocks.size() * words);
+                            std::vector<bool> liveInDone(f.blocks.size(), false);
                             iIntervals.assign(n, interval{});
                             for (std::size_t v = 0u; v < n; ++v)
                             {
@@ -5737,29 +5762,38 @@ namespace neos
                             for (std::uint32_t i = 0u; i < f.order.size(); ++i)
                                 orderIndex[f.order[i]] = i;
                             std::vector<std::uint32_t> loopEnd(f.blocks.size(), 0u);
-                            for (auto h : f.order)
                             {
-                                if (!f.blocks[h].loopHeader)
-                                    continue;
-                                std::uint32_t last = orderIndex[h];
                                 std::vector<std::uint32_t> work;
+                                std::vector<std::uint32_t> members;
                                 std::vector<bool> in(f.blocks.size(), false);
-                                for (auto p : f.blocks[h].predecessors)
-                                    if (orderIndex[p] >= orderIndex[h])
-                                        work.push_back(p);
-                                in[h] = true;
-                                while (!work.empty())
+                                for (auto h : f.order)
                                 {
-                                    auto const x = work.back();
-                                    work.pop_back();
-                                    if (in[x] || !f.blocks[x].reachable)
+                                    if (!f.blocks[h].loopHeader)
                                         continue;
-                                    in[x] = true;
-                                    last = std::max(last, orderIndex[x]);
-                                    for (auto p : f.blocks[x].predecessors)
-                                        work.push_back(p);
+                                    std::uint32_t last = orderIndex[h];
+                                    work.clear();
+                                    members.clear();
+                                    for (auto p : f.blocks[h].predecessors)
+                                        if (orderIndex[p] >= orderIndex[h])
+                                            work.push_back(p);
+                                    in[h] = true;
+                                    members.push_back(h);
+                                    while (!work.empty())
+                                    {
+                                        auto const x = work.back();
+                                        work.pop_back();
+                                        if (in[x] || !f.blocks[x].reachable)
+                                            continue;
+                                        in[x] = true;
+                                        members.push_back(x);
+                                        last = std::max(last, orderIndex[x]);
+                                        for (auto p : f.blocks[x].predecessors)
+                                            work.push_back(p);
+                                    }
+                                    for (auto x : members)
+                                        in[x] = false;
+                                    loopEnd[h] = iBlockEnd[f.order[last]];
                                 }
-                                loopEnd[h] = iBlockEnd[f.order[last]];
                             }
                             std::vector<std::uint64_t> live(words);
                             auto const set = [&](std::vector<std::uint64_t>& aSet, value aValue) { aSet[aValue / 64u] |= std::uint64_t{ 1u } << (aValue % 64u); };
@@ -5777,9 +5811,9 @@ namespace neos
                                 std::fill(live.begin(), live.end(), 0u);
                                 for (auto s : block.successors)
                                 {
-                                    if (!liveIn[s].empty())
+                                    if (liveInDone[s])
                                         for (std::size_t w = 0u; w < words; ++w)
-                                            live[w] |= liveIn[s][w];
+                                            live[w] |= liveIn[s * words + w];
                                     // (the phis' operands from this block)
                                     auto const& to = f.blocks[s];
                                     auto const index = static_cast<std::size_t>(std::find(to.predecessors.begin(), to.predecessors.end(), b) - to.predecessors.begin());
@@ -5858,7 +5892,8 @@ namespace neos
                                     for (std::size_t w = 0u; w < words; ++w)
                                         for (auto bits = live[w]; bits != 0u; bits &= bits - 1u)
                                             extend(static_cast<value>(w * 64u + static_cast<std::size_t>(std::countr_zero(bits))), iBlockStart[b], loopEnd[b]);
-                                liveIn[b] = live;
+                                std::copy(live.begin(), live.end(), liveIn.get() + b * words);
+                                liveInDone[b] = true;
                             }
                             // (the calls that each interval spans)
                             std::sort(iCalls.begin(), iCalls.end());
@@ -6321,8 +6356,9 @@ namespace neos
                         {
                             iDeferred.resize(f.values.size(), false);
                             layout();
+                            iBlockLabels.assign(f.blocks.size(), 0u);
                             for (auto b : f.order)
-                                iBlockLabels.emplace(b, a.new_label());
+                                iBlockLabels[b] = a.new_label();
                             // prologue
                             a.push(RBP);
                             a.mov_rr(true, RBP, RSP);
@@ -6569,6 +6605,11 @@ namespace neos
                                 throw unsupported{ "deopt point" };
                             auto const& point = *pointFound;
                             auto const& frame = *frameFound;
+                            // (a deopt that leaves for the function's own baseline frame: its values put in the buffer, then the code that such
+                            // deopts share (the call of deopt_taken, this frame left, the baseline's frame made and its locals set), which jumps
+                            // to its own continuation (its operand stack and arguments, then the baseline's code) (its address: in the buffer's
+                            // last slot))
+                            bool const shared = d.frames.empty() && (iDeoptCommonFrame == nullptr || iDeoptCommonFrame == &frame);
                             a.load(true, R11, R15, ContextDeoptBuffer);
                             for (std::size_t o = 0u; o < i.operands.size(); ++o)
                             {
@@ -6604,13 +6645,32 @@ namespace neos
                                     a.store(true, R11, disp, RAX);
                                 }
                             }
+                            std::size_t continuation = 0u;
+                            if (shared)
+                            {
+                                continuation = a.new_label();
+                                a.lea_label(RAX, continuation);
+                                a.store(true, R11, static_cast<std::int32_t>(8u * MaxDeoptValues), RAX);
+                                a.mov_ri(NativeIntegerArguments[2], i.imm0, false);
+                                if (iDeoptCommon)
+                                {
+                                    a.jmp(*iDeoptCommon);
+                                    a.bind(continuation);
+                                    deopt_continuation(point, frame);
+                                    return;
+                                }
+                                iDeoptCommon = a.new_label();
+                                iDeoptCommonFrame = &frame;
+                                a.bind(*iDeoptCommon);
+                            }
                             // (reported: the native call does not preserve xmm8-15 (System V): saved around it)
                             if (!Windows)
                                 for (int x = 8; x < 16; ++x)
                                     a.movf_store(true, RBP, iXmmNativeSave[x], x);
                             a.mov_rr(true, NativeIntegerArguments[0], R15);
                             a.mov_ri(NativeIntegerArguments[1], reinterpret_cast<std::uint64_t>(iVersion), true);
-                            a.mov_ri(NativeIntegerArguments[2], i.imm0, false);
+                            if (!shared)
+                                a.mov_ri(NativeIntegerArguments[2], i.imm0, false);
                             a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&deopt_taken), true);
                             a.call_r(RAX);
                             if (!Windows)
@@ -6640,10 +6700,10 @@ namespace neos
                             for (auto const& [x, disp] : frame.savedXmms)
                                 a.movf_store(true, RBP, disp, x);
                             a.load(true, RCX, R15, ContextDeoptBuffer);
-                            std::size_t o = 0u;
-                            for (auto const& l : frame.locals)
+                            for (std::size_t o = 0u; o < frame.locals.size(); ++o)
                             {
-                                auto const disp = 8 * static_cast<std::int32_t>(o++);
+                                auto const& l = frame.locals[o];
+                                auto const disp = 8 * static_cast<std::int32_t>(o);
                                 if (l.pinned)
                                 {
                                     if (is_float_type(l.type))
@@ -6657,6 +6717,18 @@ namespace neos
                                     a.store(true, RBP, l.disp, RAX);
                                 }
                             }
+                            if (shared)
+                            {
+                                a.jmp_m(RCX, static_cast<std::int32_t>(8u * MaxDeoptValues));
+                                a.bind(continuation);
+                            }
+                            deopt_continuation(point, frame);
+                        }
+                        // (a deopt's continuation, once the baseline's frame is made and its locals set (rcx: the buffer): its operand stack 
+                        // and arguments (after the locals in the buffer), then the baseline's code)
+                        void deopt_continuation(compiled_module::deopt_point const& point, compiled_module::deopt_frame const& frame)
+                        {
+                            auto o = frame.locals.size();
                             for (auto const& e : point.stack)
                             {
                                 auto const disp = 8 * static_cast<std::int32_t>(o++);
@@ -7355,7 +7427,7 @@ namespace neos
                             if (forwarded(successors.back()) != iNext)
                                 a.jmp(iBlockLabels[successors.back()]);
                         }
-                        void switch_search(std::size_t aBegin, std::size_t aEnd, std::vector<std::uint32_t> const& aSuccessors)
+                        void switch_search(std::size_t aBegin, std::size_t aEnd, decltype(ssa::block::successors) const& aSuccessors)
                         {
                             if (aEnd - aBegin <= 4u)
                             {
@@ -7445,7 +7517,8 @@ namespace neos
                             if (callee == optimizer::intrinsics::guard_failed(iModule))
                             {
                                 // (an inlined call's guard failed (aVersion, the site))
-                                native_call(reinterpret_cast<void const*>(&guard_failed), { ssa::None, ssa::None, i.operands[0] }, v, true, reinterpret_cast<std::uint64_t>(iVersion));
+                                value const arguments[] = { ssa::None, ssa::None, i.operands[0] };
+                                native_call(reinterpret_cast<void const*>(&guard_failed), arguments, v, true, reinterpret_cast<std::uint64_t>(iVersion));
                                 return;
                             }
                             auto const& c = iModule.functions[callee];
@@ -7503,7 +7576,7 @@ namespace neos
                         }
                         // (a native function's call: its arguments (ssa::None: the context (the first), or aImmediate (the second)); its
                         // result (of v's type) in rax or xmm0; the xmms that native code does not preserve (System V) saved around it)
-                        void native_call(void const* aFunction, std::vector<value> const& aArguments, value v, bool aWithContext, std::uint64_t aImmediate = 0u,
+                        void native_call(void const* aFunction, std::span<value const> aArguments, value v, bool aWithContext, std::uint64_t aImmediate = 0u,
                             bool aCanTrap = false)
                         {
                             iArgumentRax.reset();
@@ -7539,7 +7612,7 @@ namespace neos
                         // (a native call's arguments (staged in the outgoing area, after its shadow space): to their registers, or (beyond those)
                         // to the stack (Windows: after its shadow space; System V: from rsp), as the native calling convention has them (the
                         // stack arguments that are moved there overwrite only staged arguments that are in registers by then))
-                        void native_arguments(std::vector<value> const& aArguments)
+                        void native_arguments(std::span<value const> aArguments)
                         {
                             int intIndex = 0;
                             int floatIndex = 0;
@@ -8403,9 +8476,13 @@ namespace neos
                         std::vector<int> iPushed;
                         std::int32_t iXmmSave[16] = {};
                         std::int32_t iXmmNativeSave[16] = {};
+                        // (the code that the deopts that leave for the function's own baseline frame share (see deopt_exit): its label, and
+                        // the frame it makes)
+                        std::optional<std::size_t> iDeoptCommon;
+                        compiled_module::deopt_frame const* iDeoptCommonFrame = nullptr;
                         std::int32_t iFrameBelowPushed = 0;
                         std::int32_t iOutgoing = 0;
-                        std::unordered_map<std::uint32_t, std::size_t> iBlockLabels;
+                        std::vector<std::size_t> iBlockLabels;     ///< (each block's label (one in the order))
                         std::uint32_t iCurrentBlock = 0u;
                         std::uint32_t iNext = 0u;
                         value iNextInstruction = ssa::None;
@@ -8619,6 +8696,19 @@ namespace neos
                         return true;
                     }
 
+                    // (a function's blocks' ends (see compiled_module::blockEnds))
+                    std::uint32_t const* block_ends_of(compiled_module const& m, std::uint32_t f)
+                    {
+                        auto& slot = m.blockEnds[f];
+                        if (auto const* known = slot.load(std::memory_order_acquire))
+                            return known->data();
+                        auto made = std::make_unique<std::vector<std::uint32_t> const>(optimizer::block_ends(m.description, f));
+                        std::vector<std::uint32_t> const* expected = nullptr;
+                        if (slot.compare_exchange_strong(expected, made.get(), std::memory_order_acq_rel, std::memory_order_acquire))
+                            return made.release()->data();
+                        return expected->data();
+                    }
+
                     // (an optimization's first part (here, on the program's thread): its job, with the optimizer's options)
                     std::shared_ptr<compiled_module::tier_job> prepare_optimization(compiled_module& aModule, std::uint32_t aFunction)
                     {
@@ -8664,6 +8754,7 @@ namespace neos
                                 };
                         }
                         options.maxDeoptValues = MaxDeoptValues;
+                        options.blockEnds = [&m](std::uint32_t aFunction) { return block_ends_of(m, aFunction); };
                         if (m.usefulSpeculations.size() < m.description.functions.size())
                             m.usefulSpeculations.resize(m.description.functions.size());
                         if (options.speculation && m.usefulSpeculations[f])
@@ -9510,6 +9601,9 @@ namespace neos
                 {
                     if (tiering && background)
                         tier_worker::instance().closing(*this);
+                    if (blockEnds != nullptr)
+                        for (std::size_t f = 0u; f < description.functions.size(); ++f)
+                            delete blockEnds[f].load();
                     if (code != nullptr)
                         free_executable(code, codeSize);
                     for (auto const& c : chunks)
@@ -9579,6 +9673,7 @@ namespace neos
                 {
                     compiled_module_ptr result{ new compiled_module{} };
                     result->description = aModule;
+                    result->blockEnds = std::make_unique<std::atomic<std::vector<std::uint32_t> const*>[]>(aModule.functions.size());
                     result->host = std::move(aHost);
                     try
                     {
@@ -9708,7 +9803,7 @@ namespace neos
                     c.objects = aModule.description.objects;
                     thread_local std::unique_ptr<value[]> tDeoptBuffer;
                     if (!tDeoptBuffer)
-                        tDeoptBuffer = std::make_unique<value[]>(MaxDeoptValues);
+                        tDeoptBuffer = std::make_unique<value[]>(MaxDeoptValues + 1u);    // (and the slot of a deopt's continuation: see deopt_exit)
                     c.deoptBuffer = tDeoptBuffer.get();
                     struct invoked
                     {

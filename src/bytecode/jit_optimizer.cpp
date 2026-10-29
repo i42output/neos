@@ -822,6 +822,12 @@ namespace neos
                                 for (auto p = aPosition; p < aEnd;)
                                 {
                                     auto const op = static_cast<std::uint8_t>(iTokens[p]);
+                                    if ((op == 0x02u || op == 0x03u || op == 0x04u) && iEnds != nullptr && iEnds[p - iEndsBase] > p - iEndsBase)
+                                    {
+                                        // (one within it: to its end)
+                                        p = iEndsBase + iEnds[p - iEndsBase] + 1u;
+                                        continue;
+                                    }
                                     if (op == 0x02u || op == 0x03u || op == 0x04u)
                                         ++depth;
                                     else if (op == 0x0Bu)
@@ -995,6 +1001,12 @@ namespace neos
                                 while (aPosition < aEnd)
                                 {
                                     auto const op = static_cast<std::uint8_t>(iTokens[aPosition]);
+                                    if ((op == 0x02u || op == 0x03u || op == 0x04u) && iEnds != nullptr && iEnds[aPosition - iEndsBase] > aPosition - iEndsBase)
+                                    {
+                                        // (a block, loop or if within it: to its end)
+                                        aPosition = iEndsBase + iEnds[aPosition - iEndsBase] + 1u;
+                                        continue;
+                                    }
                                     if (op == 0x02u || op == 0x03u || op == 0x04u)
                                         ++depth;
                                     else if (op == 0x0Bu || (op == 0x05u && aStopAtElse))
@@ -1010,6 +1022,16 @@ namespace neos
                             // (returns whether the code's end is reached)
                             bool process(std::size_t aBegin, std::size_t aEnd, inline_context* aInline, std::vector<std::uint32_t> const& aLocals)
                             {
+                                // (the code's blocks' ends (its function's), while it is processed)
+                                struct ends_scope
+                                {
+                                    rewriter& r;
+                                    std::uint32_t const* ends;
+                                    std::size_t base;
+                                    ~ends_scope() { r.iEnds = ends; r.iEndsBase = base; }
+                                } const endsScope{ *this, iEnds, iEndsBase };
+                                iEnds = iOptions.blockEnds ? iOptions.blockEnds(aInline != nullptr ? aInline->callee : iFunction) : nullptr;
+                                iEndsBase = aBegin;
                                 auto const depthBase = iFrames.size();  // (the frames of this code: those above its own (the function's, or the inlined call's))
                                 for (std::size_t p = aBegin; p < aEnd;)
                                 {
@@ -1918,6 +1940,8 @@ namespace neos
                             // --- dead stores: a constant stored to a local that is not read (removed)
                             void dead_stores()
                             {
+                                if (iConstantSets.empty())
+                                    return;
                                 std::vector<std::size_t> reads(iLocalTypes.size(), 0u);
                                 for (std::size_t p = 0u; p < iOut.size();)
                                 {
@@ -1957,7 +1981,9 @@ namespace neos
                             std::unordered_map<std::uint64_t, std::size_t> iChainIdsByContext;     ///< (see chain_origin)
                             std::unordered_map<std::uint64_t, std::uint32_t> iChainContexts;      ///< (see chain_context)
                             std::vector<std::vector<std::size_t>> iChains;
-                            std::vector<bool> iDeleted;
+                            std::vector<std::uint8_t> iDeleted;  // (bytes, not bits: read for each token)
+                            std::uint32_t const* iEnds = nullptr;       ///< (the blocks' ends of the code being processed (see options::blockEnds))
+                            std::size_t iEndsBase = 0u;                 ///< (its function's code's start)
                             std::vector<std::size_t> iDeletions;        ///< (the tokens deleted, in order (see restore))
                             std::size_t iOrigin = 0u;
                             std::vector<std::uint8_t> iLocalTypes;
@@ -1999,6 +2025,27 @@ namespace neos
                     std::optional<std::uint64_t> fold_integer(std::uint8_t aOp, std::uint64_t aX, std::uint64_t aY)
                     {
                         return fold(aOp, aX, aY);
+                    }
+
+                    std::vector<std::uint32_t> block_ends(module_description const& aModule, std::uint32_t aFunction)
+                    {
+                        auto const& f = aModule.functions[aFunction];
+                        auto const& tokens = *aModule.tokens;
+                        std::vector<std::uint32_t> ends(f.codeEnd - f.codeBegin, 0u);
+                        std::vector<std::size_t> open;
+                        for (auto p = f.codeBegin; p < f.codeEnd;)
+                        {
+                            auto const op = static_cast<std::uint8_t>(tokens[p]);
+                            if (op == 0x02u || op == 0x03u || op == 0x04u)
+                                open.push_back(p);
+                            else if (op == 0x0Bu && !open.empty())
+                            {
+                                ends[open.back() - f.codeBegin] = static_cast<std::uint32_t>(p - f.codeBegin);
+                                open.pop_back();
+                            }
+                            p += 1u + immediates(op, tokens, p);
+                        }
+                        return ends;
                     }
 
                     std::vector<bool> parameters_read(module_description const& aModule, std::uint32_t aFunction)

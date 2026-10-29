@@ -225,8 +225,9 @@ namespace neos::javascript_runtime
 
     std::u16string utf16(std::string_view aText)
     {
-        std::u16string result;
-        result.reserve(aText.size());
+        // (at most a code unit for each byte: written in place, then the size)
+        std::u16string result(aText.size(), u'\0');
+        auto* out = result.data();
         for (std::size_t i = 0u; i < aText.size();)
         {
             auto const c = static_cast<unsigned char>(aText[i]);
@@ -254,12 +255,13 @@ namespace neos::javascript_runtime
             if (cp >= 0x10000u)
             {
                 cp -= 0x10000u;
-                result.push_back(static_cast<char16_t>(0xD800u + (cp >> 10)));
-                result.push_back(static_cast<char16_t>(0xDC00u + (cp & 0x3FFu)));
+                *out++ = static_cast<char16_t>(0xD800u + (cp >> 10));
+                *out++ = static_cast<char16_t>(0xDC00u + (cp & 0x3FFu));
             }
             else
-                result.push_back(static_cast<char16_t>(cp));
+                *out++ = static_cast<char16_t>(cp);
         }
+        result.resize(static_cast<std::size_t>(out - result.data()));
         return result;
     }
 

@@ -1442,6 +1442,18 @@ namespace neos::javascript_runtime
 
     // --- the realm and its intrinsics
 
+    // (a typed array's length property is %TypedArray.prototype%'s getter for the typed arrays whose objects (the typed array and its
+    // prototypes, to the getter's) have these shapes, and the getter's slot has the accessor (the last ones found: see api::get_length))
+    struct typed_array_length_cache
+    {
+        static constexpr std::size_t MaxDepth = 6u;
+        shape* shapes[MaxDepth] = {};
+        object const* objects[MaxDepth] = {};   ///< (the prototypes (from [1]: [0] is the typed array's place))
+        std::size_t depth = 0u;                 ///< (the typed array and its prototypes (the last: the getter's))
+        std::uint32_t position = 0u;            ///< (the getter's position in the last)
+        value accessor = Undefined;             ///< (its slot's value: the accessor (a pair of the getter and setter))
+    };
+
     struct realm
     {
         value global = Undefined;               ///< (the global object)
@@ -1496,6 +1508,7 @@ namespace neos::javascript_runtime
         value functionCall = Undefined;         ///< (%Function.prototype.call% (compiled code compares callees with it))
         value arrayPush = Undefined;            ///< (%Array.prototype.push% (compiled code compares callees with it))
         value typedArrayLength = Undefined;     ///< (%TypedArray.prototype%'s length getter (see api::get_length))
+        typed_array_length_cache typedArrayLengthCache;     ///< (see api::get_length)
         value eval = Undefined;
         // well-known symbols
         value symAsyncIterator = Undefined, symHasInstance = Undefined, symIsConcatSpreadable = Undefined, symIterator = Undefined,

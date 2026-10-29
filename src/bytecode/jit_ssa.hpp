@@ -220,7 +220,7 @@ namespace neos
                         void pop_back() noexcept { --iSize; }
                         void resize(std::size_t aSize, T const& aValue = T{}) { reserve(aSize); for (auto i = iSize; i < aSize; ++i) data()[i] = aValue; iSize = aSize; }
                         void assign(std::size_t aCount, T const& aValue) { auto const v = aValue; iSize = 0u; resize(aCount, v); }
-                        template <typename It>
+                        template <typename It, typename = std::enable_if_t<!std::is_integral_v<It>>>
                         void assign(It aFirst, It aLast)
                         {
                             auto const count = static_cast<std::size_t>(std::distance(aFirst, aLast));
@@ -258,7 +258,7 @@ namespace neos
                             iSize += static_cast<std::uint32_t>(aCount);
                             return data() + at;
                         }
-                        template <typename It>
+                        template <typename It, typename = std::enable_if_t<!std::is_integral_v<It>>>
                         T* insert(T const* aPosition, It aFirst, It aLast)
                         {
                             auto const at = static_cast<std::size_t>(aPosition - data());
@@ -341,8 +341,8 @@ namespace neos
                     struct block
                     {
                         std::vector<value> code;                ///< (its instructions: phis first; its terminator last)
-                        std::vector<std::uint32_t> predecessors;
-                        std::vector<std::uint32_t> successors;
+                        small_vector<std::uint32_t, 2> predecessors;
+                        small_vector<std::uint32_t, 2> successors;
                         std::uint32_t loopDepth = 0u;
                         bool loopHeader = false;
                         bool reachable = false;
@@ -358,6 +358,7 @@ namespace neos
                         std::vector<std::uint32_t> order;       ///< (the blocks, as the code is laid out (reverse postorder))
                         std::vector<std::uint32_t> uses;        ///< (each value's uses)
                         bool usesCurrent = false;               ///< (uses: counted since the code last changed (see optimize))
+                        std::uint64_t cfgHash = 0u;             ///< (the blocks' edges when loop depths were last found (see finish))
                     };
 
                     // (an entry at a loop (on-stack replacement): the code that a call running in the baseline's code continues in, from

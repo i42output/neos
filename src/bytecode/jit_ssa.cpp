@@ -36,6 +36,7 @@
 // block that reads it, and its predecessors (phis where they merge), as the code is read; a block is sealed when its predecessors are
 // known (structured control flow: at the end of its construct).
 
+#include <span>
 #include <neos/neos.hpp>
 #include <algorithm>
 #include <cmath>
@@ -146,8 +147,8 @@ namespace neos
                             struct frame
                             {
                                 enum kind_t { Function, Block, Loop, If } kind = Block;
-                                std::vector<std::uint8_t> results;
-                                std::vector<variable> resultVariables;  ///< (the values that branches to its end take)
+                                small_vector<std::uint8_t, 4> results;
+                                small_vector<variable, 2> resultVariables;  ///< (the values that branches to its end take)
                                 std::uint32_t end = 0u;                 ///< (the block after it (a loop's: its header, which branches go to))
                                 std::uint32_t elseBlock = 0u;           ///< (an if's else (while its then arm is read))
                                 bool hasElse = false;
@@ -175,7 +176,7 @@ namespace neos
                                 iLocals = iVariableTypes.size();
                                 // (about a value for each token, and the phis: room for them (the values are not copied as they are added))
                                 iFunction.values.reserve(aTokens.size() + aTokens.size() / 2u);
-                                iDefinitions.reserve(aTokens.size());
+                                iDefinitions.reserve(aTokens.size() - aTokens.size() / 4u);    // (about 0.6 for each token)
                                 if (aOsr != nullptr)
                                 {
                                     // (the entry's parameters: the first variables (the function's parameters, then its own locals))
@@ -275,12 +276,16 @@ namespace neos
                                 iFunction.blocks[aFrom].successors.push_back(aTo);
                                 iFunction.blocks[aTo].predecessors.push_back(aFrom);
                             }
-                            void terminate(std::uint16_t aOp, operand_list aOperands, std::vector<std::uint32_t> const& aSuccessors, std::uint64_t aImm0 = 0u)
+                            void terminate(std::uint16_t aOp, operand_list aOperands, std::span<std::uint32_t const> aSuccessors, std::uint64_t aImm0 = 0u)
                             {
                                 add(aOp, Void, std::move(aOperands), aImm0);
                                 for (auto s : aSuccessors)
                                     link(iCurrent, s);
                                 iReachable = false;
+                            }
+                            void terminate(std::uint16_t aOp, operand_list aOperands, std::initializer_list<std::uint32_t> aSuccessors, std::uint64_t aImm0 = 0u)
+                            {
+                                terminate(aOp, std::move(aOperands), std::span<std::uint32_t const>{ aSuccessors.begin(), aSuccessors.size() }, aImm0);
                             }
                             // --- variables (locals, and the values that blocks end with)
                             variable new_variable(std::uint8_t aType)
@@ -1013,12 +1018,14 @@ namespace neos
                         void count_uses(function& aFunction)
                         {
                             aFunction.uses.assign(aFunction.values.size(), 0u);
+                            auto* const uses = aFunction.uses.data();
+                            auto const* const values = aFunction.values.data();
                             for (auto const& b : aFunction.blocks)
                                 if (b.reachable)
                                     for (auto v : b.code)
-                                        if (!aFunction.values[v].dead)
-                                            for (auto o : aFunction.values[v].operands)
-                                                ++aFunction.uses[o];
+                                        if (auto const& i = values[v]; !i.dead)
+                                            for (auto o : i.operands)
+                                                ++uses[o];
                             aFunction.usesCurrent = true;
                         }
 
@@ -1159,8 +1166,9 @@ namespace neos
                                     }
                                     if (i.dead || (i.type != I32 && i.type != I64))
                                         continue;
-                                    for (auto& o : i.operands)
-                                        o = replaced.resolved(o);
+                                    if (!replaced.to.empty())
+                                        for (auto& o : i.operands)
+                                            o = replaced.resolved(o);
                                     auto const mask = width(v);
                                     // (a constant (wherever it is: constants are where they are used): its bits)
                                     auto const m = [&](std::size_t n) { auto const o = i.operands[n]; return values[o].constant() && (values[o].type == I32 || values[o].type == I64) ? values[o].imm0 & width(o) : done[o] ? may[o] : width(o); };
@@ -1467,8 +1475,9 @@ namespace neos
                                     auto& i = aFunction.values[v];
                                     if (i.dead)
                                         continue;
-                                    for (auto& o : i.operands)
-                                        o = replaced.resolved(o);
+                                    if (!replaced.to.empty())
+                                        for (auto& o : i.operands)
+                                            o = replaced.resolved(o);
                                     auto const constant = [&](std::size_t aOperand) -> instruction const*
                                     {
                                         auto const& o = aFunction.values[i.operands[aOperand]];
@@ -1759,8 +1768,9 @@ namespace neos
                                     auto const v = aFunction.blocks[b].code[n];
                                     if (values[v].dead)
                                         continue;
-                                    for (auto& o : values[v].operands)
-                                        o = replaced.resolved(o);
+                                    if (!replaced.to.empty())
+                                        for (auto& o : values[v].operands)
+                                            o = replaced.resolved(o);
                                     auto& i = values[v];
                                     auto const op = i.op;
                                     if ((op == 0xBFu || op == 0xBDu) && i.operands.size() == 1u)
@@ -2179,10 +2189,20 @@ namespace neos
                             }
                             // (a block's children in the dominator tree, by reverse postorder: a join's predecessors (but a loop's back
                             // edges) are visited before it)
-                            std::vector<std::vector<std::uint32_t>> children(blocks.size());
+                            // (childStart[b] to childStart[b + 1] in children)
+                            std::vector<std::uint32_t> childStart(blocks.size() + 1u, 0u);
                             for (std::size_t i = 1u; i < order.size(); ++i)
                                 if (idom[order[i]] != Undefined)
-                                    children[idom[order[i]]].push_back(order[i]);
+                                    ++childStart[idom[order[i]] + 1u];
+                            for (std::size_t b = 0u; b < blocks.size(); ++b)
+                                childStart[b + 1u] += childStart[b];
+                            std::vector<std::uint32_t> children(childStart.back());
+                            {
+                                std::vector<std::uint32_t> at(childStart.begin(), childStart.end() - 1);
+                                for (std::size_t i = 1u; i < order.size(); ++i)
+                                    if (idom[order[i]] != Undefined)
+                                        children[at[idom[order[i]]]++] = order[i];
+                            }
                             std::vector<bool> exited(blocks.size(), false);
                             // (the table of values by their keys: (operation, type, immediates, epoch (memory's), operands); scoped by the
                             // dominator tree)
@@ -2813,9 +2833,9 @@ namespace neos
                             while (!stack.empty())
                             {
                                 auto& top = stack.back();
-                                if (top.next < children[top.block].size())
+                                if (top.next < childStart[top.block + 1u] - childStart[top.block])
                                 {
-                                    auto const child = children[top.block][top.next++];
+                                    auto const child = children[childStart[top.block] + top.next++];
                                     enter(child);
                                     continue;
                                 }
@@ -2949,6 +2969,47 @@ namespace neos
                         return f;
                     }
 
+                    namespace
+                    {
+                        // (the blocks that can be reached, numbered again (in the same order): those that cannot be, none (but one, the last:
+                        // empty, the block of the values that were theirs (a constant may still be used elsewhere)); the passes and finish visit
+                        // the blocks that remain)
+                        void compact_blocks(function& aFunction, std::vector<std::uint32_t>& aPostorder)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            std::vector<std::uint32_t> number(blocks.size());
+                            std::uint32_t next = 0u;
+                            for (std::uint32_t b = 0u; b < blocks.size(); ++b)
+                                if (blocks[b].reachable)
+                                    number[b] = next++;
+                            auto const unreached = next;
+                            for (std::uint32_t b = 0u; b < blocks.size(); ++b)
+                                if (!blocks[b].reachable)
+                                    number[b] = unreached;
+                            std::uint32_t w = 0u;
+                            for (std::uint32_t b = 0u; b < blocks.size(); ++b)
+                                if (blocks[b].reachable)
+                                {
+                                    if (w != b)
+                                        blocks[w] = std::move(blocks[b]);
+                                    ++w;
+                                }
+                            blocks.resize(w + 1u);
+                            blocks[w] = block{};
+                            for (std::uint32_t b = 0u; b < w; ++b)
+                            {
+                                for (auto& s : blocks[b].successors)
+                                    s = number[s];
+                                for (auto& p : blocks[b].predecessors)
+                                    p = number[p];
+                            }
+                            for (auto& i : aFunction.values)
+                                i.block = i.block < number.size() ? number[i.block] : unreached;
+                            for (auto& b : aPostorder)
+                                b = number[b];
+                        }
+                    }
+
                     void finish(function& aFunction)
                     {
                         // (the blocks that can be reached, in reverse postorder (a loop's blocks follow its header))
@@ -2961,25 +3022,34 @@ namespace neos
                         }
                         bool pruned = false;
                         std::vector<std::uint32_t> postorder;
-                        std::vector<std::pair<std::uint32_t, std::size_t>> stack{ { 0u, 0u } };
+                        // (each block being visited: its successors not yet visited (they do not change while they are))
+                        struct visit
+                        {
+                            std::uint32_t block;
+                            std::uint32_t const* next;
+                            std::uint32_t const* end;
+                        };
+                        std::vector<visit> stack;
+                        stack.reserve(64u);
+                        postorder.reserve(blocks.size());
+                        stack.push_back({ 0u, blocks[0].successors.begin(), blocks[0].successors.end() });
                         blocks[0].reachable = true;
                         while (!stack.empty())
                         {
-                            auto& [b, next] = stack.back();
-                            if (next < blocks[b].successors.size())
+                            auto& top = stack.back();
+                            if (top.next != top.end)
                             {
-                                auto const s = blocks[b].successors[next++];
+                                auto const s = *top.next++;
                                 if (!blocks[s].reachable)
                                 {
                                     blocks[s].reachable = true;
-                                    stack.emplace_back(s, 0u);
+                                    stack.push_back({ s, blocks[s].successors.begin(), blocks[s].successors.end() });
                                 }
                                 continue;
                             }
-                            postorder.push_back(b);
+                            postorder.push_back(top.block);
                             stack.pop_back();
                         }
-                        aFunction.order.assign(postorder.rbegin(), postorder.rend());
                         // (predecessors that cannot be reached: not predecessors (nor their phis' operands))
                         for (std::uint32_t b = 0u; b < blocks.size(); ++b)
                         {
@@ -3001,7 +3071,27 @@ namespace neos
                                     }
                                 }
                         }
-                        // (loop depths: a block within a loop is one that can reach its header's back edge from the header)
+                        // (mostly blocks that cannot be reached: those that can, numbered again)
+                        if (blocks.size() - postorder.size() > 32u && 4u * (blocks.size() - postorder.size()) > blocks.size())
+                            compact_blocks(aFunction, postorder);
+                        aFunction.order.assign(postorder.rbegin(), postorder.rend());
+                        // (the edges' hash: loop depths are found again only if they changed)
+                        std::uint64_t edges = 0xCBF29CE484222325ull ^ blocks.size();
+                        for (auto b : postorder)
+                            for (auto s : blocks[b].successors)
+                            {
+                                edges = (edges ^ ((std::uint64_t{ b } << 32u) | s)) * 0x100000001B3ull;
+                                edges ^= edges >> 29u;
+                            }
+                        // (loop depths: a block within a loop is one that can reach its header's back edge from the header; as they were if
+                        // the edges are)
+                        if (!pruned && edges == aFunction.cfgHash)
+                        {
+                            if (!aFunction.usesCurrent || aFunction.uses.size() != aFunction.values.size() || postorder.size() != wasReachable)
+                                count_uses(aFunction);
+                            return;
+                        }
+                        aFunction.cfgHash = edges;
                         std::vector<std::uint32_t> position(blocks.size(), 0u);
                         for (std::uint32_t i = 0u; i < aFunction.order.size(); ++i)
                             position[aFunction.order[i]] = i;
@@ -4246,13 +4336,14 @@ namespace neos
                             };
                             // (a branch on a conjunction (i32.and) of comparisons: on its true edge, each is true (!= 0); on a disjunction's
                             // (i32.or) false edge, each is false (== 0))
+                            std::vector<value> pending;
                             auto const terms_of = [&](value aCondition, std::vector<value>& aTerms) -> bool
                             {
                                 auto const op = values[aCondition].op;
                                 if (op != 0x71u && op != 0x72u)
                                     return false;
                                 aTerms.clear();
-                                std::vector<value> pending{ aCondition };
+                                pending.assign(1u, aCondition);
                                 while (!pending.empty() && aTerms.size() < 8u)
                                 {
                                     auto const v = pending.back();
@@ -4283,7 +4374,7 @@ namespace neos
                             };
                             std::vector<test> tests(blocks.size());
                             {
-                                std::unordered_map<value, std::uint32_t> counts;
+                                std::vector<std::uint32_t> counts(values.size(), 0u);
                                 for (auto const b : order)
                                 {
                                     auto const& B = blocks[b];
@@ -4322,7 +4413,10 @@ namespace neos
                             std::vector<std::uint32_t> position(blocks.size(), ~std::uint32_t{});
                             for (std::uint32_t i = 0u; i < order.size(); ++i)
                                 position[order[i]] = i;
-                            std::vector<facts> entry(blocks.size());
+                            // (each block's facts at its entry: a range of them all (a block's are made once, after its predecessors' (but a
+                            // loop's back edges)))
+                            facts all;
+                            std::vector<std::pair<std::uint32_t, std::uint32_t>> entry(blocks.size(), { 0u, 0u });
                             std::vector<std::uint8_t> state(blocks.size(), 0u);    // (1: done and reachable; 2: done, not reachable)
                             auto const find = [](facts& aFacts, value aSubject) -> fact*
                             {
@@ -4366,7 +4460,7 @@ namespace neos
                             {
                                 if (state[aFrom] != 1u)
                                     return false;
-                                aFacts = entry[aFrom];
+                                aFacts.assign(all.begin() + entry[aFrom].first, all.begin() + entry[aFrom].first + entry[aFrom].second);
                                 auto const& F = blocks[aFrom];
                                 if (F.code.empty() || F.successors.size() != 2u || F.successors[0] == F.successors[1])
                                     return true;
@@ -4419,10 +4513,10 @@ namespace neos
                             };
                             bool changed = false;
                             value constants01[2] = { None, None };
-                            facts incoming, joined;
+                            facts S, incoming, joined;
                             for (auto const b : order)
                             {
-                                auto& S = entry[b];
+                                S.clear();
                                 auto const& B = blocks[b];
                                 bool reachable = false;
                                 if (b == order[0])
@@ -4474,6 +4568,8 @@ namespace neos
                                 state[b] = reachable ? 1u : 2u;
                                 if (!reachable)
                                     continue;
+                                entry[b] = { static_cast<std::uint32_t>(all.size()), static_cast<std::uint32_t>(S.size()) };
+                                all.insert(all.end(), S.begin(), S.end());
                                 auto const& x = tests[b];
                                 if (x.subject == None)
                                     continue;
@@ -4926,10 +5022,20 @@ namespace neos
                                     }
                                 }
                             }
-                            std::vector<std::vector<std::uint32_t>> children(blocks.size());
+                            // (each block's children (in the order's order): childStart[b] to childStart[b + 1] in children)
+                            std::vector<std::uint32_t> childStart(blocks.size() + 1u, 0u);
                             for (std::size_t i = 1u; i < order.size(); ++i)
                                 if (idom[order[i]] != Undefined)
-                                    children[idom[order[i]]].push_back(order[i]);
+                                    ++childStart[idom[order[i]] + 1u];
+                            for (std::size_t b = 0u; b < blocks.size(); ++b)
+                                childStart[b + 1u] += childStart[b];
+                            std::vector<std::uint32_t> children(childStart.back());
+                            {
+                                std::vector<std::uint32_t> at(childStart.begin(), childStart.end() - 1);
+                                for (std::size_t i = 1u; i < order.size(); ++i)
+                                    if (idom[order[i]] != Undefined)
+                                        children[at[idom[order[i]]]++] = order[i];
+                            }
                             std::vector<std::uint32_t> enter(blocks.size(), 0u), leave(blocks.size(), 0u);
                             {
                                 std::uint32_t clock = 0u;
@@ -4938,9 +5044,9 @@ namespace neos
                                 while (!stack.empty())
                                 {
                                     auto& [b, next] = stack.back();
-                                    if (next < children[b].size())
+                                    if (next < childStart[b + 1u] - childStart[b])
                                     {
-                                        auto const c = children[b][next++];
+                                        auto const c = children[childStart[b] + next++];
                                         enter[c] = clock++;
                                         stack.emplace_back(c, 0u);
                                         continue;
@@ -4950,22 +5056,40 @@ namespace neos
                                 }
                             }
                             auto const dominates = [&](std::uint32_t aA, std::uint32_t aB) { return position[aB] != Undefined && enter[aA] <= enter[aB] && leave[aB] <= leave[aA]; };
-                            // (each value's uses' blocks (a phi's operand: its predecessor's))
-                            std::vector<std::vector<std::uint32_t>> users(values.size());
+                            // (each value's uses' blocks (a phi's operand: its predecessor's): userStart[v] to userStart[v + 1] in userBlocks)
+                            std::vector<std::uint32_t> userStart(values.size() + 1u, 0u);
                             for (auto b : order)
                                 for (auto v : blocks[b].code)
                                 {
                                     auto const& i = values[v];
-                                    if (i.dead)
-                                        continue;
-                                    for (std::size_t n = 0u; n < i.operands.size(); ++n)
-                                    {
-                                        auto const o = i.operands[n];
-                                        if (o == None)
-                                            continue;
-                                        users[o].push_back(i.op == Phi && n < blocks[b].predecessors.size() ? blocks[b].predecessors[n] : b);
-                                    }
+                                    if (!i.dead)
+                                        for (auto o : i.operands)
+                                            if (o != None)
+                                                ++userStart[o + 1u];
                                 }
+                            for (std::size_t v = 0u; v < values.size(); ++v)
+                                userStart[v + 1u] += userStart[v];
+                            std::vector<std::uint32_t> userBlocks(userStart.back());
+                            {
+                                std::vector<std::uint32_t> at(userStart.begin(), userStart.end() - 1);
+                                for (auto b : order)
+                                    for (auto v : blocks[b].code)
+                                    {
+                                        auto const& i = values[v];
+                                        if (i.dead)
+                                            continue;
+                                        for (std::size_t n = 0u; n < i.operands.size(); ++n)
+                                        {
+                                            auto const o = i.operands[n];
+                                            if (o == None)
+                                                continue;
+                                            userBlocks[at[o]++] = i.op == Phi && n < blocks[b].predecessors.size() ? blocks[b].predecessors[n] : b;
+                                        }
+                                    }
+                            }
+                            auto const users = [&](value aValue) { return std::span<std::uint32_t>{ userBlocks.data() + userStart[aValue], userStart[aValue + 1u] - userStart[aValue] }; };
+                            std::vector<std::pair<std::size_t, value>> moved;  // (the successor's index, the value)
+                            std::vector<value> run;
                             bool changed = false;
                             for (auto b : order)
                             {
@@ -4975,7 +5099,7 @@ namespace neos
                                 auto const terminator = A.code.back();
                                 if (values[terminator].op != Branch && values[terminator].op != Switch)
                                     continue;
-                                std::vector<std::vector<value>> moved(A.successors.size());
+                                moved.clear();
                                 bool effects = false;   // (a store or call after (below) the value)
                                 for (auto c = A.code.size() - 1u; c-- > 0u;)
                                 {
@@ -4990,7 +5114,7 @@ namespace neos
                                             effects = true;
                                         continue;
                                     }
-                                    auto const& u = users[v];
+                                    auto const u = users(v);
                                     if (u.empty())
                                         continue;
                                     std::optional<std::size_t> target;
@@ -5005,13 +5129,13 @@ namespace neos
                                     if (!target)
                                         continue;
                                     auto const s = A.successors[*target];
-                                    moved[*target].push_back(v);
+                                    moved.emplace_back(*target, v);
                                     A.code[c] = None;
                                     i.block = s;
                                     // (its operands are used there now)
                                     for (auto o : i.operands)
                                         if (o != None)
-                                            for (auto& x : users[o])
+                                            for (auto& x : users(o))
                                                 if (x == b)
                                                 {
                                                     x = s;
@@ -5022,16 +5146,20 @@ namespace neos
                                 if (!changed)
                                     continue;
                                 std::erase(A.code, None);
-                                for (std::size_t k = 0u; k < moved.size(); ++k)
+                                for (std::size_t k = 0u; k < A.successors.size() && !moved.empty(); ++k)
                                 {
-                                    if (moved[k].empty())
+                                    // (in their order (they were found last first))
+                                    run.clear();
+                                    for (auto m = moved.rbegin(); m != moved.rend(); ++m)
+                                        if (m->first == k)
+                                            run.push_back(m->second);
+                                    if (run.empty())
                                         continue;
                                     auto& S = blocks[A.successors[k]].code;
                                     std::size_t phis = 0u;
                                     while (phis < S.size() && values[S[phis]].op == Phi)
                                         ++phis;
-                                    // (in their order (they were found last first))
-                                    S.insert(S.begin() + static_cast<std::ptrdiff_t>(phis), moved[k].rbegin(), moved[k].rend());
+                                    S.insert(S.begin() + static_cast<std::ptrdiff_t>(phis), run.begin(), run.end());
                                 }
                             }
                             return changed;
@@ -5250,14 +5378,18 @@ namespace neos
                         if (changes(fold_assumed(aFunction)))
                             finish(aFunction);
                         eliminate_dead_code(aFunction);
+                        // (finish: after the blocks' edges may have changed (folding a branch; inverting one), else they are as it left them)
+                        bool edges = false;
                         for (int pass = 0; pass < 4; ++pass)
                         {
                             bool changed = cached();
                             changed = changes(fold_known_bits(aFunction)) || changed;
                             changed = changes(fold_constants(aFunction)) || changed;
-                            finish(aFunction);
+                            if (changed || edges)
+                                finish(aFunction);
                             changed = changes(simplify(aFunction)) || changed;
-                            changed = invert_branches(aFunction) || changed;
+                            edges = invert_branches(aFunction);
+                            changed = edges || changed;
                             changed = changes(narrow_masked_comparisons(aFunction)) || changed;
                             if (!changed)
                                 break;
@@ -5265,14 +5397,19 @@ namespace neos
                             eliminate_dead_code(aFunction);
                         }
                         if (changes(fold_assumed(aFunction)))
+                        {
                             finish(aFunction);
+                            edges = false;
+                        }
                         number_values(aFunction);
                         aFunction.usesCurrent = false;
                         changes(decide_branches(aFunction));
                         for (int pass = 0; pass < 2; ++pass)
                         {
                             bool const changed = changes(fold_constants(aFunction));
-                            finish(aFunction);
+                            if (changed || edges)
+                                finish(aFunction);
+                            edges = false;
                             if (!changed)
                                 break;
                         }
@@ -5314,32 +5451,43 @@ namespace neos
                         }
                         for (int round = 0; round < 4; ++round)
                         {
+                            bool edges = true;  // (see the first folding loop)
                             bool threaded = changes(thread_branches(aFunction));
                             if (threaded)
+                            {
                                 finish(aFunction);
+                                edges = false;
+                            }
                             if (changes(thread_known_values(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
+                                edges = false;
                             }
                             if (changes(duplicate_tails(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
+                                edges = false;
                             }
-                            threaded = changes(decide_branches(aFunction)) || threaded;
-                            threaded = changes(merge_equal_successors(aFunction)) || threaded;
+                            if (changes(decide_branches(aFunction)))
+                                threaded = edges = true;
+                            if (changes(merge_equal_successors(aFunction)))
+                                threaded = edges = true;
                             if (changes(sink_conversions(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
+                                edges = false;
                             }
                             for (int pass = 0; pass < 2; ++pass)
                             {
                                 bool changed = cached();
                                 changed = changes(fold_known_bits(aFunction)) || changed;
                                 changed = changes(fold_constants(aFunction)) || changed;
-                                finish(aFunction);
+                                if (changed || edges)
+                                    finish(aFunction);
+                                edges = false;
                                 changed = changes(simplify(aFunction)) || changed;
                                 if (!changed)
                                     break;
