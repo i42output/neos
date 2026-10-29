@@ -648,7 +648,7 @@ namespace neos::javascript_runtime
             iHeap.iAllocations = 0u;
             iHeap.iAllocationTrigger = iStress != 0u ? iStress : ~std::uint64_t{};
             iHeap.iState->allocatedBytes = 0u;
-            iHeap.iByteTrigger = iStress != 0u ? ~std::uint64_t{} : std::max<std::uint64_t>(MinimumTrigger, iLiveBytes * 2u);
+            iHeap.iByteTrigger = iStress != 0u ? ~std::uint64_t{} : std::max<std::uint64_t>(MinimumTrigger, iLiveBytes * 4u);
             limit();
         }
         // (compiled code's allocations: the runtime's once the bytes allocated reach the trigger (always, if collections are by count))

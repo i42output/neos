@@ -1138,6 +1138,15 @@ namespace neos::javascript_runtime
         return regexp_initialize(o, aPattern, aFlags);
     }
 
+    value regexp_test_direct(value aCallee, value aThis, value aString)
+    {
+        // (as the built-in has it (its fast path first))
+        if (auto* const r = as_regexp(aThis); r != nullptr && is_string(aString) && has_builtin_exec(*r, the_regexp_state()))
+            return boolean(builtin_match(*r, aThis, aString, the_heap().regexpCaptures));
+        value const parameters[] = { aString };
+        return regexp_prototype_test(aThis, parameters, Undefined, *as_function(aCallee));
+    }
+
     void init_regexp(realm& aRealm)
     {
         the_keys().source = ascii("source");
@@ -1161,7 +1170,7 @@ namespace neos::javascript_runtime
         getter(c, aRealm.symSpecies, regexp_species);
         method(c, "escape", 1u, regexp_escape);
 
-        the_keys().execFunction = method(p, "exec", 1u, regexp_prototype_exec);
+        the_keys().execFunction = aRealm.regexpExec = method(p, "exec", 1u, regexp_prototype_exec);
         method(p, "compile", 2u, regexp_prototype_compile);
         getter(p, the_keys().dotAll, regexp_prototype_dot_all);
         getter(p, the_keys().flags, regexp_prototype_flags);
@@ -1176,7 +1185,7 @@ namespace neos::javascript_runtime
         getter(p, the_keys().source, regexp_prototype_source);
         method(p, aRealm.symSplit, 2u, regexp_prototype_split);
         getter(p, the_keys().sticky, regexp_prototype_sticky);
-        method(p, "test", 1u, regexp_prototype_test);
+        aRealm.regexpTest = method(p, "test", 1u, regexp_prototype_test);
         method(p, "toString", 0u, regexp_prototype_to_string);
         getter(p, the_keys().unicode, regexp_prototype_unicode);
         getter(p, the_keys().unicodeSets, regexp_prototype_unicode_sets);

@@ -1044,6 +1044,60 @@ namespace neos::javascript_runtime
             });
         }
 
+        value slice_direct(value aCallee, value aThis, value aStart, value aEnd)
+        {
+            // (s.slice(start, end) whose callee is the realm's %String.prototype.slice% (a direct built-in: see direct_builtin_function))
+            return guard([&]() -> value { return string_slice_direct(aCallee, aThis, aStart, aEnd); });
+        }
+
+        value test_direct(value aCallee, value aThis, value aString)
+        {
+            // (r.test(s) whose callee is the realm's %RegExp.prototype.test%)
+            return guard([&]() -> value { return regexp_test_direct(aCallee, aThis, aString); });
+        }
+
+        // (a direct built-in that the runtime has no function of its own for: called (the callee: the realm's built-in, a native))
+        template <typename... Arguments>
+        value native_direct(value aCallee, value aThis, Arguments... aArguments)
+        {
+            return guard([&]() -> value
+            {
+                auto& f = *as_function(aCallee);
+                value const parameters[] = { aArguments..., Undefined };
+                return f.native(aThis, arguments{ parameters, sizeof...(Arguments) }, Undefined, f);
+            });
+        }
+        value native_direct0(value aCallee, value aThis) { return native_direct(aCallee, aThis); }
+        value native_direct1(value aCallee, value aThis, value a0) { return native_direct(aCallee, aThis, a0); }
+        value native_direct2(value aCallee, value aThis, value a0, value a1) { return native_direct(aCallee, aThis, a0, a1); }
+        value native_direct3(value aCallee, value aThis, value a0, value a1, value a2) { return native_direct(aCallee, aThis, a0, a1, a2); }
+
+        value direct_builtin_function(std::int32_t aBuiltin)
+        {
+            // (the realm's direct built-ins (by number: the compiler's function_generator::DirectBuiltins'): compiled code's method calls
+            // whose callees are them call the runtime's functions (their work) directly)
+            auto const& r = the_realm();
+            switch (aBuiltin)
+            {
+            case 0:
+                return r.stringSlice;
+            case 1:
+                return r.regexpTest;
+            case 2:
+                return r.arrayPop;
+            case 3:
+                return r.stringIndexOf;
+            case 4:
+                return r.hasOwnProperty;
+            case 5:
+                return r.regexpExec;
+            case 6:
+                return r.objectAssign;
+            default:
+                return Undefined;
+            }
+        }
+
         value char_code_at_function()
         {
             // (the realm's %String.prototype.charCodeAt%: compiled code's s.charCodeAt(i) is the built-in's if the callee is it)
@@ -1225,7 +1279,7 @@ namespace neos::javascript_runtime
         inline bool typed_array_length_is_getter(typed_array_object const& aTypedArray)
         {
             // (the typed array has no length of its own: it has no properties (it has no shape: its [[Get]] is not the ordinary one))
-            if (aTypedArray.properties.size() != 0u && aTypedArray.properties.find(the_names().length))
+            if (!aTypedArray.properties.none() && aTypedArray.properties.find(the_names().length))
                 return false;
             auto& r = the_realm();
             auto& cache = r.typedArrayLengthCache;
@@ -1257,6 +1311,8 @@ namespace neos::javascript_runtime
             }
             return typed_array_length_lookup(aTypedArray, cache, r);
         }
+
+        value get_length_site(value aObject, std::int32_t aSite);
 
         value get_length(value aObject)
         {
@@ -1788,6 +1844,16 @@ namespace neos::javascript_runtime
                 publish_heap();
                 return Undefined;
             });
+        }
+
+        value get_length_site(value aObject, std::int32_t aSite)
+        {
+            // (x.length where compiled code's path did not have it (see the length stub): an array's (not sparse) marks its site (its
+            // first entry's kind: SiteArray), so that its code then has the array's path)
+            if (auto const* a = as_array(aObject); a != nullptr && !a->sparse)
+                if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone)
+                    entries[0].kind = jsl::SiteArray;
+            return get_length(aObject);
         }
 
         // (the megamorphic cache's: an own data property of an object of a shape (see megamorphic_entry)); the site remembers it)
@@ -2520,6 +2586,7 @@ namespace neos::javascript_runtime
             { "global_root", NEOS_RT_FUNCTION(global_root), I64, 1u, { I32 }, 0u },
             { "concat_string_number", NEOS_RT_FUNCTION(concat_string_number), I64, 3u, { I64, I64, I32 }, 0u },
             { "get_length", NEOS_RT_FUNCTION(get_length), I64, 1u, { I64 }, 0u },
+            { "get_length_site", NEOS_RT_FUNCTION(get_length_site), I64, 2u, { I64, I32 }, 0u },
             { "global_delete", NEOS_RT_FUNCTION(global_delete), I64, 1u, { I64 }, 0u },
             { "env_new", NEOS_RT_FUNCTION(env_new), I64, 2u, { I64, I32 }, 0u },
             { "env_copy", NEOS_RT_FUNCTION(env_copy), I64, 1u, { I64 }, 0u },
@@ -2551,6 +2618,13 @@ namespace neos::javascript_runtime
             { "char_code_at", NEOS_RT_FUNCTION(char_code_at), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_tail", NEOS_RT_FUNCTION(char_code_at_tail), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_function", NEOS_RT_FUNCTION(char_code_at_function), I64, 0u, {}, 0u },
+            { "slice_direct", NEOS_RT_FUNCTION(slice_direct), I64, 4u, { I64, I64, I64, I64 }, 0u },
+            { "test_direct", NEOS_RT_FUNCTION(test_direct), I64, 3u, { I64, I64, I64 }, 0u },
+            { "direct_builtin_function", NEOS_RT_FUNCTION(direct_builtin_function), I64, 1u, { I32 }, 0u },
+            { "native_direct0", NEOS_RT_FUNCTION(native_direct0), I64, 2u, { I64, I64 }, 0u },
+            { "native_direct1", NEOS_RT_FUNCTION(native_direct1), I64, 3u, { I64, I64, I64 }, 0u },
+            { "native_direct2", NEOS_RT_FUNCTION(native_direct2), I64, 4u, { I64, I64, I64, I64 }, 0u },
+            { "native_direct3", NEOS_RT_FUNCTION(native_direct3), I64, 5u, { I64, I64, I64, I64, I64 }, 0u },
             { "array_push_function", NEOS_RT_FUNCTION(array_push_function), I64, 0u, {}, 0u },
             { "array_prototype_value", NEOS_RT_FUNCTION(array_prototype_value), I64, 0u, {}, 0u },
             { "array_push_one", NEOS_RT_FUNCTION(array_push_one), I64, 3u, { I64, I64, I64 }, 0u },

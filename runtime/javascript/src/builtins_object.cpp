@@ -487,7 +487,7 @@ namespace neos::javascript_runtime
         auto const c = make_native("Object", 1u, object_constructor, true);
         aRealm.object = c;
         obj(c).put(the_names().prototype, aRealm.objectPrototype, 0u);
-        method(c, "assign", 2u, object_assign);
+        aRealm.objectAssign = method(c, "assign", 2u, object_assign);
         method(c, "create", 2u, object_create);
         method(c, "defineProperties", 2u, object_define_properties_function);
         method(c, "defineProperty", 3u, object_define_property);
@@ -514,7 +514,7 @@ namespace neos::javascript_runtime
         obj(p).put(the_names().constructor, c);
         method(p, "__defineGetter__", 2u, object_prototype_define_getter);
         method(p, "__defineSetter__", 2u, object_prototype_define_setter);
-        method(p, "hasOwnProperty", 1u, object_prototype_has_own_property);
+        aRealm.hasOwnProperty = method(p, "hasOwnProperty", 1u, object_prototype_has_own_property);
         method(p, "isPrototypeOf", 1u, object_prototype_is_prototype_of);
         method(p, "__lookupGetter__", 1u, object_prototype_lookup_getter);
         method(p, "__lookupSetter__", 1u, object_prototype_lookup_setter);

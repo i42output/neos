@@ -858,6 +858,33 @@ namespace neos
                             }
                         }
                         void sub_rsp_imm32(std::int32_t aImm) { op_rr({ 0x81 }, true, 5, RSP); emit32(static_cast<std::uint32_t>(aImm)); }
+                        // (cmp [base + index * scale + disp], imm (aWidth: 1, 4 or 8 bytes; aIndex -1: none))
+                        void cmp_mi(unsigned aWidth, int aBase, int aIndex, std::int32_t aDisp, unsigned aScale, std::int32_t aImm)
+                        {
+                            struct fused { assembler& a; std::size_t start; ~fused() { a.fusable(7, start); } } const fusing{ *this, offset() };
+                            bool const w = aWidth == 8u;
+                            bool const byte = aWidth == 1u;
+                            bool const short8 = !byte && fits_i8(aImm);
+                            std::uint8_t const opcode = byte ? 0x80u : short8 ? 0x83u : 0x81u;
+                            if (aIndex >= 0)
+                                op_bi({ opcode }, w, 7, aBase, aIndex, aDisp, -1, false, aScale);
+                            else
+                                op_rm({ opcode }, w, 7, aBase, aDisp);
+                            if (byte || short8)
+                                emit8(static_cast<std::uint8_t>(aImm));
+                            else
+                                emit32(static_cast<std::uint32_t>(aImm));
+                        }
+                        // (cmp [base + index * scale + disp], reg (aWidth: 4 or 8 bytes))
+                        void cmp_mr(unsigned aWidth, int aBase, int aIndex, std::int32_t aDisp, unsigned aScale, int aReg)
+                        {
+                            struct fused { assembler& a; std::size_t start; ~fused() { a.fusable(7, start); } } const fusing{ *this, offset() };
+                            bool const w = aWidth == 8u;
+                            if (aIndex >= 0)
+                                op_bi({ 0x39u }, w, aReg, aBase, aIndex, aDisp, -1, false, aScale);
+                            else
+                                op_rm({ 0x39u }, w, aReg, aBase, aDisp);
+                        }
                         void test_rr(bool aW, int aA, int aB) { auto const start = offset(); op_rr({ 0x85 }, aW, aB, aA); fusable(7, start); }
                         void test_ri(int aReg, std::int32_t aImm) { auto const start = offset(); op_rr({ 0xF7 }, false, 0, aReg); emit32(static_cast<std::uint32_t>(aImm)); fusable(7, start); }
                         void test_mi(int aBase, std::int32_t aDisp, std::int32_t aImm) { auto const start = offset(); op_rm({ 0xF7 }, false, 0, aBase, aDisp); emit32(static_cast<std::uint32_t>(aImm)); fusable(7, start); }
@@ -890,6 +917,16 @@ namespace neos
                         void push(int aReg) { rex(false, 0, 0, aReg); emit8(static_cast<std::uint8_t>(0x50u + (aReg & 7))); }
                         void pop(int aReg) { rex(false, 0, 0, aReg); emit8(static_cast<std::uint8_t>(0x58u + (aReg & 7))); }
                         void ret() { auto const start = offset(); emit8(0xC3u); within_boundary(start); }
+                        // (call [address] (an absolute address that a sign extended disp32 is): ff /2 with SIB, no base, no index)
+                        void call_abs32(std::uint32_t aAddress)
+                        {
+                            auto const start = offset();
+                            emit8(0xFFu);
+                            emit8(0x14u);
+                            emit8(0x25u);
+                            emit32(aAddress);
+                            within_boundary(start);
+                        }
                         void call_r(int aReg)
                         {
                             auto const start = offset();
@@ -4001,8 +4038,13 @@ namespace neos
                                 {
                                     // (the optimizing tier, or a function compiled when it is first called: through the indirect table (the
                                     // function's optimized code, if it has it))
-                                    a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&static_cast<compiled_module::indirect_entry const*>(iIndirect)[aFunction].target), true);
-                                    a.op_rm({ 0xFFu }, false, 2, R11, 0);   // call [r11]
+                                    if (auto const cell = reinterpret_cast<std::uint64_t>(&static_cast<compiled_module::indirect_entry const*>(iIndirect)[aFunction].target); cell <= 0x7FFFFFFFull)
+                                        a.call_abs32(static_cast<std::uint32_t>(cell));     // (call [cell])
+                                    else
+                                    {
+                                        a.mov_ri(R11, cell, true);
+                                        a.op_rm({ 0xFFu }, false, 2, R11, 0);   // call [r11]
+                                    }
                                 }
                                 else
                                     a.call(iFunctionLabels[aFunction]);
@@ -7539,8 +7581,13 @@ namespace neos
                             // (System V: the callee may call native code, which does not preserve xmm8-xmm15: those that hold values across
                             // the call are saved around it)
                             auto const saved = save_xmms(v);
-                            a.mov_ri(R11, reinterpret_cast<std::uint64_t>(&iTier.indirect[callee].target), true);
-                            a.op_rm({ 0xFFu }, false, 2, R11, 0);
+                            if (auto const cell = reinterpret_cast<std::uint64_t>(&iTier.indirect[callee].target); cell <= 0x7FFFFFFFull)
+                                a.call_abs32(static_cast<std::uint32_t>(cell));     // (call [cell])
+                            else
+                            {
+                                a.mov_ri(R11, cell, true);
+                                a.op_rm({ 0xFFu }, false, 2, R11, 0);
+                            }
                             iCallSites.emplace_back(a.new_label(), i.origin);
                             a.bind(iCallSites.back().first);
                             restore_xmms(saved);
@@ -7729,25 +7776,17 @@ namespace neos
                             }
                         }
                         // --- memory
-                        void memory(value v)
+                        // (a memory access's address (the code that checks it emitted): its base, index (-1: none), displacement and scale)
+                        struct memory_address
+                        {
+                            int base = -1;
+                            int index = -1;
+                            std::int32_t offset = 0;
+                            unsigned scale = 0u;
+                        };
+                        memory_address address_of(value v, unsigned aWidth)
                         {
                             auto const& i = f.values[v];
-                            auto const op = static_cast<std::uint8_t>(i.op);
-                            bool const store = i.store();
-                            struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
-                            static access const sAccesses[] =
-                            {
-                                { 4, I32, 0x8B, 0, false, -1 }, { 8, I64, 0x8B, 0, true, -1 }, { 4, F32, 0x10, 0, false, 0xF3 }, { 8, F64, 0x10, 0, false, 0xF2 },
-                                { 1, I32, 0x0F, 0xBE, false, -1 }, { 1, I32, 0x0F, 0xB6, false, -1 },
-                                { 2, I32, 0x0F, 0xBF, false, -1 }, { 2, I32, 0x0F, 0xB7, false, -1 },
-                                { 1, I64, 0x0F, 0xBE, true, -1 }, { 1, I64, 0x0F, 0xB6, false, -1 },
-                                { 2, I64, 0x0F, 0xBF, true, -1 }, { 2, I64, 0x0F, 0xB7, false, -1 },
-                                { 4, I64, 0x63, 0, true, -1 }, { 4, I64, 0x8B, 0, false, -1 },
-                                { 4, I32, 0x89, 0, false, -1 }, { 8, I64, 0x89, 0, true, -1 }, { 4, F32, 0x11, 0, false, 0xF3 }, { 8, F64, 0x11, 0, false, 0xF2 },
-                                { 1, I32, 0x88, 0, false, -1 }, { 2, I32, 0x89, 0, false, 0x66 },
-                                { 1, I64, 0x88, 0, false, -1 }, { 2, I64, 0x89, 0, false, 0x66 }, { 4, I64, 0x89, 0, false, -1 }
-                            };
-                            auto const& x = sAccesses[op - 0x28u];
                             auto const memoryIndex = static_cast<std::uint32_t>(i.imm0 >> 32u);
                             auto const disp = static_cast<std::int32_t>(i.imm1);
                             // (the address: in a register (rdx if it is not in one); a constant address within a fixed memory: in the displacement)
@@ -7758,7 +7797,7 @@ namespace neos
                             bool const fixed = memoryIndex != 0u && external_memory(memoryIndex).fixed;
                             auto const scale = static_cast<unsigned>((i.flags & ssa::Scaled) >> ssa::ScaledShift);
                             bool const within = scale == 0u && fixed && constant(address) && bits(address) <= external_memory(memoryIndex).size &&
-                                bits(address) + static_cast<std::uint64_t>(disp) + x.width <= external_memory(memoryIndex).size;
+                                bits(address) + static_cast<std::uint64_t>(disp) + aWidth <= external_memory(memoryIndex).size;
                             bool const unchecked = (i.flags & ssa::Unchecked) != 0u || within;
                             if (scale != 0u && (!fixed || !unchecked))
                                 throw std::logic_error("neos::jit: scaled access");
@@ -7785,7 +7824,7 @@ namespace neos
                                         a.mov_rr(false, RDX, RDX);
                                     index = RDX;
                                     a.load(true, RCX, R15, ContextMemory);
-                                    a.lea(RAX, RDX, disp + static_cast<std::int32_t>(x.width));
+                                    a.lea(RAX, RDX, disp + static_cast<std::int32_t>(aWidth));
                                     a.alu_rm(7, true, RAX, RCX, MemorySize);
                                     a.jcc(A, iTrapLabels[TrapOutOfBounds]);
                                     a.load(true, RCX, RCX, MemoryBase);
@@ -7798,7 +7837,7 @@ namespace neos
                                     {
                                         // (the address at most size - (disp + width))
                                         auto const size = static_cast<std::uint64_t>(m.size);
-                                        auto const end = static_cast<std::uint64_t>(static_cast<std::uint32_t>(disp)) + x.width;
+                                        auto const end = static_cast<std::uint64_t>(static_cast<std::uint32_t>(disp)) + aWidth;
                                         if (disp < 0 || size < end)
                                             a.jmp(iTrapLabels[TrapOutOfBounds]);
                                         else
@@ -7822,13 +7861,85 @@ namespace neos
                                 else
                                 {
                                     a.mov_ri(RCX, reinterpret_cast<std::uint64_t>(&external_memory(memoryIndex)), true);
-                                    a.lea(RAX, index, disp + static_cast<std::int32_t>(x.width));
+                                    a.lea(RAX, index, disp + static_cast<std::int32_t>(aWidth));
                                     a.alu_rm(7, true, RAX, RCX, MemorySize);
                                     a.jcc(A, iTrapLabels[TrapOutOfBounds]);
                                     a.load(true, RCX, RCX, MemoryBase);
                                     base = RCX;
                                 }
                             }
+                            return memory_address{ base, index, offset, scale };
+                        }
+                        // (a load (an integer's: i32.load, i64.load, i32.load8_u, i64.load8_u) whose only use is the integer comparison that
+                        // follows it (not deferred), of it and a constant (that an immediate of the load's width can be) or a value in a 
+                        // register: not made; the comparison reads the memory (cmp [address], x); its width (else 0))
+                        unsigned compared_load(value aLoad, value aComparison) const
+                        {
+                            auto const& l = f.values[aLoad];
+                            auto const& c = f.values[aComparison];
+                            if (l.dead || c.dead || f.uses[aLoad] != 1u || iHome[aLoad] || iDeferred[aComparison] || c.flags != 0u || c.operands.size() != 2u ||
+                                l.block != c.block)
+                                return 0u;
+                            bool const wide = c.op >= 0x51u && c.op <= 0x5Au;
+                            if (!wide && !(c.op >= 0x46u && c.op <= 0x4Fu))
+                                return 0u;
+                            unsigned width = 0u;
+                            switch (l.op)
+                            {
+                            case 0x28u: width = wide ? 0u : 4u; break;     // (i32.load)
+                            case 0x29u: width = wide ? 8u : 0u; break;     // (i64.load)
+                            case 0x2Du: width = wide ? 0u : 1u; break;     // (i32.load8_u)
+                            case 0x31u: width = wide ? 1u : 0u; break;     // (i64.load8_u)
+                            default: break;
+                            }
+                            if (width == 0u)
+                                return 0u;
+                            if (c.operands[0] == c.operands[1])
+                                return 0u;
+                            auto const other = c.operands[0] == aLoad ? c.operands[1] : c.operands[1] == aLoad ? c.operands[0] : ssa::None;
+                            if (other == ssa::None)
+                                return 0u;
+                            auto const relation = static_cast<int>(c.op - (wide ? 0x51u : 0x46u));     // (eq ne lt_s lt_u gt_s gt_u le_s le_u ge_s ge_u)
+                            if (constant(other))
+                            {
+                                auto const b = bits(other) & (wide ? ~0ull : 0xFFFFFFFFull);
+                                if (width == 8u && !fits_i32(static_cast<std::int64_t>(b)))
+                                    return 0u;
+                                // (a byte's: eq, ne and the unsigned relations, with a constant of a byte (the load extends with zeros))
+                                if (width == 1u && (b > 0xFFu || (relation >= 2 && (relation & 1) == 0)))
+                                    return 0u;
+                                return width;
+                            }
+                            if (width == 1u || other >= iLocations.size() || iLocations[other].kind != location::Register || is_float_type(f.values[other].type))
+                                return 0u;
+                            return width;
+                        }
+                        value iComparedLoad = ssa::None;    ///< (see compared_load: the load that the next comparison reads)
+                        void memory(value v)
+                        {
+                            auto const& i = f.values[v];
+                            auto const op = static_cast<std::uint8_t>(i.op);
+                            bool const store = i.store();
+                            if (!store && iNextInstruction != ssa::None && compared_load(v, iNextInstruction) != 0u)
+                            {
+                                iComparedLoad = v;
+                                return;
+                            }
+                            struct access { std::uint8_t width; std::uint8_t type; std::uint8_t opcode0; std::uint8_t opcode1; bool w; int prefix; };
+                            static access const sAccesses[] =
+                            {
+                                { 4, I32, 0x8B, 0, false, -1 }, { 8, I64, 0x8B, 0, true, -1 }, { 4, F32, 0x10, 0, false, 0xF3 }, { 8, F64, 0x10, 0, false, 0xF2 },
+                                { 1, I32, 0x0F, 0xBE, false, -1 }, { 1, I32, 0x0F, 0xB6, false, -1 },
+                                { 2, I32, 0x0F, 0xBF, false, -1 }, { 2, I32, 0x0F, 0xB7, false, -1 },
+                                { 1, I64, 0x0F, 0xBE, true, -1 }, { 1, I64, 0x0F, 0xB6, false, -1 },
+                                { 2, I64, 0x0F, 0xBF, true, -1 }, { 2, I64, 0x0F, 0xB7, false, -1 },
+                                { 4, I64, 0x63, 0, true, -1 }, { 4, I64, 0x8B, 0, false, -1 },
+                                { 4, I32, 0x89, 0, false, -1 }, { 8, I64, 0x89, 0, true, -1 }, { 4, F32, 0x11, 0, false, 0xF3 }, { 8, F64, 0x11, 0, false, 0xF2 },
+                                { 1, I32, 0x88, 0, false, -1 }, { 2, I32, 0x89, 0, false, 0x66 },
+                                { 1, I64, 0x88, 0, false, -1 }, { 2, I64, 0x89, 0, false, 0x66 }, { 4, I64, 0x89, 0, false, -1 }
+                            };
+                            auto const& x = sAccesses[op - 0x28u];
+                            auto const [base, index, offset, scale] = address_of(v, x.width);
                             auto const access_at = [&](std::initializer_list<std::uint8_t> aOpcode, bool aW, int aReg, int aPrefix, bool aByte)
                             {
                                 if (index >= 0)
@@ -7967,6 +8078,24 @@ namespace neos
                                     // (a constant first: second, then the constant (the relation swapped))
                                     std::swap(first, second);
                                     cc = sSwapped[op - (w ? 0x51u : 0x46u)];
+                                }
+                                if (iComparedLoad != ssa::None && (first == iComparedLoad || second == iComparedLoad))
+                                {
+                                    // (a load that only this uses (see compared_load): the memory, then the other)
+                                    if (second == iComparedLoad)
+                                    {
+                                        std::swap(first, second);
+                                        cc = sSwapped[op - (w ? 0x51u : 0x46u)];
+                                    }
+                                    iComparedLoad = ssa::None;
+                                    auto const width = compared_load(first, v);
+                                    auto const at = address_of(first, width);
+                                    if (constant(second))
+                                        a.cmp_mi(width, at.base, at.index, at.offset, at.scale, static_cast<std::int32_t>(static_cast<std::uint32_t>(bits(second))));
+                                    else
+                                        a.cmp_mr(width, at.base, at.index, at.offset, at.scale, iLocations[second].reg);
+                                    condition(v, cc);
+                                    return;
                                 }
                                 auto const x = gpr(first, RAX);
                                 if (w && constant(second) && !fits_i32(static_cast<std::int64_t>(bits(second))))
@@ -8285,6 +8414,20 @@ namespace neos
                             }
                             throw unsupported{ "float instruction" };
                         }
+                        // (an i32 whose register's upper half is zero: a 32-bit load's, or a phi of such (each operand's register is moved 
+                        // to the phi's whole))
+                        bool zero_extended(value aValue, unsigned aDepth) const
+                        {
+                            auto const& x = f.values[aValue];
+                            if (x.op == 0x28u || x.op == 0x2Du || x.op == 0x2Fu)
+                                return true;
+                            if (x.op != ssa::Phi || aDepth >= 3u || x.operands.empty())
+                                return false;
+                            for (auto o : x.operands)
+                                if (o != aValue && (o == ssa::None || constant(o) || !zero_extended(o, aDepth + 1u)))
+                                    return false;
+                            return true;
+                        }
                         void conversion(value v, std::uint8_t aOp)
                         {
                             auto const& i = f.values[v];
@@ -8369,8 +8512,7 @@ namespace neos
                                     if (!wideSource && !isSigned)
                                     {
                                         // (an unsigned i32: zero extended (a 32-bit load's register is), then converted as an i64)
-                                        auto const producer = f.values[x].op;
-                                        if (!(producer == 0x28u || producer == 0x2Du || producer == 0x2Fu) || constant(x))
+                                        if (!zero_extended(x, 0u) || constant(x))
                                         {
                                             a.mov_rr(false, RAX, g);
                                             source = RAX;

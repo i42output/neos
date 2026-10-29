@@ -712,6 +712,8 @@ namespace neos::javascript_runtime
                 return std::u16string_view{ small, length };
             if (base != 0u && text.empty())
                 return std::u16string_view{ reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length };
+            if (left == 0u)
+                return std::u16string_view{ text.data(), text.size() };     // (flat: its text (as flat() would return it))
             return std::u16string_view{ flat() };
         }
         std::size_t hash();
@@ -752,7 +754,7 @@ namespace neos::javascript_runtime
     value intern(std::u16string_view aText);                    ///< (an interned string that lives as long as the program (pinned))
     void pin_interned(value aString);                           ///< (an interned string (that lives while it is referred to): pinned)
     value concat(value aLeft, value aRight);                    ///< (strings)
-    std::u16string_view str(value aString);                     ///< (a string's code units (a rope is flattened))
+    inline std::u16string_view str(value aString) { return cell_of<string>(aString).chars(); }     ///< (a string's code units (a rope is flattened))
     value substring_of(value aString, std::size_t aStart, std::size_t aLength);  ///< (its code units [aStart, aStart + aLength): a long one
                                                                                  ///< shares them (a slice))
     std::string utf8(value aString);                            ///< (lone surrogates: U+FFFD)
@@ -1002,6 +1004,13 @@ namespace neos::javascript_runtime
         void make_dictionary();                 ///< (no shape (its layout its own) from now on)
         void set_root(shape* aRoot) { changed(); iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
         std::size_t size() const { return iShape != nullptr ? iValues.size() : entries().size() - deleted(); }
+        bool none() const   ///< (it has no properties (as size() == 0, without finding the dictionary's entries if it has none))
+        {
+            if (iShape != nullptr)
+                return iValues.size() == 0u;
+            auto const* d = dictionary_of();
+            return d == nullptr || d->entries.size() == d->deleted;
+        }
         std::size_t slots() const { return iShape != nullptr ? iValues.size() : entries().size(); }   ///< (its positions (a dictionary's 
                                                 ///< include deleted ones))
         property_ref at(std::uint32_t aPosition) { return property_ref{ *this, aPosition }; }   ///< (a property by its position)
@@ -1507,6 +1516,9 @@ namespace neos::javascript_runtime
         value charCodeAt = Undefined;           ///< (%String.prototype.charCodeAt% (compiled code compares callees with it))
         value functionCall = Undefined;         ///< (%Function.prototype.call% (compiled code compares callees with it))
         value arrayPush = Undefined;            ///< (%Array.prototype.push% (compiled code compares callees with it))
+        value stringSlice = Undefined;          ///< (%String.prototype.slice% (a direct built-in: see api::direct_builtin_function))
+        value regexpTest = Undefined;           ///< (%RegExp.prototype.test% (a direct built-in))
+        value arrayPop = Undefined, stringIndexOf = Undefined, hasOwnProperty = Undefined, regexpExec = Undefined, objectAssign = Undefined;   ///< (direct built-ins)
         value typedArrayLength = Undefined;     ///< (%TypedArray.prototype%'s length getter (see api::get_length))
         typed_array_length_cache typedArrayLengthCache;     ///< (see api::get_length)
         value eval = Undefined;
@@ -1706,6 +1718,10 @@ namespace neos::javascript_runtime
     void constant(value aObject, char const* aName, value aValue);  ///< (not writable, enumerable or configurable)
     // (builtins_string.cpp: a call of the built-in String.prototype.charCodeAt of a string (with a number): its result (else false))
     bool char_code_at(value aCallee, value aThis, value aPosition, value& aResult);
+    // (builtins_string.cpp: s.slice(start, end) whose callee is the built-in String.prototype.slice (end undefined: not passed))
+    value string_slice_direct(value aCallee, value aThis, value aStart, value aEnd);
+    // (builtins_regexp.cpp: r.test(s) whose callee is the built-in RegExp.prototype.test)
+    value regexp_test_direct(value aCallee, value aThis, value aString);
 
     // --- the built-ins (builtins_*.cpp): each adds its intrinsics to the realm
 

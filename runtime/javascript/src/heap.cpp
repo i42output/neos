@@ -460,11 +460,6 @@ namespace neos::javascript_runtime
         return make_string(std::move(text));
     }
 
-    std::u16string_view str(value aString)
-    {
-        return cell_of<string>(aString).chars();
-    }
-
     value substring_of(value aString, std::size_t aStart, std::size_t aLength)
     {
         // (a long one is a slice (it shares its code units: none are copied; the string whose they are (the base) lives while it does))

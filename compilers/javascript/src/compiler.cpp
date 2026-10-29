@@ -1681,6 +1681,12 @@ namespace neos::compilers::javascript
         return global_index("%jsfcall", type::I64);
     }
 
+    std::uint32_t compiler::direct_builtin_global(std::uint32_t aBuiltin)
+    {
+        iDirectBuiltinsUsed |= 1u << aBuiltin;
+        return global_index("%jsdirect" + std::to_string(aBuiltin), type::I64);
+    }
+
     std::uint32_t compiler::allocation_state_global()
     {
         return global_index("%jsalloc", type::I64);

@@ -138,6 +138,8 @@ namespace neos::javascript_runtime
         // (RequireObjectCoercible(this) then ToString)
         value this_string(value aThis, char const* aMethod)
         {
+            if (is_string(aThis))
+                return aThis;
             if (is_nullish(aThis))
                 throw_type_error(std::string{ "String.prototype." } + aMethod + " called on null or undefined");
             return to_string(aThis);
@@ -892,6 +894,29 @@ namespace neos::javascript_runtime
         return true;
     }
 
+    value string_slice_direct(value aCallee, value aThis, value aStart, value aEnd)
+    {
+        // (a string's, with numbers: its ToIntegerOrInfinity's (which call nothing) relative to its length (as the built-in's are))
+        if (is_string(aThis) && is_number(aStart) && (aEnd == Undefined || is_number(aEnd)))
+        {
+            auto const length = static_cast<double>(cell_of<string>(aThis).length);
+            auto const relative = [length](double aPosition)
+            {
+                if (std::isnan(aPosition))
+                    return 0.0;
+                aPosition = std::trunc(aPosition);
+                return aPosition < 0.0 ? std::max(length + aPosition, 0.0) : std::min(aPosition, length);
+            };
+            auto const from = relative(as_number(aStart));
+            auto const to = aEnd == Undefined ? length : relative(as_number(aEnd));
+            if (from >= to)
+                return the_names().empty;
+            return substring_of(aThis, static_cast<std::size_t>(from), static_cast<std::size_t>(to - from));
+        }
+        value const parameters[] = { aStart, aEnd };
+        return string_slice(aThis, parameters, Undefined, *as_function(aCallee));
+    }
+
     std::u16string get_substitution_text(std::u16string_view aMatched, std::u16string_view aString, std::size_t aPosition,
         std::span<value const> aCaptures, value aNamedCaptures, std::u16string_view aReplacement)
     {
@@ -919,7 +944,7 @@ namespace neos::javascript_runtime
         method(pr, "concat", 1u, string_concat);
         method(pr, "endsWith", 1u, string_ends_with);
         method(pr, "includes", 1u, string_includes);
-        method(pr, "indexOf", 1u, string_index_of);
+        aRealm.stringIndexOf = method(pr, "indexOf", 1u, string_index_of);
         method(pr, "isWellFormed", 0u, string_is_well_formed);
         method(pr, "lastIndexOf", 1u, string_last_index_of);
         method(pr, "localeCompare", 1u, string_locale_compare);
@@ -932,7 +957,7 @@ namespace neos::javascript_runtime
         method(pr, "replace", 2u, string_replace);
         method(pr, "replaceAll", 2u, string_replace_all);
         method(pr, "search", 1u, string_search);
-        method(pr, "slice", 2u, string_slice);
+        aRealm.stringSlice = method(pr, "slice", 2u, string_slice);
         method(pr, "split", 2u, string_split);
         method(pr, "startsWith", 1u, string_starts_with);
         method(pr, "substr", 2u, string_substr);

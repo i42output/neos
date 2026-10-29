@@ -223,6 +223,14 @@ namespace neos::compilers::javascript
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
+        // (the built-ins that a method call x.m(...) calls directly if its callee is the realm's (the runtime's function: its callee, this
+        // and arguments (undefined: those not passed)), else the callee is called: their methods' names, argument counts and the 
+        // runtime's functions (by number: the runtime's direct_builtin_function's))
+        struct direct_builtin { std::string_view method; std::uint32_t minimumArguments; std::uint32_t maximumArguments; char const* runtime; };
+        // (a null runtime function: the built-in itself is called (the runtime's native_direct with as many arguments as are passed))
+        static constexpr direct_builtin DirectBuiltins[] = { { "slice", 1u, 2u, "slice_direct" }, { "test", 1u, 1u, "test_direct" },
+            { "pop", 0u, 0u, nullptr }, { "indexOf", 1u, 2u, nullptr }, { "hasOwnProperty", 1u, 1u, nullptr }, { "exec", 1u, 1u, nullptr },
+            { "assign", 2u, 3u, nullptr } };
     private:
         // control flow
         enum class control_kind
@@ -573,6 +581,7 @@ namespace neos::compilers::javascript
         std::uint32_t function_call_global();   ///< (the global that holds %Function.prototype.call% (f.call(t, ...) calls f if the callee is it))
         std::uint32_t array_push_global();      ///< (the global that holds %Array.prototype.push% (see function_generator::stub))
         std::uint32_t array_prototype_global(); ///< (the global that holds %Array.prototype%)
+        std::uint32_t direct_builtin_global(std::uint32_t aBuiltin);    ///< (the global that holds the realm's built-in (see function_generator::direct_builtins))
         std::uint32_t allocation_state_global();    ///< (the global (an i64): the region offset of the isolate's allocation state)
         // (a function of the program's that calls the runtime's function (its index) with its arguments: slow paths call it rather than
         // the runtime's, so that an optimizing tier that inlines it can leave for the function's own code there (see the VM's deopt)
@@ -605,6 +614,7 @@ namespace neos::compilers::javascript
         std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
         bool iFunctionCallUsed = false;         ///< (function_call_global is used: the program's start sets it)
+        std::uint32_t iDirectBuiltinsUsed = 0u; ///< (by bit: the direct built-ins whose globals are used (the program's start sets them))
         bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
         std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
         std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub)

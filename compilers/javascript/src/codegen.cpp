@@ -473,7 +473,7 @@ namespace neos::compilers::javascript
                     { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
                     { "%js.callee_number", { I64, I32 }, I32 },
                     { "%js.method_number", { I64, I32 }, I32 },
-                    { "%js.get_length", { I64 }, I64 },
+                    { "%js.get_length", { I64, I32 }, I64 },
                     { "%js.char_code_at", { I64, I64, I64, I32 }, I64 },
                     { "%js.to_boolean", { I64 }, I32 },
                     { "%js.construct_number", { I64, I32 }, I32 },
@@ -615,6 +615,18 @@ namespace neos::compilers::javascript
                 call("javascript::fixed_global", { I64, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
+            for (std::uint32_t i = 0u; i < std::size(function_generator::DirectBuiltins); ++i)
+                if ((iDirectBuiltinsUsed & (1u << i)) != 0u)
+                {
+                    // (the direct built-ins' (see function_generator::DirectBuiltins): method calls compare callees with them)
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(i));
+                    call("javascript::direct_builtin_function", { I32 }, I64);
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(direct_builtin_global(i)));
+                    call("javascript::fixed_global", { I64, I32 }, I64);
+                    put_op(code, opcode::Drop);
+                }
             if (iFunctionCallUsed)
             {
                 // (%Function.prototype.call%: f.call(t, ...) compares callees with it)
@@ -1764,9 +1776,16 @@ namespace neos::compilers::javascript
                 mem_load(opcode::I32LoadMem8U, layout::ObjectExtensible, alias::Header);
                 op(opcode::I32Eqz);
                 branch(slow, true);
+                // (the property's position: the entry's (its values' count, that the receiver of its shape has: checked), so that
+                // code that knows the entry (an optimizing tier's) has it as a constant (its slot's offset, the count after it))
+                get(entry);
+                site_load(opcode::I64LoadMem32U, layout::SitePosition);
+                tee(word);
                 get(cell);
                 mem_load(opcode::I64LoadMem32U, layout::ObjectValueCount, alias::Header);
-                tee(word);
+                op(opcode::I64Ne);
+                branch(slow, true);
+                get(word);
                 get(cell);
                 mem_load(opcode::I64LoadMem32U, layout::ObjectValueCapacity, alias::Header);
                 op(opcode::I64GeU);
@@ -1847,9 +1866,11 @@ namespace neos::compilers::javascript
 
     void function_generator::get_length_stub()
     {
-        // (the length stub's code (its parameter: object): x.length: a string's, an array's (not sparse), else the runtime's 
-        // get_length)
-        std::uint32_t const object = 0u;
+        // (the length stub's code (its parameters: object, site): x.length: a string's, an array's (not sparse) if the site has had 
+        // an array's (its first entry's kind: not SiteNone (a cached load: an optimizing tier uses what it was then, so that code of a 
+        // site that only strings have reached has no array's path)), else the runtime's get_length_site (which marks the site if it 
+        // is an array's))
+        std::uint32_t const object = 0u, site = 1u;
         auto const cell = temporary();
         begin(control_kind::Block, I64);
         auto const done = iControls.size() - 1u;
@@ -1885,10 +1906,22 @@ namespace neos::compilers::javascript
             mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
             op(opcode::I32Ior);
             branch(miss, true);
+            // (an array's: if the site has had one; else the runtime's, which marks the site)
+            begin(control_kind::Block);
+            auto const unmarked = iControls.size() - 1u;
+            property_site(site);
+            site_load(opcode::I32LoadMem8U, layout::SiteKind);
+            op(opcode::I32Eqz);
+            branch(unmarked, true);
             get(cell);
             mem_load(opcode::I32LoadMem, layout::ArrayLength, alias::Elements);
             op(opcode::F64UConvertI32);
             op(opcode::I64ReinterpretF64);
+            branch(done, false);
+            end_control();
+            get(object);
+            get(site);
+            runtime("get_length_site", { I64, I32 }, I64);
             branch(done, false);
         }
         end_control();
@@ -2720,7 +2753,7 @@ namespace neos::compilers::javascript
             set_computed_stub();
             break;
         case stub::GetLength:
-            iParameterCount = 1u;
+            iParameterCount = 2u;
             get_length_stub();
             break;
         case stub::CharCodeAt:
@@ -5848,7 +5881,8 @@ namespace neos::compilers::javascript
         case construct::Dot:
             if (name_of(aNode->child(1u)) == "length")
             {
-                // (x.length: a string's or an array's directly)
+                // (x.length: a string's or an array's directly (a site of its own: whether it has had an array's))
+                i32(static_cast<std::int32_t>(iCompiler.iPropertySites++));
                 call_stub(stub::GetLength);
                 break;
             }
@@ -6704,6 +6738,57 @@ namespace neos::compilers::javascript
             release(thisValue);
             release(callee);
             return;
+        }
+        if (calleeNode->is(construct::Dot) && std::none_of(arguments.begin(), arguments.end(), [](node* a) { return a->is(construct::Spread); }))
+        {
+            auto const method = name_of(calleeNode->child(1u));
+            for (std::uint32_t builtin = 0u; builtin < std::size(DirectBuiltins); ++builtin)
+            {
+                auto const& direct = DirectBuiltins[builtin];
+                if (method != direct.method || arguments.size() < direct.minimumArguments || arguments.size() > direct.maximumArguments)
+                    continue;
+                // (x.m(...): the runtime's function (the built-in's work) if the callee is the realm's built-in; else the callee is called)
+                bool const tail = tail_call(aNode);
+                std::vector<std::uint32_t> values;
+                for (auto* a : arguments)
+                {
+                    expression(a);
+                    auto const v = temporary();
+                    set(v);
+                    values.push_back(v);
+                }
+                get(callee);
+                op(opcode::GlobalGet);
+                u32(iCompiler.direct_builtin_global(builtin));
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                {
+                    auto const count = direct.runtime != nullptr ? direct.maximumArguments : static_cast<std::uint32_t>(values.size());
+                    std::vector<type> parameters(2u + count, I64);
+                    get(callee);
+                    get(thisValue);
+                    for (std::uint32_t i = 0u; i < count; ++i)
+                    {
+                        if (i < values.size())
+                            get(values[i]);
+                        else
+                            undefined();
+                    }
+                    runtime(direct.runtime != nullptr ? std::string{ direct.runtime } : "native_direct" + std::to_string(count), parameters, I64);
+                    if (!tail)
+                        check();
+                }
+                op(opcode::Else);
+                call_locals(callee, thisValue, values, tail, known, methodSite);
+                end_control();
+                for (auto v : values)
+                    release(v);
+                release(thisValue);
+                release(callee);
+                return;
+            }
         }
         if (calleeNode->is(construct::Dot) && name_of(calleeNode->child(1u)) == "call" &&
             std::none_of(arguments.begin(), arguments.end(), [](node* a) { return a->is(construct::Spread); }))

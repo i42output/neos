@@ -1138,7 +1138,7 @@ namespace neos::javascript_runtime
         method(pr, "keys", 0u, array_keys);
         method(pr, "lastIndexOf", 1u, array_last_index_of);
         method(pr, "map", 1u, array_map);
-        method(pr, "pop", 0u, array_pop);
+        aRealm.arrayPop = method(pr, "pop", 0u, array_pop);
         aRealm.arrayPush = method(pr, "push", 1u, array_push);
         method(pr, "reduce", 1u, array_reduce);
         method(pr, "reduceRight", 1u, array_reduce_right);

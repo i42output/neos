@@ -4279,9 +4279,16 @@ namespace neos
                             struct fact
                             {
                                 value subject;
-                                bool in;                            ///< (the value is one of the constants (else none of them))
+                                bool in;                            ///< (the value is one of the constants (else none of them; none: nothing known))
                                 std::uint8_t count;
                                 std::uint64_t constants[MaxConstants];  ///< (sorted)
+                                // (the range that the value is in, as relational comparisons (with constants) decided it (see range_kind): its 
+                                // bounds as keys (see range_key))
+                                bool ranged = false;
+                                std::uint8_t kind = 0u;
+                                std::uint64_t lo = 0u;
+                                std::uint64_t hi = 0u;
+                                bool known() const { return in || count != 0u || ranged; }
                                 bool contains(std::uint64_t aConstant) const { return std::find(constants, constants + count, aConstant) != constants + count; }
                                 void add(std::uint64_t aConstant)
                                 {
@@ -4297,6 +4304,69 @@ namespace neos
                                 }
                             };
                             using facts = std::vector<fact>;    // (by subject)
+                            // (a relational comparison of integers' kind: signed (1), 64 bits (2); a value's key in its kind: its bits (32 or 64) 
+                            // (signed: its sign bit inverted), so that the comparison is of keys (unsigned))
+                            auto const key_max = [](std::uint8_t aKind) -> std::uint64_t { return (aKind & 2u) != 0u ? ~0ull : 0xFFFFFFFFull; };
+                            auto const range_key = [&](std::uint8_t aKind, std::uint64_t aBits) -> std::uint64_t
+                            {
+                                auto const bits = aBits & key_max(aKind);
+                                return (aKind & 1u) != 0u ? bits ^ ((aKind & 2u) != 0u ? 0x8000000000000000ull : 0x80000000ull) : bits;
+                            };
+                            // (a branch's condition as a relational comparison of a value with a constant: the value's kind and its range on the 
+                            // branch's true edge (aTrue) and its false edge (aFalse))
+                            auto const relation_of = [&](value aCondition, value& aSubject, std::uint8_t& aKind, std::pair<std::uint64_t, std::uint64_t>& aTrue, 
+                                std::pair<std::uint64_t, std::uint64_t>& aFalse) -> bool
+                            {
+                                auto const& c = values[aCondition];
+                                if (c.dead || c.flags != 0u || c.operands.size() != 2u)
+                                    return false;
+                                bool const wide = c.op >= 0x53u && c.op <= 0x5Au;
+                                if (!wide && !(c.op >= 0x48u && c.op <= 0x4Fu))
+                                    return false;
+                                // (lt_s lt_u gt_s gt_u le_s le_u ge_s ge_u)
+                                auto relation = static_cast<int>(c.op - (wide ? 0x53u : 0x48u));
+                                std::size_t n = 1u;
+                                if (values[c.operands[0]].constant() && !values[c.operands[1]].constant())
+                                {
+                                    // (the constant first: the relation swapped (lt and gt, le and ge))
+                                    n = 0u;
+                                    static int const sSwapped[] = { 2, 3, 0, 1, 6, 7, 4, 5 };
+                                    relation = sSwapped[relation];
+                                }
+                                else if (!values[c.operands[1]].constant() || values[c.operands[0]].constant())
+                                    return false;
+                                aSubject = c.operands[1u - n];
+                                aKind = static_cast<std::uint8_t>((wide ? 2u : 0u) | ((relation & 1) == 0 ? 1u : 0u));
+                                auto const k = range_key(aKind, values[c.operands[n]].imm0);
+                                auto const max = key_max(aKind);
+                                switch (relation >> 1)
+                                {
+                                case 0:     // (lt)
+                                    if (k == 0u)
+                                        return false;
+                                    aTrue = { 0u, k - 1u };
+                                    aFalse = { k, max };
+                                    return true;
+                                case 1:     // (gt)
+                                    if (k == max)
+                                        return false;
+                                    aTrue = { k + 1u, max };
+                                    aFalse = { 0u, k };
+                                    return true;
+                                case 2:     // (le)
+                                    if (k == max)
+                                        return false;
+                                    aTrue = { 0u, k };
+                                    aFalse = { k + 1u, max };
+                                    return true;
+                                default:    // (ge)
+                                    if (k == 0u)
+                                        return false;
+                                    aTrue = { k, max };
+                                    aFalse = { 0u, k - 1u };
+                                    return true;
+                                }
+                            };
                             // (a branch's condition as (subject == constant) (aEqual) or !=)
                             auto const test_of = [&](value aCondition, value& aSubject, std::uint64_t& aConstant, bool& aEqual) -> bool
                             {
@@ -4371,6 +4441,23 @@ namespace neos
                                 bool equal = false; 
                                 std::vector<value> terms;   ///< (a conjunction's (on the true edge) or a disjunction's (false edge): see terms_of)
                                 bool conjunction = false;
+                                // (its terms' tests (what each says about a value: a relation, or (value == constant) (equal) or !=))
+                                struct term
+                                {
+                                    value subject = None;
+                                    std::uint64_t constant = 0u;
+                                    bool equal = false;
+                                    bool relational = false;
+                                    std::uint8_t kind = 0u;
+                                    std::pair<std::uint64_t, std::uint64_t> whenTrue;
+                                    std::pair<std::uint64_t, std::uint64_t> whenFalse;
+                                };
+                                std::vector<term> termTests;
+                                // (a relational comparison's (see relation_of))
+                                bool relational = false;
+                                std::uint8_t kind = 0u;
+                                std::pair<std::uint64_t, std::uint64_t> whenTrue;
+                                std::pair<std::uint64_t, std::uint64_t> whenFalse;
                             };
                             std::vector<test> tests(blocks.size());
                             {
@@ -4384,13 +4471,26 @@ namespace neos
                                     if (t.op != Branch || t.dead || t.operands.size() != 1u)
                                         continue;
                                     test x;
-                                    if (test_of(t.operands[0], x.subject, x.constant, x.equal))
+                                    if (relation_of(t.operands[0], x.subject, x.kind, x.whenTrue, x.whenFalse))
+                                    {
+                                        x.relational = true;
+                                        ++counts[x.subject];
+                                    }
+                                    else if (test_of(t.operands[0], x.subject, x.constant, x.equal))
                                         ++counts[x.subject];
                                     else if (terms_of(t.operands[0], x.terms))
                                     {
                                         x.conjunction = values[t.operands[0]].op == 0x71u;
                                         for (auto const v : x.terms)
-                                            ++counts[v];
+                                        {
+                                            typename test::term y;
+                                            if (relation_of(v, y.subject, y.kind, y.whenTrue, y.whenFalse))
+                                                y.relational = true;
+                                            else if (!test_of(v, y.subject, y.constant, y.equal))
+                                                continue;
+                                            ++counts[y.subject];
+                                            x.termTests.push_back(y);
+                                        }
                                     }
                                     tests[b] = std::move(x);
                                 }
@@ -4404,8 +4504,8 @@ namespace neos
                                         else
                                             any = true;
                                     }
-                                    std::erase_if(x.terms, [&](value v) { return counts[v] < 2u; });
-                                    any = any || !x.terms.empty();
+                                    std::erase_if(x.termTests, [&](auto const& y) { return counts[y.subject] < 2u; });
+                                    any = any || !x.termTests.empty();
                                 }
                                 if (!any)
                                     return false;
@@ -4455,6 +4555,37 @@ namespace neos
                                     f->add(aConstant);
                                 return true;
                             };
+                            // (that a value's key is in a range (of a kind), added to facts: false if they contradict it)
+                            auto const know_range = [&](facts& aFacts, value aSubject, std::uint8_t aKind, std::pair<std::uint64_t, std::uint64_t> aRange) -> bool
+                            {
+                                auto* f = find(aFacts, aSubject);
+                                if (f == nullptr)
+                                {
+                                    if (aFacts.size() >= MaxFacts)
+                                        return true;
+                                    fact n{ aSubject, false, 0u, {} };
+                                    n.ranged = true;
+                                    n.kind = aKind;
+                                    n.lo = aRange.first;
+                                    n.hi = aRange.second;
+                                    auto const at = std::lower_bound(aFacts.begin(), aFacts.end(), aSubject, [](fact const& aFact, value aValue) { return aFact.subject < aValue; });
+                                    aFacts.insert(at, n);
+                                    return true;
+                                }
+                                if (!f->ranged)
+                                {
+                                    f->ranged = true;
+                                    f->kind = aKind;
+                                    f->lo = aRange.first;
+                                    f->hi = aRange.second;
+                                    return true;
+                                }
+                                if (f->kind != aKind)
+                                    return true;
+                                f->lo = std::max(f->lo, aRange.first);
+                                f->hi = std::min(f->hi, aRange.second);
+                                return f->lo <= f->hi;
+                            };
                             // (the facts on the edge from aFrom to aTo (aFrom's exit: its entry's, and its branch's): unreachable: false)
                             auto const edge = [&](std::uint32_t aFrom, std::uint32_t aTo, facts& aFacts) -> bool
                             {
@@ -4471,12 +4602,16 @@ namespace neos
                                 if (condition.constant())
                                     return ((condition.imm0 & 0xFFFFFFFFu) != 0u) == (F.successors[0] == aTo);
                                 auto const& x = tests[aFrom];
-                                if (!x.terms.empty() && (F.successors[0] == aTo) == x.conjunction)
-                                    for (auto const v : x.terms)
-                                        if (!know(aFacts, v, 0u, !x.conjunction))
+                                // (a conjunction's true edge: each term true; a disjunction's false edge: each false)
+                                if (!x.termTests.empty() && (F.successors[0] == aTo) == x.conjunction)
+                                    for (auto const& y : x.termTests)
+                                        if (y.relational ? !know_range(aFacts, y.subject, y.kind, x.conjunction ? y.whenTrue : y.whenFalse) :
+                                            !know(aFacts, y.subject, y.constant, x.conjunction == y.equal))
                                             return false;
                                 if (x.subject == None)
                                     return true;
+                                if (x.relational)
+                                    return know_range(aFacts, x.subject, x.kind, F.successors[0] == aTo ? x.whenTrue : x.whenFalse);
                                 return know(aFacts, x.subject, x.constant, (F.successors[0] == aTo) == x.equal);
                             };
                             // (two paths' facts about a value: what is known on either)
@@ -4484,18 +4619,33 @@ namespace neos
                             {
                                 aResult.subject = aA.subject;
                                 aResult.count = 0u;
+                                aResult.in = false;
+                                // (its range: the two's (of a kind) together)
+                                aResult.ranged = aA.ranged && aB.ranged && aA.kind == aB.kind;
+                                if (aResult.ranged)
+                                {
+                                    aResult.kind = aA.kind;
+                                    aResult.lo = std::min(aA.lo, aB.lo);
+                                    aResult.hi = std::max(aA.hi, aB.hi);
+                                    if (aResult.lo == 0u && aResult.hi == key_max(aResult.kind))
+                                        aResult.ranged = false;
+                                }
+                                // (its constants (none known on either: none))
+                                bool const aEquality = aA.in || aA.count != 0u;
+                                bool const bEquality = aB.in || aB.count != 0u;
+                                if (!aEquality || !bEquality)
+                                    return aResult.ranged;
                                 std::uint64_t buffer[2u * MaxConstants];
                                 std::uint64_t* e;
                                 if (aA.in && aB.in)
                                 {
-                                    aResult.in = true;
                                     e = std::set_union(aA.constants, aA.constants + aA.count, aB.constants, aB.constants + aB.count, buffer);
                                     if (static_cast<std::size_t>(e - buffer) > MaxConstants)
-                                        return false;
+                                        return aResult.ranged;
+                                    aResult.in = true;
                                 }
                                 else
                                 {
-                                    aResult.in = false;
                                     if (!aA.in && !aB.in)
                                         e = std::set_intersection(aA.constants, aA.constants + aA.count, aB.constants, aB.constants + aB.count, buffer);
                                     else
@@ -4505,7 +4655,7 @@ namespace neos
                                         e = std::set_difference(n.constants, n.constants + n.count, s.constants, s.constants + s.count, buffer);
                                     }
                                     if (e == buffer)
-                                        return false;
+                                        return aResult.ranged;
                                 }
                                 aResult.count = static_cast<std::uint8_t>(e - buffer);
                                 std::copy(buffer, e, aResult.constants);
@@ -4571,22 +4721,104 @@ namespace neos
                                 entry[b] = { static_cast<std::uint32_t>(all.size()), static_cast<std::uint32_t>(S.size()) };
                                 all.insert(all.end(), S.begin(), S.end());
                                 auto const& x = tests[b];
-                                if (x.subject == None)
+                                if (x.subject == None && x.termTests.empty())
                                     continue;
                                 auto const t = B.code.back();
                                 if (values[values[t].operands[0]].constant())
                                     continue;
+                                // (what the facts decide about a value's test: true, false, or not known)
+                                auto const decided = [&](value aSubject, bool aRelational, std::uint8_t aKind, std::pair<std::uint64_t, std::uint64_t> aTrue,
+                                    std::uint64_t aConstant, bool aEqual) -> std::optional<bool>
+                                {
+                                    auto const* g = find(S, aSubject);
+                                    if (g == nullptr)
+                                        return {};
+                                    if (aRelational)
+                                    {
+                                        if (!g->ranged || g->kind != aKind)
+                                            return {};
+                                        if (g->lo >= aTrue.first && g->hi <= aTrue.second)
+                                            return true;
+                                        if (g->hi < aTrue.first || g->lo > aTrue.second)
+                                            return false;
+                                        return {};
+                                    }
+                                    if (g->in && g->count == 1u && g->constants[0] == aConstant)
+                                        return aEqual;
+                                    if (g->in != g->contains(aConstant))
+                                        return !aEqual;
+                                    return {};
+                                };
+                                if (x.subject == None)
+                                {
+                                    // (a conjunction: false if a term is, true if all are; a disjunction: true if a term is, false if none is)
+                                    if (x.termTests.size() != x.terms.size())
+                                    {
+                                        // (not all its terms tested: only a term that decides it)
+                                        bool found = false;
+                                        for (auto const& y : x.termTests)
+                                            if (auto const d = decided(y.subject, y.relational, y.kind, y.whenTrue, y.constant, y.equal); d && *d != x.conjunction)
+                                                found = true;
+                                        if (!found)
+                                            continue;
+                                    }
+                                    std::optional<bool> whole = x.conjunction;
+                                    for (auto const& y : x.termTests)
+                                    {
+                                        auto const d = decided(y.subject, y.relational, y.kind, y.whenTrue, y.constant, y.equal);
+                                        if (d && *d != x.conjunction)
+                                        {
+                                            whole = !x.conjunction;
+                                            break;
+                                        }
+                                        if (!d)
+                                            whole.reset();
+                                    }
+                                    if (!whole)
+                                        continue;
+                                    int const bit = *whole ? 1 : 0;
+                                    if (constants01[bit] == None)
+                                    {
+                                        instruction c;
+                                        c.op = 0x41u;
+                                        c.type = I32;
+                                        c.imm0 = static_cast<std::uint64_t>(bit);
+                                        c.block = b;
+                                        values.push_back(c);
+                                        constants01[bit] = static_cast<value>(values.size() - 1u);
+                                    }
+                                    values[t].operands[0] = constants01[bit];
+                                    changed = true;
+                                    continue;
+                                }
                                 auto* f = find(S, x.subject);
                                 if (f == nullptr)
                                     continue;
                                 std::optional<bool> holds;
-                                if (f->in && f->count == 1u && f->constants[0] == x.constant)
-                                    holds = true;
-                                else if (f->in != f->contains(x.constant))
-                                    holds = false;
-                                if (!holds)
-                                    continue;
-                                int const bit = *holds == x.equal ? 1 : 0;
+                                int bit = 0;
+                                if (x.relational)
+                                {
+                                    // (its range within the comparison's true range (true), or outside it (false))
+                                    if (!f->ranged || f->kind != x.kind)
+                                        continue;
+                                    if (f->lo >= x.whenTrue.first && f->hi <= x.whenTrue.second)
+                                        holds = true;
+                                    else if (f->hi < x.whenTrue.first || f->lo > x.whenTrue.second)
+                                        holds = false;
+                                    if (!holds)
+                                        continue;
+                                    bit = *holds ? 1 : 0;
+                                }
+                                else
+                                {
+                                    if (f->in && f->count == 1u && f->constants[0] == x.constant)
+                                        holds = true;
+                                    else if (f->in != f->contains(x.constant))
+                                        holds = false;
+                                    if (!holds)
+                                        continue;
+                                    bit = *holds == x.equal ? 1 : 0;
+                                }
                                 if (constants01[bit] == None)
                                 {
                                     instruction c;
