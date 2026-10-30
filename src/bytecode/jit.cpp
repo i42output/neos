@@ -235,6 +235,11 @@ namespace neos
                         mutable std::vector<std::uint32_t> deoptCounts;     ///< (each deopt's (its code left for the baseline's))
                         mutable std::uint32_t deoptsTaken = 0u;             ///< (its deopts' (not guards'): all of them)
                         mutable std::uint64_t calls = 0u;                   ///< (its code's calls (counted if it has deopts that are not guards'))
+                        // (where its code counts its calls (a word after its code, that it adds to (rip relative): see allocate_executable),
+                        // else calls; the offset in its code of the add's displacement)
+                        std::uint64_t* callCounter = nullptr;
+                        mutable std::size_t callCounterFixup = ~std::size_t{};
+                        std::uint64_t& call_count() const { return callCounter != nullptr ? *callCounter : calls; }
                         std::uint64_t osrLoop = NoOsrLoop;                  ///< (code that calls continue in from a loop (see osr_entry): the loop)
                     };
                     struct tier_chunk
@@ -266,6 +271,7 @@ namespace neos
                     std::vector<std::uint8_t> tierState;                ///< (0: not optimized, 1: optimized, 2: not to be optimized)
                     std::vector<std::uint32_t> recompiles;
                     std::vector<std::set<std::size_t>> noInline;        ///< (calls (their positions) not to inline (their guards failed))
+                    std::unique_ptr<std::atomic<std::uint8_t>[]> largeRejects;  ///< (by callee: see optimizer::options::largeRejects)
                     std::vector<std::set<std::size_t>> noDeopt;         ///< (inlined calls (their positions) whose code calls rather than deopts
                                                                         ///< (it left there often))
                     std::vector<std::map<std::size_t, std::uint32_t>> guardFailures;
@@ -5520,10 +5526,10 @@ namespace neos
                             bool floatNe = false;   ///< (float !=: NE or P)
                         };
 #if defined(_WIN32)
-                        static constexpr int CallerSavedGprs[] = { R8, R9, R10 };
+                        static constexpr int CallerSavedGprs[] = { R8, R9, R10, RDX };
                         static constexpr int CalleeSavedGprs[] = { RBX, RSI, RDI, R12, R13, R14 };
 #else
-                        static constexpr int CallerSavedGprs[] = { RSI, RDI, R8, R9, R10 };
+                        static constexpr int CallerSavedGprs[] = { RSI, RDI, R8, R9, R10, RDX };
                         static constexpr int CalleeSavedGprs[] = { RBX, R12, R13, R14 };
 #endif
                         static constexpr int CallerSavedXmms[] = { 2, 3, 4, 5, 6, 7 };
@@ -5776,6 +5782,7 @@ namespace neos
                                     if (!f.values[v].dead && is_call(f.values[v]))
                                     {
                                         iCalls.push_back(iPosition[v]);
+                                        iCallWeights.push_back(static_cast<double>(1u << (3u * std::min<std::uint32_t>(f.blocks[b].loopDepth, 4u))) / (cold[b] ? 16.0 : 1.0));
                                         if (!cold[b])
                                             iHotCalls.push_back(iPosition[v]);
                                     }
@@ -5927,9 +5934,10 @@ namespace neos
                                         continue;
                                     iIntervals[v].start = std::min(iIntervals[v].start, iBlockStart[b]);
                                     iIntervals[v].end = std::max(iIntervals[v].end, iBlockStart[b] + 1u);
-                                    // (its register is written at the ends of its block's predecessors (the moves to it))
+                                    // (its register is written at the ends of its block's predecessors (the moves to it), after the values that
+                                    // only the moves read there (the phis' operands: their intervals end there) are read: it may be one of theirs)
                                     for (auto p : block.predecessors)
-                                        extend(v, iBlockEnd[p] - 1u, iBlockEnd[p]);
+                                        extend(v, iBlockEnd[p], iBlockEnd[p] + 1u);
                                     reset(live, v);
                                 }
                                 if (block.loopHeader)
@@ -5961,10 +5969,12 @@ namespace neos
                                 if (i.start <= i.end && needs_location(i.v))
                                     order.push_back(&i);
                             std::sort(order.begin(), order.end(), [](interval const* x, interval const* y) { return x->start < y->start || (x->start == y->start && x->v < y->v); });
-                            // (each value's spill cost: its definition and uses, each weighed by its block's loop depth (8 times for each))
+                            // (each value's spill cost: its definition and uses, each weighed by its block's loop depth (8 times for each); in
+                            // cold code (see cold_blocks), a sixteenth of that)
                             std::vector<double> weight(f.values.size(), 0.0);
                             {
-                                auto const scale = [&](std::uint32_t aBlock) { return static_cast<double>(1u << (3u * std::min<std::uint32_t>(f.blocks[aBlock].loopDepth, 4u))); };
+                                auto const cold = cold_blocks();
+                                auto const scale = [&](std::uint32_t aBlock) { return static_cast<double>(1u << (3u * std::min<std::uint32_t>(f.blocks[aBlock].loopDepth, 4u))) / (cold[aBlock] ? 16.0 : 1.0); };
                                 for (auto b : f.order)
                                 {
                                     auto const k = scale(b);
@@ -6037,10 +6047,17 @@ namespace neos
                                 }
                                 auto& free = i->xmm ? xmmFree : gprFree;
                                 int reg = -1;
+                                // (a caller saved register is saved and restored around each call that the interval spans: if that costs
+                                // more than its slot (its definition and uses), the slot rather than such a register)
+                                double saves = 0.0;
+                                for (auto c = std::upper_bound(iCalls.begin(), iCalls.end(), i->start); c != iCalls.end() && *c < i->end; ++c)
+                                    if (iPosition[i->v] < *c)
+                                        saves += 2.0 * iCallWeights[static_cast<std::size_t>(c - iCalls.begin())];
+                                bool const callerSavedWorse = saves > weight[i->v];
                                 auto const pick = [&](int const* aRegs, std::size_t aCount)
                                 {
                                     for (std::size_t r = 0u; r < aCount && reg < 0; ++r)
-                                        if (free[aRegs[r]])
+                                        if (free[aRegs[r]] && !(callerSavedWorse && !calleeSaved(i->xmm, aRegs[r])))
                                             reg = aRegs[r];
                                 };
                                 // (a phi: the register of one of its operands (no move on that edge), if it is free; a value that only a phi
@@ -6052,7 +6069,7 @@ namespace neos
                                             return;
                                         auto const& l = iLocations[aOther];
                                         if (l.kind == location::Register && is_float_type(f.values[aOther].type) == i->xmm && free[l.reg] &&
-                                            (!i->crossesHotCall || calleeSaved(i->xmm, l.reg)))
+                                            (!i->crossesHotCall || calleeSaved(i->xmm, l.reg)) && !(callerSavedWorse && !calleeSaved(i->xmm, l.reg)))
                                             reg = l.reg;
                                     };
                                     auto const& x = f.values[i->v];
@@ -6082,11 +6099,12 @@ namespace neos
                                     // (none free: the interval (this or an active one) whose spill costs least (its uses' weight, for the 
                                     // length that it is in the frame), else that ends last, is in the frame)
                                     interval* victim = nullptr;
-                                    auto const cost = [&](interval const* x) { return weight[x->v] / static_cast<double>(std::max<std::uint32_t>(x->end - i->start, 1u)); };
+                                    auto const cost = [&](interval const* x) { return weight[x->v] / std::sqrt(static_cast<double>(std::max<std::uint32_t>(x->end - i->start, 1u))); };
                                     for (auto* x : active)
                                         if (x->xmm == i->xmm && (victim == nullptr || cost(x) < cost(victim) || (cost(x) == cost(victim) && x->end > victim->end)))
                                             victim = x;
-                                    if (victim != nullptr && (cost(victim) < cost(i) || (cost(victim) == cost(i) && victim->end > i->end)))
+                                    if (victim != nullptr && (cost(victim) < cost(i) || (cost(victim) == cost(i) && victim->end > i->end)) &&
+                                        !(callerSavedWorse && !calleeSaved(i->xmm, iLocations[victim->v].reg)))
                                     {
                                         reg = iLocations[victim->v].reg;
                                         spill(victim->v);
@@ -6424,22 +6442,14 @@ namespace neos
                             {
                                 // (its calls are counted: a deopt that it seldom takes (as a share of its calls) does not make it optimized
                                 // again (see deopt_taken))
-                                auto const counter = reinterpret_cast<std::uint64_t>(&iVersion->calls);
-                                if (counter < 0x80000000u)
-                                {
-                                    // (add qword [counter], 1: an absolute address (one instruction))
-                                    a.emit8(0x48u);
-                                    a.emit8(0x83u);
-                                    a.emit8(0x04u);
-                                    a.emit8(0x25u);
-                                    a.emit32(static_cast<std::uint32_t>(counter));
-                                    a.emit8(0x01u);
-                                }
-                                else
-                                {
-                                    a.mov_ri(R11, counter, true);
-                                    a.alu_mi(0, true, R11, 0, 1);
-                                }
+                                // (add qword [rip + counter], 1: the counter after the code (its displacement written when it is
+                                // allocated: see allocate_executable))
+                                a.emit8(0x48u);
+                                a.emit8(0x83u);
+                                a.emit8(0x05u);
+                                iVersion->callCounterFixup = a.offset();
+                                a.emit32(0u);
+                                a.emit8(0x01u);
                             }
                             if (iMemoryBase >= 0 && iTier.primaryMemory == 0u)
                                 a.mov_ri(iMemoryBase, reinterpret_cast<std::uint64_t>(external_memory(iMemoryBaseIndex).base), true);
@@ -7791,7 +7801,7 @@ namespace neos
                             auto const& i = f.values[v];
                             auto const memoryIndex = static_cast<std::uint32_t>(i.imm0 >> 32u);
                             auto const disp = static_cast<std::int32_t>(i.imm1);
-                            // (the address: in a register (rdx if it is not in one); a constant address within a fixed memory: in the displacement)
+                            // (the address: in a register (r11 if it is not in one); a constant address within a fixed memory: in the displacement)
                             int base = -1;
                             int index = -1;
                             std::int32_t offset = disp;
@@ -7817,16 +7827,13 @@ namespace neos
                             }
                             else
                             {
-                                index = gpr(address, RDX);
+                                index = gpr(address, R11);
                                 if (memoryIndex == 0u)
                                 {
-                                    if (index != RDX)
-                                        a.mov_rr(false, RDX, index);    // (zero extend: a 32 bit address)
-                                    else
-                                        a.mov_rr(false, RDX, RDX);
-                                    index = RDX;
+                                    a.mov_rr(false, R11, index);    // (zero extend: a 32 bit address)
+                                    index = R11;
                                     a.load(true, RCX, R15, ContextMemory);
-                                    a.lea(RAX, RDX, disp + static_cast<std::int32_t>(aWidth));
+                                    a.lea(RAX, R11, disp + static_cast<std::int32_t>(aWidth));
                                     a.alu_rm(7, true, RAX, RCX, MemorySize);
                                     a.jcc(A, iTrapLabels[TrapOutOfBounds]);
                                     a.load(true, RCX, RCX, MemoryBase);
@@ -8314,6 +8321,7 @@ namespace neos
                             auto const& i = f.values[v];
                             gpr_into(i.operands[1], RCX);
                             gpr_into(i.operands[0], RAX);
+                            a.mov_rr(true, R11, RDX);   // (rdx may hold a value: kept in r11 (restored after))
                             a.test_rr(aW, RCX, RCX);
                             a.jcc(E, iTrapLabels[TrapDivideByZero]);
                             auto const done = a.new_label();
@@ -8349,7 +8357,10 @@ namespace neos
                                 a.f7(6, aW, RCX);
                             }
                             a.bind(done);
-                            defined(v, aRemainder ? RDX : RAX);
+                            if (aRemainder)
+                                a.mov_rr(true, RAX, RDX);
+                            a.mov_rr(true, RDX, R11);
+                            defined(v, RAX);
                         }
                         void floating(value v, std::uint8_t aOp)
                         {
@@ -8490,8 +8501,8 @@ namespace neos
                                     auto const done = a.new_label();
                                     if (wide)
                                     {
-                                        a.mov_ri(RDX, 0x8000000000000000ull, true);
-                                        a.alu_rr(7, true, RCX, RDX);
+                                        a.mov_ri(R11, 0x8000000000000000ull, true);
+                                        a.alu_rr(7, true, RCX, R11);
                                     }
                                     else
                                         a.alu_ri(7, false, RCX, std::numeric_limits<std::int32_t>::min());
@@ -8615,6 +8626,7 @@ namespace neos
                         std::vector<std::uint32_t> iBlockStart;
                         std::vector<std::uint32_t> iBlockEnd;
                         std::vector<std::uint32_t> iCalls;
+                        std::vector<double> iCallWeights;       ///< (iCalls': their blocks' weights (see allocate))
                         std::vector<std::uint32_t> iHotCalls;   ///< (the calls that are not in cold code)
                         std::vector<interval> iIntervals;
                         std::vector<location> iLocations;
@@ -8657,36 +8669,58 @@ namespace neos
                         return static_cast<std::size_t>((sNext.fetch_add(1u, std::memory_order_relaxed) * 37u) % 64u) * 64u;
                     }
 
-                    void* allocate_executable(bytes const& aCode, std::size_t& aSize)
+                    void* allocate_executable(bytes const& aCode, std::size_t& aSize, compiled_module::tier_version* aVersion = nullptr)
                     {
                         aSize = aCode.size();
                         auto const offset = executable_offset();
-                        auto const total = aSize + offset;
+                        auto total = aSize + offset;
+                        // (a version's call counter: a page of its own after the code's (writable), that the code adds to (rip relative))
+                        bool const counted = aVersion != nullptr && aVersion->callCounterFixup != ~std::size_t{} && aVersion->callCounterFixup + 5u <= aSize;
+                        std::size_t counterAt = 0u;
+                        bytes patched;
+                        if (counted)
+                        {
+                            constexpr std::size_t Page = 4096u;
+                            counterAt = (total + Page - 1u) & ~(Page - 1u);
+                            patched = aCode;
+                            auto const instructionEnd = offset + aVersion->callCounterFixup + 5u;
+                            auto const displacement = static_cast<std::int64_t>(counterAt) - static_cast<std::int64_t>(instructionEnd);
+                            auto const d32 = static_cast<std::int32_t>(displacement);
+                            std::memcpy(patched.data() + aVersion->callCounterFixup, &d32, sizeof(d32));
+                            total = counterAt + Page;
+                            aSize = total - offset;
+                        }
+                        auto const& source = counted ? patched : aCode;
+                        auto const executable = counted ? counterAt : total;
 #if defined(_WIN32)
                         void* memory = ::VirtualAlloc(nullptr, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                         if (memory == nullptr)
                             return nullptr;
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
-                        std::memcpy(code, aCode.data(), aCode.size());
+                        std::memcpy(code, source.data(), source.size());
                         DWORD old;
-                        if (!::VirtualProtect(memory, total, PAGE_EXECUTE_READ, &old))
+                        if (!::VirtualProtect(memory, executable, PAGE_EXECUTE_READ, &old))
                         {
                             ::VirtualFree(memory, 0, MEM_RELEASE);
                             return nullptr;
                         }
-                        ::FlushInstructionCache(::GetCurrentProcess(), memory, total);
+                        ::FlushInstructionCache(::GetCurrentProcess(), memory, executable);
+                        if (counted)
+                            aVersion->callCounter = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(memory) + counterAt);
                         return code;
 #else
                         void* memory = ::mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
                         if (memory == MAP_FAILED)
                             return nullptr;
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
-                        std::memcpy(code, aCode.data(), aCode.size());
-                        if (::mprotect(memory, total, PROT_READ | PROT_EXEC) != 0)
+                        std::memcpy(code, source.data(), source.size());
+                        if (::mprotect(memory, executable, PROT_READ | PROT_EXEC) != 0)
                         {
                             ::munmap(memory, total);
                             return nullptr;
                         }
+                        if (counted)
+                            aVersion->callCounter = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(memory) + counterAt);
                         return code;
 #endif
                     }
@@ -8868,6 +8902,7 @@ namespace neos
                         job->start = std::chrono::steady_clock::now();
                         auto& options = job->options;
                         options.noInline = m.noInline[f];
+                        options.largeRejects = m.largeRejects.get();
                         options.noDeopt = m.noDeopt[f];
                         options.speculation = m.speculation && m.recompiles[f] < MaxRecompiles;
                         options.inlining = m.inlining;
@@ -9184,7 +9219,7 @@ namespace neos
                             entry = generator.function_offset(f);
                             code = std::move(generator.code());
                         }
-                        chunk.code = allocate_executable(code, chunk.size);
+                        chunk.code = allocate_executable(code, chunk.size, optimizing ? version.get() : nullptr);
                         if (chunk.code == nullptr)
                         {
                             m.tierState[f] = 2u;
@@ -9472,7 +9507,7 @@ namespace neos
                         }
                         compiled_module::tier_chunk chunk;
                         chunk.callSites = std::move(job->callSites);
-                        chunk.code = allocate_executable(job->code, chunk.size);
+                        chunk.code = allocate_executable(job->code, chunk.size, job->version.get());
                         if (chunk.code == nullptr)
                             return nullptr;
                         state.entry = chunk.code;
@@ -9647,10 +9682,10 @@ namespace neos
                                     return;
                                 // (seldom (as a share of its calls since it was optimized, or since its deopts were last counted again):
                                 // the code stays (a deopt then costs less than the calls would), its deopts counted again)
-                                if (aVersion->calls / aVersion->deoptsTaken >= CallsPerSeldomDeopt)
+                                if (aVersion->call_count() / aVersion->deoptsTaken >= CallsPerSeldomDeopt)
                                 {
                                     aVersion->deoptsTaken = 0u;
-                                    aVersion->calls = 0u;
+                                    aVersion->call_count() = 0u;
                                     std::fill(aVersion->deoptCounts.begin(), aVersion->deoptCounts.end(), 0u);
                                     return;
                                 }
@@ -9864,6 +9899,7 @@ namespace neos
                             m.tierState.assign(n, 0u);
                             m.recompiles.assign(n, 0u);
                             m.noInline.resize(n);
+                            m.largeRejects = std::make_unique<std::atomic<std::uint8_t>[]>(n);
                             m.noDeopt.resize(n);
                             m.guardFailures.resize(n);
                             m.deoptStrikes.resize(n);

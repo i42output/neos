@@ -1738,6 +1738,74 @@ namespace neos
                             return changed;
                         }
 
+                        // (an f64 value that is an integer: its range (each value of it an integer within it, exactly: none beyond 2^53 in
+                        // magnitude), if it is one: an integer converted to f64, an integral constant, their sums and differences, phis of them)
+                        std::optional<std::pair<double, double>> integral_range(std::vector<instruction> const& aValues, value aValue, int aDepth)
+                        {
+                            constexpr double Exact = 9007199254740992.0;
+                            auto const& x = aValues[aValue];
+                            switch (x.op)
+                            {
+                            case 0x44u:
+                                {
+                                    double const d = std::bit_cast<double>(x.imm0);
+                                    if (d == d && std::floor(d) == d && std::fabs(d) <= Exact)
+                                        return std::pair{ d, d };
+                                    return {};
+                                }
+                            case 0xB7u:     // (f64.convert_i32_s)
+                                return std::pair{ -2147483648.0, 2147483647.0 };
+                            case 0xB8u:     // (f64.convert_i32_u)
+                                return std::pair{ 0.0, 4294967295.0 };
+                            case 0xB9u:     // (f64.convert_i64_s, of an extended i32)
+                            case 0xBAu:     // (f64.convert_i64_u, of a zero extended i32)
+                                if (x.operands.size() == 1u)
+                                {
+                                    auto const& e = aValues[x.operands[0]];
+                                    if (e.op == 0xADu)
+                                        return std::pair{ 0.0, 4294967295.0 };
+                                    if (e.op == 0xACu && x.op == 0xB9u)
+                                        return std::pair{ -2147483648.0, 2147483647.0 };
+                                }
+                                return {};
+                            case 0xA0u:     // (f64.add)
+                            case 0xA1u:     // (f64.sub)
+                                if (aDepth > 0 && x.operands.size() == 2u)
+                                {
+                                    auto const a = integral_range(aValues, x.operands[0], aDepth - 1);
+                                    if (!a)
+                                        return {};
+                                    auto const b = integral_range(aValues, x.operands[1], aDepth - 1);
+                                    if (!b)
+                                        return {};
+                                    auto const lo = x.op == 0xA0u ? a->first + b->first : a->first - b->second;
+                                    auto const hi = x.op == 0xA0u ? a->second + b->second : a->second - b->first;
+                                    if (lo < -Exact || hi > Exact)
+                                        return {};
+                                    return std::pair{ lo, hi };
+                                }
+                                return {};
+                            case Phi:
+                                if (aDepth > 0 && !x.operands.empty())
+                                {
+                                    std::optional<std::pair<double, double>> result;
+                                    for (auto o : x.operands)
+                                    {
+                                        if (o == None || o == aValue)
+                                            return {};
+                                        auto const r = integral_range(aValues, o, aDepth - 1);
+                                        if (!r)
+                                            return {};
+                                        result = result ? std::pair{ std::min(result->first, r->first), std::max(result->second, r->second) } : *r;
+                                    }
+                                    return result;
+                                }
+                                return {};
+                            default:
+                                return {};
+                            }
+                        }
+
                         bool simplify(function& aFunction)
                         {
                             bool changed = false;
@@ -1830,6 +1898,66 @@ namespace neos
                                             else if (op == 0x58u && k > Most) known = false;    // (k <= x)
                                             else if (op == 0x51u && k > Most) known = false;    // (k == x)
                                             else if (op == 0x52u && k > Most) known = true;     // (k != x)
+                                        }
+                                        if (known)
+                                        {
+                                            i.op = 0x41u;
+                                            i.type = I32;
+                                            i.imm0 = *known ? 1u : 0u;
+                                            i.operands.clear();
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
+                                    if (op >= 0x61u && op <= 0x66u && i.operands.size() == 2u)
+                                    {
+                                        // (an f64 comparison of a value that is an integer within a range (see integral_range): known if the range
+                                        // decides it (with a constant), or (eq, ne) if it is the value's truncation converted back (exact))
+                                        std::optional<bool> known;
+                                        auto x = i.operands[0];
+                                        auto y = i.operands[1];
+                                        auto const exact_round_trip = [&](value aBack, value aValue)
+                                        {
+                                            auto const& back = values[aBack];
+                                            if (back.op != 0xB9u || back.operands.size() != 1u)
+                                                return false;
+                                            auto const& t = values[back.operands[0]];
+                                            if (t.op != 0xB0u || t.operands.size() != 1u || t.operands[0] != aValue)
+                                                return false;
+                                            auto const range = integral_range(values, aValue, 4);
+                                            return range && range->first >= -9007199254740992.0 && range->second <= 9007199254740992.0;
+                                        };
+                                        if ((op == 0x61u || op == 0x62u) && (exact_round_trip(x, y) || exact_round_trip(y, x)))
+                                            known = op == 0x61u;
+                                        else
+                                        {
+                                            bool swapped = false;
+                                            if (values[x].constant())
+                                            {
+                                                std::swap(x, y);
+                                                swapped = true;
+                                            }
+                                            if (values[y].op == 0x44u && !values[x].constant())
+                                                if (auto const range = integral_range(values, x, 4))
+                                                {
+                                                    double const d = std::bit_cast<double>(values[y].imm0);
+                                                    if (d == d)
+                                                    {
+                                                        // (eq ne lt gt le ge; the constant first: lt and gt (le and ge) swapped)
+                                                        static constexpr std::size_t sSwapped[] = { 0u, 1u, 3u, 2u, 5u, 4u };
+                                                        auto const k = swapped ? sSwapped[op - 0x61u] : static_cast<std::size_t>(op - 0x61u);
+                                                        auto const [lo, hi] = *range;
+                                                        switch (k)
+                                                        {
+                                                        case 0u: if (d < lo || d > hi) known = false; break;
+                                                        case 1u: if (d < lo || d > hi) known = true; break;
+                                                        case 2u: if (hi < d) known = true; else if (lo >= d) known = false; break;      // (x < d)
+                                                        case 3u: if (lo > d) known = true; else if (hi <= d) known = false; break;      // (x > d)
+                                                        case 4u: if (hi <= d) known = true; else if (lo > d) known = false; break;      // (x <= d)
+                                                        case 5u: if (lo >= d) known = true; else if (hi < d) known = false; break;      // (x >= d)
+                                                        }
+                                                    }
+                                                }
                                         }
                                         if (known)
                                         {
@@ -2336,7 +2464,7 @@ namespace neos
                                 k.push_back(aAddress);
                                 return k;
                             };
-                            struct frame { std::uint32_t block; std::size_t next; std::size_t mark; std::size_t knownMark; std::size_t accessMark; std::size_t equalMark; };
+                            struct frame { std::uint32_t block; std::size_t next; std::size_t mark; std::size_t knownMark; std::size_t accessMark; std::size_t equalMark; std::size_t oneOfMark; };
                             // (the memory accesses made (in the blocks being walked: those that dominate the block being numbered), with
                             // the epoch (of their class) that they were made in: an access at an address (its base, and its offset and
                             // width) is what the memory there is after a later store to the same base that does not overlap it (the 
@@ -2401,6 +2529,11 @@ namespace neos
                             // constants, in it)
                             std::vector<value> equalTo(values.size(), None);
                             std::vector<value> equalOrder;
+                            // (the values that a join's predecessors' branches decided are each equal to a constant (x == C on each edge to
+                            // the join: e.g. a check of a shape that is one of two): their constants, in the join and the blocks it dominates)
+                            constexpr std::size_t MaxOneOf = 4u;
+                            struct one_of { value subject; std::uint8_t count; std::uint64_t constants[MaxOneOf]; };
+                            std::vector<one_of> oneOf;
                             auto const constant_of = [&](value aValue) -> std::optional<std::uint64_t>
                             {
                                 if (values[aValue].constant())
@@ -2408,6 +2541,14 @@ namespace neos
                                 if (aValue < equalTo.size() && equalTo[aValue] != None)
                                     return values[equalTo[aValue]].imm0;
                                 return {};
+                            };
+                            // (a value that is known to be one of some constants (see oneOf), none of them aConstant)
+                            auto const differs = [&](value aValue, std::uint64_t aConstant) -> bool
+                            {
+                                for (auto o = oneOf.size(); o > 0u; --o)
+                                    if (oneOf[o - 1u].subject == aValue)
+                                        return std::find(oneOf[o - 1u].constants, oneOf[o - 1u].constants + oneOf[o - 1u].count, aConstant) == oneOf[o - 1u].constants + oneOf[o - 1u].count;
+                                return false;
                             };
                             // (an f64 that branches that dominate the block decided is within the range of a signed truncation (i32's or, aWide,
                             // i64's): not NaN, and above the least integer minus one and below the greatest plus one (x >= C, x > C, x < C,
@@ -2515,7 +2656,63 @@ namespace neos
                                         epoch[c] = same ? exitEpoch[idom[aBlock]][c] : ++epochs;
                                     }
                                 }
-                                stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size() });
+                                stack.push_back(frame{ aBlock, 0u, table.added.size(), knownOrder.size(), accesses.size(), equalOrder.size(), oneOf.size() });
+                                if (b.predecessors.size() >= 2u && b.predecessors.size() <= MaxOneOf && aBlock != order[0])
+                                {
+                                    // (each predecessor's edge to it: x == C (the same x))
+                                    one_of o{ None, 0u, {} };
+                                    for (auto p : b.predecessors)
+                                    {
+                                        // (an edge's block (a jump only, of one predecessor): its predecessor's edge to it)
+                                        auto target = aBlock;
+                                        for (int hop = 0; hop < 2; ++hop)
+                                        {
+                                            auto const& j = blocks[p];
+                                            if (j.successors.size() != 1u || j.predecessors.size() != 1u)
+                                                break;
+                                            bool empty = true;
+                                            for (auto v : j.code)
+                                                if (!values[v].dead && values[v].op != Jump)
+                                                    empty = false;
+                                            if (!empty)
+                                                break;
+                                            target = p;
+                                            p = j.predecessors[0];
+                                        }
+                                        auto const& from = blocks[p];
+                                        value subject = None;
+                                        std::uint64_t constant = 0u;
+                                        if (!from.code.empty() && from.successors.size() == 2u && from.successors[0] != from.successors[1])
+                                            if (auto const& t = values[from.code.back()]; t.op == Branch && !t.dead)
+                                            {
+                                                auto const condition = replaced.resolved(t.operands[0]);
+                                                bool const whenTrue = from.successors[0] == target;
+                                                if (auto const& c = values[condition]; !c.dead && (c.op == 0x51u || c.op == 0x52u) && c.operands.size() == 2u &&
+                                                    whenTrue == (c.op == 0x51u))
+                                                    for (std::size_t n = 0u; n < 2u; ++n)
+                                                    {
+                                                        auto const k = replaced.resolved(c.operands[n]);
+                                                        auto const x = replaced.resolved(c.operands[1u - n]);
+                                                        if (values[k].constant() && !values[x].constant())
+                                                        {
+                                                            subject = x;
+                                                            constant = values[k].imm0;
+                                                            break;
+                                                        }
+                                                    }
+                                            }
+                                        if (subject == None || (o.subject != None && subject != o.subject))
+                                        {
+                                            o.subject = None;
+                                            break;
+                                        }
+                                        o.subject = subject;
+                                        if (std::find(o.constants, o.constants + o.count, constant) == o.constants + o.count)
+                                            o.constants[o.count++] = constant;
+                                    }
+                                    if (o.subject != None)
+                                        oneOf.push_back(o);
+                                }
                                 if (b.predecessors.size() == 1u && aBlock != order[0])
                                 {
                                     auto const& from = blocks[b.predecessors[0]];
@@ -2639,8 +2836,9 @@ namespace neos
                                                     // both aligned: not overlapped)
                                                     if (!held || e.offset != st.imm1 || e.width != width || !aligned(e.address, 8u, 4))
                                                         continue;
+                                                    // (its value: a constant, or one of the constants that a join's predecessors decided)
                                                     auto const other = constant_of(e.data);
-                                                    if (!other || *other == *held)
+                                                    if (other ? *other == *held : !differs(e.data, *held))
                                                         continue;
                                                     if (e.loadOp != 0u)
                                                     {
@@ -2846,6 +3044,7 @@ namespace neos
                                 for (auto k = equalOrder.size(); k > top.equalMark; --k)
                                     equalTo[equalOrder[k - 1u]] = None;
                                 equalOrder.resize(top.equalMark);
+                                oneOf.resize(top.oneOfMark);
                                 accesses.resize(top.accessMark);
                                 stack.pop_back();
                             }
@@ -5202,6 +5401,101 @@ namespace neos
                                 }
                         }
 
+                        // (a block that only returns (its phis, or values from before it): each predecessor returns instead (a predecessor
+                        // that branches: through a block of its own that returns), so that the results need no phis (no moves to them, and
+                        // no registers that are theirs from the predecessors to the return))
+                        bool duplicate_returns(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            bool changed = false;
+                            std::size_t const count = blocks.size();
+                            for (std::uint32_t b = 1u; b < count; ++b)
+                            {
+                                if (!blocks[b].reachable || blocks[b].loopHeader || blocks[b].predecessors.size() < 2u || !blocks[b].successors.empty())
+                                    continue;
+                                std::vector<value> phis;
+                                value ret = None;
+                                bool ok = true;
+                                for (auto v : blocks[b].code)
+                                {
+                                    auto const& i = values[v];
+                                    if (i.dead)
+                                        continue;
+                                    if (i.op == Phi && ret == None)
+                                        phis.push_back(v);
+                                    else if (i.op == Return && ret == None)
+                                        ret = v;
+                                    else
+                                        ok = false;
+                                }
+                                if (!ok || ret == None)
+                                    continue;
+                                auto const preds = blocks[b].predecessors;
+                                for (auto ph : phis)
+                                {
+                                    if (values[ph].operands.size() != preds.size())
+                                        ok = false;
+                                    for (auto o : values[ph].operands)
+                                        if (o == None)
+                                            ok = false;
+                                }
+                                for (auto o : values[ret].operands)
+                                    if (o == None || (values[o].block == b && std::find(phis.begin(), phis.end(), o) == phis.end()))
+                                        ok = false;
+                                // (the phis: used only by the return)
+                                for (auto v : blocks[b].code)
+                                    for (auto o : values[v].operands)
+                                        if (v != ret && std::find(phis.begin(), phis.end(), o) != phis.end())
+                                            ok = false;
+                                for (std::size_t k = 0u; k < preds.size() && ok; ++k)
+                                    for (std::size_t q = k + 1u; q < preds.size(); ++q)
+                                        if (preds[k] == preds[q] || preds[k] == b)
+                                            ok = false;
+                                if (!ok)
+                                    continue;
+                                for (std::size_t k = 0u; k < preds.size(); ++k)
+                                {
+                                    auto const p = preds[k];
+                                    instruction r;
+                                    r.op = Return;
+                                    r.type = Void;
+                                    r.origin = values[ret].origin;
+                                    for (auto o : values[ret].operands)
+                                    {
+                                        auto const ph = std::find(phis.begin(), phis.end(), o);
+                                        r.operands.push_back(ph != phis.end() ? values[*ph].operands[k] : o);
+                                    }
+                                    value const last = blocks[p].code.empty() ? None : blocks[p].code.back();
+                                    if (blocks[p].successors.size() == 1u && last != None && values[last].op == Jump)
+                                    {
+                                        // (its jump: the return)
+                                        r.block = p;
+                                        values[last] = std::move(r);
+                                        blocks[p].successors.clear();
+                                        continue;
+                                    }
+                                    auto const nb = static_cast<std::uint32_t>(blocks.size());
+                                    blocks.push_back(block{});
+                                    blocks[nb].predecessors = { p };
+                                    blocks[nb].loopDepth = blocks[b].loopDepth;
+                                    blocks[nb].reachable = true;
+                                    r.block = nb;
+                                    values.push_back(std::move(r));
+                                    blocks[nb].code.push_back(static_cast<value>(values.size() - 1u));
+                                    for (auto& s : blocks[p].successors)
+                                        if (s == b)
+                                            s = nb;
+                                }
+                                for (auto v : blocks[b].code)
+                                    values[v].dead = true;
+                                blocks[b].predecessors.clear();
+                                blocks[b].reachable = false;
+                                changed = true;
+                            }
+                            return changed;
+                        }
+
                         // (a value without effects (or a load that cannot trap, with nothing after it in its block that may store or call) 
                         // that a block computes, all of whose uses are where only one of its successors leads (that successor's only 
                         // predecessor is it): computed there (e.g. what only a slow path uses is not computed on the fast path))
@@ -5742,6 +6036,8 @@ namespace neos
                                 i.dead = true;
                         aFunction.usesCurrent = false;
                         sink_values(aFunction);
+                        if (duplicate_returns(aFunction))
+                            finish(aFunction);
                         fold_address_offsets(aFunction);
                         eliminate_dead_stores(aFunction);
                         fold_scaled_indexes(aFunction);

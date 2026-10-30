@@ -224,6 +224,7 @@ namespace neos::javascript_runtime
         }
         bool empty() const { return iSize == 0u; }
         void forget() { if (iSize == 0u) release(); }   ///< (its storage, if it has no elements)
+        void limit(std::size_t aCapacity) { if (aCapacity < iCapacity && iSize <= aCapacity) iCapacity = narrow(aCapacity); }  ///< (less of its storage used)
         T* data() { return iCapacity != 0u ? reinterpret_cast<T*>(gRegionBase + iOffset) : nullptr; }
         T const* data() const { return iCapacity != 0u ? reinterpret_cast<T const*>(gRegionBase + iOffset) : nullptr; }
         T& operator[](std::size_t aIndex) { return data()[aIndex]; }
@@ -724,7 +725,7 @@ namespace neos::javascript_runtime
                                         ///< 0: a rope))
         region_u16string text;          ///< (none while it is a rope: its parts (left and right) are concatenated when it is flattened)
         value left = 0u;
-        value right = 0u;
+        value right = 0u;               ///< (a flat string that is not interned: the interned string equal to it, once intern has found it)
         value base = 0u;                ///< (a slice: the flat string whose code units (some of them) are its (charsOffset is in them, until
                                         ///< it is flattened (flat()): its text is then a copy of them (its base lives as long as it does: 
                                         ///< views of its code units that were taken before then are valid)))
@@ -749,6 +750,7 @@ namespace neos::javascript_runtime
     value make_string(char16_t aCharacter);
     value ascii(char const* aText);                             ///< (an interned string)
     value intern(value aString);                                ///< (a string (that lives while it is referred to) as an interned string)
+    value interned_equal(value aString);                        ///< (the interned string equal to a string, if there is one (else 0): none is made)
     value intern(std::u16string_view aText);                    ///< (an interned string that lives as long as the program (pinned))
     void pin_interned(value aString);                           ///< (an interned string (that lives while it is referred to): pinned)
     value concat(value aLeft, value aRight);                    ///< (strings)
@@ -996,6 +998,7 @@ namespace neos::javascript_runtime
                                                 ///< transition for its key)
         void remove(value aKey);
         void reserve(std::size_t aCapacity);
+        void limit_storage(std::size_t aCapacity) { iValues.limit(aCapacity); }  ///< (less of its values' storage used (its values and layout are as they were))
         void forget_storage() { changed(); iValues.forget(); }  ///< (its values' storage, if it has none (e.g. its cell's for another use))
         void use_storage(value* aStorage, std::size_t aCapacity) { changed(); iValues.use_storage(aStorage, aCapacity); }  ///< (its values' (it has
                                                 ///< none): storage that is not its own (e.g. in its object's cell))
@@ -1365,6 +1368,7 @@ namespace neos::javascript_runtime
         // object's properties are given))
         value lastConstructed = Undefined;
         std::uint32_t constructedProperties = 0u;
+        std::uint32_t constructions = 0u;   ///< (the objects that it made (as the runtime makes them: see api::construct_this_cached))
         // (a compiled constructor: where its prototype property was found last (its table's shape, and the position in it: a shape's
         // positions and attributes never change, so a table of that shape has the data property there))
         shape* prototypeShape = nullptr;

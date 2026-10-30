@@ -1526,9 +1526,12 @@ namespace neos
                                 if (aCallee >= iModule.functions.size() || aCallee == iFunction)
                                     return false;
                                 auto const& f = iModule.functions[aCallee];
-                                if (f.imported || f.results->size() > 1u || f.codeEnd - f.codeBegin > (f.frameless ? iOptions.maxCalleeTokens : iOptions.maxFramedCalleeTokens))
+                                if (f.imported || f.results->size() > 1u || f.codeEnd - f.codeBegin > (f.frameless ? iOptions.maxCalleeTokens : iOptions.maxLargeFramedCalleeTokens))
                                     return false;
                                 if (iOptions.noInline.contains(aPosition))
+                                    return false;
+                                if (!f.frameless && f.codeEnd - f.codeBegin > iOptions.maxFramedCalleeTokens && iOptions.largeRejects != nullptr &&
+                                    iOptions.largeRejects[aCallee].load(std::memory_order_relaxed) >= options::MaxLargeRejects)
                                     return false;
                                 for (auto const& c : iInlines)
                                     if (c.callee == aCallee)
@@ -1851,7 +1854,17 @@ namespace neos
                                         }
                                         i += 1u + n;
                                     }
-                                    bool const large = size > iOptions.maxInlinedTokens || cost > iOptions.maxInlinedCost || done.guardCount > iOptions.maxGuards;
+                                    bool const largeCallee = !callee.frameless && callee.codeEnd - callee.codeBegin > iOptions.maxFramedCalleeTokens;
+                                    bool const large = size > (largeCallee ? iOptions.maxLargeFramedInlinedTokens : iOptions.maxInlinedTokens) ||
+                                        cost > (largeCallee ? iOptions.maxLargeFramedInlinedCost : iOptions.maxInlinedCost) || done.guardCount > iOptions.maxGuards;
+                                    if (largeCallee && iOptions.largeRejects != nullptr)
+                                    {
+                                        auto& rejects = iOptions.largeRejects[aCallee];
+                                        if (!large)
+                                            rejects.store(0u, std::memory_order_relaxed);
+                                        else if (auto const n = rejects.load(std::memory_order_relaxed); n < 255u)
+                                            rejects.store(static_cast<std::uint8_t>(n + 1u), std::memory_order_relaxed);
+                                    }
                                     if (large)
                                     {
                                         // (and not inlined again (its code is as large where it is called again))

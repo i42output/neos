@@ -931,6 +931,8 @@ namespace neos::javascript_runtime
                 if (from >= to)
                     return the_names().empty;
                 auto const count = static_cast<std::size_t>(to - from);
+                if (count == 1u && static_cast<std::int64_t>(count) < size)
+                    return make_string(cell_of<string>(aThis).chars()[static_cast<std::size_t>(from)]);    // (one code unit: shared if ASCII)
                 if (count <= string::SmallCapacity && static_cast<std::int64_t>(count) < size)
                     return make_small_string(cell_of<string>(aThis).chars().substr(static_cast<std::size_t>(from), count));
                 return substring_of(aThis, static_cast<std::size_t>(from), count);

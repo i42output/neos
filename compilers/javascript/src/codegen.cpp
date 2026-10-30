@@ -6404,6 +6404,49 @@ namespace neos::compilers::javascript
         // constructor's number))
         namespace jsl = neos::language::javascript::layout;
         std::uint32_t const aCallee = 0u, site = 1u;
+        // (the callee's number from its dispatch key (a function of the program's: the program's serial and its number), else -1)
+        auto const dispatched = [&]()
+        {
+            auto const key = temporary();
+            get(aCallee);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            cell_of(aCallee);
+            cached_load(opcode::I32LoadMem8U, jsl::ObjectClass, alias::Header);
+            i32(static_cast<std::int32_t>(jsl::ClassFunction));
+            op(opcode::I32Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            cell_of(aCallee);
+            cached_load(opcode::I64LoadMem, jsl::FunctionDispatch, alias::Function);
+            tee(key);
+            i64(32);
+            op(opcode::I64ShrU);
+            op(opcode::GlobalGet);
+            u32(iCompiler.program_serial_global());
+            op(opcode::I64Eq);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            get(key);
+            op(opcode::I32ConvertI64);
+            op(opcode::Else);
+            i32(-1);
+            end_control();
+            op(opcode::Else);
+            i32(-1);
+            end_control();
+            op(opcode::Else);
+            i32(-1);
+            end_control();
+            release(key);
+        };
         auto const entry = temporary();
         property_site(site);
         tee(entry);
@@ -6441,47 +6484,7 @@ namespace neos::compilers::javascript
             get(site);
             runtime("callee_number_cached", { I64, I32 }, I32);
             op(opcode::Else);
-            {
-                auto const key = temporary();
-                get(aCallee);
-                constant(0xFFFF000000000000ull);
-                op(opcode::I64And);
-                constant(values::TagObject);
-                op(opcode::I64Eq);
-                op(opcode::If);
-                iCode.push_back(0x7Fu);
-                iControls.push_back(control{ control_kind::Block });
-                cell_of(aCallee);
-                cached_load(opcode::I32LoadMem8U, jsl::ObjectClass, alias::Header);
-                i32(static_cast<std::int32_t>(jsl::ClassFunction));
-                op(opcode::I32Eq);
-                op(opcode::If);
-                iCode.push_back(0x7Fu);
-                iControls.push_back(control{ control_kind::Block });
-                cell_of(aCallee);
-                cached_load(opcode::I64LoadMem, jsl::FunctionDispatch, alias::Function);
-                tee(key);
-                i64(32);
-                op(opcode::I64ShrU);
-                op(opcode::GlobalGet);
-                u32(iCompiler.program_serial_global());
-                op(opcode::I64Eq);
-                op(opcode::If);
-                iCode.push_back(0x7Fu);
-                iControls.push_back(control{ control_kind::Block });
-                get(key);
-                op(opcode::I32ConvertI64);
-                op(opcode::Else);
-                i32(-1);
-                end_control();
-                op(opcode::Else);
-                i32(-1);
-                end_control();
-                op(opcode::Else);
-                i32(-1);
-                end_control();
-                release(key);
-            }
+            dispatched();
             end_control();
         }
         else
@@ -6493,7 +6496,7 @@ namespace neos::compilers::javascript
                 runtime("construct_number_cached", { I64, I32 }, I32);
             }
             else
-                runtime("callee_number", { I64 }, I32);
+                dispatched();   // (a method's: as the runtime's callee_number has it)
         }
         end_control();
         end_control();
@@ -7768,6 +7771,31 @@ namespace neos::compilers::javascript
             }
             else if (aNode->is(construct::Equal) || aNode->is(construct::NotEqual))
                 loose_equality(lhs, rhs, aNode->is(construct::NotEqual), sOperations.at(aNode->kind));
+            else if (aNode->is(construct::Add))
+            {
+                // (two strings: their concatenation (the runtime's concat, not its add's dispatch))
+                for (auto side : { lhs, rhs })
+                {
+                    get(side);
+                    i64(48);
+                    op(opcode::I64ShrU);
+                    constant(values::TagString >> 48u);
+                    op(opcode::I64Eq);
+                }
+                op(opcode::I32And);
+                op(opcode::If);
+                iCode.push_back(0x7Eu);
+                iControls.push_back(control{ control_kind::Block });
+                get(lhs);
+                get(rhs);
+                runtime("concat", { I64, I64 }, I64);
+                op(opcode::Else);
+                get(lhs);
+                get(rhs);
+                slow_runtime(sOperations.at(aNode->kind), { I64, I64 }, I64);
+                end_control();
+                check();
+            }
             else
             {
                 get(lhs);

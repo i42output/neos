@@ -129,6 +129,9 @@ namespace neos::javascript_runtime
             shape const* execPrototype = nullptr;
             std::uint32_t execPosition = 0u;
             last_index_position lastIndex;      ///< (see known_last_index)
+            // (a match's array's shapes (see builtin_exec): of a new array (made by make_array), then with its index, input and groups)
+            shape* matchBase = nullptr;
+            shape* matchShapes[3] = {};
         };
         isolate_local<regexp_state> sRegExpState;
         regexp_state& the_regexp_state() { return *sRegExpState; }
@@ -405,18 +408,71 @@ namespace neos::javascript_runtime
             auto const index = captures[0];
             auto const e = captures[1];
             auto const n = program.captureCount;
-            value_list elements(n + 1u, Undefined);
-            elements[0] = substring(text, index, e);
-            for (std::uint32_t i = 1u; i <= n; ++i)
-                if (captures[i * 2u] != -1)
-                    elements[i] = substring(text, captures[i * 2u], captures[i * 2u + 1u]);
-            auto const a = make_array(elements);
-            auto& ao = obj(a);
-            ao.put(the_names().index, number(index), AttributesDefault);
-            ao.put(the_names().input, aS, AttributesDefault);
+            value a;
+            value groups = Undefined;
             value_list groupNames;
-            auto const groups = make_groups(program, elements, &groupNames);
-            ao.put(the_names().groups, groups, AttributesDefault);
+            if (!program.hasNamedGroups && !hasIndices)
+            {
+                // (no groups: the array made, then its elements (no list of them)), its properties (index, input and groups) and its
+                // elements in its cell (as array_literal's are)
+                auto& array = [&]() -> array_object&
+                {
+                    if (n + 4u <= MaxCellValues)
+                    {
+                        auto& h = the_heap();
+                        constexpr std::size_t base = (sizeof(array_object) + 7u) & ~std::size_t{ 7u };
+                        auto& made = h.make_with<array_object>(n + 4u, the_realm().arrayPrototype);
+                        auto* const room = reinterpret_cast<value*>(reinterpret_cast<std::byte*>(&made) + base);
+                        auto const capacity = (h.slot_size_of(&made) - base) / sizeof(value);
+                        made.properties.limit_storage(3u);  // (make_with gave it all of the room)
+                        made.elements.use_storage(room + 3u, capacity - 3u);
+                        return made;
+                    }
+                    auto& made = static_cast<array_object&>(obj(make_array(std::size_t{ 0u })));
+                    made.elements.reserve(n + 1u);
+                    return made;
+                }();
+                a = value_of(array);
+                array.elements.push_back(substring(text, index, e));
+                for (std::uint32_t i = 1u; i <= n; ++i)
+                    array.elements.push_back(captures[i * 2u] != -1 ? substring(text, captures[i * 2u], captures[i * 2u + 1u]) : Undefined);
+                array.length = n + 1u;
+            }
+            else
+            {
+                value_list elements(n + 1u, Undefined);
+                elements[0] = substring(text, index, e);
+                for (std::uint32_t i = 1u; i <= n; ++i)
+                    if (captures[i * 2u] != -1)
+                        elements[i] = substring(text, captures[i * 2u], captures[i * 2u + 1u]);
+                a = make_array(elements);
+                groups = make_groups(program, elements, &groupNames);
+            }
+            auto& ao = obj(a);
+            // (its index, input and groups: as the last match's array was given them, if it had the same shape)
+            auto& state = the_regexp_state();
+            auto* const base = ao.properties.layout();
+            if (base != nullptr && base == state.matchBase && state.matchShapes[2] != nullptr && !ao.mirrored)
+            {
+                ao.properties.add(number(index), state.matchShapes[0]);
+                ao.properties.add(aS, state.matchShapes[1]);
+                ao.properties.add(groups, state.matchShapes[2]);
+            }
+            else
+            {
+                ao.put(the_names().index, number(index), AttributesDefault);
+                ao.put(the_names().input, aS, AttributesDefault);
+                ao.put(the_names().groups, groups, AttributesDefault);
+                if (base != nullptr)
+                {
+                    state.matchBase = base;
+                    state.matchShapes[0] = base->transition(the_names().index, AttributesDefault);
+                    state.matchShapes[1] = state.matchShapes[0] != nullptr ? state.matchShapes[0]->transition(the_names().input, AttributesDefault) : nullptr;
+                    state.matchShapes[2] = state.matchShapes[1] != nullptr ? state.matchShapes[1]->transition(the_names().groups, AttributesDefault) : nullptr;
+                    if (state.matchShapes[2] != ao.properties.layout())
+                        state.matchBase = nullptr;
+                }
+            }
             if (hasIndices)
             {
                 // (MakeMatchIndicesIndexPairArray)

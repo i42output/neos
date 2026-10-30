@@ -138,24 +138,41 @@ namespace neos::javascript_runtime
 
     namespace
     {
+        // (an interned string's key: its text and the text's hash (computed once for a lookup in both maps, and kept for rehashing))
+        struct intern_key
+        {
+            std::u16string_view text;
+            std::size_t hash;
+            explicit intern_key(std::u16string_view aText) : text{ aText }, hash{ std::hash<std::u16string_view>{}(aText) } {}
+        };
+        struct intern_key_hash
+        {
+            std::size_t operator()(intern_key const& aKey) const noexcept { return aKey.hash; }
+        };
+        struct intern_key_equal
+        {
+            bool operator()(intern_key const& aLeft, intern_key const& aRight) const noexcept { return aLeft.hash == aRight.hash && aLeft.text == aRight.text; }
+        };
+
         struct intern_table
         {
             // (pinned strings (that live as long as the program): marked by the collector (pinnedValues, in the order they were 
             // pinned); the others (weak) live while they are referred to (those that die are removed))
-            std::unordered_map<std::u16string_view, value> pinned;
-            std::unordered_map<std::u16string_view, value> weak;
+            using map = std::unordered_map<intern_key, value, intern_key_hash, intern_key_equal>;
+            map pinned;
+            map weak;
             std::vector<value> pinnedValues;
-            value find(std::u16string_view aText) const
+            value find(intern_key const& aKey) const
             {
-                if (auto const p = pinned.find(aText); p != pinned.end())
+                if (auto const p = pinned.find(aKey); p != pinned.end())
                     return p->second;
-                if (auto const w = weak.find(aText); w != weak.end())
+                if (auto const w = weak.find(aKey); w != weak.end())
                     return w->second;
                 return 0u;
             }
-            void pin(std::u16string_view aText, value aString)
+            void pin(intern_key const& aKey, value aString)
             {
-                pinned.emplace(aText, aString);
+                pinned.emplace(aKey, aString);
                 pinnedValues.push_back(aString);
             }
         };
@@ -334,23 +351,24 @@ namespace neos::javascript_runtime
     value intern(std::u16string_view aText)
     {
         auto& table = interned();
-        if (auto existing = table.pinned.find(aText); existing != table.pinned.end())
+        intern_key const key{ aText };
+        if (auto existing = table.pinned.find(key); existing != table.pinned.end())
             return existing->second;
-        if (auto existing = table.weak.find(aText); existing != table.weak.end())
+        if (auto existing = table.weak.find(key); existing != table.weak.end())
         {
             // (pinned from now on)
             auto const result = existing->second;
-            auto const key = existing->first;
+            auto const pinnedKey = existing->first;
             table.weak.erase(existing);
             cell_of<string>(result).pinned = true;
-            table.pin(key, result);
+            table.pin(pinnedKey, result);
             return result;
         }
         auto& s = the_heap().make<string>(std::u16string{ aText });
         s.interned = true;
         s.pinned = true;
         auto const result = TagString | s.handle;
-        table.pin(std::u16string_view{ s.text }, result);
+        table.pin(intern_key{ std::u16string_view{ s.text } }, result);
         return result;
     }
 
@@ -359,13 +377,35 @@ namespace neos::javascript_runtime
         auto& s = cell_of<string>(aString);
         if (s.interned)
             return aString;
+        // (a flat string interned before: the interned string equal to it, kept in its right (a rope's part; it marks it))
+        if (s.left == 0u && s.right != 0u)
+            return s.right;
         auto& table = interned();
-        auto const& text = s.flat();
-        if (auto const existing = table.find(std::u16string_view{ text }); existing != 0u)
+        // (looked up by its code units (a slice's are its base's: not copied); its text (flat) is the table's key if it is added)
+        intern_key key{ s.chars() };
+        if (auto const existing = table.find(key); existing != 0u)
+        {
+            s.right = existing;
             return existing;
+        }
+        s.flat();
         s.interned = true;
-        table.weak.emplace(std::u16string_view{ s.text }, aString);
+        key.text = std::u16string_view{ s.text };   // (the same code units: the same hash)
+        table.weak.emplace(key, aString);
         return aString;
+    }
+
+    value interned_equal(value aString)
+    {
+        auto& s = cell_of<string>(aString);
+        if (s.interned)
+            return aString;
+        if (s.left == 0u && s.right != 0u)
+            return s.right;
+        auto const existing = interned().find(intern_key{ s.chars() });
+        if (existing != 0u)
+            s.right = existing;
+        return existing;
     }
 
     void pin_interned(value aString)
@@ -378,11 +418,11 @@ namespace neos::javascript_runtime
         if (!s.interned || s.pinned)
             return;
         auto& table = interned();
-        auto const text = std::u16string_view{ s.text };
-        if (auto const w = table.weak.find(text); w != table.weak.end() && w->second == aString)
+        intern_key const key{ std::u16string_view{ s.text } };
+        if (auto const w = table.weak.find(key); w != table.weak.end() && w->second == aString)
         {
             table.weak.erase(w);
-            table.pin(text, aString);
+            table.pin(key, aString);
             s.pinned = true;
         }
     }
@@ -517,7 +557,7 @@ namespace neos::javascript_runtime
         char digits[24];
         auto const end = std::to_chars(std::begin(digits), std::end(digits), aIndex).ptr;
         auto text = utf16_ascii(std::string_view{ digits, static_cast<std::size_t>(end - digits) });
-        if (auto const existing = interned().find(std::u16string_view{ text }); existing != 0u)
+        if (auto const existing = interned().find(intern_key{ std::u16string_view{ text } }); existing != 0u)
             return existing;
         return intern(make_string(std::move(text)));    // (not pinned: it lives while it is referred to)
     }

@@ -46,6 +46,7 @@
 
 #include <neos/neos.hpp>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <set>
@@ -136,10 +137,17 @@ namespace neos
                         std::set<std::size_t> noDeopt;          ///< (inlined calls (their positions) whose code's calls are made (not deopts))
                         std::size_t maxInlineDepth = 4u;
                         std::size_t maxCalleeTokens = 6000u;    ///< (a callee larger than this is not inlined)
-                        std::size_t maxFramedCalleeTokens = 600u;   ///< (... nor one with a frame of its own larger than this)
+                        std::size_t maxFramedCalleeTokens = 600u;   ///< (... nor one with a frame of its own larger than this, ...)
+                        std::size_t maxLargeFramedCalleeTokens = 2400u; ///< (... unless it is at most this and its code (after folding) is small (see below))
+                        std::size_t maxLargeFramedInlinedTokens = 1200u; ///< (an inlined call of such a callee: its code's size (after folding) at most this...)
+                        std::size_t maxLargeFramedInlinedCost = 200u;   ///< (... and its instructions that are code at most this)
+                        // (by callee: the times in a row that such a callee was too large where it was inlined (the module's, for all of its
+                        // optimizations: tried again until it has been too large MaxLargeRejects times); if none, it is always tried)
+                        std::atomic<std::uint8_t>* largeRejects = nullptr;
+                        static constexpr std::uint8_t MaxLargeRejects = 4u;
                         std::size_t maxTokens = 60000u;         ///< (the function's code may grow to this, by inlining...)
-                        std::size_t maxGrowth = 6u;             ///< (... and to this many times its size (and 2000 tokens))
-                        std::size_t maxInlinedTokens = 2000u;   ///< (an inlined call whose code (after folding) is larger is not inlined...)
+                        std::size_t maxGrowth = 10u;             ///< (... and to this many times its size (and 2000 tokens))
+                        std::size_t maxInlinedTokens = 2800u;   ///< (an inlined call whose code (after folding) is larger is not inlined...)
                         std::size_t maxInlinedCost = 400u;      ///< (... nor one with more instructions that are code (see rewriter::inline_call) ...)
                         std::size_t maxGuards = 16u;            ///< (... nor one with more guards)
                         std::size_t maxInlines = 512u;          ///< (the calls inlined in a function)

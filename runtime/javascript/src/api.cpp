@@ -1009,6 +1009,8 @@ namespace neos::javascript_runtime
                 // (its properties' storage: as much as the object it made last has (allocated once))
                 if (is_object(f.lastConstructed))
                     f.constructedProperties = std::max<std::uint32_t>(f.constructedProperties, static_cast<std::uint32_t>(obj(f.lastConstructed).properties.size()));
+                if (f.constructions != ~std::uint32_t{})
+                    ++f.constructions;
                 // (OrdinaryCreateFromConstructor: its prototype (its own data property: found in its table))
                 value prototype;
                 if (f.prototypeShape != nullptr && f.properties.layout() == f.prototypeShape)
@@ -1564,6 +1566,11 @@ namespace neos::javascript_runtime
                                 e.kind = jsl::SiteSelf;
                                 e.prototypes[0] = { aObject, 0u };
                                 e.position = p.position();
+                                // (and the megamorphic cache's, by the object itself (not a shape: compiled code's probes, by shape, do
+                                // not find it; its gets are the runtime's (see megamorphic_get)), e.g. a table of many keys' gets)
+                                auto& state = the_heap().the_allocation_state();
+                                auto* const table = reinterpret_cast<megamorphic_entry*>(gRegionBase + state.megamorphic);
+                                table[megamorphic_index(aObject, aKey)] = megamorphic_entry{ aObject, aKey, e.position, 0u, 0u };
                             }
                             return;
                         }
@@ -1707,9 +1714,12 @@ namespace neos::javascript_runtime
             return guard([&]() -> value
             {
                 auto& f = *as_function(aCallee);
+                // (after a few objects (the size of each, as the next is made: those of a recursive constructor's callers' are made first
+                // and filled after): their largest is known well enough)
+                constexpr std::uint32_t SampledConstructions = 64u;
                 bool const before = is_object(f.lastConstructed);
                 auto const thisValue = make_this(aCallee);
-                if (!before || f.derived || f.flavour == function_flavour::ClassConstructor || f.prototypeShape == nullptr ||
+                if (!before || f.constructions < SampledConstructions || f.derived || f.flavour == function_flavour::ClassConstructor || f.prototypeShape == nullptr ||
                     f.properties.layout() != f.prototypeShape || !is_object(f.properties.at(f.prototypePosition).data()))
                     return thisValue;
                 auto* const entries = site_of(aSite);
@@ -1876,19 +1886,28 @@ namespace neos::javascript_runtime
         }
 
         // (the megamorphic cache's: an own data property of an object of a shape (see megamorphic_entry)); the site remembers it)
-        bool megamorphic_get(std::int32_t aSite, value aObject, value aKey, value& aResult)
+        bool megamorphic_get(std::int32_t aSite, value aObject, value aKey, value& aResult, bool aRemember = true)
         {
             if (!is_object(aObject))
                 return false;
             auto const& o = obj(aObject);
             auto const* layout = o.properties.layout();
             if (layout == nullptr)
-                return false;
+            {
+                // (no shape: its own data property, if the cache has its key's position (by the object itself: see remember_get))
+                if (!o.ordinaryGet || o.mirrored)
+                    return false;
+                auto const& state = the_heap().the_allocation_state();
+                auto const& e = reinterpret_cast<megamorphic_entry const*>(gRegionBase + state.megamorphic)[megamorphic_index(aObject, aKey)];
+                return e.shape == aObject && e.key == aKey && o.properties.cached_value(0u, e.position, aKey, aResult);
+            }
             auto const shape = shape_word(layout);
             auto const& state = the_heap().the_allocation_state();
             auto const& e = reinterpret_cast<megamorphic_entry const*>(gRegionBase + state.megamorphic)[megamorphic_index(shape, aKey)];
             if (e.shape != shape || e.key != aKey || !o.properties.cached_value(shape, e.position, aKey, aResult))
                 return false;
+            if (!aRemember)
+                return true;
             site entry{};
             entry.key = aKey;
             entry.number = -1;
@@ -1929,11 +1948,21 @@ namespace neos::javascript_runtime
 
         value get_cached(value aObject, value aKey, std::int32_t aSite)
         {
-            // (o[k]: as get_named_cached if the key is an interned string (a property key, as a site's entry has); else as get)
+            // (o[k]: as get_named_cached if the key is an interned string (a property key, as a site's entry has); else as get (a
+            // string that is not interned: its interned equal (a property's key is), e.g. a word sliced from a source looked up)
+            if (is_string(aKey) && !cell_of<javascript_runtime::string>(aKey).interned)
+                if (auto const equal = guard([&]() -> value { return interned_equal(aKey); }); equal != 0u)
+                {
+                    if (equal == Exception)
+                        return Exception;
+                    aKey = equal;
+                }
             value result;
             if (cached_get(site_of(aSite), aObject, aKey, result))
                 return result;
-            if (megamorphic_get(aSite, aObject, aKey, result))
+            // (the megamorphic cache's (not remembered by the site: its entries are for keys that its compiled code's gets have, and
+            // a computed key's are many))
+            if (megamorphic_get(aSite, aObject, aKey, result, false))
                 return result;
             result = get(aObject, aKey);
             if (result != Exception && is_string(aKey) && cell_of<javascript_runtime::string>(aKey).interned)

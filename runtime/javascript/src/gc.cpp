@@ -678,7 +678,7 @@ namespace neos::javascript_runtime
             iHeap.iAllocations = 0u;
             iHeap.iAllocationTrigger = iStress != 0u ? iStress : ~std::uint64_t{};
             iHeap.iState->allocatedBytes = 0u;
-            iHeap.iByteTrigger = iStress != 0u ? ~std::uint64_t{} : std::max<std::uint64_t>(MinimumTrigger, iLiveBytes * 4u);
+            iHeap.iByteTrigger = iStress != 0u ? ~std::uint64_t{} : std::max<std::uint64_t>(MinimumTrigger, iLiveBytes * 8u);
             limit();
         }
         // (compiled code's allocations: the runtime's once the bytes allocated reach the trigger (always, if collections are by count))
@@ -1326,6 +1326,46 @@ namespace neos::javascript_runtime
                 static_cast<unsigned long long>(iMarkedBytes / 1024u), freed);
     }
 
+    namespace
+    {
+        // (a cell whose destruction does nothing (it owns no storage outside its cell): a plain object's, or an array's, whose 
+        // properties' (and elements') storage is in its cell (or none))
+        template <typename Raw>
+        bool owns_nothing(cell& aCell, Raw const& aRaw)
+        {
+            // (its type: by its vtable (the first one of a plain object's, and of an array's, found by their type: one load and compare,
+            // not the type's (two loads))
+            static std::atomic<void const*> sObjectTable = nullptr;
+            static std::atomic<void const*> sArrayTable = nullptr;
+            void const* table;
+            std::memcpy(&table, &aCell, sizeof(table));
+            bool isObject = table == sObjectTable.load(std::memory_order_relaxed);
+            bool isArray = !isObject && table == sArrayTable.load(std::memory_order_relaxed);
+            if (!isObject && !isArray)
+            {
+                auto const& type = typeid(aCell);
+                if (&type == &typeid(object))
+                {
+                    sObjectTable.store(table, std::memory_order_relaxed);
+                    isObject = true;
+                }
+                else if (&type == &typeid(array_object))
+                {
+                    sArrayTable.store(table, std::memory_order_relaxed);
+                    isArray = true;
+                }
+            }
+            if (isObject)
+                return static_cast<object&>(aCell).properties.owns_nothing(aRaw) && static_cast<object&>(aCell).extra_if() == nullptr;
+            if (isArray)
+            {
+                auto& a = static_cast<array_object&>(aCell);
+                return a.properties.owns_nothing(aRaw) && a.extra_if() == nullptr && (a.elements.capacity() == 0u || !aRaw(a.elements.data()));
+            }
+            return false;
+        }
+    }
+
     void collector::sweep_page(std::size_t aPage)
     {
         // (its live cells unmarked, its dead ones freed; its free slots (free, or not used yet) in runs, from which cells are allocated
@@ -1403,9 +1443,14 @@ namespace neos::javascript_runtime
                         }
                         continue;
                     }
-                    // (a dead cell: destroyed (unless it is a plain object that owns nothing outside its cell), then free)
-                    if (!(&typeid(*c) == &typeid(object) && static_cast<object*>(c)->properties.owns_nothing(raw) &&
-                        static_cast<object*>(c)->extra_if() == nullptr))
+                    // (a dead cell: destroyed (unless it is a plain object, or an array, that owns nothing outside its cell), then free)
+                    // (storage within its own slot is not raw: not looked up)
+                    auto const rawOutside = [&](void const* aMemory)
+                    {
+                        auto const* const m = static_cast<std::byte const*>(aMemory);
+                        return !(m >= slot && m < slot + slotSize) && raw(aMemory);
+                    };
+                    if (!owns_nothing(*c, rawOutside))
                         c->~cell();
                     std::uint32_t const none = 0u;
                     std::memcpy(slot + handleOffset, &none, sizeof(none));
