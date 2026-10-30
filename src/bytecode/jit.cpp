@@ -2754,7 +2754,7 @@ namespace neos
                             iTeeCache.reset();
                             bool const osr = osr_loop(aRotated);
                             if (osr)
-                                iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(iLocals.size()));
+                                iOutgoing = std::max(iOutgoing, 8 * static_cast<std::int32_t>(iLocals.size() + 1u));
                             a.barrier();
                             auto const cold = a.new_label();
                             auto const resume = a.new_label();
@@ -2771,7 +2771,6 @@ namespace neos
                                 constexpr std::int32_t GprsAt = ShadowSpace;
                                 constexpr std::int32_t XmmsAt = GprsAt + 8 * static_cast<std::int32_t>(std::size(Saved));
                                 constexpr std::int32_t Size = (XmmsAt + 16 * 16 + 15) & ~15;   // (rsp stays aligned)
-                                constexpr std::int32_t R11At = GprsAt + 8 * 8;
                                 static_assert(Saved[8] == R11);
                                 auto const restore = [&]()
                                 {
@@ -2797,8 +2796,10 @@ namespace neos
                                     a.test_rr(true, RAX, RAX);
                                     a.jcc(E, stay);
                                     // (the call continues in optimized code: its locals (their values here) are that code's arguments; its
-                                    // results are this call's)
-                                    a.store(true, RSP, R11At, RAX);
+                                    // results are this call's (the code's address: in the outgoing area, after them (a register that is
+                                    // restored may be a local's)))
+                                    auto const targetAt = 8 * static_cast<std::int32_t>(iLocals.size());
+                                    a.store(true, RSP, Size + targetAt, RAX);
                                     restore();
                                     for (std::size_t i = 0u; i < iLocals.size(); ++i)
                                     {
@@ -2817,7 +2818,8 @@ namespace neos
                                             a.store(true, RSP, disp, RAX);
                                         }
                                     }
-                                    a.call_r(R11);
+                                    a.load(true, RAX, RSP, targetAt);
+                                    a.call_r(RAX);
                                     // (where it returns to: a frame making a call (see walk), at the loop)
                                     iCallSites.emplace_back(a.new_label(), origin(aLoop));
                                     a.bind(iCallSites.back().first);
