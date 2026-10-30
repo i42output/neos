@@ -310,6 +310,28 @@ namespace neos::javascript_runtime
                         return result;
                     }
                     auto const slotSize = SizeClasses[ci];
+                    auto& bump = iState->bump[ci];
+                    if (bump != 0u && bump + slotSize <= iState->bumpLimit[ci])
+                    {
+                        auto* const result = iBase + bump;
+                        bump += slotSize;
+                        return result;
+                    }
+                    return allocate_cell(ci);
+                }
+                return allocate_raw(ci);
+            }
+        private:
+            // (a cell's memory when the size class has no free slot and its run has no room: the next run (see allocate))
+#if defined(_MSC_VER)
+            __declspec(noinline)
+#else
+            [[gnu::noinline]]
+#endif
+            void* allocate_cell(std::size_t ci)
+            {
+                {
+                    auto const slotSize = SizeClasses[ci];
                     for (;;)
                     {
                         auto& bump = iState->bump[ci];
@@ -351,6 +373,10 @@ namespace neos::javascript_runtime
                         iState->bumpLimit[ci] = start + (PageSize / slotSize) * slotSize;
                     }
                 }
+            }
+            // (storage that is not a cell's (see allocate))
+            void* allocate_raw(std::size_t ci)
+            {
                 auto* const classes = iRawClasses;
                 auto& c = classes[ci];
                 if (c.freeList != nullptr)
@@ -367,7 +393,7 @@ namespace neos::javascript_runtime
                 if (c.bump == c.bumpEnd)
                 {
                     auto const page = iRegion.take(1u);
-                    iPages[page] = page_info{ slotSize, 0u, 0u, iOwner, aRaw };
+                    iPages[page] = page_info{ slotSize, 0u, 0u, iOwner, true };
                     c.bump = page_address(page);
                     c.bumpEnd = c.bump + (PageSize / slotSize) * slotSize;
                 }
@@ -375,6 +401,7 @@ namespace neos::javascript_runtime
                 c.bump += slotSize;
                 return result;
             }
+        public:
             void release(void* aMemory, bool aReuse) noexcept
             {
                 auto const page = page_of(aMemory);
@@ -1058,12 +1085,26 @@ namespace neos::javascript_runtime
         return the_collector().memory().raw(aMemory);
     }
 
+    namespace
+    {
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        void release_raw(cell_memory& aMemory, void* aStorage) noexcept
+        {
+            aMemory.release(aStorage, true);
+        }
+    }
+
     void region_release(void* aMemory) noexcept
     {
-        // (storage in a cell (e.g. a table's values in its object's) is the cell's)
+        // (storage in a cell (e.g. a table's values in its object's) is the cell's; raw storage released (out of line: the check, the
+        // usual case, needs no frame))
         auto& memory = the_collector().memory();
         if (memory.raw(aMemory))
-            memory.release(aMemory, true);
+            release_raw(memory, aMemory);
     }
 
     void publish_heap()

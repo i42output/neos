@@ -34,6 +34,7 @@
 // RegExp: the RegExp constructor, RegExp.prototype, the RegExp String Iterator and RegExpCreate (make_regexp)
 
 #include <algorithm>
+#include <cstring>
 #include <unordered_map>
 #include "js.hpp"
 #include "api.hpp"
@@ -140,9 +141,8 @@ namespace neos::javascript_runtime
             aTracer.mark(the_legacy().subject);
         } };
 
-        void update_legacy_statics(value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
+        void update_legacy_statics(legacy_statics& legacy, value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
         {
-            auto& legacy = the_legacy();
             legacy.valid = true;
             legacy.input = aSubject;
             legacy.subject = aSubject;
@@ -155,6 +155,10 @@ namespace neos::javascript_runtime
             }
             legacy.lastParen[0] = aCount > 0u ? aCaptures[aCount * 2u] : -1;
             legacy.lastParen[1] = aCount > 0u ? aCaptures[aCount * 2u + 1u] : -1;
+        }
+        void update_legacy_statics(value aSubject, std::vector<std::int32_t> const& aCaptures, std::int32_t aStart, std::uint32_t aCount)
+        {
+            update_legacy_statics(the_legacy(), aSubject, aCaptures, aStart, aCount);
         }
 
         last_index_position const* known_last_index(regexp_object& aR, regexp_state& aState)
@@ -176,20 +180,28 @@ namespace neos::javascript_runtime
         {
             return known_last_index(aR, the_regexp_state());
         }
-        value last_index(regexp_object& aR, value aRValue)
+        value last_index(regexp_object& aR, value aRValue, regexp_state& aState)
         {
-            if (auto const* k = known_last_index(aR))
+            if (auto const* k = known_last_index(aR, aState))
                 return aR.properties.value_at(k->position);
             return get(aRValue, the_names().lastIndex);
         }
-        void set_last_index(regexp_object& aR, value aRValue, value aIndex)
+        value last_index(regexp_object& aR, value aRValue)
         {
-            if (auto const* k = known_last_index(aR); k != nullptr && k->writable)
+            return last_index(aR, aRValue, the_regexp_state());
+        }
+        void set_last_index(regexp_object& aR, value aRValue, value aIndex, regexp_state& aState)
+        {
+            if (auto const* k = known_last_index(aR, aState); k != nullptr && k->writable)
             {
                 aR.properties.set_value_at(k->position, aIndex);
                 return;
             }
             set(aRValue, the_names().lastIndex, aIndex, true);
+        }
+        void set_last_index(regexp_object& aR, value aRValue, value aIndex)
+        {
+            set_last_index(aR, aRValue, aIndex, the_regexp_state());
         }
 
         // (compiled patterns, by flags and pattern)
@@ -294,7 +306,7 @@ namespace neos::javascript_runtime
         };
 
         // (RegExpBuiltinExec's matching (and its updates of lastIndex): aCaptures: the match's capture slots (slot 0: its index))
-        bool builtin_match(regexp_object& aR, value aRValue, value aS, std::vector<std::int32_t>& aCaptures)
+        bool builtin_match(regexp_object& aR, value aRValue, value aS, std::vector<std::int32_t>& aCaptures, regexp_state& aState)
         {
             auto const& text = str(aS);
             auto const length = static_cast<double>(text.size());
@@ -303,7 +315,7 @@ namespace neos::javascript_runtime
             bool const sticky = (bits & regexp::FlagSticky) != 0u;
             bool const fullUnicode = (bits & (regexp::FlagUnicode | regexp::FlagUnicodeSets)) != 0u;
             // (ToLength(lastIndex): unless it is a number (ToLength has no effect) that is not used (neither global nor sticky))
-            auto const lastIndexValue = last_index(aR, aRValue);
+            auto const lastIndexValue = last_index(aR, aRValue, aState);
             double lastIndex = 0.0;
             if (global || sticky || !is_number(lastIndexValue))
                 lastIndex = to_length(lastIndexValue);
@@ -313,7 +325,7 @@ namespace neos::javascript_runtime
             if (lastIndex > length)
             {
                 if (global || sticky)
-                    set_last_index(aR, aRValue, number(0.0));
+                    set_last_index(aR, aRValue, number(0.0), aState);
                 return false;
             }
             auto const start = static_cast<std::size_t>(lastIndex);
@@ -328,7 +340,7 @@ namespace neos::javascript_runtime
             if (result == regexp::match_result::NoMatch)
             {
                 if (global || sticky)
-                    set_last_index(aR, aRValue, number(0.0));
+                    set_last_index(aR, aRValue, number(0.0), aState);
                 return false;
             }
             auto index = captures[0];
@@ -336,13 +348,17 @@ namespace neos::javascript_runtime
                 index = static_cast<std::int32_t>(start);
             auto const e = captures[1];
             if (global || sticky)
-                set_last_index(aR, aRValue, number(e));
+                set_last_index(aR, aRValue, number(e), aState);
             if (aR.legacyFeaturesEnabled)
-                update_legacy_statics(aS, captures, index, program.captureCount);
+                update_legacy_statics(aState.legacy, aS, captures, index, program.captureCount);
             else
-                the_legacy().valid = false;
+                aState.legacy.valid = false;
             captures[0] = index;
             return true;
+        }
+        bool builtin_match(regexp_object& aR, value aRValue, value aS, std::vector<std::int32_t>& aCaptures)
+        {
+            return builtin_match(aR, aRValue, aS, aCaptures, the_regexp_state());
         }
 
         // (the groups object of a match (aGroupNames: by group (1...), the key of the name whose value it gives, or undefined))
@@ -427,18 +443,27 @@ namespace neos::javascript_runtime
         }
 
         // (whether the object's exec is %RegExp.prototype.exec% (a data property that we can use without calling it))
-        bool has_builtin_exec(regexp_object& r, regexp_state& aState)
+        bool find_builtin_exec(regexp_object& r, regexp_state& aState);
+        inline bool has_builtin_exec(regexp_object& r, regexp_state& aState)
         {
             if (!r.matcher || r.proto != the_realm().regexpPrototype)
                 return false;
-            auto const& keys = aState.k;
             // (a regexp of a shape known not to have its own exec, whose prototype (of the shape it had then) has the built-in at the 
             // position it had then)
             auto& p = obj(r.proto);
             auto const* ownShape = r.properties.layout();
             auto const* prototypeShape = p.properties.layout();
             if (ownShape != nullptr && ownShape == aState.execOwn && prototypeShape != nullptr && prototypeShape == aState.execPrototype)
-                return p.properties.value_at(aState.execPosition) == keys.execFunction;
+                return p.properties.value_at(aState.execPosition) == aState.k.execFunction;
+            return find_builtin_exec(r, aState);
+        }
+        bool find_builtin_exec(regexp_object& r, regexp_state& aState)
+        {
+            // (as has_builtin_exec, without the shapes it knows: found, and known)
+            auto const& keys = aState.k;
+            auto& p = obj(r.proto);
+            auto const* ownShape = r.properties.layout();
+            auto const* prototypeShape = p.properties.layout();
             if (r.own(keys.exec) != nullptr)
                 return false;
             auto const exec = p.own(keys.exec);
@@ -604,8 +629,9 @@ namespace neos::javascript_runtime
             // (a RegExp whose exec is the built-in, and a string: RegExpBuiltinExec's match (as below, without the steps that change 
             // nothing))
             if (auto* const r = as_regexp(aThis); r != nullptr)
-                if (auto const s = argument(aArguments, 0u); is_string(s) && has_builtin_exec(*r, the_regexp_state()))
-                    return boolean(builtin_match(*r, aThis, s, the_heap().regexpCaptures));
+                if (auto const s = argument(aArguments, 0u); is_string(s))
+                    if (auto& state = the_regexp_state(); has_builtin_exec(*r, state))
+                        return boolean(builtin_match(*r, aThis, s, the_heap().regexpCaptures, state));
             require_object(aThis, "test");
             auto const s = to_string(argument(aArguments, 0u));
             return boolean(regexp_exec(aThis, s, exec_kind::Test) != Null);
@@ -1138,13 +1164,73 @@ namespace neos::javascript_runtime
         return regexp_initialize(o, aPattern, aFlags);
     }
 
+    namespace
+    {
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        value regexp_test_call(value aCallee, value aThis, value aString)
+        {
+            value const parameters[] = { aString };
+            return regexp_prototype_test(aThis, parameters, Undefined, *as_function(aCallee));
+        }
+    }
+
     value regexp_test_direct(value aCallee, value aThis, value aString)
     {
-        // (as the built-in has it (its fast path first))
-        if (auto* const r = as_regexp(aThis); r != nullptr && is_string(aString) && has_builtin_exec(*r, the_regexp_state()))
-            return boolean(builtin_match(*r, aThis, aString, the_heap().regexpCaptures));
-        value const parameters[] = { aString };
-        return regexp_prototype_test(aThis, parameters, Undefined, *as_function(aCallee));
+        // (as the built-in has it (its fast path first; else the built-in called))
+        if (is_string(aString))
+            if (auto* const r = as_regexp(aThis); r != nullptr)
+                if (auto& state = the_regexp_state(); has_builtin_exec(*r, state))
+                {
+                    // (a set of words (see regexp::compile), neither global nor sticky, whose lastIndex is a number (its ToLength calls 
+                    // nothing, and it is not used): RegExpBuiltinExec's match here (one of its words: the whole string))
+                    auto const& program = *r->matcher;
+                    if (program.wordSet && (r->flagBits & (regexp::FlagGlobal | regexp::FlagSticky)) == 0u)
+                        if (auto const* k = known_last_index(*r, state); k != nullptr && is_number(r->properties.value_at(k->position)))
+                        {
+                            auto const text = str(aString);
+                            auto const length = text.size();
+                            if (length < program.shortestWord || length > program.longestWord)
+                                return False;
+                            bool found = false;
+                            for (auto const& word : program.words[length])
+                            {
+                                std::size_t i = 0u;
+                                while (i < length && word[i] == text[i])
+                                    ++i;
+                                if (i == length)
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found)
+                                return False;
+                            if (r->legacyFeaturesEnabled)
+                            {
+                                // (the match, and no captures)
+                                static constexpr std::int32_t sNone[std::size(legacy_statics{}.captures) - 2u] = { -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                                    -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+                                auto& legacy = state.legacy;
+                                legacy.valid = true;
+                                legacy.input = aString;
+                                legacy.subject = aString;
+                                legacy.captures[0] = 0;
+                                legacy.captures[1] = static_cast<std::int32_t>(length);
+                                std::memcpy(legacy.captures + 2, sNone, sizeof(sNone));
+                                legacy.lastParen[0] = -1;
+                                legacy.lastParen[1] = -1;
+                            }
+                            else
+                                state.legacy.valid = false;
+                            return True;
+                        }
+                    return boolean(builtin_match(*r, aThis, aString, the_heap().regexpCaptures, state));
+                }
+        return regexp_test_call(aCallee, aThis, aString);
     }
 
     void init_regexp(realm& aRealm)

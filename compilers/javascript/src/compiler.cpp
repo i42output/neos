@@ -1665,6 +1665,11 @@ namespace neos::compilers::javascript
         return global_index("%jscharcodeat", type::I64);
     }
 
+    std::uint32_t compiler::array_pop_global()
+    {
+        return global_index("%jsarraypop", type::I64);
+    }
+
     std::uint32_t compiler::array_push_global()
     {
         return global_index("%jsarraypush", type::I64);
@@ -1687,6 +1692,12 @@ namespace neos::compilers::javascript
         return global_index("%jsdirect" + std::to_string(aBuiltin), type::I64);
     }
 
+    std::uint32_t compiler::program_serial_global()
+    {
+        iProgramSerialUsed = true;
+        return global_index("%jsserial", type::I64);
+    }
+
     std::uint32_t compiler::allocation_state_global()
     {
         return global_index("%jsalloc", type::I64);
@@ -1694,9 +1705,40 @@ namespace neos::compilers::javascript
 
     std::uint32_t compiler::slow_function(std::uint32_t aRuntime, std::string const& aName, std::vector<type> const& aParameters, type aResult)
     {
-        // (the slow function (see define_slow_functions) of the runtime's function, if it has one)
+        // (the slow function of the runtime's function, if it has one (defined now, if it is not yet: a program (e.g. a dynamic function's)
+        // has those that its code calls))
         auto existing = iSlowFunctions.find(aName);
-        if (existing == iSlowFunctions.end() || existing->second.parameters != aParameters || aResult != type::I64)
+        if (existing == iSlowFunctions.end())
+        {
+            static char const* const sUnary[] = { "sloppy_this", "increment", "decrement", "global_get", "global_get_typeof" };
+            static char const* const sBinary[] = { "exponent", "multiply", "divide", "remainder", "add", "subtract", "shift_left", "shift_right",
+                "shift_right_unsigned", "less_than", "greater_than", "less_equal", "greater_equal", "instance_of", "in", "strict_equal_value",
+                "strict_not_equal", "equal", "not_equal", "bitwise_and", "bitwise_xor", "bitwise_or" };
+            std::vector<type> parameters;
+            if (std::find_if(std::begin(sUnary), std::end(sUnary), [&](char const* n) { return aName == n; }) != std::end(sUnary))
+                parameters = { type::I64 };
+            else if (std::find_if(std::begin(sBinary), std::end(sBinary), [&](char const* n) { return aName == n; }) != std::end(sBinary))
+                parameters = { type::I64, type::I64 };
+            else if (aName == "construct_this_cached")     // (a new expression's this, when the site's entry is not the callee's (or its slot is not taken here))
+                parameters = { type::I64, type::I32 };
+            else
+                return aRuntime;
+            function_signature signature;
+            signature.set_return_type(type::I64);
+            function_parameters signatureParameters;
+            for (auto const t : parameters)
+            {
+                function_parameter p;
+                p.set_parameter_type(t);
+                signatureParameters.push_back(p);
+            }
+            signature.set_parameters(signatureParameters);
+            auto const name = "%js.slow." + aName;
+            signature.set_name(neolib::string{ name });
+            auto const function = generator().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+            existing = iSlowFunctions.emplace(aName, slow_info{ function, std::nullopt, parameters }).first;
+        }
+        if (existing->second.parameters != aParameters || aResult != type::I64)
             return aRuntime;
         existing->second.runtime = aRuntime;
         return existing->second.function;
@@ -1704,35 +1746,8 @@ namespace neos::compilers::javascript
 
     void compiler::define_slow_functions()
     {
-        // (the slow functions (see slow_function): defined with the program's other functions (before their code))
-        static char const* const sUnary[] = { "sloppy_this", "increment", "decrement", "global_get", "global_get_typeof" };
-        static char const* const sBinary[] = { "exponent", "multiply", "divide", "remainder", "add", "subtract", "shift_left", "shift_right",
-            "shift_right_unsigned", "less_than", "greater_than", "less_equal", "greater_equal", "instance_of", "in", "strict_equal_value",
-            "strict_not_equal", "equal", "not_equal", "bitwise_and", "bitwise_xor", "bitwise_or" };
+        // (the slow functions (see slow_function): each is defined when the code first calls it)
         iSlowFunctions.clear();
-        auto const define = [&](std::string const& aName, std::vector<type> const& aParameters)
-        {
-            function_signature signature;
-            signature.set_return_type(type::I64);
-            function_parameters parameters;
-            for (auto const t : aParameters)
-            {
-                function_parameter p;
-                p.set_parameter_type(t);
-                parameters.push_back(p);
-            }
-            signature.set_parameters(parameters);
-            auto const name = "%js.slow." + aName;
-            signature.set_name(neolib::string{ name });
-            auto const function = generator().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
-            iSlowFunctions.emplace(aName, slow_info{ function, std::nullopt, aParameters });
-        };
-        for (auto const* n : sUnary)
-            define(n, { type::I64 });
-        for (auto const* n : sBinary)
-            define(n, { type::I64, type::I64 });
-        // (a new expression's this, when the site's entry is not the callee's (or its slot is not taken here))
-        define("construct_this_cached", { type::I64, type::I32 });
     }
 
     std::uint32_t compiler::tail_depth_global()

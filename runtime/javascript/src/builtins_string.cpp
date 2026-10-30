@@ -894,11 +894,47 @@ namespace neos::javascript_runtime
         return true;
     }
 
+    namespace
+    {
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        value string_slice_call(value aCallee, value aThis, value aStart, value aEnd)
+        {
+            value const parameters[] = { aStart, aEnd };
+            return string_slice(aThis, parameters, Undefined, *as_function(aCallee));
+        }
+    }
+
     value string_slice_direct(value aCallee, value aThis, value aStart, value aEnd)
     {
         // (a string's, with numbers: its ToIntegerOrInfinity's (which call nothing) relative to its length (as the built-in's are))
         if (is_string(aThis) && is_number(aStart) && (aEnd == Undefined || is_number(aEnd)))
         {
+            // (integers (the usual case): as integers)
+            auto const integer = [](value aPosition, std::int64_t& aResult)
+            {
+                auto const d = as_number(aPosition);
+                if (!(d >= -2147483648.0 && d <= 2147483647.0))
+                    return false;
+                aResult = static_cast<std::int64_t>(d);
+                return static_cast<double>(aResult) == d;
+            };
+            if (std::int64_t start, end; integer(aStart, start) && (aEnd == Undefined || integer(aEnd, end)))
+            {
+                auto const size = static_cast<std::int64_t>(cell_of<string>(aThis).length);
+                auto const clamp = [size](std::int64_t aPosition) { return aPosition < 0 ? std::max<std::int64_t>(size + aPosition, 0) : std::min(aPosition, size); };
+                auto const from = clamp(start);
+                auto const to = aEnd == Undefined ? size : clamp(end);
+                if (from >= to)
+                    return the_names().empty;
+                auto const count = static_cast<std::size_t>(to - from);
+                if (count <= string::SmallCapacity && static_cast<std::int64_t>(count) < size)
+                    return make_small_string(cell_of<string>(aThis).chars().substr(static_cast<std::size_t>(from), count));
+                return substring_of(aThis, static_cast<std::size_t>(from), count);
+            }
             auto const length = static_cast<double>(cell_of<string>(aThis).length);
             auto const relative = [length](double aPosition)
             {
@@ -911,10 +947,13 @@ namespace neos::javascript_runtime
             auto const to = aEnd == Undefined ? length : relative(as_number(aEnd));
             if (from >= to)
                 return the_names().empty;
-            return substring_of(aThis, static_cast<std::size_t>(from), static_cast<std::size_t>(to - from));
+            auto const start = static_cast<std::size_t>(from);
+            auto const count = static_cast<std::size_t>(to - from);
+            if (count <= string::SmallCapacity && count < cell_of<string>(aThis).length)
+                return make_small_string(cell_of<string>(aThis).chars().substr(start, count));     // (as substring_of makes it)
+            return substring_of(aThis, start, count);
         }
-        value const parameters[] = { aStart, aEnd };
-        return string_slice(aThis, parameters, Undefined, *as_function(aCallee));
+        return string_slice_call(aCallee, aThis, aStart, aEnd);
     }
 
     std::u16string get_substitution_text(std::u16string_view aMatched, std::u16string_view aString, std::size_t aPosition,

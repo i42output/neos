@@ -219,7 +219,7 @@ namespace neos::compilers::javascript
         // change a word of another; Any: any word (the default))
         enum class alias : std::uint32_t { Any, Shape, Values, Slot, Proto, Elements, Element, Env, EnvSlot, String, Site, Alloc, Function, Dictionary, Header, Validity };
         static alias alias_of_word(std::uint32_t aOffset, bool aArray);     ///< (a word (its offset) of an object's cell (an array's))
-        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, Count };
+        enum class stub : std::uint32_t { GetNamed, GetComputed, SetNamed, SetComputed, CalleeNumber, MethodNumber, GetLength, CharCodeAt, ToBoolean, ConstructNumber, ConstructThis, ArrayLiteral, ObjectLiteral, ArrayPush, ArrayPop, Count };
         void generate_stub(stub aStub);
         void generate_slow_function(std::uint32_t aFunction, std::optional<std::uint32_t> aRuntime, std::size_t aParameters);
         void call_stub(stub aStub);         ///< (a call of the stub (it is used))
@@ -229,7 +229,7 @@ namespace neos::compilers::javascript
         struct direct_builtin { std::string_view method; std::uint32_t minimumArguments; std::uint32_t maximumArguments; char const* runtime; };
         // (a null runtime function: the built-in itself is called (the runtime's native_direct with as many arguments as are passed))
         static constexpr direct_builtin DirectBuiltins[] = { { "slice", 1u, 2u, "slice_direct" }, { "test", 1u, 1u, "test_direct" },
-            { "pop", 0u, 0u, nullptr }, { "indexOf", 1u, 2u, nullptr }, { "hasOwnProperty", 1u, 1u, nullptr }, { "exec", 1u, 1u, nullptr },
+            { "indexOf", 1u, 2u, nullptr }, { "hasOwnProperty", 1u, 1u, nullptr }, { "exec", 1u, 1u, nullptr },
             { "assign", 2u, 3u, nullptr } };
     private:
         // control flow
@@ -293,6 +293,7 @@ namespace neos::compilers::javascript
         void get_length_stub();
         void char_code_at_stub();
         void array_push_stub();
+        void array_pop_stub();
         void to_boolean_stub();
         void construct_this_stub();
         void array_literal_stub();
@@ -394,6 +395,7 @@ namespace neos::compilers::javascript
         void unary(node* aNode);
         void binary(node* aNode);
         void logical(node* aNode);
+        bool boolean_expression(node* aNode) const;    ///< (an expression whose value is a boolean (true or false))
         void conditional(node* aNode);
         void array_literal(node* aNode);
         void object_literal(node* aNode);
@@ -580,14 +582,17 @@ namespace neos::compilers::javascript
         std::uint32_t char_code_at_global();    ///< (the global that holds %String.prototype.charCodeAt% (see function_generator::stub))
         std::uint32_t function_call_global();   ///< (the global that holds %Function.prototype.call% (f.call(t, ...) calls f if the callee is it))
         std::uint32_t array_push_global();      ///< (the global that holds %Array.prototype.push% (see function_generator::stub))
+        std::uint32_t array_pop_global();       ///< (the global that holds %Array.prototype.pop% (see function_generator::stub))
         std::uint32_t array_prototype_global(); ///< (the global that holds %Array.prototype%)
         std::uint32_t direct_builtin_global(std::uint32_t aBuiltin);    ///< (the global that holds the realm's built-in (see function_generator::direct_builtins))
         std::uint32_t allocation_state_global();    ///< (the global (an i64): the region offset of the isolate's allocation state)
+        std::uint32_t program_serial_global();  ///< (the global (an i64): the program's serial (its functions' dispatch keys' high half))
         // (a function of the program's that calls the runtime's function (its index) with its arguments: slow paths call it rather than
         // the runtime's, so that an optimizing tier that inlines it can leave for the function's own code there (see the VM's deopt)
         // rather than make the call, and so know more about the code after it)
         std::uint32_t slow_function(std::uint32_t aRuntime, std::string const& aName, std::vector<type> const& aParameters, type aResult);
-        void define_slow_functions();
+        void define_slow_functions();       ///< (none yet: each is defined when the code first calls it (see slow_function))
+        std::uint32_t stub_function(function_generator::stub aStub);   ///< (the stub's function (defined when the code first calls it))
         std::uint32_t tail_depth_global();      ///< (the global (an i64): the tail calls made as calls that are running (see call_value))
         std::uint32_t source_line_of(std::string_view aSource) const;
         mutable std::vector<std::size_t> iNewlines;     ///< (see source_line_of)
@@ -614,10 +619,12 @@ namespace neos::compilers::javascript
         std::map<function_info const*, std::uint32_t> iClosures;  ///< (function declarations -> the globals that hold their function objects)
         std::uint32_t iDispatcher = 0u;
         bool iFunctionCallUsed = false;         ///< (function_call_global is used: the program's start sets it)
+        bool iProgramSerialUsed = false;        ///< (program_serial_global is used: the program's start sets it)
         std::uint32_t iDirectBuiltinsUsed = 0u; ///< (by bit: the direct built-ins whose globals are used (the program's start sets them))
         bool iDirectDispatch = false;           ///< (the program's functions are called directly (call_indirect): their indices are consecutive)
         std::uint32_t iDispatchSignature = 0u;  ///< (their signature (an indirect signature))
-        std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub)
+        static constexpr std::uint32_t NoStub = ~std::uint32_t{};
+        std::uint32_t iStubs[static_cast<std::size_t>(function_generator::stub::Count)] = {};   ///< (see function_generator::stub; NoStub: not defined)
         bool iStubsUsed[static_cast<std::size_t>(function_generator::stub::Count)] = {};
         struct slow_info { std::uint32_t function; std::optional<std::uint32_t> runtime; std::vector<type> parameters; };
         std::map<std::string, slow_info> iSlowFunctions;    ///< (by the runtime's function's name: see slow_function)

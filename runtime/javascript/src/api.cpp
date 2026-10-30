@@ -1084,14 +1084,12 @@ namespace neos::javascript_runtime
             case 1:
                 return r.regexpTest;
             case 2:
-                return r.arrayPop;
-            case 3:
                 return r.stringIndexOf;
-            case 4:
+            case 3:
                 return r.hasOwnProperty;
-            case 5:
+            case 4:
                 return r.regexpExec;
-            case 6:
+            case 5:
                 return r.objectAssign;
             default:
                 return Undefined;
@@ -1108,6 +1106,21 @@ namespace neos::javascript_runtime
         {
             // (the realm's %Array.prototype.push%: compiled code's a.push(x) is its own if the callee is it (see the push stub))
             return the_realm().arrayPush;
+        }
+
+        value array_pop_function()
+        {
+            // (the realm's %Array.prototype.pop%: compiled code's a.pop() is its own if the callee is it (see the pop stub))
+            return the_realm().arrayPop;
+        }
+
+        value array_pop_one(value aCallee, value aThis)
+        {
+            // (a.pop() that the pop stub does not do itself: the callee called)
+            return guard([&]() -> value
+            {
+                return javascript_runtime::call(aCallee, aThis, {});
+            });
         }
 
         value array_prototype_value()
@@ -1805,6 +1818,12 @@ namespace neos::javascript_runtime
                 std::fprintf(stderr, "neos: out of memory\n");
                 std::abort();
             }
+        }
+
+        value program_serial()
+        {
+            // (the running program's serial (its functions' dispatch keys' high half: see function_object::dispatch))
+            return static_cast<value>(the_heap().program_serial(current_program()));
         }
 
         value allocation_state_offset()
@@ -2618,6 +2637,8 @@ namespace neos::javascript_runtime
             { "char_code_at", NEOS_RT_FUNCTION(char_code_at), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_tail", NEOS_RT_FUNCTION(char_code_at_tail), I64, 3u, { I64, I64, I64 }, 0u },
             { "char_code_at_function", NEOS_RT_FUNCTION(char_code_at_function), I64, 0u, {}, 0u },
+            { "array_pop_function", NEOS_RT_FUNCTION(array_pop_function), I64, 0u, {}, 0u },
+            { "array_pop_one", NEOS_RT_FUNCTION(array_pop_one), I64, 2u, { I64, I64 }, 0u },
             { "slice_direct", NEOS_RT_FUNCTION(slice_direct), I64, 4u, { I64, I64, I64, I64 }, 0u },
             { "test_direct", NEOS_RT_FUNCTION(test_direct), I64, 3u, { I64, I64, I64 }, 0u },
             { "direct_builtin_function", NEOS_RT_FUNCTION(direct_builtin_function), I64, 1u, { I32 }, 0u },
@@ -2644,6 +2665,7 @@ namespace neos::javascript_runtime
             { "construct_number_cached", NEOS_RT_FUNCTION(construct_number_cached), I32, 2u, { I64, I32 }, 0u },
             { "construct_this_cached", NEOS_RT_FUNCTION(construct_this_cached), I64, 2u, { I64, I32 }, 0u },
             { "allocation_state", NEOS_RT_FUNCTION(allocation_state_offset), I64, 0u, {}, 0u },
+            { "program_serial", NEOS_RT_FUNCTION(program_serial), I64, 0u, {}, 0u },
             { "allocate_slot", NEOS_RT_FUNCTION(allocate_slot), I64, 1u, { I32 }, NEOS_RT_COMMON },
             { "array_literal", NEOS_RT_FUNCTION(array_literal), I64, 2u, { I32, I32 }, 0u },
             { "object_literal_remember", NEOS_RT_FUNCTION(object_literal_remember), I64, 3u, { I64, I32, I32 }, 0u },

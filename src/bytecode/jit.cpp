@@ -2895,9 +2895,9 @@ namespace neos
                             // prologue (aligned, so that the speed of its code (e.g. its loops' jumps) does not depend on the code before it)
                             a.align(FunctionAlignment);
                             a.bind(function_label(aIndex));
-                            // (a function that the optimizing tier inlines (it has no frame of its own: a language's helper) is not optimized
-                            // itself: its callers are)
-                            if (iCounters != nullptr && !iModule.functions[aIndex].frameless)
+                            // (a function that the optimizing tier inlines (it has no frame of its own: a language's helper) is optimized
+                            // itself too: callers that are not optimized (e.g. while they warm up) call it)
+                            if (iCounters != nullptr)
                                 tier_entry(aIndex);
                             a.push(RBP);
                             a.mov_rr(true, RBP, RSP);
@@ -9351,12 +9351,15 @@ namespace neos
                                 generator.generate_lazy(m, aFunction, compiled);
                                 compiled.frame.valid = compiled.frame.valid && m.tiering;
                                 bytes& code = generator.code();
-                                // (in the last region, after the code there (a new region if it has no room))
+                                // (in the last region, after the code there (a new region if it has no room: the first small (a module 
+                                // may have few functions called, e.g. a dynamic function's), each one twice the last, up to RegionSize))
                                 constexpr std::size_t RegionSize = std::size_t{ 1u } << 20u;
+                                constexpr std::size_t FirstRegionSize = std::size_t{ 1u } << 14u;
                                 constexpr std::size_t Alignment = 64u;
                                 if (m.lazyRegions.empty() || m.lazyRegions.back().size - m.lazyRegions.back().used < code.size() + Alignment)
                                 {
-                                    auto const size = std::max(RegionSize, (code.size() + Alignment + 4095u) & ~std::size_t{ 4095u });
+                                    auto const next = m.lazyRegions.empty() ? FirstRegionSize : std::min(RegionSize, m.lazyRegions.back().size * 2u);
+                                    auto const size = std::max(next, (code.size() + Alignment + 4095u) & ~std::size_t{ 4095u });
                                     bytes empty(size, 0xCCu);
                                     compiled_module::tier_chunk chunk;
                                     chunk.code = allocate_executable(empty, chunk.size);

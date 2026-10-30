@@ -42,6 +42,7 @@
 
 #include <neolib/neolib.hpp>
 #include <algorithm>
+#include <bit>
 #include <set>
 #include <cmath>
 #include <charconv>
@@ -463,42 +464,7 @@ namespace neos::compilers::javascript
             // (the property caches' stubs (see function_generator::stub)), and the slow paths' functions
             define_slow_functions();
             std::fill(std::begin(iStubsUsed), std::end(iStubsUsed), false);
-            {
-                struct stub_signature { char const* name; std::vector<type> parameters; type result; };
-                stub_signature const stubs[] =
-                {
-                    { "%js.get_named", { I64, I64, I32 }, I64 },
-                    { "%js.get_computed", { I64, I64, I32 }, I64 },
-                    { "%js.set_named", { I64, I64, I64, I32, I32 }, I64 },
-                    { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
-                    { "%js.callee_number", { I64, I32 }, I32 },
-                    { "%js.method_number", { I64, I32 }, I32 },
-                    { "%js.get_length", { I64, I32 }, I64 },
-                    { "%js.char_code_at", { I64, I64, I64, I32 }, I64 },
-                    { "%js.to_boolean", { I64 }, I32 },
-                    { "%js.construct_number", { I64, I32 }, I32 },
-                    { "%js.construct_this", { I64, I32 }, I64 },
-                    { "%js.array_literal", { I32, I32 }, I64 },
-                    { "%js.object_literal", { I32, I32 }, I64 },
-                    { "%js.array_push", { I64, I64, I64 }, I64 }
-                };
-                static_assert(std::size(stubs) == static_cast<std::size_t>(function_generator::stub::Count));
-                for (std::size_t i = 0u; i < std::size(stubs); ++i)
-                {
-                    function_signature signature;
-                    signature.set_return_type(stubs[i].result);
-                    function_parameters parameters;
-                    for (auto t : stubs[i].parameters)
-                    {
-                        function_parameter p;
-                        p.set_parameter_type(t);
-                        parameters.push_back(p);
-                    }
-                    signature.set_parameters(parameters);
-                    signature.set_name(neolib::string{ stubs[i].name });
-                    iStubs[i] = generator().define_function(neolib::string{ stubs[i].name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
-                }
-            }
+            std::fill(std::begin(iStubs), std::end(iStubs), NoStub);
             // (each function's code)
             for (auto* f : all)
             {
@@ -506,10 +472,33 @@ namespace neos::compilers::javascript
                 if ((f->generator || f->async) && !f->script)
                     function_generator{ *this, *f, true }.generate();
             }
-            for (std::size_t i = 0u; i < static_cast<std::size_t>(function_generator::stub::Count); ++i)
-                function_generator{ *this, *all.front() }.generate_stub(static_cast<function_generator::stub>(i));
-            for (auto const& [name, slow] : iSlowFunctions)
-                function_generator{ *this, *all.front() }.generate_slow_function(slow.function, slow.runtime, slow.parameters.size());
+            // (the stubs and slow functions that the code calls (a stub's code may call others: until there are no more))
+            {
+                bool stubsGenerated[static_cast<std::size_t>(function_generator::stub::Count)] = {};
+                std::set<std::string> slowGenerated;
+                for (bool more = true; more;)
+                {
+                    more = false;
+                    for (std::size_t i = 0u; i < static_cast<std::size_t>(function_generator::stub::Count); ++i)
+                        if (iStubs[i] != NoStub && !stubsGenerated[i])
+                        {
+                            stubsGenerated[i] = true;
+                            function_generator{ *this, *all.front() }.generate_stub(static_cast<function_generator::stub>(i));
+                            more = true;
+                        }
+                    std::vector<std::string> names;
+                    for (auto const& entry : iSlowFunctions)
+                        if (!slowGenerated.contains(entry.first))
+                            names.push_back(entry.first);
+                    for (auto const& name : names)
+                    {
+                        slowGenerated.insert(name);
+                        auto const& slow = iSlowFunctions.at(name);
+                        function_generator{ *this, *all.front() }.generate_slow_function(slow.function, slow.runtime, slow.parameters.size());
+                        more = true;
+                    }
+                }
+            }
             // the dispatcher's code: a binary search of the function numbers (each leaf calls its function and returns)
             {
                 std::vector<std::uint32_t> targets;
@@ -583,7 +572,8 @@ namespace neos::compilers::javascript
             }
             if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ConstructThis)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayLiteral)] ||
                 iStubsUsed[static_cast<std::size_t>(function_generator::stub::ObjectLiteral)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetNamed)] ||
-                iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetComputed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetNamed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetComputed)])
+                iStubsUsed[static_cast<std::size_t>(function_generator::stub::GetComputed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetNamed)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::SetComputed)] ||
+                iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPop)])
             {
                 // (the isolate's allocation state: the construct this stub's (its region offset))
                 call("javascript::allocation_state", {}, I64);
@@ -592,14 +582,26 @@ namespace neos::compilers::javascript
                 call("javascript::fixed_global", { I64, I32 }, I64);
                 put_op(code, opcode::Drop);
             }
-            if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)])
+            if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)] || iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPop)])
             {
-                // (%Array.prototype.push% and %Array.prototype%: the push stub compares callees and arrays' prototypes with them)
-                call("javascript::array_push_function", {}, I64);
-                put_op(code, opcode::I32Const);
-                put_s64(code, static_cast<std::int32_t>(array_push_global()));
-                call("javascript::fixed_global", { I64, I32 }, I64);
-                put_op(code, opcode::Drop);
+                // (%Array.prototype.push%, %Array.prototype.pop% and %Array.prototype%: the push and pop stubs compare callees and arrays' 
+                // prototypes with them)
+                if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPush)])
+                {
+                    call("javascript::array_push_function", {}, I64);
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(array_push_global()));
+                    call("javascript::fixed_global", { I64, I32 }, I64);
+                    put_op(code, opcode::Drop);
+                }
+                if (iStubsUsed[static_cast<std::size_t>(function_generator::stub::ArrayPop)])
+                {
+                    call("javascript::array_pop_function", {}, I64);
+                    put_op(code, opcode::I32Const);
+                    put_s64(code, static_cast<std::int32_t>(array_pop_global()));
+                    call("javascript::fixed_global", { I64, I32 }, I64);
+                    put_op(code, opcode::Drop);
+                }
                 call("javascript::array_prototype_value", {}, I64);
                 put_op(code, opcode::I32Const);
                 put_s64(code, static_cast<std::int32_t>(array_prototype_global()));
@@ -627,6 +629,15 @@ namespace neos::compilers::javascript
                     call("javascript::fixed_global", { I64, I32 }, I64);
                     put_op(code, opcode::Drop);
                 }
+            if (iProgramSerialUsed)
+            {
+                // (the program's serial: the callee number stub's megamorphic sites read their callees' numbers from their dispatch keys)
+                call("javascript::program_serial", {}, I64);
+                put_op(code, opcode::I32Const);
+                put_s64(code, static_cast<std::int32_t>(program_serial_global()));
+                call("javascript::fixed_global", { I64, I32 }, I64);
+                put_op(code, opcode::Drop);
+            }
             if (iFunctionCallUsed)
             {
                 // (%Function.prototype.call%: f.call(t, ...) compares callees with it)
@@ -1238,8 +1249,9 @@ namespace neos::compilers::javascript
                     op(opcode::I64Xor);
                     i64(static_cast<std::int64_t>(layout::MegamorphicEntries - 1u));
                     op(opcode::I64And);
-                    i64(static_cast<std::int64_t>(layout::MegamorphicEntrySize));
-                    op(opcode::I64Mul);
+                    static_assert((layout::MegamorphicEntrySize & (layout::MegamorphicEntrySize - 1u)) == 0u);
+                    i64(static_cast<std::int64_t>(std::countr_zero(layout::MegamorphicEntrySize)));
+                    op(opcode::I64Shl);     // (a shift: its range is known (the entry's address within the table))
                     op(opcode::I64Add);
                     tee(entry);
                     mem_load(opcode::I64LoadMem, 0u, alias::Site);
@@ -1572,8 +1584,8 @@ namespace neos::compilers::javascript
             op(opcode::I64Xor);
             i64(static_cast<std::int64_t>(layout::MegamorphicEntries - 1u));
             op(opcode::I64And);
-            i64(static_cast<std::int64_t>(layout::MegamorphicEntrySize));
-            op(opcode::I64Mul);
+            i64(static_cast<std::int64_t>(std::countr_zero(layout::MegamorphicEntrySize)));
+            op(opcode::I64Shl);     // (a shift: its range is known (the entry's address within the table))
             op(opcode::I64Add);
             tee(entry);
             mem_load(opcode::I64LoadMem, 0u, alias::Site);
@@ -1668,8 +1680,8 @@ namespace neos::compilers::javascript
                 op(opcode::I64Xor);
                 i64(static_cast<std::int64_t>(layout::MegamorphicEntries - 1u));
                 op(opcode::I64And);
-                i64(static_cast<std::int64_t>(layout::MegamorphicEntrySize));
-                op(opcode::I64Mul);
+                i64(static_cast<std::int64_t>(std::countr_zero(layout::MegamorphicEntrySize)));
+                op(opcode::I64Shl);     // (a shift: its range is known (the entry's address within the table))
                 op(opcode::I64Add);
                 tee(entry);
                 mem_load(opcode::I64LoadMem, 0u, alias::Site);
@@ -2669,6 +2681,157 @@ namespace neos::compilers::javascript
         release(cell);
     }
 
+    void function_generator::array_pop_stub()
+    {
+        // (the pop stub's code (its parameters: callee, this): a.pop(): if the callee is the realm's %Array.prototype.pop%, a plain array
+        // (as the push stub's) of elements (as many as its length, at least one) whose last (and, if it has more, the one before it) is 
+        // not a hole, and the prototypes plain (see the push stub): its last element (its number and length one less); else the 
+        // runtime's array_pop_one (the callee called))
+        std::uint32_t const callee = 0u, thisValue = 1u;
+        auto const cell = temporary();
+        auto const size = temporary();
+        auto const prototype = temporary();
+        auto const elements = temporary();
+        auto const element = temporary();
+        begin(control_kind::Block, I64);
+        auto const done = iControls.size() - 1u;
+        begin(control_kind::Block);
+        {
+            auto const miss = iControls.size() - 1u;
+            get(callee);
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_pop_global());
+            op(opcode::I64Ne);
+            get(thisValue);
+            constant(0xFFFF000000000000ull);
+            op(opcode::I64And);
+            constant(values::TagObject);
+            op(opcode::I64Ne);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            cell_of(thisValue);
+            tee(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectClass, alias::Header);
+            i32(layout::ClassArray);
+            op(opcode::I32Ne);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
+            op(opcode::I32Ior);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ObjectExtensible, alias::Header);
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+            get(cell);
+            mem_load(opcode::I32LoadMem8U, layout::ArrayLengthWritable, alias::Elements);
+            op(opcode::I32Eqz);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(cell);
+            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_prototype_global());
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (its elements: as many as its length, at least one)
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ArrayElements + 8u, alias::Elements);
+            tee(size);
+            get(cell);
+            mem_load(opcode::I64LoadMem32U, layout::ArrayLength, alias::Elements);
+            op(opcode::I64Ne);
+            get(size);
+            op(opcode::I64Eqz);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            // (the prototypes: as the runtime last found them plain)
+            op(opcode::GlobalGet);
+            u32(iCompiler.array_prototype_global());
+            set(prototype);
+            cell_of(prototype);
+            tee(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays);
+            op(opcode::I64Ne);
+            get(prototype);
+            mem_load(opcode::I32LoadMem8U, layout::ArraySparse, alias::Elements);
+            op(opcode::I32Ior);
+            get(prototype);
+            mem_load(opcode::I32LoadMem, layout::ArrayElements + 8u, alias::Elements);
+            op(opcode::I32Ior);
+            branch(miss, true);
+            get(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            tee(prototype);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 8u);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            cell_of(prototype);
+            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 16u);
+            op(opcode::I64Ne);
+            branch(miss, true);
+            // (its last element (not a hole), and the one before it (if it has one: not a hole, so that the elements left need no 
+            // trailing holes removed))
+            get(cell);
+            offset_load(layout::ArrayElements, alias::Elements);
+            get(size);
+            i64(3);
+            op(opcode::I64Shl);
+            op(opcode::I64Add);
+            tee(elements);
+            i64(8);
+            op(opcode::I64Sub);
+            mem_load(opcode::I64LoadMem, 0u, alias::Element);
+            tee(element);
+            constant(values::Empty);
+            op(opcode::I64Eq);
+            branch(miss, true);
+            get(size);
+            i64(1);
+            op(opcode::I64GtU);
+            op(opcode::If);
+            iCode.push_back(0x40u);
+            iControls.push_back(control{ control_kind::Block });
+            get(elements);
+            i64(16);
+            op(opcode::I64Sub);
+            mem_load(opcode::I64LoadMem, 0u, alias::Element);
+            constant(values::Empty);
+            op(opcode::I64Eq);
+            branch(miss, true);
+            end_control();
+            // (its number and length)
+            get(size);
+            i64(1);
+            op(opcode::I64Sub);
+            set(size);
+            get(cell);
+            get(size);
+            mem_store(opcode::I64StoreMem32, layout::ArrayElements + 8u, alias::Elements);
+            get(cell);
+            get(size);
+            mem_store(opcode::I64StoreMem32, layout::ArrayLength, alias::Elements);
+            get(element);
+            branch(done, false);
+        }
+        end_control();
+        get(callee);
+        get(thisValue);
+        runtime("array_pop_one", { I64, I64 }, I64);
+        end_control();
+        release(element);
+        release(elements);
+        release(prototype);
+        release(size);
+        release(cell);
+    }
+
     void function_generator::array_element(std::uint32_t aObject, std::uint32_t aKey, std::uint32_t aAddress, std::size_t aMiss)
     {
         // (an array (not sparse) and a number that is an index (an integer in [0, 2^32 - 1)) below the number of its elements)
@@ -2730,7 +2893,49 @@ namespace neos::compilers::javascript
     void function_generator::call_stub(stub aStub)
     {
         iCompiler.iStubsUsed[static_cast<std::size_t>(aStub)] = true;
-        call(iCompiler.iStubs[static_cast<std::size_t>(aStub)]);
+        call(iCompiler.stub_function(aStub));
+    }
+
+    std::uint32_t compiler::stub_function(function_generator::stub aStub)
+    {
+        // (the stub's function: defined when the code first calls it (a program (e.g. a dynamic function's) has those that its code calls))
+        auto& index = iStubs[static_cast<std::size_t>(aStub)];
+        if (index != NoStub)
+            return index;
+        struct stub_signature { char const* name; std::vector<type> parameters; type result; };
+        static stub_signature const sStubs[] =
+        {
+            { "%js.get_named", { I64, I64, I32 }, I64 },
+            { "%js.get_computed", { I64, I64, I32 }, I64 },
+            { "%js.set_named", { I64, I64, I64, I32, I32 }, I64 },
+            { "%js.set_computed", { I64, I64, I64, I32 }, I64 },
+            { "%js.callee_number", { I64, I32 }, I32 },
+            { "%js.method_number", { I64, I32 }, I32 },
+            { "%js.get_length", { I64, I32 }, I64 },
+            { "%js.char_code_at", { I64, I64, I64, I32 }, I64 },
+            { "%js.to_boolean", { I64 }, I32 },
+            { "%js.construct_number", { I64, I32 }, I32 },
+            { "%js.construct_this", { I64, I32 }, I64 },
+            { "%js.array_literal", { I32, I32 }, I64 },
+            { "%js.object_literal", { I32, I32 }, I64 },
+            { "%js.array_push", { I64, I64, I64 }, I64 },
+            { "%js.array_pop", { I64, I64 }, I64 }
+        };
+        static_assert(std::size(sStubs) == static_cast<std::size_t>(function_generator::stub::Count));
+        auto const& s = sStubs[static_cast<std::size_t>(aStub)];
+        function_signature signature;
+        signature.set_return_type(s.result);
+        function_parameters parameters;
+        for (auto t : s.parameters)
+        {
+            function_parameter p;
+            p.set_parameter_type(t);
+            parameters.push_back(p);
+        }
+        signature.set_parameters(parameters);
+        signature.set_name(neolib::string{ s.name });
+        index = generator().define_function(neolib::string{ s.name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+        return index;
     }
 
     void function_generator::generate_stub(stub aStub)
@@ -2767,6 +2972,10 @@ namespace neos::compilers::javascript
         case stub::ArrayPush:
             iParameterCount = 3u;
             array_push_stub();
+            break;
+        case stub::ArrayPop:
+            iParameterCount = 2u;
+            array_pop_stub();
             break;
         case stub::ConstructThis:
             iParameterCount = 2u;
@@ -6217,14 +6426,75 @@ namespace neos::compilers::javascript
         get(entry);
         mem_load(opcode::I32LoadMem, jsl::SiteEntrySize + jsl::SiteNumber, alias::Site);
         op(opcode::Else);
-        get(aCallee);
-        if (aStub != stub::MethodNumber)
+        if (aStub == stub::CalleeNumber)
         {
+            // (a call's site whose entries are both used (it has had more callees: it is megamorphic): the callee's number from its
+            // dispatch key (a function of the program's: the program's serial and its number), not remembered (its entries stay); else
+            // the runtime's (remembered))
+            get(entry);
+            mem_load(opcode::I64LoadMem, jsl::SiteEntrySize + jsl::SiteFunction, alias::Site);
+            op(opcode::I64Eqz);
+            op(opcode::If);
+            iCode.push_back(0x7Fu);
+            iControls.push_back(control{ control_kind::Block });
+            get(aCallee);
             get(site);
-            runtime(aStub == stub::CalleeNumber ? "callee_number_cached" : "construct_number_cached", { I64, I32 }, I32);
+            runtime("callee_number_cached", { I64, I32 }, I32);
+            op(opcode::Else);
+            {
+                auto const key = temporary();
+                get(aCallee);
+                constant(0xFFFF000000000000ull);
+                op(opcode::I64And);
+                constant(values::TagObject);
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Fu);
+                iControls.push_back(control{ control_kind::Block });
+                cell_of(aCallee);
+                cached_load(opcode::I32LoadMem8U, jsl::ObjectClass, alias::Header);
+                i32(static_cast<std::int32_t>(jsl::ClassFunction));
+                op(opcode::I32Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Fu);
+                iControls.push_back(control{ control_kind::Block });
+                cell_of(aCallee);
+                cached_load(opcode::I64LoadMem, jsl::FunctionDispatch, alias::Function);
+                tee(key);
+                i64(32);
+                op(opcode::I64ShrU);
+                op(opcode::GlobalGet);
+                u32(iCompiler.program_serial_global());
+                op(opcode::I64Eq);
+                op(opcode::If);
+                iCode.push_back(0x7Fu);
+                iControls.push_back(control{ control_kind::Block });
+                get(key);
+                op(opcode::I32ConvertI64);
+                op(opcode::Else);
+                i32(-1);
+                end_control();
+                op(opcode::Else);
+                i32(-1);
+                end_control();
+                op(opcode::Else);
+                i32(-1);
+                end_control();
+                release(key);
+            }
+            end_control();
         }
         else
-            runtime("callee_number", { I64 }, I32);
+        {
+            get(aCallee);
+            if (aStub != stub::MethodNumber)
+            {
+                get(site);
+                runtime("construct_number_cached", { I64, I32 }, I32);
+            }
+            else
+                runtime("callee_number", { I64 }, I32);
+        }
         end_control();
         end_control();
         release(entry);
@@ -6290,11 +6560,12 @@ namespace neos::compilers::javascript
             runtime("push_arg", { I64 }, I64);
             drop();
         }
-        if (aTail && argc <= RegisterArguments)
+        if (aTail)
         {
             // (a tail call of the program's function: a call (through the dispatcher) while the program's tail calls made as calls are
             // fewer than TailCallDepth (they are nested: each one's frame remains), else (and a tail call of another callee) made by 
-            // the caller once this function has returned (the stack does not grow))
+            // the caller once this function has returned (the stack does not grow); the arguments beyond the registers' (pushed above) 
+            // are popped once it returns)
             auto const depth = iCompiler.tail_depth_global();
             auto const number = temporary(I32);
             callee_number_of(aCallee, aSite);
@@ -6352,22 +6623,6 @@ namespace neos::compilers::javascript
             }
             end_control();
             release(number);
-            return;
-        }
-        if (aTail)
-        {
-            // (a tail call: made by the caller once this function has returned)
-            get(aCallee);
-            get(aThis);
-            i32(static_cast<std::int32_t>(argc));
-            for (std::uint32_t i = 0u; i < RegisterArguments; ++i)
-            {
-                if (i < values.size())
-                    get(values[i]);
-                else
-                    undefined();
-            }
-            runtime("tail_call", { I64, I64, I32, I64, I64, I64, I64 }, I64);
             if (argc > RegisterArguments)
             {
                 auto const result = temporary();
@@ -6717,6 +6972,18 @@ namespace neos::compilers::javascript
             if (!tail)
                 check();
             release(position);
+            release(thisValue);
+            release(callee);
+            return;
+        }
+        if (calleeNode->is(construct::Dot) && name_of(calleeNode->child(1u)) == "pop" && arguments.empty() && !tail_call(aNode))
+        {
+            // (a.pop(): the element popped directly if the callee is the built-in and a a plain array (see the pop stub); else the 
+            // callee is called)
+            get(callee);
+            get(thisValue);
+            call_stub(stub::ArrayPop);
+            check();
             release(thisValue);
             release(callee);
             return;
@@ -7665,9 +7932,55 @@ namespace neos::compilers::javascript
         release(tags);
     }
 
+    bool function_generator::boolean_expression(node* aNode) const
+    {
+        // (comparisons, !, and && and || of them: their value is true or false)
+        while (aNode->is(construct::Parenthesized) && aNode->size() == 1u)
+            aNode = aNode->child(0u);
+        switch (aNode->kind)
+        {
+        case construct::True:
+        case construct::False:
+        case construct::Not:
+        case construct::LessThan:
+        case construct::GreaterThan:
+        case construct::LessEqual:
+        case construct::GreaterEqual:
+        case construct::StrictEqual:
+        case construct::StrictNotEqual:
+        case construct::Equal:
+        case construct::NotEqual:
+            return true;
+        case construct::And:
+        case construct::Or:
+            return aNode->size() == 2u && boolean_expression(aNode->child(0u)) && boolean_expression(aNode->child(1u));
+        default:
+            return false;
+        }
+    }
+
     void function_generator::logical(node* aNode)
     {
         // a && b, a || b, a ?? b: the value of the operand that decides
+        if (!aNode->is(construct::Coalesce) && boolean_expression(aNode->child(0u)))
+        {
+            // (a boolean first operand: its condition decides (a || b: true, else b; a && b: b, else false))
+            condition(aNode->child(0u));
+            op(opcode::If);
+            iCode.push_back(0x7Eu);
+            iControls.push_back(control{ control_kind::Block });
+            if (aNode->is(construct::Or))
+                constant(values::True);
+            else
+                expression(aNode->child(1u));
+            op(opcode::Else);
+            if (aNode->is(construct::Or))
+                expression(aNode->child(1u));
+            else
+                constant(values::False);
+            end_control();
+            return;
+        }
         expression(aNode->child(0u));
         auto const value = temporary();
         tee(value);

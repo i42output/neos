@@ -2667,6 +2667,35 @@ namespace neos::javascript_runtime::regexp
             aCaptures[1] = static_cast<std::int32_t>(aInput.size());
             return match_result::Match;
         }
+        // (no code unit (from the start; sticky: at it) that a match can start with: none (the matcher's state is not read))
+        if (!aProgram.prefix.empty())
+        {
+            if (!aSticky && find_prefix(aProgram, aInput, aStart) == std::u16string_view::npos)
+                return match_result::NoMatch;
+        }
+        else if (aProgram.hasFirstChar)
+        {
+            if (aSticky ? (aStart >= aInput.size() || aInput[aStart] != aProgram.firstChar) : aInput.find(aProgram.firstChar, aStart) == std::u16string_view::npos)
+                return match_result::NoMatch;
+        }
+        else if (aProgram.hasFirstSet)
+        {
+            auto const& firstSet = aProgram.firstSet;
+            auto const first = [&](char32_t c) { return c < 128u ? ((firstSet.ascii[c >> 6u] >> (c & 63u)) & 1u) != 0u : contains(firstSet.ranges, c); };
+            auto pos = aStart;
+            if (aSticky)
+            {
+                if (pos >= aInput.size() || !first(aInput[pos]))
+                    return match_result::NoMatch;
+            }
+            else
+            {
+                while (pos < aInput.size() && !first(aInput[pos]))
+                    ++pos;
+                if (pos >= aInput.size())
+                    return match_result::NoMatch;
+            }
+        }
         return run(aProgram, aInput, aStart, aSticky, aCaptures);
     }
 
