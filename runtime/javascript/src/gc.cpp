@@ -40,6 +40,9 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#if defined(_MSC_VER)
+#include <xmmintrin.h>
+#endif
 #include <neos/language/javascript.hpp>
 #include "js.hpp"
 #include "gc.hpp"
@@ -1370,8 +1373,19 @@ namespace neos::javascript_runtime
             auto* slot = start;
             auto handle = first;
             auto offset = startOffset;
+            // (the slots ahead fetched while one is swept: its memory is seldom in the caches)
+            auto const ahead = static_cast<std::size_t>(slotSize) * 8u;
+            auto* const end = start + count * slotSize;
             for (std::size_t i = 0u; i < count; ++i, slot += slotSize, handle += step, offset += slotSize)
             {
+                if (slot + ahead < end)
+                {
+#if defined(_MSC_VER)
+                    _mm_prefetch(reinterpret_cast<char const*>(slot + ahead), _MM_HINT_T0);
+#else
+                    __builtin_prefetch(slot + ahead, 1);
+#endif
+                }
                 std::uint32_t h;
                 std::memcpy(&h, slot + handleOffset, sizeof(h));
                 if (h == handle)
