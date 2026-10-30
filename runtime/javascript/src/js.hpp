@@ -708,12 +708,10 @@ namespace neos::javascript_runtime
         region_u16string const& flat();
         std::u16string_view chars()     ///< (its code units (a rope is flattened; a slice's are its base's))
         {
-            if (smallText)
-                return std::u16string_view{ small, length };
-            if (base != 0u && text.empty())
+            // (not a rope: its code units are at charsOffset (as compiled code reads them), whether they are its small text's, its text's 
+            // or its base's)
+            if (charsOffset != 0u)
                 return std::u16string_view{ reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length };
-            if (left == 0u)
-                return std::u16string_view{ text.data(), text.size() };     // (flat: its text (as flat() would return it))
             return std::u16string_view{ flat() };
         }
         std::size_t hash();

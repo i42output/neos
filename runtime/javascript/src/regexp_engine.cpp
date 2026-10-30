@@ -2042,6 +2042,14 @@ namespace neos::javascript_runtime::regexp
         };
 
         thread_local matcher_state tState;
+        // (its address, once per match: the compiler would otherwise compute a thread_local's address again where it is used (each a call,
+        // the runtime being a module loaded at run time))
+#if defined(_MSC_VER)
+        __declspec(noinline)
+#else
+        [[gnu::noinline]]
+#endif
+        matcher_state& thread_matcher_state() { return tState; }
 
         template <bool Unicode>
         class matcher
@@ -2704,7 +2712,7 @@ namespace neos::javascript_runtime::regexp
         // (the program's thread's matcher state (a thread_local: not read for a set of words))
         match_result run(program const& aProgram, std::u16string_view aInput, std::size_t aStart, bool aSticky, std::vector<std::int32_t>& aCaptures)
         {
-            auto& state = tState;
+            auto& state = thread_matcher_state();
             state.slots.assign((aProgram.captureCount + 1u) * 2u, -1);
             state.registers.assign(aProgram.registers * 2u, 0);
             bool const unicode = (aProgram.flags & (FlagUnicode | FlagUnicodeSets)) != 0u;

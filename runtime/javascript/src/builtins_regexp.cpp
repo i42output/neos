@@ -106,6 +106,7 @@ namespace neos::javascript_runtime
             value input = Undefined;        ///< ([[RegExpInput]])
             value subject = Undefined;      ///< (the string that was matched)
             std::int32_t captures[20] = {}; ///< (the match and $1-$9: start and end (-1: undefined))
+            std::uint32_t count = 10u;      ///< (the captures (the match and $1-$9) that captures has: the others are undefined)
             std::int32_t lastParen[2] = { -1, -1 };
         };
 
@@ -148,6 +149,7 @@ namespace neos::javascript_runtime
             legacy.subject = aSubject;
             legacy.captures[0] = aStart;
             legacy.captures[1] = aCaptures[1];
+            legacy.count = 10u;
             for (std::uint32_t i = 1u; i <= 9u; ++i)
             {
                 legacy.captures[i * 2u] = i <= aCount ? aCaptures[i * 2u] : -1;
@@ -804,6 +806,8 @@ namespace neos::javascript_runtime
                     return substring(text, the_legacy().captures[1], static_cast<std::int32_t>(text.size()));
                 else
                 {
+                    if (Which != 10 && Which >= static_cast<int>(the_legacy().count))
+                        return the_names().empty;
                     auto const* const c = Which == 10 ? the_legacy().lastParen : the_legacy().captures + Which * 2;
                     return c[0] == -1 ? the_names().empty : substring(text, c[0], c[1]);
                 }
@@ -1195,16 +1199,24 @@ namespace neos::javascript_runtime
                             auto const length = text.size();
                             if (length < program.shortestWord || length > program.longestWord)
                                 return False;
+                            // (the words of its length: their first and last code units compared first, then the others)
                             bool found = false;
-                            for (auto const& word : program.words[length])
+                            auto const& same = program.words[length];
+                            if (length == 0u)
+                                found = !same.empty();
+                            else
                             {
-                                std::size_t i = 0u;
-                                while (i < length && word[i] == text[i])
-                                    ++i;
-                                if (i == length)
+                                auto const* const t = text.data();
+                                auto const first = t[0];
+                                auto const last = t[length - 1u];
+                                for (auto const& word : same)
                                 {
-                                    found = true;
-                                    break;
+                                    auto const* const w = word.data();
+                                    if (w[0] == first && w[length - 1u] == last && std::memcmp(w, t, length * sizeof(char16_t)) == 0)
+                                    {
+                                        found = true;
+                                        break;
+                                    }
                                 }
                             }
                             if (!found)
@@ -1212,15 +1224,13 @@ namespace neos::javascript_runtime
                             if (r->legacyFeaturesEnabled)
                             {
                                 // (the match, and no captures)
-                                static constexpr std::int32_t sNone[std::size(legacy_statics{}.captures) - 2u] = { -1, -1, -1, -1, -1, -1, -1, -1, -1,
-                                    -1, -1, -1, -1, -1, -1, -1, -1, -1 };
                                 auto& legacy = state.legacy;
                                 legacy.valid = true;
                                 legacy.input = aString;
                                 legacy.subject = aString;
                                 legacy.captures[0] = 0;
                                 legacy.captures[1] = static_cast<std::int32_t>(length);
-                                std::memcpy(legacy.captures + 2, sNone, sizeof(sNone));
+                                legacy.count = 1u;
                                 legacy.lastParen[0] = -1;
                                 legacy.lastParen[1] = -1;
                             }

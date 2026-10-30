@@ -8421,6 +8421,8 @@ namespace neos
                             auto const& x = f.values[aValue];
                             if (x.op == 0x28u || x.op == 0x2Du || x.op == 0x2Fu)
                                 return true;
+                            if (x.op >= 0x45u && x.op <= 0x66u)
+                                return true;    // (a comparison's: setcc and movzx (32 bits))
                             if (x.op != ssa::Phi || aDepth >= 3u || x.operands.empty())
                                 return false;
                             for (auto o : x.operands)
@@ -8439,7 +8441,9 @@ namespace neos
                                 {
                                     auto const r = target(v, RAX);
                                     auto const g = gpr(x, r);
-                                    a.mov_rr(false, r, g);
+                                    // (an i32 whose register's upper half is zero, in the same register: nothing to do)
+                                    if (aOp != 0xAD || r != g || constant(x) || !zero_extended(x, 0u))
+                                        a.mov_rr(false, r, g);
                                     defined(v, r);
                                 }
                                 return;
