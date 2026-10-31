@@ -263,6 +263,9 @@ namespace neos
                                                                         ///< that accesses one has its address in r14, saved and set by it))
                     std::vector<std::int32_t> loopCounters;             ///< (each function's (with a frame) loops' iterations before it is optimized
                                                                         ///< (see tier_loop))
+                    std::vector<std::int32_t> osrPending;               ///< (each function's: a loop within another (whose code calls cannot continue
+                                                                        ///< in from it) made it optimized: the call continues in optimized code from
+                                                                        ///< the loop that it is within, at its head (see tier_loop))
                     std::int32_t loopIterations = 0;
                     std::vector<std::uint8_t> staleJobs;                ///< (each function's optimizations made in the background that were not
                                                                         ///< installed (the program's memory had changed): then made here)
@@ -1650,6 +1653,7 @@ namespace neos
                             {
                                 iCounters = aOutput.counters.data();
                                 iLoopCounters = aOutput.loopCounters.data();
+                                iOsrPending = aOutput.osrPending.data();
                                 iOsr = aOutput.osr;
                                 aOutput.deoptFrames.resize(iModule.functions.size());
                                 iDeoptFrames = &aOutput.deoptFrames;
@@ -1793,6 +1797,7 @@ namespace neos
                             {
                                 iCounters = aModule.counters.data();
                                 iLoopCounters = aModule.loopCounters.data();
+                                iOsrPending = aModule.osrPending.data();
                                 iOsr = aModule.osr;
                                 iCallFlags = &aModule.callFlags;
                                 iLazyFrame = &aOutput.frame;
@@ -2768,6 +2773,13 @@ namespace neos
                             a.emit8(0xFFu);     // dec dword [rax]
                             a.emit8(0x08u);
                             a.jcc(E, cold);
+                            if (osr && iOsrPending != nullptr)
+                            {
+                                // (a loop within it made the function optimized: the call continues in its optimized code from here)
+                                a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&iOsrPending[iFunctionIndex]), true);
+                                a.alu_mi(7, false, RAX, 0, 0);
+                                a.jcc(NE, cold);
+                            }
                             a.barrier();
                             a.bind(resume);
                             // (cold code (unless the loop is in cold code: then where it is, jumped over))
@@ -5442,6 +5454,7 @@ namespace neos
                         bytes iCode;
                         std::int32_t* iCounters = nullptr;              ///< (the optimizing tier's counters (see compiled_module::counters))
                         std::int32_t* iLoopCounters = nullptr;          ///< (... and its loop counters)
+                        std::int32_t* iOsrPending = nullptr;            ///< (... and its pending continuations at loops (see compiled_module::osrPending))
                         compiled_module* iTier = nullptr;               ///< (the optimizing tier: the module whose function is compiled)
                         std::vector<std::size_t> const* iOrigins = nullptr;
                         compiled_module::tier_version const* iTierVersion = nullptr;
@@ -5803,6 +5816,7 @@ namespace neos
                             auto const liveIn = std::make_unique_for_overwrite<std::uint64_t[]>(f.blocks.size() * words);
                             std::vector<bool> liveInDone(f.blocks.size(), false);
                             iIntervals.assign(n, interval{});
+                            iPhiRanges.assign(n, {});
                             for (std::size_t v = 0u; v < n; ++v)
                             {
                                 iIntervals[v].v = static_cast<value>(v);
@@ -5854,6 +5868,8 @@ namespace neos
                                 auto& i = iIntervals[aValue];
                                 i.start = std::min(i.start, aFrom);
                                 i.end = std::max(i.end, aTo);
+                                if (f.values[aValue].op == ssa::Phi)
+                                    iPhiRanges[aValue].emplace_back(aFrom, aTo);
                             };
                             for (auto o = f.order.size(); o-- > 0u;)
                             {
@@ -5934,10 +5950,15 @@ namespace neos
                                         continue;
                                     iIntervals[v].start = std::min(iIntervals[v].start, iBlockStart[b]);
                                     iIntervals[v].end = std::max(iIntervals[v].end, iBlockStart[b] + 1u);
+                                    iPhiRanges[v].emplace_back(iBlockStart[b], iBlockStart[b] + 1u);
                                     // (its register is written at the ends of its block's predecessors (the moves to it), after the values that
-                                    // only the moves read there (the phis' operands: their intervals end there) are read: it may be one of theirs)
+                                    // only the moves read there (the phis' operands: their intervals end there) are read: it may be one of theirs;
+                                    // not where it is live (see iPhiRanges))
                                     for (auto p : block.predecessors)
-                                        extend(v, iBlockEnd[p], iBlockEnd[p] + 1u);
+                                    {
+                                        iIntervals[v].start = std::min(iIntervals[v].start, iBlockEnd[p]);
+                                        iIntervals[v].end = std::max(iIntervals[v].end, iBlockEnd[p] + 1u);
+                                    }
                                     reset(live, v);
                                 }
                                 if (block.loopHeader)
@@ -6008,6 +6029,8 @@ namespace neos
                                             if (o != ssa::None && o < phiUser.size() && f.uses[o] == 1u)
                                                 phiUser[o] = v;
                             std::vector<interval*> active;
+                            // (a phi whose register a value that only it uses shares (see below): not spilled for another interval)
+                            std::vector<bool> shared(f.values.size(), false);
                             std::vector<bool> gprFree(16, false), xmmFree(16, false);
                             for (auto r : CallerSavedGprs)
                                 gprFree[r] = true;
@@ -6054,6 +6077,25 @@ namespace neos
                                     if (iPosition[i->v] < *c)
                                         saves += 2.0 * iCallWeights[static_cast<std::size_t>(c - iCalls.begin())];
                                 bool const callerSavedWorse = saves > weight[i->v];
+                                // (a value that only a phi uses (e.g. a loop's next value, for its back edge), whose interval is in the phi's
+                                // where the phi is not live (e.g. after its last use in its loop, until the moves to it (at its block's predecessors'
+                                // ends: see liveness))): the phi's register (it is the phi's (that interval holds it), no move to it on that edge);
+                                // one for each phi (another's may be live where it is))
+                                auto const phiLive = [&](value aPhi)
+                                {
+                                    for (auto const& r : iPhiRanges[aPhi])
+                                        if (r.first < i->end && r.second > i->start)
+                                            return true;
+                                    return false;
+                                };
+                                if (auto const p = phiUser[i->v]; p != ssa::None && !shared[p] && !i->crossesCall && iLocations[p].kind == location::Register &&
+                                    iIntervals[p].xmm == i->xmm && iIntervals[p].start <= i->start && i->end <= iIntervals[p].end && !phiLive(p) &&
+                                    std::find(active.begin(), active.end(), &iIntervals[p]) != active.end())
+                                {
+                                    shared[p] = true;
+                                    iLocations[i->v] = iLocations[p];
+                                    continue;
+                                }
                                 auto const pick = [&](int const* aRegs, std::size_t aCount)
                                 {
                                     for (std::size_t r = 0u; r < aCount && reg < 0; ++r)
@@ -6101,7 +6143,7 @@ namespace neos
                                     interval* victim = nullptr;
                                     auto const cost = [&](interval const* x) { return weight[x->v] / std::sqrt(static_cast<double>(std::max<std::uint32_t>(x->end - i->start, 1u))); };
                                     for (auto* x : active)
-                                        if (x->xmm == i->xmm && (victim == nullptr || cost(x) < cost(victim) || (cost(x) == cost(victim) && x->end > victim->end)))
+                                        if (x->xmm == i->xmm && !shared[x->v] && (victim == nullptr || cost(x) < cost(victim) || (cost(x) == cost(victim) && x->end > victim->end)))
                                             victim = x;
                                     if (victim != nullptr && (cost(victim) < cost(i) || (cost(victim) == cost(i) && victim->end > i->end)) &&
                                         !(callerSavedWorse && !calleeSaved(i->xmm, iLocations[victim->v].reg)))
@@ -7077,8 +7119,66 @@ namespace neos
                         void jump_to(std::uint32_t aTarget)
                         {
                             phi_moves(iCurrentBlock, aTarget);
+                            if (forwarded(aTarget) != iNext && rotated(aTarget))
+                                return;
                             if (forwarded(aTarget) != iNext)
                                 a.jmp(iBlockLabels[aTarget]);
+                        }
+                        // (a jump back to a loop's head that only tests (its phis, then comparisons and a branch on them): the test here (its
+                        // phis' registers have their values for the next iteration), its branch to the head's successors: one branch taken
+                        // each iteration, not a jump and the head's branch)
+                        bool rotated(std::uint32_t aHead)
+                        {
+                            auto const& head = f.blocks[aHead];
+                            if (!head.loopHeader || head.successors.size() != 2u || aHead == iCurrentBlock)
+                                return false;
+                            value branchValue = ssa::None;
+                            std::vector<value> tests;
+                            for (auto v : head.code)
+                            {
+                                auto const& i = f.values[v];
+                                if (i.dead || i.constant())
+                                    continue;
+                                if (i.op == ssa::Phi)
+                                {
+                                    if (!tests.empty())
+                                        return false;
+                                    continue;
+                                }
+                                if (i.op == ssa::Branch)
+                                {
+                                    branchValue = v;
+                                    break;
+                                }
+                                if (!(comparison(i.op) || connective(i.op)) || is_float_type(f.values[i.operands[0]].type))
+                                    return false;
+                                for (auto o : i.operands)
+                                    if (!constant(o) && f.values[o].load())
+                                        return false;
+                                tests.push_back(v);
+                            }
+                            if (branchValue == ssa::None || tests.empty() || tests.size() > 4u)
+                                return false;
+                            // (the head's phis' homes (deopts read them): stored as at the head)
+                            if (!iHomeSlots.empty())
+                                for (auto v : head.code)
+                                    if (f.values[v].op == ssa::Phi && !f.values[v].dead)
+                                        store_home(v);
+                            auto const savedBlock = iCurrentBlock;
+                            auto const savedNextInstruction = iNextInstruction;
+                            iCurrentBlock = aHead;
+                            for (std::size_t t = 0u; t < tests.size(); ++t)
+                            {
+                                iNextInstruction = t + 1u < tests.size() ? tests[t + 1u] : branchValue;
+                                instruction(tests[t]);
+                                if (!iHomeSlots.empty() && !iDeferred[tests[t]])
+                                    store_home(tests[t]);
+                            }
+                            iNextInstruction = ssa::None;
+                            branch(branchValue);
+                            iCurrentBlock = savedBlock;
+                            iNextInstruction = savedNextInstruction;
+                            return true;
                         }
                         // (a comparison that the next instruction (a branch) uses (only): its condition, not its value)
                         bool fused(value aValue) const
@@ -8629,6 +8729,7 @@ namespace neos
                         std::vector<double> iCallWeights;       ///< (iCalls': their blocks' weights (see allocate))
                         std::vector<std::uint32_t> iHotCalls;   ///< (the calls that are not in cold code)
                         std::vector<interval> iIntervals;
+                        std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> iPhiRanges;    ///< (each phi's ranges where it is live (not the moves to it: see liveness))
                         std::vector<location> iLocations;
                         std::vector<value> iSpills;
                         bool iUsedCalleeGprs[16] = {};
@@ -9558,17 +9659,24 @@ namespace neos
                             // (being made: the loop looks again (as do the function's calls))
                             if (m.tierState[f] == 3u)
                                 m.loopCounters[f] = PollIterations;
+                            // (a loop that the call cannot continue in optimized code from (within another loop): the loop that it is within
+                            // (whose code it can continue in) does, at its head (each time, until it does))
+                            if (aLoop == NoOsrLoop && m.osr && (m.tierState[f] == 1u || m.tierState[f] == 3u))
+                                m.osrPending[f] = 1;
                             if (aLoop != NoOsrLoop && m.osr && m.tierState[f] == 1u)
                             {
                                 // (just optimized: later calls run its optimized code, so a loop that runs its baseline code again is a call's
-                                // that has not ended (it continues in optimized code then))
-                                if (!optimized)
+                                // that has not ended (it continues in optimized code then); a call that a loop within it made optimized has not)
+                                if (!optimized && m.osrPending[f] == 0)
                                 {
                                     m.loopCounters[f] = PollIterations;
                                     return nullptr;
                                 }
+                                m.osrPending[f] = 0;
                                 return osr_entry(m, f, aLoop);
                             }
+                            if (m.tierState[f] == 2u)
+                                m.osrPending[f] = 0;
                         }
                         catch (...)
                         {
@@ -9894,6 +10002,7 @@ namespace neos
                             m.tierCalls = calls;
                             m.loopIterations = static_cast<std::int32_t>(std::clamp<long long>(setting("NEOS_TIER2_LOOPS").value_or(10000), 1, NotAgain));
                             m.loopCounters.assign(n, m.loopIterations);
+                            m.osrPending.assign(n, 0);
                             m.loopTriggered.assign(n, 0u);
                             m.staleJobs.assign(n, 0u);
                             m.tierState.assign(n, 0u);

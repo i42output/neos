@@ -148,7 +148,7 @@ namespace neos
                         std::size_t maxTokens = 60000u;         ///< (the function's code may grow to this, by inlining...)
                         std::size_t maxGrowth = 10u;             ///< (... and to this many times its size (and 2000 tokens))
                         std::size_t maxInlinedTokens = 2800u;   ///< (an inlined call whose code (after folding) is larger is not inlined...)
-                        std::size_t maxInlinedCost = 400u;      ///< (... nor one with more instructions that are code (see rewriter::inline_call) ...)
+                        std::size_t maxInlinedCost = 600u;      ///< (... nor one with more instructions that are code (see rewriter::inline_call) ...)
                         std::size_t maxGuards = 16u;            ///< (... nor one with more guards)
                         std::size_t maxInlines = 512u;          ///< (the calls inlined in a function)
                         bool deopt = false;                     ///< (the code leaves for the function's own (see deopt), rather than calls)
