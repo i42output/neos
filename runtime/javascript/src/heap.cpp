@@ -72,11 +72,13 @@ namespace neos::javascript_runtime
             text.assign(small, length);
             smallText = false;
             charsOffset = region_offset(text.data());
+            note_owner(this);
         }
         if (base != 0u && text.empty())
         {
             text.assign(reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length);
             charsOffset = region_offset(text.data());
+            note_owner(this);
         }
         if (left == 0u)
             return text;
@@ -101,6 +103,7 @@ namespace neos::javascript_runtime
         }
         text = std::move(result);
         charsOffset = region_offset(text.data());
+        note_owner(this);
         left = 0u;
         right = 0u;
         return text;

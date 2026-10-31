@@ -261,6 +261,8 @@ namespace neos::javascript_runtime
             cell_memory() : iRegion{ region::instance() }, iBase{ iRegion.base() }, iPages{ iRegion.pages() }, iOwner{ new_owner() }
             {
                 static_assert(ClassCount <= allocation_state::Classes);
+                for (auto size : SizeClasses)
+                    iReciprocal[size / 16u] = ((std::uint64_t{ 1u } << 32u) + size - 1u) / size;
                 for (std::size_t c = 0u, size = 0u; size <= MaxSmall; size += 16u)
                 {
                     while (SizeClasses[c] < size)
@@ -276,6 +278,8 @@ namespace neos::javascript_runtime
             }
             ~cell_memory()
             {
+                for (auto* b : iBits)
+                    delete b;
                 // (the isolate has ended: its pages are given back)
                 for (std::size_t page = 1u, high = iRegion.high(); page < high;)
                 {
@@ -310,6 +314,7 @@ namespace neos::javascript_runtime
                     {
                         auto* const result = iBase + head;
                         head = *reinterpret_cast<std::uint64_t const*>(result);
+                        set_bit(&page_bits::allocated, result);
                         return result;
                     }
                     auto const slotSize = SizeClasses[ci];
@@ -344,12 +349,15 @@ namespace neos::javascript_runtime
                             bump += slotSize;
                             return result;
                         }
+                        // (the run's slots (allocated): in its page's bits)
+                        fold_run(ci);
                         if (!iRuns[ci].empty())
                         {
                             auto const run = iRuns[ci].back();
                             iRuns[ci].pop_back();
                             iState->bump[ci] = run.first;
                             iState->bumpLimit[ci] = run.second;
+                            iRunStart[ci] = run.first;
                             continue;
                         }
                         if (!iUnswept[ci].empty())
@@ -374,6 +382,7 @@ namespace neos::javascript_runtime
                         auto const start = static_cast<std::uint64_t>(page_address(page) - iBase);
                         iState->bump[ci] = start;
                         iState->bumpLimit[ci] = start + (PageSize / slotSize) * slotSize;
+                        iRunStart[ci] = start;
                     }
                 }
             }
@@ -442,6 +451,7 @@ namespace neos::javascript_runtime
             }
             void begin_sweeping()
             {
+                fold_runs();
                 for (std::size_t ci = 0u; ci < ClassCount; ++ci)
                 {
                     // (the runs' slots (free) are found again when their pages are swept)
@@ -495,10 +505,131 @@ namespace neos::javascript_runtime
             // (a free slot of a cells' page: its size class's)
             void free_slot(void* aSlot)
             {
+                clear_bit(&page_bits::allocated, aSlot);
+                clear_bit(&page_bits::finalized, aSlot);
+                if (iHandleOffset != 0u)
+                {
+                    std::uint32_t const none = 0u;
+                    std::memcpy(static_cast<std::byte*>(aSlot) + iHandleOffset, &none, sizeof(none));
+                }
                 auto& head = iState->freeLists[iClassOf[iPages[page_of(aSlot)].slotSize / 16u]];
                 *static_cast<std::uint64_t*>(aSlot) = head;
                 head = static_cast<std::uint64_t>(static_cast<std::byte*>(aSlot) - iBase);
             }
+            // --- the slots' bits (each page of small cells': see page_bits)
+            static constexpr std::size_t BitWords = PageSize / 16u / 64u;
+            struct page_bits
+            {
+                std::uint64_t allocated[BitWords];  ///< (its cells (as the last sweep left them, and those allocated since: see fold_runs))
+                std::uint64_t marked[BitWords];     ///< (the collection's marks)
+                std::uint64_t finalized[BitWords];  ///< (cells whose destruction does something (see note_owner): destroyed when they die)
+            };
+            page_bits& bits(std::size_t aPage)
+            {
+                if (aPage < iBits.size()) [[likely]]
+                    if (auto* const b = iBits[aPage]; b != nullptr) [[likely]]
+                        return *b;
+                return new_bits(aPage);
+            }
+#if defined(_MSC_VER)
+            __declspec(noinline)
+#else
+            [[gnu::noinline]]
+#endif
+            page_bits& new_bits(std::size_t aPage)
+            {
+                if (aPage >= iBits.size())
+                    iBits.resize(std::max<std::size_t>(aPage + 1u, iBits.size() * 2u), nullptr);
+                if (iBits[aPage] == nullptr)
+                    iBits[aPage] = new page_bits{};
+                return *iBits[aPage];
+            }
+            // (a slot's page and its index in it (aSlot: in a page of small cells): its offset in the page divided by its slots' size (as a
+            // multiplication by its reciprocal: exact for multiples of it in a page))
+            void slot_index(void const* aSlot, std::size_t& aPage, std::size_t& aIndex) const
+            {
+                auto const offset = static_cast<std::size_t>(static_cast<std::byte const*>(aSlot) - iBase);
+                aPage = offset >> PageShift;
+                aIndex = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[iPages[aPage].slotSize / 16u]) >> 32u);
+            }
+            bool small_cell(void const* aSlot) const
+            {
+                auto const& info = iPages[page_of(aSlot)];
+                return info.slotSize != 0u && info.largeSize == 0u && !info.raw;
+            }
+            void set_bit(std::uint64_t (page_bits::*aBits)[BitWords], void const* aSlot)
+            {
+                if (!small_cell(aSlot))
+                    return;
+                std::size_t page, index;
+                slot_index(aSlot, page, index);
+                (bits(page).*aBits)[index / 64u] |= std::uint64_t{ 1u } << (index % 64u);
+            }
+            void clear_bit(std::uint64_t (page_bits::*aBits)[BitWords], void const* aSlot)
+            {
+                if (!small_cell(aSlot))
+                    return;
+                std::size_t page, index;
+                slot_index(aSlot, page, index);
+                (bits(page).*aBits)[index / 64u] &= ~(std::uint64_t{ 1u } << (index % 64u));
+            }
+            bool test_bit(std::uint64_t const (page_bits::*aBits)[BitWords], void const* aSlot) const
+            {
+                std::size_t page, index;
+                slot_index(aSlot, page, index);
+                if (page >= iBits.size() || iBits[page] == nullptr)
+                    return false;
+                return ((iBits[page]->*aBits)[index / 64u] >> (index % 64u) & 1u) != 0u;
+            }
+            // (one page lookup: its information, then its bits)
+            void set_small_bit(std::uint64_t (page_bits::*aBits)[BitWords], void const* aSlot)
+            {
+                auto const offset = static_cast<std::size_t>(static_cast<std::byte const*>(aSlot) - iBase);
+                auto const page = offset >> PageShift;
+                auto const& info = iPages[page];
+                if (info.largeSize != 0u || info.raw || info.slotSize == 0u)
+                    return;
+                auto const index = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[info.slotSize / 16u]) >> 32u);
+                (bits(page).*aBits)[index / 64u] |= std::uint64_t{ 1u } << (index % 64u);
+            }
+            void mark(void const* aSlot) { set_small_bit(&page_bits::marked, aSlot); }
+            void finalize(void const* aSlot) { set_small_bit(&page_bits::finalized, aSlot); }
+            // (a small cell's slot that holds a cell (the runs' slots allocated since the last sweep: in its bits (see fold_runs)))
+            bool allocated(void const* aSlot) const { return !small_cell(aSlot) || test_bit(&page_bits::allocated, aSlot); }
+            // (the size classes' runs' slots allocated so far (by the runtime and by compiled code: those before their bumps): in their 
+            // pages' bits)
+            void fold_runs()
+            {
+                for (std::size_t ci = 0u; ci < ClassCount; ++ci)
+                    fold_run(ci);
+            }
+            void fold_run(std::size_t ci)
+            {
+                auto const bump = iState->bump[ci];
+                auto const start = iRunStart[ci];
+                if (bump == 0u || start == 0u || bump <= start)
+                {
+                    iRunStart[ci] = bump;
+                    return;
+                }
+                auto const page = static_cast<std::size_t>(start >> PageShift);
+                auto const slotSize = iPages[page].slotSize;
+                auto const pageStart = static_cast<std::uint64_t>(page) << PageShift;
+                auto first = static_cast<std::size_t>((start - pageStart) / slotSize);
+                auto const last = static_cast<std::size_t>((bump - pageStart) / slotSize);     // (the first not allocated)
+                auto& b = bits(page);
+                while (first < last)
+                {
+                    auto const w = first / 64u;
+                    auto const end = std::min<std::size_t>(last, (w + 1u) * 64u);
+                    auto const n = end - first;
+                    auto const mask = (n == 64u ? ~std::uint64_t{ 0u } : ((std::uint64_t{ 1u } << n) - 1u)) << (first % 64u);
+                    b.allocated[w] |= mask;
+                    first = end;
+                }
+                iRunStart[ci] = bump;
+            }
+            void set_handle_offset(std::size_t aOffset) { iHandleOffset = aOffset; }
             allocation_state& state() const { return *iState; }
             // (a page of small cells that its sweep found has none: not swept again (until it has cells: see allocate))
             void empty(std::size_t aPage)
@@ -598,6 +729,10 @@ namespace neos::javascript_runtime
             void (*iSweeper)(void*, std::size_t) = nullptr;
             void* iSweeperData = nullptr;
             std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
+            std::vector<page_bits*> iBits;                      ///< (each page's (of small cells), made when used)
+            std::uint64_t iRunStart[ClassCount] = {};           ///< (each size class's run's first slot (region offset): see fold_run)
+            std::uint64_t iReciprocal[MaxSmall / 16u + 1u] = {};  ///< (by slot size / 16: 2^32 / the size, rounded up (see slot_index))
+            std::size_t iHandleOffset = 0u;                     ///< (see collector::record_handle_offset)
         };
 
         // --- rooted memory (root_allocate): a list of blocks
@@ -662,6 +797,8 @@ namespace neos::javascript_runtime
             if (environment_flag("NEOS_JS_GC", flag) && flag == 0u)
                 iPauses = 1;
             environment_flag("NEOS_JS_GC_VERBOSE", iVerbose);
+            if (environment_flag("NEOS_JS_GC_CHECK", flag))
+                iCheck = flag != 0u;
             iMemory.set_sweeper([](void* aCollector, std::size_t aPage) { static_cast<collector*>(aCollector)->sweep_page(aPage); }, this);
             iHeap.iState = &iMemory.state();
             triggers();
@@ -717,19 +854,27 @@ namespace neos::javascript_runtime
                 return nullptr;
             std::uint32_t h;
             std::memcpy(&h, slot + iHandleOffset, sizeof(h));
-            return h == aHandle ? reinterpret_cast<cell*>(slot) : nullptr;
+            // (while it collects: a slot that holds a cell (a dead cell's handle is not cleared unless it is destroyed: see sweep_page))
+            if (h != aHandle || (iCollecting && !iMemory.allocated(slot)))
+                return nullptr;
+            return reinterpret_cast<cell*>(slot);
         }
         void record_handle_offset(cell& aCell)
         {
             if (iHandleOffset == 0u)
+            {
                 iHandleOffset = static_cast<std::size_t>(reinterpret_cast<std::byte const*>(&aCell.handle) - reinterpret_cast<std::byte const*>(&aCell));
+                iMemory.set_handle_offset(iHandleOffset);
+            }
         }
         void free_cell(cell* aCell, std::uint32_t aHandle);
+        void added(cell& aCell);
         void collect();
         // marking
         void push(cell& aCell)
         {
             aCell.marked = 1u;
+            iMemory.mark(&aCell);
             iWork.push_back(&aCell);
             // (the values of the ephemerons whose key it is: marked now)
             if (!iPendingEphemerons.empty())
@@ -867,6 +1012,7 @@ namespace neos::javascript_runtime
         std::size_t iHandleOffset = 0u;
         std::uint64_t iStress = 0u;
         bool iQuarantine = false;
+        bool iCheck = false;                ///< (testing: a dead cell that is not destroyed is checked to own nothing (see sweep_page))
         std::vector<std::pair<std::uint64_t, std::uint64_t>> iSweptRuns;     ///< (a page's free runs, as sweep_page finds them)
         std::uint64_t iVerbose = 0u;
         int iPauses = 0;
@@ -1064,7 +1210,12 @@ namespace neos::javascript_runtime
         auto& c = *iCollector;
         c.record_handle_offset(aCell);
         if (c.collecting())
+        {
             aCell.marked = 1u;     // (a cell made while dead cells are freed (e.g. by a weak reference's clearing) lives)
+            c.memory().mark(&aCell);
+            c.memory().set_bit(&cell_memory::page_bits::allocated, &aCell);
+        }
+        c.added(aCell);
         // (its handle: its offset in the region (its slot's: a multiple of 16) >> HandleShift)
         auto const offset = region_offset(&aCell);
         if ((offset & ((std::uint64_t{ 1u } << HandleShift) - 1u)) != 0u)
@@ -1220,8 +1371,10 @@ namespace neos::javascript_runtime
 
     void collector::mark_and_sweep()
     {
-        // (the last collection's pages that are not swept yet: swept (the cells' marks are clear))
+        // (the last collection's pages that are not swept yet: swept (the cells' marks are clear); the cells allocated since: in their
+        // pages' bits)
         iMemory.finish_sweeping();
+        iMemory.fold_runs();
         iCollecting = true;
         iMarked = 0u;
         iMarkedBytes = 0u;
@@ -1341,6 +1494,10 @@ namespace neos::javascript_runtime
             std::memcpy(&table, &aCell, sizeof(table));
             bool isObject = table == sObjectTable.load(std::memory_order_relaxed);
             bool isArray = !isObject && table == sArrayTable.load(std::memory_order_relaxed);
+            // (neither, once both are known: not one of them (a string's text is checked below))
+            if (!isObject && !isArray && aCell.type != cell_type::String && sObjectTable.load(std::memory_order_relaxed) != nullptr &&
+                sArrayTable.load(std::memory_order_relaxed) != nullptr)
+                return false;
             if (!isObject && !isArray)
             {
                 auto const& type = typeid(aCell);
@@ -1357,6 +1514,9 @@ namespace neos::javascript_runtime
             }
             if (isObject)
                 return static_cast<object&>(aCell).properties.owns_nothing(aRaw) && static_cast<object&>(aCell).extra_if() == nullptr;
+            // (a string whose text is in its cell (or none: a small string's, a slice's, a rope's))
+            if (aCell.type == cell_type::String)
+                return !aRaw(static_cast<string&>(aCell).text.data());
             if (isArray)
             {
                 auto& a = static_cast<array_object&>(aCell);
@@ -1366,109 +1526,162 @@ namespace neos::javascript_runtime
         }
     }
 
+    void collector::added(cell& aCell)
+    {
+        // (a cell whose destruction does something (it owns storage outside its cell): destroyed when it dies (see sweep_page); a plain
+        // object or an array that comes to own such storage later: see note_owner)
+        auto const raw = [this](void const* aMemory) { return iMemory.raw(aMemory); };
+        bool owns = true;
+        if (aCell.type == cell_type::String)
+            owns = raw(static_cast<string&>(aCell).text.data());
+        else if (aCell.type == cell_type::Object)
+            owns = !owns_nothing(aCell, raw);
+        if (owns)
+            iMemory.finalize(&aCell);
+    }
+
+    void note_owner(void const* aMember) noexcept
+    {
+        // (a cell's member that has storage outside its cell (e.g. a property table's values): the cell is destroyed when it dies)
+        heap* h = nullptr;
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && !defined(_WIN32)
+        if (auto* const sole = gSoleIsolate.isolate.load(std::memory_order_acquire); sole != nullptr && gSoleIsolate.threadPointer == __builtin_thread_pointer())
+            h = sole;
+#endif
+        if (h == nullptr)
+            h = tHeap;
+        if (h == nullptr || !h->has_collector())
+            return;
+        auto& memory = h->the_collector().memory();
+        auto const address = reinterpret_cast<std::uintptr_t>(aMember);
+        if (address < memory.begin() || address >= memory.end())
+            return;
+        if (auto const* const slot = memory.slot_at(address); slot != nullptr)
+            memory.finalize(slot);
+    }
+
     void collector::sweep_page(std::size_t aPage)
     {
-        // (its live cells unmarked, its dead ones freed; its free slots (free, or not used yet) in runs, from which cells are allocated
-        // (see cell_memory::allocate))
+        // (its dead cells freed (from its bits: only those whose destruction does something are destroyed, and their handles cleared); 
+        // its live cells unmarked; its free slots (free, or not used yet) in runs, from which cells are allocated (see 
+        // cell_memory::allocate))
         std::byte* start;
         std::uint32_t slotSize;
         iMemory.page_slots(aPage, start, slotSize);
         auto const startOffset = static_cast<std::uint64_t>(region_offset(start));
-        bool live = false;
-        auto const first = static_cast<std::uint32_t>(region_offset(start) >> heap::HandleShift);
-        auto const step = slotSize >> heap::HandleShift;
         auto const count = PageSize / slotSize;
+        auto const words = (count + 63u) / 64u;
+        auto& b = iMemory.bits(aPage);
         auto& tRuns = iSweptRuns;   // (the collector's: a thread_local's access is not cheap (the runtime is a module loaded at run time))
         tRuns.clear();
-        std::uint64_t runStart = 0u;
-        bool inRun = false;
-        // (the collector's state that the loop reads: locals (the runs' growth would otherwise make them read again each time))
+        bool live = false;
         auto const handleOffset = iHandleOffset;
         auto const raw = [this](void const* aMemory) { return iMemory.raw(aMemory); };  // (region_raw: without finding the collector)
-        if (iQuarantine)
+        auto const destroy = [&](std::size_t aIndex)
         {
-            // (testing: its dead cells are freed (and kept: they are not slots to allocate from))
-            for (std::size_t i = 0u; i < count; ++i)
+            auto* const slot = start + aIndex * slotSize;
+            auto* const c = reinterpret_cast<cell*>(slot);
+            // (storage within its own slot is not raw: not looked up)
+            auto const rawOutside = [&](void const* aMemory)
             {
-                auto* const slot = start + i * slotSize;
-                auto const handle = first + static_cast<std::uint32_t>(i) * step;
-                std::uint32_t h;
-                std::memcpy(&h, slot + handleOffset, sizeof(h));
-                if (h == handle)
-                {
-                    auto* const c = reinterpret_cast<cell*>(slot);
-                    if (c->marked != 0u)
-                    {
-                        c->marked = 0u;
-                        live = true;
-                    }
-                    else
-                        free_cell(c, h);
-                }
+                auto const* const m = static_cast<std::byte const*>(aMemory);
+                return !(m >= slot && m < slot + slotSize) && raw(aMemory);
+            };
+            if (iQuarantine)
+            {
+                free_cell(c, c->handle);
+                return;
             }
-        }
-        else
+            if (!owns_nothing(*c, rawOutside))
+                c->~cell();
+            std::uint32_t const none = 0u;
+            std::memcpy(slot + handleOffset, &none, sizeof(none));
+        };
+        for (std::size_t w = 0u; w < words; ++w)
         {
-            // (the slots in order (memory is read in order: the processor fetches it ahead))
-            auto* slot = start;
-            auto handle = first;
-            auto offset = startOffset;
-            // (the slots ahead fetched while one is swept: its memory is seldom in the caches)
-            auto const ahead = static_cast<std::size_t>(slotSize) * 8u;
-            auto* const end = start + count * slotSize;
-            for (std::size_t i = 0u; i < count; ++i, slot += slotSize, handle += step, offset += slotSize)
+            auto const marked = b.marked[w];
+            auto const dead = b.allocated[w] & ~marked;
+            // (dead: destroyed if their destruction does something (all of them, while testing))
+            for (auto f = iQuarantine || iCheck ? dead : dead & b.finalized[w]; f != 0u; f &= f - 1u)
             {
-                if (slot + ahead < end)
+                auto const i = w * 64u + static_cast<std::size_t>(std::countr_zero(f));
+                if (iCheck && !iQuarantine && (b.finalized[w] >> (i % 64u) & 1u) == 0u)
                 {
-#if defined(_MSC_VER)
-                    _mm_prefetch(reinterpret_cast<char const*>(slot + ahead), _MM_HINT_T0);
-#else
-                    __builtin_prefetch(slot + ahead, 1);
-#endif
-                }
-                std::uint32_t h;
-                std::memcpy(&h, slot + handleOffset, sizeof(h));
-                if (h == handle)
-                {
-                    auto* const c = reinterpret_cast<cell*>(slot);
-                    if (c->marked != 0u)
-                    {
-                        // (live: a run ends)
-                        c->marked = 0u;
-                        live = true;
-                        if (inRun)
-                        {
-                            tRuns.emplace_back(runStart, offset);
-                            inRun = false;
-                        }
-                        continue;
-                    }
-                    // (a dead cell: destroyed (unless it is a plain object, or an array, that owns nothing outside its cell), then free)
-                    // (storage within its own slot is not raw: not looked up)
+                    // (testing: a dead cell that is not destroyed must own nothing)
+                    auto* const slot = start + i * slotSize;
                     auto const rawOutside = [&](void const* aMemory)
                     {
                         auto const* const m = static_cast<std::byte const*>(aMemory);
                         return !(m >= slot && m < slot + slotSize) && raw(aMemory);
                     };
-                    if (!owns_nothing(*c, rawOutside))
-                        c->~cell();
-                    std::uint32_t const none = 0u;
-                    std::memcpy(slot + handleOffset, &none, sizeof(none));
+                    if (!owns_nothing(*reinterpret_cast<cell*>(slot), rawOutside))
+                    {
+                        std::fprintf(stderr, "JavaScript runtime: a dead cell (%s) owns storage, but is not to be destroyed\n", typeid(*reinterpret_cast<cell*>(slot)).name());
+                        std::abort();
+                    }
+                    continue;
                 }
-                if (!inRun)
+                destroy(i);
+            }
+            b.finalized[w] &= ~dead;
+            // (live: unmarked)
+            for (auto m = marked; m != 0u; m &= m - 1u)
+            {
+                auto const i = w * 64u + static_cast<std::size_t>(std::countr_zero(m));
+                reinterpret_cast<cell*>(start + i * slotSize)->marked = 0u;
+            }
+            live = live || marked != 0u;
+            // (while testing (quarantine) the dead are not slots to allocate from: no runs (see below))
+            b.allocated[w] = marked;
+            b.marked[w] = 0u;
+        }
+        // (its runs: its slots that are not allocated)
+        if (!iQuarantine)
+        {
+            std::size_t i = 0u;
+            while (i < count)
+            {
+                // (the next free slot)
+                auto const w = i / 64u;
+                auto const freeBits = ~b.allocated[w] & (~std::uint64_t{ 0u } << (i % 64u));
+                if (freeBits == 0u)
                 {
-                    runStart = offset;
-                    inRun = true;
+                    i = (w + 1u) * 64u;
+                    continue;
                 }
+                auto const first = w * 64u + static_cast<std::size_t>(std::countr_zero(freeBits));
+                if (first >= count)
+                    break;
+                // (the next allocated slot after it)
+                auto j = first;
+                for (;;)
+                {
+                    auto const v = j / 64u;
+                    if (v >= words)
+                    {
+                        j = count;
+                        break;
+                    }
+                    auto const usedBits = b.allocated[v] & (~std::uint64_t{ 0u } << (j % 64u));
+                    if (usedBits != 0u)
+                    {
+                        j = v * 64u + static_cast<std::size_t>(std::countr_zero(usedBits));
+                        break;
+                    }
+                    j = (v + 1u) * 64u;
+                }
+                j = std::min<std::size_t>(j, count);
+                tRuns.emplace_back(startOffset + first * slotSize, startOffset + j * slotSize);
+                i = j;
             }
         }
-        if (inRun)
-            tRuns.emplace_back(runStart, startOffset + count * slotSize);
         // (a page that has no live cells: not swept again until it has cells (its slots are not runs: it is an empty page))
         if (!live && !iQuarantine)
+        {
             iMemory.empty(aPage);
-        else
-            iMemory.add_runs(slotSize, tRuns);
+            return;
+        }
+        iMemory.add_runs(slotSize, tRuns);
     }
 
     // --- rooted memory
