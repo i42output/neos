@@ -1033,6 +1033,51 @@ namespace neos
                             case 0xBC: case 0xBD: case 0xBE: case 0xBF: break; // (reinterpretations: values are their bits)
                             case 0xC0: unary([](value a) { return of_i32(static_cast<std::int8_t>(as_u32(a))); }); break;
                             case 0xC1: unary([](value a) { return of_i32(static_cast<std::int16_t>(as_u32(a))); }); break;
+                            case 0xC2: unary([](value a) { return of_i64(static_cast<std::int8_t>(a)); }); break;
+                            case 0xC3: unary([](value a) { return of_i64(static_cast<std::int16_t>(a)); }); break;
+                            case 0xC4: unary([](value a) { return of_i64(static_cast<std::int32_t>(a)); }); break;
+                            // (prefix 0xFC: the saturating conversions; memory.copy and memory.fill)
+                            case 0xFC:
+                                switch (auto const sub = code.u())
+                                {
+                                case 0x00: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f32(a))); }); break;
+                                case 0x01: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f32(a))); }); break;
+                                case 0x02: unary([](value a) { return of_i32(saturate<std::int32_t>(as_f64(a))); }); break;
+                                case 0x03: unary([](value a) { return of_u32(saturate<std::uint32_t>(as_f64(a))); }); break;
+                                case 0x04: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f32(a))); }); break;
+                                case 0x05: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f32(a))); }); break;
+                                case 0x06: unary([](value a) { return of_i64(saturate<std::int64_t>(as_f64(a))); }); break;
+                                case 0x07: unary([](value a) { return static_cast<value>(saturate<std::uint64_t>(as_f64(a))); }); break;
+                                case 0x0A:
+                                    {
+                                        auto const targetMemory = code.u();
+                                        auto const sourceMemory = code.u();
+                                        auto const count = pop();
+                                        auto const source = pop();
+                                        auto const target = pop();
+                                        auto const n = targetMemory == 0u || sourceMemory == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
+                                        auto* to = memory_range(targetMemory, target, n);
+                                        auto const* from = memory_range(sourceMemory, source, n);
+                                        if (n != 0u)
+                                            std::memmove(to, from, static_cast<std::size_t>(n));
+                                    }
+                                    break;
+                                case 0x0B:
+                                    {
+                                        auto const memoryIndex = code.u();
+                                        auto const count = pop();
+                                        auto const byte = pop();
+                                        auto const target = pop();
+                                        auto const n = memoryIndex == 0u ? static_cast<std::uint64_t>(as_u32(count)) : count;
+                                        auto* to = memory_range(memoryIndex, target, n);
+                                        if (n != 0u)
+                                            std::memset(to, static_cast<int>(as_u32(byte) & 0xFFu), static_cast<std::size_t>(n));
+                                    }
+                                    break;
+                                default:
+                                    throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
+                                }
+                                break;
                             default:
                                 throw trap{ "unsupported instruction 0x" + to_hex(op) };
                             }
@@ -1051,6 +1096,36 @@ namespace neos
                         return as_u32(iGlobals.at(existing->second));
                     }
                 private:
+                    // (a memory's bytes at an address (memory 0: a 32 bit address; an external memory: a 64 bit one), checked)
+                    std::uint8_t* memory_range(std::uint64_t aMemory, value aAddress, std::uint64_t aCount)
+                    {
+                        if (aMemory == 0u)
+                        {
+                            auto const address = static_cast<std::uint64_t>(as_u32(aAddress));
+                            if (address + aCount > iMemory.size())
+                                throw trap{ "out of bounds memory access" };
+                            return iMemory.data() + address;
+                        }
+                        auto const& external = jit::external_memory(aMemory);
+                        if (aAddress + aCount > external.size || aAddress + aCount < aAddress)
+                            throw trap{ "out of bounds memory access" };
+                        return external.base + aAddress;
+                    }
+                    // (a saturating conversion: NaN is 0, a value beyond the type's range its bound)
+                    template <typename T, typename F>
+                    static T saturate(F aValue)
+                    {
+                        if (std::isnan(aValue))
+                            return T{ 0 };
+                        auto const t = static_cast<long double>(std::trunc(aValue));
+                        long double const lowest = static_cast<long double>(std::numeric_limits<T>::min());
+                        long double const limit = static_cast<long double>(std::numeric_limits<T>::max()) + 1.0L;
+                        if (t < lowest)
+                            return std::numeric_limits<T>::min();
+                        if (t >= limit)
+                            return std::numeric_limits<T>::max();
+                        return static_cast<T>(t);
+                    }
                     template <typename T, typename F>
                     static T truncate(F aValue)
                     {
@@ -1288,6 +1363,23 @@ namespace neos
                                 break;
                             case 0x3F: case 0x40:
                                 token(r.byte());
+                                break;
+                            case 0xFC:
+                                {
+                                    // (the prefixed instruction, then its immediates: memory.copy's two memory indices, memory.fill's one;
+                                    // the others that have immediates are not supported (their execution traps))
+                                    auto const sub = r.u();
+                                    token(sub);
+                                    if (sub == 0x0Au)
+                                    {
+                                        token(r.byte());
+                                        token(r.byte());
+                                    }
+                                    else if (sub == 0x0Bu)
+                                        token(r.byte());
+                                    else if (sub > 0x07u)
+                                        throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
+                                }
                                 break;
                             case 0x41:
                                 token(static_cast<std::uint64_t>(r.s()));

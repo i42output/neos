@@ -5153,6 +5153,11 @@ namespace neos
                                 break;
                             case 0x0D:
                                 conditional_branch(static_cast<std::size_t>(aImmediate(0)));
+                                // (a loop's head that leaves values on the operand stack (below the exit's condition): not rotated (its
+                                // repetition at the branch back would not leave them where its body has them, and the loop counter needs the
+                                // operand stack in memory (rax free)))
+                                if (auto& c = iControl.back(); c.kind == control::Loop && c.headEnd == aPosition && !c.bodyLabel && iStack.size() != c.base)
+                                    c.headEnd = 0u;
                                 if (auto& c = iControl.back(); c.kind == control::Loop && c.headEnd == aPosition && !c.bodyLabel)
                                 {
                                     c.bodyLabel = a.new_label();
