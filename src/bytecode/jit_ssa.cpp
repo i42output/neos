@@ -1785,6 +1785,10 @@ namespace neos
                                     return std::pair{ lo, hi };
                                 }
                                 return {};
+                            case 0xBFu:     // (f64.reinterpret_i64 of i64.reinterpret_f64)
+                                if (aDepth > 0 && x.operands.size() == 1u && aValues[x.operands[0]].op == 0xBDu && aValues[x.operands[0]].operands.size() == 1u)
+                                    return integral_range(aValues, aValues[x.operands[0]].operands[0], aDepth - 1);
+                                return {};
                             case Phi:
                                 if (aDepth > 0 && !x.operands.empty())
                                 {
@@ -1804,6 +1808,147 @@ namespace neos
                             default:
                                 return {};
                             }
+                        }
+
+                        // (a bound of a value's bits (unsigned): an f64 that is an integer (see integral_range) or an integer converted to f64, 
+                        // its bits (it is not a NaN: at most -infinity's); a constant; a phi of such values; such a value shifted right
+                        // (unsigned) by a constant)
+                        std::optional<std::uint64_t> bits_bound(std::vector<instruction> const& aValues, value aValue, int aDepth)
+                        {
+                            constexpr std::uint64_t Most = 0xFFF0000000000000ull;
+                            auto const& x = aValues[aValue];
+                            if (x.constant())
+                                return x.type == I64 ? std::optional<std::uint64_t>{ x.imm0 } : std::nullopt;
+                            if (x.op == 0xBDu && x.operands.size() == 1u && ((aValues[x.operands[0]].op >= 0xB7u && aValues[x.operands[0]].op <= 0xBAu) ||
+                                integral_range(aValues, x.operands[0], 4)))
+                                return Most;
+                            if (x.op == 0x88u && x.operands.size() == 2u && aDepth > 0 && aValues[x.operands[1]].constant() && aValues[x.operands[1]].type == I64 &&
+                                aValues[x.operands[1]].imm0 < 64u)
+                            {
+                                if (auto const b = bits_bound(aValues, x.operands[0], aDepth - 1))
+                                    return *b >> aValues[x.operands[1]].imm0;
+                                return {};
+                            }
+                            if (x.op == Phi && aDepth > 0 && !x.operands.empty())
+                            {
+                                std::uint64_t result = 0u;
+                                for (auto o : x.operands)
+                                {
+                                    if (o == aValue || o == None)
+                                        return {};
+                                    auto const b = bits_bound(aValues, o, aDepth - 1);
+                                    if (!b)
+                                        return {};
+                                    result = std::max(result, *b);
+                                }
+                                return result;
+                            }
+                            return {};
+                        }
+
+                        // (an i64 unsigned comparison (lt_u gt_u le_u ge_u, eq, ne) of a value whose bits have a bound (see bits_bound) with
+                        // a constant that the bound decides it with)
+                        std::optional<bool> bounded_comparison(std::vector<instruction> const& aValues, std::uint16_t aOp, value aA, value aB)
+                        {
+                            if (!(((aOp >= 0x54u && aOp <= 0x5Au && (aOp - 0x54u) % 2u == 0u) || aOp == 0x51u || aOp == 0x52u)))
+                                return {};
+                            auto const& a0 = aValues[aA];
+                            auto const& a1 = aValues[aB];
+                            if (!a0.constant() && a1.constant() && a1.type == I64)
+                            {
+                                if (auto const ub = bits_bound(aValues, aA, 3))
+                                {
+                                    auto const k = a1.imm0;
+                                    if (aOp == 0x54u && k > *ub) return true;           // (x < k)
+                                    if (aOp == 0x58u && k >= *ub) return true;          // (x <= k)
+                                    if (aOp == 0x56u && k >= *ub) return false;         // (x > k)
+                                    if (aOp == 0x5Au && k > *ub) return false;          // (x >= k)
+                                    if (aOp == 0x51u && k > *ub) return false;          // (x == k)
+                                    if (aOp == 0x52u && k > *ub) return true;           // (x != k)
+                                }
+                            }
+                            else if (!a1.constant() && a0.constant() && a0.type == I64)
+                            {
+                                if (auto const ub = bits_bound(aValues, aB, 3))
+                                {
+                                    auto const k = a0.imm0;
+                                    if (aOp == 0x56u && k > *ub) return true;           // (k > x)
+                                    if (aOp == 0x5Au && k >= *ub) return true;          // (k >= x)
+                                    if (aOp == 0x54u && k >= *ub) return false;         // (k < x)
+                                    if (aOp == 0x58u && k > *ub) return false;          // (k <= x)
+                                    if (aOp == 0x51u && k > *ub) return false;          // (k == x)
+                                    if (aOp == 0x52u && k > *ub) return true;           // (k != x)
+                                }
+                            }
+                            return {};
+                        }
+
+                        // (an f64 comparison of a value that is an integer within a range (see integral_range): known if the range decides
+                        // it (with a constant), or (eq, ne) if it is the value's truncation converted back (exact))
+                        std::optional<bool> ranged_comparison(std::vector<instruction> const& aValues, std::uint16_t aOp, value aX, value aY)
+                        {
+                            if (aOp < 0x61u || aOp > 0x66u)
+                                return {};
+                            auto x = aX;
+                            auto y = aY;
+                            auto const exact_round_trip = [&](value aBack, value aValue)
+                            {
+                                // (i64 (f64.convert_i64_s of i64.trunc_f64_s), or i32 (f64.convert_i32_s of i32.trunc_f64_s, f64.convert_i32_u of
+                                // i32.trunc_f64_u): the range within the integer's)
+                                auto const& back = aValues[aBack];
+                                if (back.operands.size() != 1u)
+                                    return false;
+                                auto const& t = aValues[back.operands[0]];
+                                if (t.operands.size() != 1u || t.operands[0] != aValue)
+                                    return false;
+                                double lo = 0.0, hi = 0.0;
+                                if (back.op == 0xB9u && t.op == 0xB0u)
+                                {
+                                    lo = -9007199254740992.0;
+                                    hi = 9007199254740992.0;
+                                }
+                                else if (back.op == 0xB7u && t.op == 0xAAu)
+                                {
+                                    lo = -2147483648.0;
+                                    hi = 2147483647.0;
+                                }
+                                else if (back.op == 0xB8u && t.op == 0xABu)
+                                    hi = 4294967295.0;
+                                else
+                                    return false;
+                                auto const range = integral_range(aValues, aValue, 4);
+                                return range && range->first >= lo && range->second <= hi;
+                            };
+                            if ((aOp == 0x61u || aOp == 0x62u) && (exact_round_trip(x, y) || exact_round_trip(y, x)))
+                                return aOp == 0x61u;
+                            bool swapped = false;
+                            if (aValues[x].constant())
+                            {
+                                std::swap(x, y);
+                                swapped = true;
+                            }
+                            if (aValues[y].op == 0x44u && !aValues[x].constant())
+                                if (auto const range = integral_range(aValues, x, 4))
+                                {
+                                    double const d = std::bit_cast<double>(aValues[y].imm0);
+                                    if (d == d)
+                                    {
+                                        // (eq ne lt gt le ge; the constant first: lt and gt (le and ge) swapped)
+                                        static constexpr std::size_t sSwapped[] = { 0u, 1u, 3u, 2u, 5u, 4u };
+                                        auto const k = swapped ? sSwapped[aOp - 0x61u] : static_cast<std::size_t>(aOp - 0x61u);
+                                        auto const [lo, hi] = *range;
+                                        switch (k)
+                                        {
+                                        case 0u: if (d < lo || d > hi) return false; break;
+                                        case 1u: if (d < lo || d > hi) return true; break;
+                                        case 2u: if (hi < d) return true; else if (lo >= d) return false; break;      // (x < d)
+                                        case 3u: if (lo > d) return true; else if (hi <= d) return false; break;      // (x > d)
+                                        case 4u: if (hi <= d) return true; else if (lo > d) return false; break;      // (x <= d)
+                                        case 5u: if (lo >= d) return true; else if (hi < d) return false; break;      // (x >= d)
+                                        }
+                                    }
+                                }
+                            return {};
                         }
 
                         bool simplify(function& aFunction)
@@ -1855,50 +2000,8 @@ namespace neos
                                     }
                                     if (((op >= 0x54u && op <= 0x5Au && (op - 0x54u) % 2u == 0u) || op == 0x51u || op == 0x52u) && i.operands.size() == 2u)
                                     {
-                                        // (an i64 unsigned comparison (lt_u gt_u le_u ge_u, eq, ne) of an integer converted to f64 (its bits, which
-                                        // are at most -infinity's: it is not a NaN), or of a phi of such values (and constants that are at most that),
-                                        // with a constant above that: known)
-                                        constexpr std::uint64_t Most = 0xFFF0000000000000ull;
-                                        auto const converting = [&](auto const& aSelf, value aValue, int aDepth) -> bool
-                                        {
-                                            auto const& x = values[aValue];
-                                            if (x.constant())
-                                                return x.type == I64 && x.imm0 <= Most;
-                                            if (x.op == 0xBDu && x.operands.size() == 1u && values[x.operands[0]].op >= 0xB7u && values[x.operands[0]].op <= 0xBAu)
-                                                return true;
-                                            if (x.op == ssa::Phi && aDepth > 0 && !x.operands.empty())
-                                            {
-                                                for (auto o : x.operands)
-                                                    if (o == aValue || !aSelf(aSelf, o, aDepth - 1))
-                                                        return false;
-                                                return true;
-                                            }
-                                            return false;
-                                        };
-                                        auto const converted = [&](value aValue, int aDepth) { return converting(converting, aValue, aDepth); };
-                                        std::optional<bool> known;
-                                        auto const& a0 = values[i.operands[0]];
-                                        auto const& a1 = values[i.operands[1]];
-                                        if (!a0.constant() && a1.constant() && converted(i.operands[0], 3))
-                                        {
-                                            auto const k = a1.imm0;
-                                            if (op == 0x54u && k > Most) known = true;          // (x < k)
-                                            else if (op == 0x58u && k >= Most) known = true;    // (x <= k)
-                                            else if (op == 0x56u && k >= Most) known = false;   // (x > k)
-                                            else if (op == 0x5Au && k > Most) known = false;    // (x >= k)
-                                            else if (op == 0x51u && k > Most) known = false;    // (x == k)
-                                            else if (op == 0x52u && k > Most) known = true;     // (x != k)
-                                        }
-                                        else if (!a1.constant() && a0.constant() && converted(i.operands[1], 3))
-                                        {
-                                            auto const k = a0.imm0;
-                                            if (op == 0x56u && k > Most) known = true;          // (k > x)
-                                            else if (op == 0x5Au && k >= Most) known = true;    // (k >= x)
-                                            else if (op == 0x54u && k >= Most) known = false;   // (k < x)
-                                            else if (op == 0x58u && k > Most) known = false;    // (k <= x)
-                                            else if (op == 0x51u && k > Most) known = false;    // (k == x)
-                                            else if (op == 0x52u && k > Most) known = true;     // (k != x)
-                                        }
+                                        // (known by its operand's bits' bound (see bounded_comparison))
+                                        auto const known = bounded_comparison(values, op, i.operands[0], i.operands[1]);
                                         if (known)
                                         {
                                             i.op = 0x41u;
@@ -1911,54 +2014,8 @@ namespace neos
                                     }
                                     if (op >= 0x61u && op <= 0x66u && i.operands.size() == 2u)
                                     {
-                                        // (an f64 comparison of a value that is an integer within a range (see integral_range): known if the range
-                                        // decides it (with a constant), or (eq, ne) if it is the value's truncation converted back (exact))
-                                        std::optional<bool> known;
-                                        auto x = i.operands[0];
-                                        auto y = i.operands[1];
-                                        auto const exact_round_trip = [&](value aBack, value aValue)
-                                        {
-                                            auto const& back = values[aBack];
-                                            if (back.op != 0xB9u || back.operands.size() != 1u)
-                                                return false;
-                                            auto const& t = values[back.operands[0]];
-                                            if (t.op != 0xB0u || t.operands.size() != 1u || t.operands[0] != aValue)
-                                                return false;
-                                            auto const range = integral_range(values, aValue, 4);
-                                            return range && range->first >= -9007199254740992.0 && range->second <= 9007199254740992.0;
-                                        };
-                                        if ((op == 0x61u || op == 0x62u) && (exact_round_trip(x, y) || exact_round_trip(y, x)))
-                                            known = op == 0x61u;
-                                        else
-                                        {
-                                            bool swapped = false;
-                                            if (values[x].constant())
-                                            {
-                                                std::swap(x, y);
-                                                swapped = true;
-                                            }
-                                            if (values[y].op == 0x44u && !values[x].constant())
-                                                if (auto const range = integral_range(values, x, 4))
-                                                {
-                                                    double const d = std::bit_cast<double>(values[y].imm0);
-                                                    if (d == d)
-                                                    {
-                                                        // (eq ne lt gt le ge; the constant first: lt and gt (le and ge) swapped)
-                                                        static constexpr std::size_t sSwapped[] = { 0u, 1u, 3u, 2u, 5u, 4u };
-                                                        auto const k = swapped ? sSwapped[op - 0x61u] : static_cast<std::size_t>(op - 0x61u);
-                                                        auto const [lo, hi] = *range;
-                                                        switch (k)
-                                                        {
-                                                        case 0u: if (d < lo || d > hi) known = false; break;
-                                                        case 1u: if (d < lo || d > hi) known = true; break;
-                                                        case 2u: if (hi < d) known = true; else if (lo >= d) known = false; break;      // (x < d)
-                                                        case 3u: if (lo > d) known = true; else if (hi <= d) known = false; break;      // (x > d)
-                                                        case 4u: if (hi <= d) known = true; else if (lo > d) known = false; break;      // (x <= d)
-                                                        case 5u: if (lo >= d) known = true; else if (hi < d) known = false; break;      // (x >= d)
-                                                        }
-                                                    }
-                                                }
-                                        }
+                                        // (known by its operand's range (see ranged_comparison))
+                                        auto const known = ranged_comparison(values, op, i.operands[0], i.operands[1]);
                                         if (known)
                                         {
                                             i.op = 0x41u;
@@ -3739,6 +3796,570 @@ namespace neos
                                 }
                             }
                             replaced.apply(aFunction);
+                            return changed;
+                        }
+
+
+                        // (a join (not a loop's head) whose code is phis, a few pure instructions and a branch, where a predecessor decides the
+                        // branch (with the phis' operands from it, the condition is known: a constant's; a comparison that its operand's bits'
+                        // bound or range decides; a value that an assume claims is not the constant; the same comparison as a branch that
+                        // dominates the predecessor decided: e.g. a cache's slow path's result merged with its fast path's load (not an
+                        // exception), or with an integer converted to f64, then tested for its tags): the predecessor goes to the successor that
+                        // it decides instead, with copies of the instructions whose values are used beyond the join; those values and the phis
+                        // are made phis where the paths meet again (each use: the value that reaches it)
+                        bool thread_decided_joins(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            // (a join's code: its phis, its pure instructions (not loads), its branch)
+                            std::vector<value> phis, body;
+                            value br = None;
+                            auto const join_code = [&](std::uint32_t aBlock) -> bool
+                            {
+                                auto const& J = blocks[aBlock];
+                                if (!J.reachable || J.loopHeader || J.successors.size() != 2u || J.successors[0] == J.successors[1] || J.predecessors.size() < 2u ||
+                                    J.code.empty() || values[J.code.back()].op != Branch || values[J.code.back()].operands.size() != 1u)
+                                    return false;
+                                phis.clear();
+                                body.clear();
+                                br = None;
+                                for (auto v : J.code)
+                                {
+                                    auto const& i = values[v];
+                                    if (i.dead || i.constant())
+                                        continue;
+                                    if (i.op == Phi)
+                                    {
+                                        if (!body.empty())
+                                            return false;
+                                        phis.push_back(v);
+                                    }
+                                    else if (i.op == Branch)
+                                        br = v;
+                                    else if (br != None || i.terminator() || !pure(i) || i.load() || body.size() >= 8u)
+                                        return false;
+                                    else
+                                        body.push_back(v);
+                                }
+                                if (br == None || phis.empty())
+                                    return false;
+                                for (auto t : J.successors)
+                                    if (t == aBlock || blocks[t].loopHeader || std::count(blocks[t].predecessors.begin(), blocks[t].predecessors.end(), aBlock) != 1)
+                                        return false;
+                                return true;
+                            };
+                            std::size_t const count = blocks.size();
+                            {
+                                bool any = false;
+                                for (std::uint32_t b = 1u; b < count && !any; ++b)
+                                    any = join_code(b);
+                                if (!any)
+                                    return false;
+                            }
+                            current_uses(aFunction);
+                            auto& uses = aFunction.uses;
+                            bool changed = false;
+                            std::size_t threads = 0u;
+                            // (what neos::assume claims: a value that is not a constant (see fold_assumed))
+                            std::unordered_map<value, std::uint64_t> excluded;
+                            for (auto const& B : blocks)
+                                for (std::size_t k = 0u; k < B.code.size(); ++k)
+                                {
+                                    auto const& a = values[B.code[k]];
+                                    if (a.dead || a.op != Assume || a.operands.size() != 1u)
+                                        continue;
+                                    auto const* c = &values[a.operands[0]];
+                                    bool negated = false;
+                                    if (c->op == 0x45u && c->operands.size() == 1u)
+                                    {
+                                        c = &values[c->operands[0]];
+                                        negated = true;
+                                    }
+                                    bool const ne = c->op == 0x47u || c->op == 0x52u;
+                                    bool const eq = c->op == 0x46u || c->op == 0x51u;
+                                    if (c->dead || c->operands.size() != 2u || !(negated ? eq : ne))
+                                        continue;
+                                    for (std::size_t n = 0u; n < 2u; ++n)
+                                        if (auto const& kv = values[c->operands[n]]; kv.constant() && !values[c->operands[1u - n]].constant())
+                                        {
+                                            auto const x = c->operands[1u - n];
+                                            if (values[x].block == a.block && values[x].op != Phi &&
+                                                std::find(B.code.begin(), B.code.begin() + static_cast<std::ptrdiff_t>(k), x) != B.code.begin() + static_cast<std::ptrdiff_t>(k))
+                                                excluded.emplace(x, kv.imm0);
+                                            break;
+                                        }
+                                }
+                            // (the blocks' immediate dominators: found when needed, again after the edges change)
+                            auto const none = ~std::uint32_t{};
+                            std::vector<std::uint32_t> idom;
+                            bool dominatorsCurrent = false;
+                            auto const dominators = [&]()
+                            {
+                                if (dominatorsCurrent)
+                                    return;
+                                dominatorsCurrent = true;
+                                std::vector<std::uint32_t> rank(blocks.size(), none);
+                                std::vector<std::uint32_t> rpo;
+                                {
+                                    std::vector<std::uint8_t> state(blocks.size(), 0u);
+                                    std::vector<std::pair<std::uint32_t, std::size_t>> stack{ { 0u, 0u } };
+                                    std::vector<std::uint32_t> post;
+                                    state[0] = 1u;
+                                    while (!stack.empty())
+                                    {
+                                        auto& [x, n] = stack.back();
+                                        if (n < blocks[x].successors.size())
+                                        {
+                                            auto const y = blocks[x].successors[n++];
+                                            if (state[y] == 0u)
+                                            {
+                                                state[y] = 1u;
+                                                stack.emplace_back(y, 0u);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            post.push_back(x);
+                                            stack.pop_back();
+                                        }
+                                    }
+                                    rpo.assign(post.rbegin(), post.rend());
+                                }
+                                for (std::uint32_t r = 0u; r < rpo.size(); ++r)
+                                    rank[rpo[r]] = r;
+                                idom.assign(blocks.size(), none);
+                                idom[0] = 0u;
+                                for (bool again = true; again;)
+                                {
+                                    again = false;
+                                    for (std::size_t r = 1u; r < rpo.size(); ++r)
+                                    {
+                                        auto const x = rpo[r];
+                                        auto d = none;
+                                        for (auto q : blocks[x].predecessors)
+                                        {
+                                            if (rank[q] == none || idom[q] == none)
+                                                continue;
+                                            if (d == none)
+                                            {
+                                                d = q;
+                                                continue;
+                                            }
+                                            auto f1 = q;
+                                            auto f2 = d;
+                                            while (f1 != f2)
+                                            {
+                                                while (rank[f1] > rank[f2])
+                                                    f1 = idom[f1];
+                                                while (rank[f2] > rank[f1])
+                                                    f2 = idom[f2];
+                                            }
+                                            d = f1;
+                                        }
+                                        if (d != none && idom[x] != d)
+                                        {
+                                            idom[x] = d;
+                                            again = true;
+                                        }
+                                    }
+                                }
+                            };
+                            // (the conditions that the branches that dominate a block decided (each: its value, true or false), found when 
+                            // needed (again after the edges change))
+                            std::unordered_map<std::uint32_t, std::vector<std::pair<value, bool>>> decided;
+                            auto const decided_at = [&](std::uint32_t aBlock) -> std::vector<std::pair<value, bool>> const&
+                            {
+                                if (auto const d = decided.find(aBlock); d != decided.end())
+                                    return d->second;
+                                dominators();
+                                std::vector<std::pair<value, bool>> result;
+                                std::size_t steps = 0u;
+                                for (auto x = aBlock; x != 0u && idom[x] != none && idom[x] != x && steps < 64u; ++steps)
+                                {
+                                    auto const d = idom[x];
+                                    auto const& D = blocks[d];
+                                    // (x is reached only from its dominator: the dominator's branch's edge to it)
+                                    if (D.successors.size() == 2u && D.successors[0] != D.successors[1] && blocks[x].predecessors.size() == 1u && !D.code.empty() &&
+                                        values[D.code.back()].op == Branch && values[D.code.back()].operands.size() == 1u)
+                                        result.emplace_back(values[D.code.back()].operands[0], x == D.successors[0]);
+                                    x = d;
+                                }
+                                return decided.emplace(aBlock, std::move(result)).first->second;
+                            };
+                            // (each value's users (found when needed; kept as values are used: an entry may be out of date (its user no longer
+                            // uses the value)); its uses (see count_uses) kept current)
+                            std::vector<std::uint32_t> userStart;           // (each value's users: userList[userStart[v], userStart[v + 1]))
+                            std::vector<value> userList;
+                            std::vector<std::pair<value, value>> userAdded;  // (users since: (value, user))
+                            bool usersFound = false;
+                            auto const add_use = [&](value aValue, value aUser)
+                            {
+                                if (aValue == None)
+                                    return;
+                                if (uses.size() < values.size())
+                                    uses.resize(values.size(), 0u);
+                                ++uses[aValue];
+                                if (usersFound)
+                                    userAdded.emplace_back(aValue, aUser);
+                            };
+                            auto const drop_use = [&](value aValue)
+                            {
+                                if (aValue != None && aValue < uses.size() && uses[aValue] > 0u)
+                                    --uses[aValue];
+                            };
+                            auto const find_users = [&]()
+                            {
+                                if (usersFound)
+                                    return;
+                                usersFound = true;
+                                userStart.assign(values.size() + 1u, 0u);
+                                for (auto const& B : blocks)
+                                    if (B.reachable)
+                                        for (auto w : B.code)
+                                            if (!values[w].dead)
+                                                for (auto o : values[w].operands)
+                                                    if (o != None)
+                                                        ++userStart[o + 1u];
+                                for (std::size_t v = 1u; v < userStart.size(); ++v)
+                                    userStart[v] += userStart[v - 1u];
+                                userList.assign(userStart.back(), None);
+                                std::vector<std::uint32_t> fill(userStart.begin(), userStart.end() - 1);
+                                for (auto const& B : blocks)
+                                    if (B.reachable)
+                                        for (auto w : B.code)
+                                            if (!values[w].dead)
+                                                for (auto o : values[w].operands)
+                                                    if (o != None)
+                                                        userList[fill[o]++] = w;
+                            };
+                            for (std::uint32_t b = 1u; b < count && threads < 64u; ++b)
+                            {
+                                if (!join_code(b))
+                                    continue;
+                                for (std::size_t k = 0u; k < blocks[b].predecessors.size() && threads < 64u;)
+                                {
+                                    auto const p = blocks[b].predecessors[k];
+                                    if (p == b || std::count(blocks[b].predecessors.begin(), blocks[b].predecessors.end(), p) != 1 ||
+                                        std::count(blocks[p].successors.begin(), blocks[p].successors.end(), b) != 1 || blocks[p].code.empty())
+                                    {
+                                        ++k;
+                                        continue;
+                                    }
+                                    // (the phis' operands from it; copies of the instructions (not yet in a block))
+                                    std::vector<std::pair<value, value>> map;
+                                    auto const lookup = [&](value aValue) -> value { for (auto const& [from, to] : map) if (from == aValue) return to; return None; };
+                                    bool ok = true;
+                                    for (auto ph : phis)
+                                    {
+                                        auto const o = k < values[ph].operands.size() ? values[ph].operands[k] : None;
+                                        if (o == None)
+                                            ok = false;
+                                        map.emplace_back(ph, o);
+                                    }
+                                    if (!ok)
+                                        break;
+                                    // (worth trying: a phi's operand from it that is informative (a constant, a value that an assume claims is not
+                                    // a constant, a conversion's bits, a phi), or a comparison of values that are not the join's)
+                                    {
+                                        bool worth = false;
+                                        for (auto const& [ph, ov] : map)
+                                        {
+                                            auto const& o = values[ov];
+                                            if (o.constant() || excluded.contains(ov) || o.op == 0xBDu || (o.op >= 0xB7u && o.op <= 0xBAu))
+                                                worth = true;
+                                        }
+                                        if (!worth)
+                                        {
+                                            auto const outside = [&](value aValue) { return lookup(aValue) == None && std::find(body.begin(), body.end(), aValue) == body.end(); };
+                                            auto const cv = values[br].operands[0];
+                                            for (auto v : body)
+                                                if ((v == cv || values[cv].op == 0x45u || values[cv].op == 0x71u || values[cv].op == 0x72u) && values[v].operands.size() == 2u &&
+                                                    values[v].op >= 0x46u && values[v].op <= 0x66u && outside(values[v].operands[0]) && outside(values[v].operands[1]))
+                                                    worth = true;
+                                            if (outside(cv) && values[cv].operands.size() == 2u && values[cv].op >= 0x46u && values[cv].op <= 0x66u)
+                                                worth = true;
+                                        }
+                                        if (!worth)
+                                        {
+                                            ++k;
+                                            continue;
+                                        }
+                                    }
+                                    auto const firstCopy = values.size();
+                                    std::vector<value> copies(body.size(), None);
+                                    auto const copy = [&](std::size_t aIndex)
+                                    {
+                                        if (copies[aIndex] != None)
+                                            return;
+                                        instruction x = values[body[aIndex]];
+                                        x.block = p;
+                                        for (auto& o : x.operands)
+                                            if (auto const m = lookup(o); m != None)
+                                                o = m;
+                                        values.push_back(std::move(x));
+                                        copies[aIndex] = static_cast<value>(values.size() - 1u);
+                                        map.emplace_back(body[aIndex], copies[aIndex]);
+                                    };
+                                    {
+                                        // (the instructions that the condition is made of)
+                                        std::vector<bool> wanted(body.size(), false);
+                                        auto const cv = values[br].operands[0];
+                                        for (std::size_t n = body.size(); n-- > 0u;)
+                                        {
+                                            if (body[n] == cv)
+                                                wanted[n] = true;
+                                            if (wanted[n])
+                                                for (auto o : values[body[n]].operands)
+                                                    for (std::size_t q = 0u; q < n; ++q)
+                                                        if (body[q] == o)
+                                                            wanted[q] = true;
+                                        }
+                                        for (std::size_t n = 0u; n < body.size(); ++n)
+                                            if (wanted[n])
+                                                copy(n);
+                                    }
+                                    auto const mapped = [&](value aValue) { auto const m = lookup(aValue); return m != None ? m : aValue; };
+                                    // (the condition, with the predecessor's values)
+                                    auto const deciding = [&](auto const& aSelf, value aValue, int aDepth) -> std::optional<bool>
+                                    {
+                                        auto const& c = values[aValue];
+                                        if (c.constant())
+                                            return c.type == I32 || c.type == I64 ? std::optional<bool>{ c.imm0 != 0u } : std::nullopt;
+                                        if (aDepth <= 0)
+                                            return {};
+                                        auto const boolean = [&](value aOperand) { auto const op = values[aOperand].op; return (op >= 0x45u && op <= 0x66u) || op == 0x71u || op == 0x72u; };
+                                        if ((c.op == 0x45u || c.op == 0x50u) && c.operands.size() == 1u)
+                                        {
+                                            auto const& o = values[c.operands[0]];
+                                            if (o.constant())
+                                                return o.imm0 == 0u;
+                                            if (c.op == 0x45u && boolean(c.operands[0]))
+                                                if (auto const d = aSelf(aSelf, c.operands[0], aDepth - 1))
+                                                    return !*d;
+                                            return {};
+                                        }
+                                        if ((c.op == 0x71u || c.op == 0x72u) && c.operands.size() == 2u && boolean(c.operands[0]) && boolean(c.operands[1]))
+                                        {
+                                            auto const a = aSelf(aSelf, c.operands[0], aDepth - 1);
+                                            auto const d = aSelf(aSelf, c.operands[1], aDepth - 1);
+                                            if (c.op == 0x71u)
+                                            {
+                                                if ((a && !*a) || (d && !*d))
+                                                    return false;
+                                                if (a && d)
+                                                    return true;
+                                            }
+                                            else
+                                            {
+                                                if ((a && *a) || (d && *d))
+                                                    return true;
+                                                if (a && d)
+                                                    return false;
+                                            }
+                                            return {};
+                                        }
+                                        if (c.operands.size() != 2u || !(c.op >= 0x46u && c.op <= 0x66u))
+                                            return {};
+                                        if (c.op <= 0x5Au)
+                                        {
+                                            auto const& x = values[c.operands[0]];
+                                            auto const& y = values[c.operands[1]];
+                                            if (x.constant() && y.constant())
+                                                return evaluate_comparison(c.op, x.imm0, y.imm0);
+                                            // (a value that an assume claims is not the constant)
+                                            if (c.op == 0x46u || c.op == 0x47u || c.op == 0x51u || c.op == 0x52u)
+                                                for (std::size_t n = 0u; n < 2u; ++n)
+                                                    if (auto const e = excluded.find(c.operands[1u - n]); e != excluded.end() && values[c.operands[n]].constant() &&
+                                                        values[c.operands[n]].imm0 == e->second && values[c.operands[n]].type == values[c.operands[1u - n]].type)
+                                                        return c.op == 0x47u || c.op == 0x52u;
+                                            if (auto const known = bounded_comparison(values, c.op, c.operands[0], c.operands[1]))
+                                                return known;
+                                        }
+                                        else if (c.op >= 0x61u)
+                                        {
+                                            if (auto const known = ranged_comparison(values, c.op, c.operands[0], c.operands[1]))
+                                                return known;
+                                        }
+                                        // (the same comparison (of the same values: not the join's, nor copies) as a branch that dominates the
+                                        // predecessor decided)
+                                        if (c.operands[0] >= firstCopy || c.operands[1] >= firstCopy || lookup(c.operands[0]) != None || lookup(c.operands[1]) != None)
+                                            return {};
+                                        for (auto const& [dv, outcome] : decided_at(p))
+                                        {
+                                            auto const& dc = values[dv];
+                                            if (dv == aValue || (dc.op == c.op && dc.operands.size() == 2u && dc.operands[0] == c.operands[0] && dc.operands[1] == c.operands[1] &&
+                                                dc.flags == c.flags && dc.imm0 == c.imm0))
+                                                return outcome;
+                                        }
+                                        return {};
+                                    };
+                                    auto const decision = deciding(deciding, mapped(values[br].operands[0]), 4);
+                                    auto const t = decision ? blocks[b].successors[*decision ? 0u : 1u] : 0u;
+                                    if (!decision || t == p || std::find(blocks[t].predecessors.begin(), blocks[t].predecessors.end(), p) != blocks[t].predecessors.end())
+                                    {
+                                        values.resize(firstCopy);
+                                        ++k;
+                                        continue;
+                                    }
+                                    find_users();
+                                    if (uses.size() < values.size())
+                                        uses.resize(values.size(), 0u);
+                                    // (the copies that are needed: of values used beyond the join, and their operands)
+                                    auto const inside = [&](value aValue)
+                                    {
+                                        std::uint32_t n = 0u;
+                                        for (auto v : body)
+                                            for (auto o : values[v].operands)
+                                                n += o == aValue ? 1u : 0u;
+                                        for (auto o : values[br].operands)
+                                            n += o == aValue ? 1u : 0u;
+                                        return n;
+                                    };
+                                    std::vector<value> repaired;
+                                    std::vector<bool> needed(body.size(), false);
+                                    for (auto ph : phis)
+                                        if (uses[ph] > inside(ph))
+                                            repaired.push_back(ph);
+                                    for (std::size_t n = body.size(); n-- > 0u;)
+                                    {
+                                        if (uses[body[n]] > inside(body[n]))
+                                        {
+                                            needed[n] = true;
+                                            repaired.push_back(body[n]);
+                                        }
+                                        if (needed[n])
+                                            for (auto o : values[body[n]].operands)
+                                                for (std::size_t q = 0u; q < n; ++q)
+                                                    if (body[q] == o)
+                                                        needed[q] = true;
+                                    }
+                                    for (std::size_t n = 0u; n < body.size(); ++n)
+                                        if (needed[n])
+                                            copy(n);
+                                    // (the copies: before the predecessor's terminator)
+                                    {
+                                        std::vector<value> inserted;
+                                        for (std::size_t n = 0u; n < body.size(); ++n)
+                                            if (needed[n])
+                                            {
+                                                inserted.push_back(copies[n]);
+                                                for (auto o : values[copies[n]].operands)
+                                                    add_use(o, copies[n]);
+                                            }
+                                            else if (copies[n] != None)
+                                                values[copies[n]].dead = true;
+                                        auto& code = blocks[p].code;
+                                        code.insert(code.end() - 1, inserted.begin(), inserted.end());
+                                    }
+                                    // (the edge: to the successor instead; its phis' operands from the predecessor)
+                                    for (auto& s : blocks[p].successors)
+                                        if (s == b)
+                                            s = t;
+                                    {
+                                        auto const kt = static_cast<std::size_t>(std::find(blocks[t].predecessors.begin(), blocks[t].predecessors.end(), b) - blocks[t].predecessors.begin());
+                                        blocks[t].predecessors.push_back(p);
+                                        for (auto v : blocks[t].code)
+                                        {
+                                            if (values[v].op != Phi)
+                                                break;
+                                            auto const o = kt < values[v].operands.size() ? mapped(values[v].operands[kt]) : None;
+                                            values[v].operands.push_back(o);
+                                            add_use(o, v);
+                                        }
+                                    }
+                                    blocks[b].predecessors.erase(blocks[b].predecessors.begin() + static_cast<std::ptrdiff_t>(k));
+                                    for (auto ph : phis)
+                                    {
+                                        auto& ops = values[ph].operands;
+                                        if (k < ops.size())
+                                        {
+                                            drop_use(ops[k]);
+                                            ops.erase(ops.begin() + static_cast<std::ptrdiff_t>(k));
+                                        }
+                                    }
+                                    // (each value used beyond the join: the value that reaches each use (the join's, or the predecessor's 
+                                    // copy, or a phi of them where paths from both meet))
+                                    for (auto v : repaired)
+                                    {
+                                        std::unordered_map<std::uint32_t, value> reaching;
+                                        reaching[b] = v;
+                                        reaching[p] = mapped(v);
+                                        auto const reach = [&](auto const& aSelf, std::uint32_t aBlock) -> value
+                                        {
+                                            std::vector<std::uint32_t> walk;
+                                            auto x = aBlock;
+                                            while (!reaching.contains(x) && blocks[x].predecessors.size() == 1u)
+                                            {
+                                                walk.push_back(x);
+                                                x = blocks[x].predecessors[0];
+                                            }
+                                            value result;
+                                            if (auto const r = reaching.find(x); r != reaching.end())
+                                                result = r->second;
+                                            else if (blocks[x].predecessors.empty())
+                                                result = v;
+                                            else
+                                            {
+                                                instruction phi;
+                                                phi.op = Phi;
+                                                phi.type = values[v].type;
+                                                phi.block = x;
+                                                phi.origin = values[v].origin;
+                                                values.push_back(std::move(phi));
+                                                result = static_cast<value>(values.size() - 1u);
+                                                blocks[x].code.insert(blocks[x].code.begin(), result);
+                                                reaching[x] = result;
+                                                std::vector<value> operands;
+                                                auto const preds = blocks[x].predecessors;
+                                                for (auto q : preds)
+                                                    operands.push_back(aSelf(aSelf, q));
+                                                values[result].operands.assign(operands.begin(), operands.end());
+                                                for (auto o : operands)
+                                                    add_use(o, result);
+                                            }
+                                            for (auto w : walk)
+                                                reaching[w] = result;
+                                            return result;
+                                        };
+                                        // (its users (not in the join))
+                                        std::vector<value> found;
+                                        if (v + 1u < userStart.size())
+                                            found.assign(userList.begin() + userStart[v], userList.begin() + userStart[v + 1u]);
+                                        for (auto const& [o, u] : userAdded)
+                                            if (o == v)
+                                                found.push_back(u);
+                                        std::sort(found.begin(), found.end());
+                                        found.erase(std::unique(found.begin(), found.end()), found.end());
+                                        for (auto u : found)
+                                        {
+                                            if (values[u].dead || values[u].block == b)
+                                                continue;
+                                            auto const ub = values[u].block;
+                                            for (std::size_t n = 0u; n < values[u].operands.size(); ++n)
+                                            {
+                                                if (values[u].operands[n] != v)
+                                                    continue;
+                                                auto const from = values[u].op == Phi ? (n < blocks[ub].predecessors.size() ? blocks[ub].predecessors[n] : ub) : ub;
+                                                auto const r = reach(reach, from);
+                                                if (r != v)
+                                                {
+                                                    values[u].operands[n] = r;
+                                                    drop_use(v);
+                                                    add_use(r, u);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ++threads;
+                                    changed = true;
+                                    dominatorsCurrent = false;
+                                    decided.clear();
+                                    if (blocks[b].predecessors.size() < 2u || !join_code(b))
+                                        break;
+                                }
+                            }
+                            if (changed)
+                                aFunction.usesCurrent = false;
                             return changed;
                         }
 
@@ -5991,6 +6612,12 @@ namespace neos
                                 edges = false;
                             }
                             if (changes(duplicate_tails(aFunction)))
+                            {
+                                threaded = true;
+                                finish(aFunction);
+                                edges = false;
+                            }
+                            if (changes(thread_decided_joins(aFunction)))
                             {
                                 threaded = true;
                                 finish(aFunction);
