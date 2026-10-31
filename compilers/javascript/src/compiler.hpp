@@ -307,6 +307,9 @@ namespace neos::compilers::javascript
         void property_site(std::uint32_t aSite);    ///< (the address of a property cache site's entry (aSite: the local (i32) that has its number))
         void volatile_load(opcode aOpcode, std::uint32_t aOffset, bool aHeapOffset, alias aAlias);
         void offset_load(std::uint32_t aOffset, alias aAlias);
+        void unit_load(std::uint32_t aOffset, alias aAlias, bool aCached = false);
+        void values_word(std::uint32_t aSlot, std::uint32_t aPattern);
+        void header_word(std::uint32_t aSlot, std::uint32_t aPattern, bool aShape);
         void site_load(opcode aOpcode, std::uint32_t aOffset);  ///< (as mem_load, a site's entry's field (a cached load))
         void cached_load(opcode aOpcode, std::uint32_t aOffset, alias aAlias, bool aHeapOffset = false);  ///< (a cached load of a word that
                                                                 ///< the code has checked does not change (e.g. a watched holder's property))

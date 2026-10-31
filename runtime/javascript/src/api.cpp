@@ -121,9 +121,8 @@ namespace neos::javascript_runtime
                 at(&o.proto) == jsl::ObjectProto &&
                 at(o.properties.shape_field()) == jsl::ObjectShape &&
                 at(o.properties.values_field()) == jsl::ObjectValues &&
-                at(o.properties.values_field()) + sizeof(std::uint64_t) == jsl::ObjectValueCount &&
-                at(o.properties.values_field()) + sizeof(std::uint64_t) + sizeof(std::uint32_t) == jsl::ObjectValueCapacity &&
-                at(o.properties.dictionary_field()) == jsl::ObjectDictionary &&
+                at(o.properties.capacity_field()) == jsl::ObjectValueCapacity &&
+                at(o.properties.values_field()) == jsl::ObjectDictionary &&
                 at(&o.cls) == jsl::ObjectClass && sizeof(o.cls) == 1u &&
                 at(&o.extensible) == jsl::ObjectExtensible && sizeof(o.extensible) == 1u &&
                 offsetof(property, setter) == jsl::PropertySetter && AttributesDefault == jsl::AttributesDefault &&
@@ -133,7 +132,7 @@ namespace neos::javascript_runtime
                 offsetof(property, attributes) == jsl::PropertyAttributes &&
                 AttributeWritable == jsl::AttributeWritable &&
                 AttributeAccessor == jsl::AttributeAccessor &&
-                at(&o.handle) == jsl::CellHandle && sizeof(o.handle) == 4u &&
+                at(&o.cellKind) == 3u && sizeof(cell) == 4u && at(o.properties.shape_field()) == 4u && sizeof(shape_ref) == 4u &&
                 ((sizeof(object) + 7u) & ~std::size_t{ 7u }) == jsl::ObjectSize &&
                 ((sizeof(array_object) + 7u) & ~std::size_t{ 7u }) == jsl::ArraySize && MaxCellValues == jsl::MaxLiteralProperties &&
                 offsetof(allocation_state, freeLists) == jsl::AllocFreeLists &&
@@ -171,7 +170,7 @@ namespace neos::javascript_runtime
                 sizeof(array.sparse) == 1u && sizeof(array.cls) == 1u;
             if (!ok || !arrayOk)
                 std::fprintf(stderr, "JavaScript runtime: object prototype %zu, shape %zu, values %zu, dictionary %zu, class %zu, extensible %zu; array elements %zu, length %zu, sparse %zu\n",
-                    at(&o.proto), at(o.properties.shape_field()), at(o.properties.values_field()), at(o.properties.dictionary_field()), at(&o.cls),
+                    at(&o.proto), at(o.properties.shape_field()), at(o.properties.values_field()), at(o.properties.capacity_field()), at(&o.cls),
                     at(&o.extensible), field(array, array.elements.offset_field()), field(array, &array.length), field(array, &array.sparse));
             if (!ok || !environmentOk || !arrayOk || !stringOk)
             {
@@ -708,7 +707,7 @@ namespace neos::javascript_runtime
         value env_new(value aParent, std::int32_t aSize)
         {
             auto& e = the_heap().make<environment>(aParent, static_cast<std::uint32_t>(aSize));
-            return TagInternal | e.handle;
+            return TagInternal | e.handle();
         }
 
         value env_copy(value aEnvironment)
@@ -718,7 +717,7 @@ namespace neos::javascript_runtime
             std::copy(source.slots.begin(), source.slots.end(), e.slots.begin());
             e.names = source.names;
             e.withObject = source.withObject;
-            return TagInternal | e.handle;
+            return TagInternal | e.handle();
         }
 
         value env_get(value aEnvironment, std::int32_t aHops, std::int32_t aSlot)
@@ -1421,7 +1420,7 @@ namespace neos::javascript_runtime
             static_assert(offsetof(site, added) == jsl::SiteAdded && offsetof(site, function) == jsl::SiteFunction);
             static_assert(offsetof(site, number) == jsl::SiteNumber && offsetof(site, dispatch) == jsl::SiteDispatch);
 
-            inline std::uint64_t shape_word(shape const* aShape) { return reinterpret_cast<std::uintptr_t>(aShape); }
+            inline std::uint64_t shape_word(shape const* aShape) { return shape_ref::word_of(aShape); }
 
             // (the programs' tables)
             struct site_tables
@@ -1749,14 +1748,14 @@ namespace neos::javascript_runtime
 
         value array_literal(std::int32_t aSite, std::int32_t aCount)
         {
-            // (an array literal's array: aCount elements (undefined: compiled code sets them), in its cell (room for as many, at least 4);
+            // (an array literal's array: aCount elements (undefined: compiled code sets them), in its cell (room for as many: 4 if none);
             // its site's entry then has what compiled code needs to make its arrays itself (SiteArray))
             return guard([&]() -> value
             {
                 auto& h = the_heap();
                 constexpr std::size_t base = (sizeof(array_object) + 7u) & ~std::size_t{ 7u };
                 auto const count = static_cast<std::size_t>(std::clamp<std::int32_t>(aCount, 0, static_cast<std::int32_t>(jsl::MaxLiteralElements)));
-                auto const room = std::max<std::size_t>(count, 4u);
+                auto const room = count != 0u ? count : 4u;
                 auto& a = h.make_with<array_object>(room, the_realm().arrayPrototype);
                 a.properties.forget_storage();
                 auto* const cell = reinterpret_cast<std::byte*>(&a);
@@ -1789,14 +1788,14 @@ namespace neos::javascript_runtime
             auto& o = obj(aObject);
             auto* const s = o.properties.layout();
             constexpr std::size_t base = (sizeof(object) + 7u) & ~std::size_t{ 7u };
-            if (&typeid(o) != &typeid(object) || s == nullptr || o.properties.size() != static_cast<std::size_t>(aCount) || o.has_private_elements() ||
+            if (o.cellKind != KindObject || s == nullptr || o.properties.size() != static_cast<std::size_t>(aCount) || o.has_private_elements() ||
                 o.proto != the_realm().objectPrototype || !o.extensible)
                 return Undefined;
             for (auto const& slot : s->slots())
                 if (slot.attributes != AttributesDefault)
                     return Undefined;
             auto* const cell = reinterpret_cast<std::byte*>(&o);
-            if (*static_cast<std::uint64_t const*>(o.properties.values_field()) != region_offset(cell + base))
+            if (o.properties.values_offset() != region_offset(cell + base))
                 return Undefined;   // (its values are not in its cell)
             auto& h = the_heap();
             auto const sizeClass = h.size_class(base + static_cast<std::size_t>(aCount) * sizeof(value));
@@ -2020,7 +2019,7 @@ namespace neos::javascript_runtime
                         if (e->kind == jsl::SiteAdd && o.extensible && prototypes_match(o, *e, false) &&
                             (e->depth == 0u ? o.proto : obj(e->prototypes[e->depth - 1u].object).proto) == Null)
                         {
-                            o.properties.add(aValue, reinterpret_cast<shape*>(e->added));
+                            o.properties.add(aValue, shape_ref::from_word(e->added));
                             return aValue;
                         }
                     }

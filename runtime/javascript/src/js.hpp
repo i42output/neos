@@ -129,34 +129,47 @@ namespace neos::javascript_runtime
     class tracer;
     enum class object_class : std::uint8_t;
 
+    // (a cell's type's operations (its destructor, its trace and, an object's, its internal methods): by its kind (cells have no 
+    // vtables: see cell_kind))
+    struct cell_ops;
+    template <typename T>
+    std::uint8_t cell_kind();               ///< (a cell type's kind (see below))
+    extern cell_ops const* gCellOps[256];   ///< (gc.cpp: by kind (0: none))
+    extern std::byte* gRegionBase;          ///< (gc.cpp: the region's address (one definition: not an inline variable))
+
     class cell
     {
     public:
         explicit cell(cell_type aType) : type{ aType } {}
         cell(cell const&) = delete;
         cell& operator=(cell const&) = delete;
-        virtual ~cell() = default;
+        ~cell() = default;      ///< (not virtual: a cell is destroyed by destroy(), its type's destructor (see cell_ops))
     public:
-        // (the garbage collector (gc.hpp): a cell type that refers to other cells (values, or pointers to cells) overrides it, marking 
-        // them (and calling its base's); the default refers to none)
-        virtual void trace(tracer& aTracer) { (void)aTracer; }
+        // (the garbage collector (gc.hpp): a cell type that refers to other cells (values, or pointers to cells) has its own do_trace,
+        // marking them (and calling its base's); the default refers to none)
+        void trace(tracer& aTracer);
+        void do_trace(tracer& aTracer) { (void)aTracer; }
+        void destroy() noexcept;    ///< (its type's destructor)
+        cell_ops const& ops() const { return *gCellOps[cellKind]; }
+        // (its handle: its offset in the region >> 3 (see heap::HandleShift))
+        std::uint32_t handle() const { return static_cast<std::uint32_t>(static_cast<std::uint64_t>(reinterpret_cast<std::byte const*>(this) - gRegionBase) >> 3u); }
     public:
-        // (one word (with the vtable's, the cell's first 16 bytes): its type, the collector's mark, an object's flags and class, and
-        // its handle (compiled code copies the word of a template object with its handle: see layout::CellHandle))
-        cell_type const type;
+        // (its first 4 bytes: its type, the collector's mark, an object's flags and class, and its type's kind (compiled code copies 
+        // them from a template object: see layout::ObjectClass))
+        cell_type const type : 3;
         std::uint8_t marked : 1 = 0u;
         std::uint8_t ordinaryGet : 1 = 1u;  ///< (an object: its [[Get]] (and [[GetOwnProperty]] and [[GetPrototypeOf]]) are the ordinary ones)
         std::uint8_t mirrored : 1 = 0u;     ///< (an object: a global object whose properties have mirrors: changes to them call 
                                             ///< global_object_changed; it has no shape (the property caches do not use it))
+        std::uint8_t hasExtra : 1 = 0u;     ///< (an object: it has an object_extra (see object::extra))
         object_class cls{};                 ///< (an object: its class)
         bool extensible = true;             ///< (an object: it is extensible)
-        std::uint32_t handle = 0u;
+        std::uint8_t cellKind = 0u;         ///< (its type's kind (see cell_kind): its operations are gCellOps[cellKind])
     };
 
     // --- the region: the heap's address space (gc.cpp), which compiled code reads as an external memory (see
     // neos::language::javascript::layout): its cells, and storage that is not a cell's but that compiled code reads (region_vector)
 
-    extern std::byte* gRegionBase;                      ///< (gc.cpp: the region's address (one definition: not an inline variable))
     void* region_allocate(std::size_t aSize);           ///< (gc.cpp: storage in the region that is not a cell)
     void region_release(void* aMemory) noexcept;      ///< (storage that region_allocate allocated (else (e.g. a cell's) nothing))
     bool region_raw(void const* aMemory);             ///< (gc.cpp: storage that region_allocate allocated (not a cell's))
@@ -374,7 +387,7 @@ namespace neos::javascript_runtime
     struct function_object;
 
     // (the heap: cells, by handle; a mark-sweep garbage collector (gc.cpp) frees the cells that cannot be reached (cells do not move:
-    // a cell's handle is its offset in the region, divided by 16 (the region's size is 64 GB: it is 32 bits); a cell's memory (and so
+    // a cell's handle is its offset in the region, divided by 8 (the region's size is 32 GB: it is 32 bits); a cell's memory (and so
     // its handle) is reused once it is freed). Compiled code finds a handle's cell from the handle (layout::HandleShift))
     class array_object;
     struct shape;
@@ -394,7 +407,7 @@ namespace neos::javascript_runtime
     // collects then))
     struct allocation_state
     {
-        static constexpr std::size_t Classes = 32u;
+        static constexpr std::size_t Classes = 40u;
         std::uint64_t freeLists[Classes];
         std::uint64_t allocatedBytes;
         std::uint64_t compiledLimit;
@@ -417,7 +430,7 @@ namespace neos::javascript_runtime
     inline constexpr std::size_t MegamorphicEntries = 4096u;
     inline std::size_t megamorphic_index(std::uint64_t aShape, std::uint64_t aKey)
     {
-        return static_cast<std::size_t>(((aShape >> 4u) ^ (aShape >> 16u) ^ aKey) & (MegamorphicEntries - 1u));
+        return static_cast<std::size_t>((aShape ^ (aShape >> 12u) ^ aKey) & (MegamorphicEntries - 1u));  // (a shape's word: its region offset >> 3)
     }
 
     // (an isolate: a heap and the state of the runtime that refers to its cells (its realms, interned strings, shapes ...). Programs that
@@ -447,6 +460,30 @@ namespace neos::javascript_runtime
                 allocating();
             return allocate(aSize);
         }
+        // (a cell of (at least) aSize bytes (at least its type's size): its room after its type's members is its own (e.g. a small
+        // string's code units))
+        template <typename T, typename... Args>
+        T& make_sized(std::size_t aSize, Args&&... aArguments)
+        {
+            auto const size = std::max(aSize, sizeof(T));
+            iState->allocatedBytes += size;
+            if (++iAllocations >= iAllocationTrigger || iState->allocatedBytes >= iByteTrigger)
+                allocating();
+            void* const memory = allocate(size);
+            T* result;
+            try
+            {
+                result = ::new (memory) T{ std::forward<Args>(aArguments)... };
+            }
+            catch (...)
+            {
+                deallocate(memory);
+                throw;
+            }
+            result->cellKind = cell_kind<T>();
+            add(*result, memory);
+            return *result;
+        }
         // (a cell with room for (at least) aValues of its properties' values in it (an object's: see property_table::use_storage); its
         // slot's room after it is used for them anyway)
         template <typename T, typename... Args>
@@ -470,6 +507,7 @@ namespace neos::javascript_runtime
                 deallocate(memory);
                 throw;
             }
+            result->cellKind = cell_kind<T>();
             add(*result, memory);
             if constexpr (requires (T& t) { t.properties.use_storage(nullptr, 0u); })
             {
@@ -484,9 +522,9 @@ namespace neos::javascript_runtime
                 if constexpr (!std::is_same_v<T, object> && !std::is_same_v<T, function_object>)
                 {
                     constexpr bool ordinaryGet =
-                        std::is_same_v<decltype(&T::get), value (object::*)(value, value)> &&
-                        std::is_same_v<decltype(&T::get_own_property), std::optional<property_descriptor> (object::*)(value)> &&
-                        std::is_same_v<decltype(&T::get_prototype_of), value (object::*)()>;
+                        std::is_same_v<decltype(&T::do_get), value (object::*)(value, value)> &&
+                        std::is_same_v<decltype(&T::do_get_own_property), std::optional<property_descriptor> (object::*)(value)> &&
+                        std::is_same_v<decltype(&T::do_get_prototype_of), value (object::*)()>;
                     if constexpr (!ordinaryGet)
                         result->ordinaryGet = false;
                     if constexpr (ordinaryGet || std::is_same_v<T, array_object>)
@@ -675,11 +713,11 @@ namespace neos::javascript_runtime
     {
         switch (aCell.type)
         {
-        case cell_type::String: return TagString | aCell.handle;
-        case cell_type::Symbol: return TagSymbol | aCell.handle;
-        case cell_type::BigInt: return TagBigInt | aCell.handle;
-        case cell_type::Object: return TagObject | aCell.handle;
-        default: return TagInternal | aCell.handle;
+        case cell_type::String: return TagString | aCell.handle();
+        case cell_type::Symbol: return TagSymbol | aCell.handle();
+        case cell_type::BigInt: return TagBigInt | aCell.handle();
+        case cell_type::Object: return TagObject | aCell.handle();
+        default: return TagInternal | aCell.handle();
         }
     }
 
@@ -696,58 +734,63 @@ namespace neos::javascript_runtime
     class string : public cell
     {
     public:
-        string() : cell{ cell_type::String } { charsOffset = region_offset(text.data()); }
-        explicit string(std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, text{ aText }
-        {
-            charsOffset = region_offset(text.data());
-        }
-        string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, length{ aLength }, left{ aLeft }, right{ aRight } {}
+        // (an empty string (its code units: none, in its cell))
+        string() : cell{ cell_type::String } { charsOffset = region_offset(small_text()); }
+        // (its code units in storage of its own (in the region))
+        explicit string(std::u16string_view aText);
+        string(value aLeft, value aRight, std::uint32_t aLength) : cell{ cell_type::String }, length{ aLength }, left{ aLeft }, right{ aRight },
+            rope{ true } {}
         struct slice_tag {};
         string(slice_tag, value aBase, std::uint64_t aCharsOffset, std::uint32_t aLength) : cell{ cell_type::String }, length{ aLength }, 
-            charsOffset{ aCharsOffset }, base{ aBase } {}
+            charsOffset{ aCharsOffset }, left{ aBase } {}
+        // (its code units in its cell (after its members): its cell has room for them (see make_small_string))
         struct small_tag {};
-        string(small_tag, std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, smallText{ true }
+        string(small_tag, std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }
         {
-            std::copy(aText.begin(), aText.end(), small);
-            charsOffset = region_offset(small);
+            std::copy(aText.begin(), aText.end(), small_text());
+            charsOffset = region_offset(small_text());
         }
+        ~string();
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
-        region_u16string const& flat();
+        std::u16string_view flat();     ///< (its code units (a rope is flattened: its own storage))
         std::u16string_view chars()     ///< (its code units (a rope is flattened; a slice's are its base's))
         {
-            // (not a rope: its code units are at charsOffset (as compiled code reads them), whether they are its small text's, its text's 
-            // or its base's)
-            if (charsOffset != 0u)
+            // (not a rope: its code units are at charsOffset (as compiled code reads them), whether they are in its cell, its own
+            // storage or its base's)
+            if (!rope)
                 return std::u16string_view{ reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length };
-            return std::u16string_view{ flat() };
+            return flat();
         }
         std::size_t hash();
         std::int64_t array_index();     ///< (-1: not an array index)
+        bool slice() const { return !rope && !owned && left != 0u; }  ///< (its code units are its base's (left))
+        value interned_equal() const { return rope ? 0u : right; }  ///< (a flat string that is not interned: the interned string equal to it, 
+                                                                    ///< once intern has found it (else 0))
+        char16_t* small_text() { return reinterpret_cast<char16_t*>(this + 1); }
+        static std::size_t small_size(std::size_t aLength) { return sizeof(string) + aLength * sizeof(char16_t); }  ///< (a small string's cell)
     public:
-        // (compiled code reads its length and its code units' offset (they precede its text: their offsets are the same whatever the
-        // C++ library))
+        // (compiled code reads its length and its code units' offset (see layout::StringLength))
         std::uint32_t length = 0u;
-        std::uint64_t charsOffset = 0u; ///< (compiled code reads it: the offset of its code units (text.s, or small.s), if it is flat (else
-                                        ///< 0: a rope))
-        region_u16string text;          ///< (none while it is a rope: its parts (left and right) are concatenated when it is flattened)
-        value left = 0u;
-        value right = 0u;               ///< (a flat string that is not interned: the interned string equal to it, once intern has found it)
-        value base = 0u;                ///< (a slice: the flat string whose code units (some of them) are its (charsOffset is in them, until
-                                        ///< it is flattened (flat()): its text is then a copy of them (its base lives as long as it does: 
-                                        ///< views of its code units that were taken before then are valid)))
-        std::size_t hashValue = 0u;
-        bool hashed = false;
-        bool interned = false;
-        bool pinned = false;            ///< (interned for as long as the program runs (e.g. compiled code's literals); else an interned
+        std::uint64_t charsOffset = 0u; ///< (compiled code reads it: the offset of its code units, if it is flat (else 0: a rope))
+        value left = 0u;                ///< (a rope: its left part; a slice: the flat string whose code units (some of them) are its (its 
+                                        ///< base lives as long as it does))
+        value right = 0u;               ///< (a rope: its right part; a flat string that is not interned: the interned string equal to it, 
+                                        ///< once intern has found it)
+        std::uint32_t hashValue = 0u;
+        std::uint32_t arrayIndex = 0u;  ///< (0xFFFFFFFF: not an array index)
+        bool rope : 1 = false;          ///< (its code units are its parts' (left and right), until it is flattened)
+        bool owned : 1 = false;         ///< (its code units are in storage of its own (at charsOffset), which it releases)
+        bool hashed : 1 = false;
+        bool indexed : 1 = false;       ///< (arrayIndex is computed)
+        bool interned : 1 = false;
+        bool pinned : 1 = false;        ///< (interned for as long as the program runs (e.g. compiled code's literals); else an interned
                                         ///< string lives while it is referred to)
-        std::int64_t arrayIndex = -2;   ///< (-2: not computed yet)
-        // (a short string's code units, in place (no memory of their own) until it is flattened (text is then made from them))
+        // (a short string's code units are in its cell, after its members)
         static constexpr std::size_t SmallCapacity = 16u;
-        bool smallText = false;
-        char16_t small[SmallCapacity];
     };
+    static_assert(sizeof(string) == 48u);
 
     inline constexpr std::uint32_t MaxStringLength = (1u << 30) - 25u;
 
@@ -782,7 +825,7 @@ namespace neos::javascript_runtime
         symbol() : cell{ cell_type::Symbol } {}
         explicit symbol(value aDescription) : cell{ cell_type::Symbol }, description{ aDescription } {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
         value description = Undefined;
         bool registered = false;        ///< (Symbol.for)
@@ -899,6 +942,9 @@ namespace neos::javascript_runtime
     // have it (their traces mark them), so a key that is freed (and its handle reused) cannot be confused)
     struct shape
     {
+        // (in the region: an object's shape is a 32-bit word (see shape_ref))
+        static void* operator new(std::size_t aSize) { return region_allocate(aSize); }
+        static void operator delete(void* aMemory) noexcept { region_release(aMemory); }
         struct slot
         {
             value key;
@@ -927,13 +973,29 @@ namespace neos::javascript_runtime
     };
     inline shape* root_shape() { return the_heap().root_shape(); }   ///< (the shape of no properties)
 
+    // (a shape as an object's word (compiled code compares them): its region offset >> 3 (0: none))
+    class shape_ref
+    {
+    public:
+        shape_ref() = default;
+        shape_ref(std::nullptr_t) {}
+        shape_ref(shape const* aShape) : iWord{ word_of(aShape) } {}
+        shape* operator->() const { return reinterpret_cast<shape*>(gRegionBase + (std::uint64_t{ iWord } << 3u)); }
+        operator shape*() const { return iWord != 0u ? operator->() : nullptr; }
+        std::uint32_t word() const { return iWord; }
+        static std::uint32_t word_of(shape const* aShape) { return aShape != nullptr ? static_cast<std::uint32_t>(region_offset(aShape) >> 3u) : 0u; }
+        static shape* from_word(std::uint64_t aWord) { return aWord != 0u ? reinterpret_cast<shape*>(gRegionBase + (aWord << 3u)) : nullptr; }
+    private:
+        std::uint32_t iWord = 0u;
+    };
+
     // (an accessor property's getter and setter (in a table that has a shape, its value is the pair))
     class accessor_pair : public cell
     {
     public:
         accessor_pair(value aGetter, value aSetter) : cell{ cell_type::Internal }, getter{ aGetter }, setter{ aSetter } {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
         value getter;
         value setter;
@@ -983,21 +1045,28 @@ namespace neos::javascript_runtime
         friend class property_ref;
     public:
         property_table() = default;
-        property_table(property_table&& aOther) noexcept : iShape{ aOther.iShape }, iValues{ std::move(aOther.iValues) }, 
-            iDictionary{ std::exchange(aOther.iDictionary, 0u) } {}
+        property_table(property_table&& aOther) noexcept : iShape{ aOther.iShape }, iStorage{ aOther.iStorage }, iCapacity{ aOther.iCapacity }
+        {
+            aOther.forget_all();
+            if (iShape != nullptr ? iCapacity != 0u : iStorage != 0u)
+                note_owner(this);
+        }
         property_table& operator=(property_table&& aOther) noexcept
         {
             if (&aOther != this)
             {
                 changed();
-                release_dictionary();
+                release();
                 iShape = aOther.iShape;
-                iValues = std::move(aOther.iValues);
-                iDictionary = std::exchange(aOther.iDictionary, 0u);
+                iStorage = aOther.iStorage;
+                iCapacity = aOther.iCapacity;
+                aOther.forget_all();
+                if (iShape != nullptr ? iCapacity != 0u : iStorage != 0u)
+                    note_owner(this);
             }
             return *this;
         }
-        ~property_table() { release_dictionary(); }
+        ~property_table() { release(); }
     public:
         property_ref find(value aKey);
         property_ref find(value aKey) const { return const_cast<property_table*>(this)->find(aKey); }
@@ -1006,25 +1075,47 @@ namespace neos::javascript_runtime
                                                 ///< transition for its key)
         void remove(value aKey);
         void reserve(std::size_t aCapacity);
-        void limit_storage(std::size_t aCapacity) { iValues.limit(aCapacity); }  ///< (less of its values' storage used (its values and layout are as they were))
-        void forget_storage() { changed(); iValues.forget(); }  ///< (its values' storage, if it has none (e.g. its cell's for another use))
-        void use_storage(value* aStorage, std::size_t aCapacity) { changed(); iValues.use_storage(aStorage, aCapacity); }  ///< (its values' (it has
-                                                ///< none): storage that is not its own (e.g. in its object's cell))
+        void limit_storage(std::size_t aCapacity)   ///< (less of its values' storage used (its values and layout are as they were))
+        {
+            if (iShape != nullptr && aCapacity < iCapacity && iShape->count <= aCapacity)
+                iCapacity = static_cast<std::uint32_t>(aCapacity);
+        }
+        void forget_storage()   ///< (its values' storage, if it has no values (e.g. its cell's for another use))
+        {
+            changed();
+            if (iShape != nullptr && iShape->count == 0u)
+                release_values();
+        }
+        void use_storage(value* aStorage, std::size_t aCapacity)    ///< (its values' (it has none): storage that is not its own (e.g. in its 
+                                                                    ///< object's cell))
+        {
+            changed();
+            if (iShape == nullptr || iCapacity != 0u || aCapacity == 0u)
+                return;
+            iStorage = unit_of(aStorage);
+            iCapacity = static_cast<std::uint32_t>(std::min<std::size_t>(aCapacity, 0xFFFFFFFFu));
+        }
         void make_dictionary();                 ///< (no shape (its layout its own) from now on)
-        void set_root(shape* aRoot) { changed(); iShape = aRoot; }    ///< (its shape (it has no properties): a root shape)
-        std::size_t size() const { return iShape != nullptr ? iValues.size() : entries().size() - deleted(); }
+        void set_root(shape* aRoot)             ///< (its shape (it has no properties): a root shape)
+        {
+            changed();
+            if (iShape == nullptr)
+                release_dictionary();
+            iShape = aRoot;
+        }
+        std::size_t size() const { return iShape != nullptr ? iShape->count : entries().size() - deleted(); }
         bool none() const   ///< (it has no properties (as size() == 0, without finding the dictionary's entries if it has none))
         {
             if (iShape != nullptr)
-                return iValues.size() == 0u;
+                return iShape->count == 0u;
             auto const* d = dictionary_of();
             return d == nullptr || d->entries.size() == d->deleted;
         }
-        std::size_t slots() const { return iShape != nullptr ? iValues.size() : entries().size(); }   ///< (its positions (a dictionary's 
+        std::size_t slots() const { return iShape != nullptr ? iShape->count : entries().size(); }   ///< (its positions (a dictionary's 
                                                 ///< include deleted ones))
         property_ref at(std::uint32_t aPosition) { return property_ref{ *this, aPosition }; }   ///< (a property by its position)
-        value value_at(std::uint32_t aPosition) const { return iValues[aPosition]; }    ///< (a shape's data property's value (by its position))
-        void set_value_at(std::uint32_t aPosition, value aValue) { changed(); iValues[aPosition] = aValue; }   ///< (... set)
+        value value_at(std::uint32_t aPosition) const { return values()[aPosition]; }    ///< (a shape's data property's value (by its position))
+        void set_value_at(std::uint32_t aPosition, value aValue) { changed(); values()[aPosition] = aValue; }   ///< (... set)
         // (a watched object's table (its shape has a validity word: see watch): each change of its properties (its shape, values or 
         // their storage) changes the word)
         void changed()
@@ -1044,7 +1135,7 @@ namespace neos::javascript_runtime
         {
             if (iShape != nullptr)
             {
-                for (std::uint32_t i = 0u; i < iValues.size(); ++i)
+                for (std::uint32_t i = 0u; i < iShape->count; ++i)
                     aFunction(const_cast<property_table*>(this)->at(i).get());
             }
             else
@@ -1060,17 +1151,21 @@ namespace neos::javascript_runtime
         template <typename Raw>
         bool owns_nothing(Raw const& aRaw) const    ///< (... aRaw: region_raw (e.g. the collector's own, while it sweeps))
         {
-            return iDictionary == 0u && (iValues.capacity() == 0u || !aRaw(iValues.data()));
+            return iShape != nullptr ? iCapacity == 0u || !aRaw(values()) : iStorage == 0u;
         }
         // (the property caches': a data property's value at a position (aShape: its shape (it has the shape), else (0: a dictionary)
         // the key's at the position), and a writable data property's (its shape's) value set)
         bool cached_value(std::uint64_t aShape, std::uint32_t aPosition, value aKey, value& aResult) const;
         bool cached_store(std::uint64_t aShape, std::uint32_t aPosition, value aValue);
         shape* layout() const { return iShape; }       ///< (its shape (null: none))
+        std::uint32_t shape_word() const { return iShape.word(); }  ///< (its shape's word (0: none): see shape_ref)
+        std::uint64_t values_offset() const { return iShape != nullptr && iCapacity != 0u ? std::uint64_t{ iStorage } << 3u : 0u; }  ///< (its
+                                                ///< values' storage's region offset (0: none))
         // (the members that compiled code reads (the runtime checks their offsets: see layout::ObjectShape))
         void const* shape_field() const { return &iShape; }
-        void const* values_field() const { return iValues.offset_field(); }     ///< (its offset (u64), size (u32) and capacity (u32))
-        void const* dictionary_field() const { return &iDictionary; }           ///< (its dictionary's offset (u64): see dictionary)
+        void const* values_field() const { return &iStorage; }      ///< (a shape's: its values' storage (u32: its region offset >> 3), then
+                                                                    ///< their capacity (u32); no shape's: its dictionary's (u32: the same))
+        void const* capacity_field() const { return &iCapacity; }
     private:
         void reindex();
         // (no shape: its properties (in the region, that compiled code reads: the dictionary's first member is their storage's offset
@@ -1082,7 +1177,32 @@ namespace neos::javascript_runtime
             std::uint32_t deleted = 0u;
             std::uint64_t* validity = nullptr;  ///< (a watched object's (see watch))
         };
-        dictionary* dictionary_of() const { return iDictionary != 0u ? reinterpret_cast<dictionary*>(gRegionBase + iDictionary) : nullptr; }
+        static std::uint32_t unit_of(void const* aMemory) { return static_cast<std::uint32_t>(region_offset(aMemory) >> 3u); }
+        value* values() const { return reinterpret_cast<value*>(gRegionBase + (std::uint64_t{ iStorage } << 3u)); }
+        void grow(std::size_t aCapacity);       ///< (room for aCapacity values (a shape's))
+        void push(value aValue)                 ///< (its values' next (its shape's count is then one more))
+        {
+            auto const count = iShape->count;
+            if (count == iCapacity)
+                grow(iCapacity < 4u ? 4u : static_cast<std::size_t>(iCapacity) * 2u);
+            values()[count] = aValue;
+        }
+        void release_values() noexcept
+        {
+            if (iCapacity != 0u)
+                region_release(values());
+            iStorage = 0u;
+            iCapacity = 0u;
+        }
+        void release() noexcept
+        {
+            if (iShape != nullptr)
+                release_values();
+            else
+                release_dictionary();
+        }
+        void forget_all() noexcept { iShape = root_shape(); iStorage = 0u; iCapacity = 0u; }
+        dictionary* dictionary_of() const { return iShape == nullptr && iStorage != 0u ? reinterpret_cast<dictionary*>(values()) : nullptr; }
         dictionary& dict();     ///< (made if it has none)
         void release_dictionary() noexcept;
         region_vector<property>& entries() { return dict().entries; }
@@ -1096,9 +1216,10 @@ namespace neos::javascript_runtime
         std::uint32_t& deleted() { return dict().deleted; }
         std::uint32_t deleted() const { auto const* d = dictionary_of(); return d != nullptr ? d->deleted : 0u; }
     private:
-        shape* iShape = root_shape();
-        region_vector<value> iValues;           ///< (a shape: its properties' values (an accessor's: its accessor_pair))
-        std::uint64_t iDictionary = 0u;         ///< (no shape: the region offset of its dictionary (0: none))
+        shape_ref iShape = root_shape();        ///< (its shape (none: a dictionary))
+        std::uint32_t iStorage = 0u;            ///< (a shape: its properties' values' storage (an accessor's value: its accessor_pair): its
+                                                ///< region offset >> 3; no shape: its dictionary's (0: none))
+        std::uint32_t iCapacity = 0u;           ///< (a shape: the values that its storage has room for (0: none))
     };
 
     // --- objects
@@ -1170,29 +1291,87 @@ namespace neos::javascript_runtime
 
     using arguments = std::span<value const>;
 
+    // (a cell type's operations: by its kind (see cell_kind); an object's internal methods (null: a cell that is not an object))
+    struct cell_ops
+    {
+        char const* name;
+        void (*destroy)(cell&) noexcept;
+        void (*trace)(cell&, tracer&);
+        value (*get_prototype_of)(object&);
+        bool (*set_prototype_of)(object&, value);
+        bool (*is_extensible)(object&);
+        bool (*prevent_extensions)(object&);
+        std::optional<property_descriptor> (*get_own_property)(object&, value);
+        bool (*define_own_property)(object&, value, property_descriptor const&);
+        bool (*has_property)(object&, value);
+        value (*get)(object&, value, value);
+        bool (*set)(object&, value, value, value);
+        bool (*delete_property)(object&, value);
+        value_list (*own_property_keys)(object&);
+        bool (*callable)(object const&);
+        bool (*constructor)(object const&);
+        value (*call)(object&, value, arguments);
+        value (*construct)(object&, arguments, value);
+    };
+
+    // (the kinds of the types that the runtime tests for; the others' are numbered when they are first made (see cell_kind))
+    enum : std::uint8_t
+    {
+        KindNone,
+        KindObject,
+        KindArray,
+        KindFunction,
+        KindString,
+        KindSymbol,
+        KindBigInt,
+        KindAccessorPair,
+        KindEnvironment,
+        KindFirstNumbered = 16u
+    };
+    std::uint8_t number_kind(cell_ops const& aOps, std::uint8_t aKind);   ///< (gc.cpp: a type's kind (aKind: a fixed one, else 0))
+    template <typename T>
+    constexpr std::uint8_t fixed_kind() { return KindNone; }
+
     class object : public cell
     {
     public:
         explicit object(value aPrototype, object_class aClass = object_class::Ordinary) : cell{ cell_type::Object }, proto{ aPrototype } { cls = aClass; }
     public:
-        void trace(tracer& aTracer) override;   ///< (its prototype, properties, internal value (a WeakRef's target is weak) and private elements)
+        void do_trace(tracer& aTracer);   ///< (its prototype, properties, internal value (a WeakRef's target is weak) and private elements)
     public:
-        // ECMAScript's internal methods
-        virtual value get_prototype_of();
-        virtual bool set_prototype_of(value aPrototype);
-        virtual bool is_extensible();
-        virtual bool prevent_extensions();
-        virtual std::optional<property_descriptor> get_own_property(value aKey);
-        virtual bool define_own_property(value aKey, property_descriptor const& aDescriptor);
-        virtual bool has_property(value aKey);
-        virtual value get(value aKey, value aReceiver);
-        virtual bool set(value aKey, value aValue, value aReceiver);
-        virtual bool delete_property(value aKey);
-        virtual value_list own_property_keys();
-        virtual bool callable() const { return false; }
-        virtual bool constructor() const { return false; }
-        virtual value call(value aThis, arguments aArguments);
-        virtual value construct(arguments aArguments, value aNewTarget);
+        // ECMAScript's internal methods (by its type: see cell_ops)
+        value get_prototype_of();
+        bool set_prototype_of(value aPrototype);
+        bool is_extensible();
+        bool prevent_extensions();
+        std::optional<property_descriptor> get_own_property(value aKey);
+        bool define_own_property(value aKey, property_descriptor const& aDescriptor);
+        bool has_property(value aKey);
+        value get(value aKey, value aReceiver);
+        bool set(value aKey, value aValue, value aReceiver);
+        bool delete_property(value aKey);
+        value_list own_property_keys();
+        bool callable() const;
+        bool constructor() const;
+        value call(value aThis, arguments aArguments);
+        value construct(arguments aArguments, value aNewTarget);
+    public:
+        // (an object's own (ordinary): a type of object that has its own has a member of the same name)
+        value do_get_prototype_of();
+        bool do_set_prototype_of(value aPrototype);
+        bool do_is_extensible();
+        bool do_prevent_extensions();
+        std::optional<property_descriptor> do_get_own_property(value aKey);
+        bool do_define_own_property(value aKey, property_descriptor const& aDescriptor);
+        bool do_has_property(value aKey);
+        value do_get(value aKey, value aReceiver);
+        bool do_set(value aKey, value aValue, value aReceiver);
+        bool do_delete_property(value aKey);
+        value_list do_own_property_keys();
+        bool do_callable() const { return false; }
+        bool do_constructor() const { return false; }
+        value do_call(value aThis, arguments aArguments);
+        value do_construct(arguments aArguments, value aNewTarget);
     public:
         // (ordinary versions (OrdinaryGetOwnProperty, ...) that exotic objects use)
         std::optional<property_descriptor> ordinary_get_own_property(value aKey);
@@ -1234,27 +1413,22 @@ namespace neos::javascript_runtime
             private_elements privateElements;
         };
         value& internal() { return extra().internal; }
-        value internal() const { return iExtra ? iExtra->internal : Undefined; }
+        value internal() const { auto const* e = extra_if(); return e != nullptr ? e->internal : Undefined; }
         private_elements& private_elements_of() { return extra().privateElements; }
-        bool has_private_elements() const { return iExtra && !iExtra->privateElements.empty(); }
-        object_extra const* extra_if() const { return iExtra.get(); }
-        object_extra* extra_if() { return iExtra.get(); }
+        bool has_private_elements() const { auto const* e = extra_if(); return e != nullptr && !e->privateElements.empty(); }
+        object_extra const* extra_if() const { return hasExtra ? find_extra() : nullptr; }
+        object_extra* extra_if() { return hasExtra ? find_extra() : nullptr; }
     public:
         // (compiled code reads the prototype and the properties (see neos::language::javascript::layout): their offsets are checked 
         // when the runtime starts; its class and flags are its cell's)
-        value proto;
         property_table properties;
+        value proto;
+    public:
+        ~object();
     private:
-        object_extra& extra()
-        {
-            if (!iExtra)
-            {
-                iExtra = std::make_unique<object_extra>();
-                note_owner(this);
-            }
-            return *iExtra;
-        }
-        std::unique_ptr<object_extra> iExtra;
+        // (an object's extra is the heap's (few objects have one: not a member of each), found by its object's address (hasExtra))
+        object_extra& extra();      ///< (made if it has none)
+        object_extra* find_extra() const;
     };
 
     // (an object whose properties compiled code uses as a holder's (a get's site's: a prototype's, %String.prototype%'s), checking its
@@ -1273,15 +1447,15 @@ namespace neos::javascript_runtime
     public:
         explicit array_object(value aPrototype) : object{ aPrototype, object_class::Array } {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
-        std::optional<property_descriptor> get_own_property(value aKey) override;
-        bool define_own_property(value aKey, property_descriptor const& aDescriptor) override;
-        bool has_property(value aKey) override;
-        value get(value aKey, value aReceiver) override;
-        bool set(value aKey, value aValue, value aReceiver) override;
-        bool delete_property(value aKey) override;
-        value_list own_property_keys() override;
+        std::optional<property_descriptor> do_get_own_property(value aKey);
+        bool do_define_own_property(value aKey, property_descriptor const& aDescriptor);
+        bool do_has_property(value aKey);
+        value do_get(value aKey, value aReceiver);
+        bool do_set(value aKey, value aValue, value aReceiver);
+        bool do_delete_property(value aKey);
+        value_list do_own_property_keys();
     public:
         bool set_length(property_descriptor const& aDescriptor);
         void make_sparse();
@@ -1345,12 +1519,12 @@ namespace neos::javascript_runtime
     {
         function_object(value aPrototype, function_kind aKind) : object{ aPrototype, object_class::Function }, kind{ aKind } {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
-        bool callable() const override { return true; }
-        bool constructor() const override { return isConstructor; }
-        value call(value aThis, arguments aArguments) override;
-        value construct(arguments aArguments, value aNewTarget) override;
+        bool do_callable() const { return true; }
+        bool do_constructor() const { return isConstructor; }
+        value do_call(value aThis, arguments aArguments);
+        value do_construct(arguments aArguments, value aNewTarget);
     public:
         function_kind kind;
         function_flavour flavour = function_flavour::Normal;
@@ -1398,16 +1572,125 @@ namespace neos::javascript_runtime
         return o.cls == object_class::Function ? static_cast<function_object*>(&o) : nullptr;
     }
 
-    // (an object whose internal methods are the ordinary ones (its type is object or function_object, which do not override them):
-    // its own properties are its table's; the type_infos are compared by address (the objects are all made by this runtime))
+    template <>
+    constexpr std::uint8_t fixed_kind<object>() { return KindObject; }
+    template <>
+    constexpr std::uint8_t fixed_kind<array_object>() { return KindArray; }
+    template <>
+    constexpr std::uint8_t fixed_kind<function_object>() { return KindFunction; }
+    template <>
+    constexpr std::uint8_t fixed_kind<string>() { return KindString; }
+    template <>
+    constexpr std::uint8_t fixed_kind<symbol>() { return KindSymbol; }
+    template <>
+    constexpr std::uint8_t fixed_kind<bigint>() { return KindBigInt; }
+    template <>
+    constexpr std::uint8_t fixed_kind<accessor_pair>() { return KindAccessorPair; }
+    class environment;
+    template <>
+    constexpr std::uint8_t fixed_kind<environment>() { return KindEnvironment; }
+
+    // (a cell type's operations (cell_ops): its own do_trace, destructor and (an object's type) do_get ... (those that it has, else its
+    // base's); a type has no member of the dispatching functions' names (trace, get ...: they would not be called))
+    template <typename T>
+    struct cell_ops_of
+    {
+        static_assert(!std::is_polymorphic_v<T>, "a cell type has no vtable");
+        static void destroy(cell& aCell) noexcept { static_cast<T&>(aCell).~T(); }
+        static void trace(cell& aCell, tracer& aTracer) { static_cast<T&>(aCell).do_trace(aTracer); }
+        static value get_prototype_of(object& aObject) { return static_cast<T&>(aObject).do_get_prototype_of(); }
+        static bool set_prototype_of(object& aObject, value aPrototype) { return static_cast<T&>(aObject).do_set_prototype_of(aPrototype); }
+        static bool is_extensible(object& aObject) { return static_cast<T&>(aObject).do_is_extensible(); }
+        static bool prevent_extensions(object& aObject) { return static_cast<T&>(aObject).do_prevent_extensions(); }
+        static std::optional<property_descriptor> get_own_property(object& aObject, value aKey) { return static_cast<T&>(aObject).do_get_own_property(aKey); }
+        static bool define_own_property(object& aObject, value aKey, property_descriptor const& aDescriptor) { return static_cast<T&>(aObject).do_define_own_property(aKey, aDescriptor); }
+        static bool has_property(object& aObject, value aKey) { return static_cast<T&>(aObject).do_has_property(aKey); }
+        static value get(object& aObject, value aKey, value aReceiver) { return static_cast<T&>(aObject).do_get(aKey, aReceiver); }
+        static bool set(object& aObject, value aKey, value aValue, value aReceiver) { return static_cast<T&>(aObject).do_set(aKey, aValue, aReceiver); }
+        static bool delete_property(object& aObject, value aKey) { return static_cast<T&>(aObject).do_delete_property(aKey); }
+        static value_list own_property_keys(object& aObject) { return static_cast<T&>(aObject).do_own_property_keys(); }
+        static bool callable(object const& aObject) { return static_cast<T const&>(aObject).do_callable(); }
+        static bool constructor(object const& aObject) { return static_cast<T const&>(aObject).do_constructor(); }
+        static value call(object& aObject, value aThis, arguments aArguments) { return static_cast<T&>(aObject).do_call(aThis, aArguments); }
+        static value construct(object& aObject, arguments aArguments, value aNewTarget) { return static_cast<T&>(aObject).do_construct(aArguments, aNewTarget); }
+        static constexpr cell_ops make(char const* aName)
+        {
+            static_assert(std::is_same_v<decltype(&T::trace), decltype(&cell::trace)>, "a cell type's trace is do_trace");
+            cell_ops result{ aName, &destroy, &trace };
+            if constexpr (std::is_base_of_v<object, T>)
+            {
+#define NEOS_JS_DISPATCHED(name) static_assert(std::is_same_v<decltype(&T::name), decltype(&object::name)>, "an object type's " #name " is do_" #name)
+                NEOS_JS_DISPATCHED(get_prototype_of); NEOS_JS_DISPATCHED(set_prototype_of); NEOS_JS_DISPATCHED(is_extensible);
+                NEOS_JS_DISPATCHED(prevent_extensions); NEOS_JS_DISPATCHED(get_own_property); NEOS_JS_DISPATCHED(define_own_property);
+                NEOS_JS_DISPATCHED(has_property); NEOS_JS_DISPATCHED(get); NEOS_JS_DISPATCHED(set); NEOS_JS_DISPATCHED(delete_property);
+                NEOS_JS_DISPATCHED(own_property_keys); NEOS_JS_DISPATCHED(callable); NEOS_JS_DISPATCHED(constructor); NEOS_JS_DISPATCHED(call);
+                NEOS_JS_DISPATCHED(construct);
+#undef NEOS_JS_DISPATCHED
+                result.get_prototype_of = &get_prototype_of;
+                result.set_prototype_of = &set_prototype_of;
+                result.is_extensible = &is_extensible;
+                result.prevent_extensions = &prevent_extensions;
+                result.get_own_property = &get_own_property;
+                result.define_own_property = &define_own_property;
+                result.has_property = &has_property;
+                result.get = &get;
+                result.set = &set;
+                result.delete_property = &delete_property;
+                result.own_property_keys = &own_property_keys;
+                result.callable = &callable;
+                result.constructor = &constructor;
+                result.call = &call;
+                result.construct = &construct;
+            }
+            return result;
+        }
+    };
+
+    // (a cell type's kind: its operations are gCellOps[kind] (a fixed kind's are there from the start (gc.cpp); others' are numbered
+    // when they are first wanted))
+    template <typename T>
+    std::uint8_t cell_kind()
+    {
+        if constexpr (fixed_kind<T>() != KindNone)
+            return fixed_kind<T>();
+        else
+        {
+            static std::uint8_t const sKind = []()
+            {
+                static cell_ops const sOps = cell_ops_of<T>::make(typeid(T).name());
+                return number_kind(sOps, KindNone);
+            }();
+            return sKind;
+        }
+    }
+
+    inline void cell::trace(tracer& aTracer) { ops().trace(*this, aTracer); }
+    inline void cell::destroy() noexcept { ops().destroy(*this); }
+    inline value object::get_prototype_of() { return ops().get_prototype_of(*this); }
+    inline bool object::set_prototype_of(value aPrototype) { return ops().set_prototype_of(*this, aPrototype); }
+    inline bool object::is_extensible() { return ops().is_extensible(*this); }
+    inline bool object::prevent_extensions() { return ops().prevent_extensions(*this); }
+    inline std::optional<property_descriptor> object::get_own_property(value aKey) { return ops().get_own_property(*this, aKey); }
+    inline bool object::define_own_property(value aKey, property_descriptor const& aDescriptor) { return ops().define_own_property(*this, aKey, aDescriptor); }
+    inline bool object::has_property(value aKey) { return ops().has_property(*this, aKey); }
+    inline value object::get(value aKey, value aReceiver) { return ops().get(*this, aKey, aReceiver); }
+    inline bool object::set(value aKey, value aValue, value aReceiver) { return ops().set(*this, aKey, aValue, aReceiver); }
+    inline bool object::delete_property(value aKey) { return ops().delete_property(*this, aKey); }
+    inline value_list object::own_property_keys() { return ops().own_property_keys(*this); }
+    inline bool object::callable() const { return ops().callable(*this); }
+    inline bool object::constructor() const { return ops().constructor(*this); }
+    inline value object::call(value aThis, arguments aArguments) { return ops().call(*this, aThis, aArguments); }
+    inline value object::construct(arguments aArguments, value aNewTarget) { return ops().construct(*this, aArguments, aNewTarget); }
+
+    // (an object whose internal methods are the ordinary ones (its type is object or function_object, which have none of their own):
+    // its own properties are its table's)
     inline bool ordinary_type(object const& aObject)
     {
-        auto const* const type = &typeid(aObject);
-        return type == &typeid(object) || type == &typeid(function_object);
+        return aObject.cellKind == KindObject || aObject.cellKind == KindFunction;
     }
     inline bool array_type(object const& aObject)
     {
-        return &typeid(aObject) == &typeid(array_object);
+        return aObject.cellKind == KindArray;
     }
 
     template <typename T>
@@ -1429,7 +1712,7 @@ namespace neos::javascript_runtime
     public:
         environment(value aParent, std::uint32_t aSize) : cell{ cell_type::Internal }, parent{ aParent }, slots(aSize, Undefined) {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
         // (compiled code reads the parent and the slots (in the region): see neos::language::javascript::layout)
         value parent;

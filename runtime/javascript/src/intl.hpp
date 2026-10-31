@@ -182,7 +182,7 @@ namespace neos::javascript_runtime::intl
     public:
         intl_object(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
     public:
-        void trace(tracer& aTracer) override;
+        void do_trace(tracer& aTracer);
     public:
         std::string locale;                     ///< ([[Locale]])
         value bound = Undefined;                ///< (the bound function of its format/compare getter, once made)

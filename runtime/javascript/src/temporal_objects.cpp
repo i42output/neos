@@ -1183,9 +1183,9 @@ namespace neos::javascript_runtime
         method(aRealm.datePrototype, "toTemporalInstant", 0u, date_to_temporal_instant);
     }
 
-    void temporal::temporal_object::trace(tracer& aTracer)
+    void temporal::temporal_object::do_trace(tracer& aTracer)
     {
-        object::trace(aTracer);
+        object::do_trace(aTracer);
         aTracer.mark(timeZone.id);
     }
 }

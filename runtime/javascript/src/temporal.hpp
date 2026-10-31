@@ -527,7 +527,7 @@ namespace neos::javascript_runtime::temporal
         duration_fields duration;       ///< (Duration)
         calendar_id calendar = calendar_id::Iso8601;    ///< (PlainDate, PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime)
     public:
-        void trace(tracer& aTracer) override;   ///< (temporal_objects.cpp: its time zone's identifier too)
+        void do_trace(tracer& aTracer);   ///< (temporal_objects.cpp: its time zone's identifier too)
     };
 
     inline temporal_object* as_temporal(value aValue, object_class aClass)

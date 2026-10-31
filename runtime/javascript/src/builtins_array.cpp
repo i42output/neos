@@ -668,9 +668,9 @@ namespace neos::javascript_runtime
             state.plainArrays[0] = ~std::uint64_t{};
             return;
         }
-        state.plainArrays[0] = reinterpret_cast<std::uintptr_t>(arrayShape);
+        state.plainArrays[0] = shape_ref::word_of(arrayShape);
         state.plainArrays[1] = r.objectPrototype;
-        state.plainArrays[2] = reinterpret_cast<std::uintptr_t>(objectShape);
+        state.plainArrays[2] = shape_ref::word_of(objectShape);
     }
 
     bool plain_array_prototypes()

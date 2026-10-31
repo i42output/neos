@@ -65,26 +65,35 @@ namespace neos::javascript_runtime
 
     // --- strings
 
-    region_u16string const& string::flat()
+    namespace
     {
-        if (smallText)
+        // (storage of a string's own for its code units (in the region))
+        char16_t* string_storage(std::size_t aLength)
         {
-            text.assign(small, length);
-            smallText = false;
-            charsOffset = region_offset(text.data());
-            note_owner(this);
+            return static_cast<char16_t*>(region_allocate(std::max<std::size_t>(aLength, 1u) * sizeof(char16_t)));
         }
-        if (base != 0u && text.empty())
-        {
-            text.assign(reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length);
-            charsOffset = region_offset(text.data());
-            note_owner(this);
-        }
-        if (left == 0u)
-            return text;
+    }
+
+    string::string(std::u16string_view aText) : cell{ cell_type::String }, length{ static_cast<std::uint32_t>(aText.size()) }, owned{ true }
+    {
+        auto* const text = string_storage(aText.size());
+        std::copy(aText.begin(), aText.end(), text);
+        charsOffset = region_offset(text);
+    }
+
+    string::~string()
+    {
+        if (owned)
+            region_release(gRegionBase + charsOffset);
+    }
+
+    std::u16string_view string::flat()
+    {
+        if (!rope)
+            return std::u16string_view{ reinterpret_cast<char16_t const*>(gRegionBase + charsOffset), length };
         // (a rope: its leaves in order (iteratively: a rope made by repeated concatenation is deep))
-        region_u16string result;
-        result.reserve(length);
+        auto* const text = string_storage(length);
+        auto* out = text;
         thread_local std::vector<value> tPending;
         tPending.clear();
         tPending.push_back(right);
@@ -93,27 +102,31 @@ namespace neos::javascript_runtime
         {
             auto& s = cell_of<string>(tPending.back());
             tPending.pop_back();
-            if (s.left == 0u)
-                result.append(s.chars());
+            if (!s.rope)
+            {
+                auto const c = s.chars();
+                out = std::copy(c.begin(), c.end(), out);
+            }
             else
             {
                 tPending.push_back(s.right);
                 tPending.push_back(s.left);
             }
         }
-        text = std::move(result);
-        charsOffset = region_offset(text.data());
+        charsOffset = region_offset(text);
+        owned = true;
+        rope = false;
         note_owner(this);
         left = 0u;
         right = 0u;
-        return text;
+        return std::u16string_view{ text, length };
     }
 
     std::size_t string::hash()
     {
         if (!hashed)
         {
-            hashValue = std::hash<std::u16string_view>{}(chars());
+            hashValue = static_cast<std::uint32_t>(std::hash<std::u16string_view>{}(chars()));
             hashed = true;
         }
         return hashValue;
@@ -121,22 +134,29 @@ namespace neos::javascript_runtime
 
     std::int64_t string::array_index()
     {
-        if (arrayIndex != -2)
-            return arrayIndex;
-        auto const t = chars();
-        arrayIndex = -1;
-        if (t.empty() || t.size() > 10u || (t.size() > 1u && t[0] == u'0'))
-            return arrayIndex;
-        std::uint64_t n = 0u;
-        for (auto c : t)
+        if (!indexed)
         {
-            if (c < u'0' || c > u'9')
-                return arrayIndex;
-            n = n * 10u + static_cast<std::uint64_t>(c - u'0');
+            indexed = true;
+            arrayIndex = 0xFFFFFFFFu;
+            auto const t = chars();
+            if (!t.empty() && t.size() <= 10u && (t.size() == 1u || t[0] != u'0'))
+            {
+                std::uint64_t n = 0u;
+                bool digits = true;
+                for (auto c : t)
+                {
+                    if (c < u'0' || c > u'9')
+                    {
+                        digits = false;
+                        break;
+                    }
+                    n = n * 10u + static_cast<std::uint64_t>(c - u'0');
+                }
+                if (digits && n < 0xFFFFFFFFull)
+                    arrayIndex = static_cast<std::uint32_t>(n);
+            }
         }
-        if (n < 0xFFFFFFFFull)
-            arrayIndex = static_cast<std::int64_t>(n);
-        return arrayIndex;
+        return arrayIndex == 0xFFFFFFFFu ? -1 : static_cast<std::int64_t>(arrayIndex);
     }
 
     namespace
@@ -202,9 +222,11 @@ namespace neos::javascript_runtime
     {
         if (aText.size() > MaxStringLength)
             throw_range_error("invalid string length");
+        if (aText.size() <= string::SmallCapacity)
+            return make_small_string(aText);
         the_heap().account(aText.size() * sizeof(char16_t));
-        auto& s = the_heap().make<string>(std::move(aText));
-        return TagString | s.handle;
+        auto& s = the_heap().make<string>(std::u16string_view{ aText });
+        return TagString | s.handle();
     }
 
     value make_string(std::u16string_view aText)
@@ -216,13 +238,13 @@ namespace neos::javascript_runtime
             throw_range_error("invalid string length");
         the_heap().account(aText.size() * sizeof(char16_t));
         auto& s = the_heap().make<string>(aText);
-        return TagString | s.handle;
+        return TagString | s.handle();
     }
 
     value make_small_string(std::u16string_view aText)
     {
-        auto& s = the_heap().make<string>(string::small_tag{}, aText);
-        return TagString | s.handle;
+        auto& s = the_heap().make_sized<string>(string::small_size(aText.size()), string::small_tag{}, aText);
+        return TagString | s.handle();
     }
 
     value make_string(char16_t aCharacter)
@@ -367,11 +389,11 @@ namespace neos::javascript_runtime
             table.pin(pinnedKey, result);
             return result;
         }
-        auto& s = the_heap().make<string>(std::u16string{ aText });
+        auto const result = make_string(aText);
+        auto& s = cell_of<string>(result);
         s.interned = true;
         s.pinned = true;
-        auto const result = TagString | s.handle;
-        table.pin(intern_key{ std::u16string_view{ s.text } }, result);
+        table.pin(intern_key{ s.chars() }, result);
         return result;
     }
 
@@ -381,8 +403,8 @@ namespace neos::javascript_runtime
         if (s.interned)
             return aString;
         // (a flat string interned before: the interned string equal to it, kept in its right (a rope's part; it marks it))
-        if (s.left == 0u && s.right != 0u)
-            return s.right;
+        if (auto const equal = s.interned_equal(); equal != 0u)
+            return equal;
         auto& table = interned();
         // (looked up by its code units (a slice's are its base's: not copied); its text (flat) is the table's key if it is added)
         intern_key key{ s.chars() };
@@ -391,9 +413,8 @@ namespace neos::javascript_runtime
             s.right = existing;
             return existing;
         }
-        s.flat();
+        key.text = s.flat();    // (the same code units: the same hash)
         s.interned = true;
-        key.text = std::u16string_view{ s.text };   // (the same code units: the same hash)
         table.weak.emplace(key, aString);
         return aString;
     }
@@ -403,8 +424,8 @@ namespace neos::javascript_runtime
         auto& s = cell_of<string>(aString);
         if (s.interned)
             return aString;
-        if (s.left == 0u && s.right != 0u)
-            return s.right;
+        if (auto const equal = s.interned_equal(); equal != 0u)
+            return equal;
         auto const existing = interned().find(intern_key{ s.chars() });
         if (existing != 0u)
             s.right = existing;
@@ -421,7 +442,7 @@ namespace neos::javascript_runtime
         if (!s.interned || s.pinned)
             return;
         auto& table = interned();
-        intern_key const key{ std::u16string_view{ s.text } };
+        intern_key const key{ s.chars() };
         if (auto const w = table.weak.find(key); w != table.weak.end() && w->second == aString)
         {
             table.weak.erase(w);
@@ -466,7 +487,7 @@ namespace neos::javascript_runtime
             return make_string(std::move(text));
         }
         auto& s = the_heap().make<string>(aLeft, aRight, static_cast<std::uint32_t>(length));
-        return TagString | s.handle;
+        return TagString | s.handle();
     }
 
     value concat_number(value aString, double aNumber, bool aNumberFirst)
@@ -510,12 +531,12 @@ namespace neos::javascript_runtime
         auto& s = cell_of<string>(aString);
         if (aStart == 0u && aLength == s.length)
             return aString;
-        if (aLength < MinimumSlice || s.smallText)
+        if (aLength < MinimumSlice)
             return make_string(s.chars().substr(aStart, aLength));
-        auto const base = s.base != 0u && s.text.empty() ? s.base : (s.flat(), aString);
+        auto const base = s.slice() ? s.left : (s.flat(), aString);
         auto const offset = cell_of<string>(aString).charsOffset + aStart * sizeof(char16_t);
         auto& slice = the_heap().make<string>(string::slice_tag{}, base, offset, static_cast<std::uint32_t>(aLength));
-        return TagString | slice.handle;
+        return TagString | slice.handle();
     }
 
     bool string_equal(value aLhs, value aRhs)
@@ -570,6 +591,6 @@ namespace neos::javascript_runtime
     value make_symbol(value aDescription)
     {
         auto& s = the_heap().make<symbol>(aDescription);
-        return TagSymbol | s.handle;
+        return TagSymbol | s.handle();
     }
 }

@@ -71,9 +71,9 @@ namespace neos::javascript_runtime::intl
 
     // --- the Intl objects
 
-    void intl_object::trace(tracer& aTracer)
+    void intl_object::do_trace(tracer& aTracer)
     {
-        object::trace(aTracer);
+        object::do_trace(aTracer);
         aTracer.mark(bound);
         aTracer.mark(extra);
         if (data)

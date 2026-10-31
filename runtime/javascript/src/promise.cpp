@@ -60,9 +60,9 @@ namespace neos::javascript_runtime
         public:
             explicit promise_object(value aPrototype) : object{ aPrototype, object_class::Promise } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(result);
                 for (auto const* reactions : { &fulfillReactions, &rejectReactions })
                     for (auto const& r : *reactions)
@@ -87,7 +87,7 @@ namespace neos::javascript_runtime
         public:
             captures() : cell{ cell_type::Internal } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 aTracer.mark(values);
                 aTracer.mark(shared);

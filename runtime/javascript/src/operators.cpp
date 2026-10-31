@@ -304,7 +304,7 @@ namespace neos::javascript_runtime
         public:
             explicit iterator_record_cell(iterator_record const& aRecord) : cell{ cell_type::Internal }, record{ aRecord } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 aTracer.mark(record);
             }
@@ -317,7 +317,7 @@ namespace neos::javascript_runtime
         public:
             for_in_state() : cell{ cell_type::Internal } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 aTracer.mark(current);
                 aTracer.mark(keys);
@@ -334,7 +334,7 @@ namespace neos::javascript_runtime
 
     value make_iterator_record(iterator_record const& aRecord)
     {
-        return TagInternal | the_heap().make<iterator_record_cell>(aRecord).handle;
+        return TagInternal | the_heap().make<iterator_record_cell>(aRecord).handle();
     }
 
     iterator_record& iterator_record_of(value aRecord)
@@ -351,7 +351,7 @@ namespace neos::javascript_runtime
             auto const keys = obj(state.current).own_property_keys();
             state.keys.assign(keys.begin(), keys.end());
         }
-        return TagInternal | state.handle;
+        return TagInternal | state.handle();
     }
 
     value for_in_step(value aIterator)

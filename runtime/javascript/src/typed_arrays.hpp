@@ -81,9 +81,9 @@ namespace neos::javascript_runtime
         array_buffer_object(value aPrototype, bool aShared) :
             object{ aPrototype, aShared ? object_class::SharedArrayBuffer : object_class::ArrayBuffer } {}
     public:
-        void trace(tracer& aTracer) override
+        void do_trace(tracer& aTracer) 
         {
-            object::trace(aTracer);
+            object::do_trace(aTracer);
             aTracer.mark(detachKey);
         }
     public:
@@ -122,20 +122,20 @@ namespace neos::javascript_runtime
     public:
         typed_array_object(value aPrototype, element_type aType) : object{ aPrototype, object_class::TypedArray }, type{ aType } {}
     public:
-        void trace(tracer& aTracer) override
+        void do_trace(tracer& aTracer) 
         {
-            object::trace(aTracer);
+            object::do_trace(aTracer);
             aTracer.mark(buffer);
         }
     public:
-        std::optional<property_descriptor> get_own_property(value aKey) override;
-        bool define_own_property(value aKey, property_descriptor const& aDescriptor) override;
-        bool has_property(value aKey) override;
-        value get(value aKey, value aReceiver) override;
-        bool set(value aKey, value aValue, value aReceiver) override;
-        bool delete_property(value aKey) override;
-        value_list own_property_keys() override;
-        bool prevent_extensions() override;
+        std::optional<property_descriptor> do_get_own_property(value aKey);
+        bool do_define_own_property(value aKey, property_descriptor const& aDescriptor);
+        bool do_has_property(value aKey);
+        value do_get(value aKey, value aReceiver);
+        bool do_set(value aKey, value aValue, value aReceiver);
+        bool do_delete_property(value aKey);
+        value_list do_own_property_keys();
+        bool do_prevent_extensions();
     public:
         array_buffer_object& buffer_object() const { return static_cast<array_buffer_object&>(obj(buffer)); }
         std::size_t element_size() const { return javascript_runtime::element_size(type); }
@@ -246,9 +246,9 @@ namespace neos::javascript_runtime
     public:
         explicit data_view_object(value aPrototype) : object{ aPrototype, object_class::DataView } {}
     public:
-        void trace(tracer& aTracer) override
+        void do_trace(tracer& aTracer) 
         {
-            object::trace(aTracer);
+            object::do_trace(aTracer);
             aTracer.mark(buffer);
         }
     public:

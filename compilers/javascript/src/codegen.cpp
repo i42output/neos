@@ -953,7 +953,7 @@ namespace neos::compilers::javascript
     function_generator::alias function_generator::alias_of_word(std::uint32_t aOffset, bool aArray)
     {
         if (aOffset == 0u)
-            return alias::Alloc;        // (a free slot's next)
+            return alias::Any;          // (its type, flags, class and kind (ObjectClass ...: Header), and its shape (Shape): see header_word)
         if (aOffset == layout::ObjectShape)
             return alias::Shape;
         if (aOffset == layout::ObjectValues)
@@ -994,6 +994,53 @@ namespace neos::compilers::javascript
         u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x200u | alias_flags(aAlias));
         u32(layout::Memory);
         u32(aOffset);
+    }
+
+    void function_generator::unit_load(std::uint32_t aOffset, alias aAlias, bool aCached)
+    {
+        // (address -> the region offset whose units (8 bytes: ValueUnitShift) the u32 there is (e.g. an object's values' storage's); 
+        // cached: see cached_load)
+        op(opcode::I64LoadMem32U);
+        u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem32U)) | (aCached ? 0x80u : 0u) | alias_flags(aAlias));
+        u32(layout::Memory);
+        u32(aOffset);
+        i64(static_cast<std::int64_t>(layout::ValueUnitShift));
+        op(opcode::I64Shl);
+    }
+
+    void function_generator::header_word(std::uint32_t aSlot, std::uint32_t aPattern, bool aShape)
+    {
+        // (a new cell's first word: its template's (its type, flags, class and kind (u32: Header), then (aShape) its shape (u32: Shape)), 
+        // as two stores of their own alias classes (code that follows knows that loads of other words are not changed by them))
+        static_assert(layout::ObjectShape == 4u);
+        get(aSlot);
+        get(aPattern);
+        site_load(opcode::I64LoadMem, 0u);
+        mem_store(opcode::I64StoreMem32, 0u, alias::Header);
+        if (aShape)
+        {
+            get(aSlot);
+            get(aPattern);
+            site_load(opcode::I64LoadMem32U, layout::ObjectShape);
+            mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
+        }
+    }
+
+    void function_generator::values_word(std::uint32_t aSlot, std::uint32_t aPattern)
+    {
+        // (a new object's values' word: its values' storage in its cell (after it), and their capacity (the template's))
+        get(aSlot);
+        get(aSlot);
+        i64(static_cast<std::int64_t>(layout::ObjectSize));
+        op(opcode::I64Add);
+        i64(static_cast<std::int64_t>(layout::ValueUnitShift));
+        op(opcode::I64ShrU);
+        get(aPattern);
+        site_load(opcode::I64LoadMem, layout::ObjectValues);
+        i64(static_cast<std::int64_t>(0xFFFFFFFF00000000ull));
+        op(opcode::I64And);
+        op(opcode::I64Ior);
+        mem_store(opcode::I64StoreMem, layout::ObjectValues, alias::Values);
     }
 
     void function_generator::site_load(opcode aOpcode, std::uint32_t aOffset)
@@ -1230,19 +1277,17 @@ namespace neos::compilers::javascript
                     branch(slow, true);
                     cell_of(object);
                     tee(cell);
-                    mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+                    mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
                     tee(word);
                     op(opcode::I64Eqz);
                     branch(slow, true);
-                    // (the entry: ((shape >> 4) ^ (shape >> 16) ^ key) & (entries - 1))
+                    // (the entry: (shape ^ (shape >> 12) ^ key) & (entries - 1))
                     op(opcode::GlobalGet);
                     u32(iCompiler.allocation_state_global());
                     site_load(opcode::I64LoadMem, layout::AllocMegamorphic);
                     get(word);
-                    i64(4);
-                    op(opcode::I64ShrU);
                     get(word);
-                    i64(16);
+                    i64(12);
                     op(opcode::I64ShrU);
                     op(opcode::I64Xor);
                     get(keyValue);
@@ -1264,7 +1309,7 @@ namespace neos::compilers::javascript
                     op(opcode::I32Ior);
                     branch(slow, true);
                     get(cell);
-                    offset_load(layout::ObjectValues, alias::Values);
+                    unit_load(layout::ObjectValues, alias::Values);
                     get(entry);
                     mem_load(opcode::I64LoadMem32U, layout::MegamorphicPosition, alias::Site);
                     i64(3);
@@ -1329,7 +1374,7 @@ namespace neos::compilers::javascript
                     {
                         // (its own property: its value at the position (its shape's: a data property))
                         get(cell);
-                        offset_load(layout::ObjectValues, alias::Values);
+                        unit_load(layout::ObjectValues, alias::Values);
                         get(word);
                         i64(32);
                         op(opcode::I64ShrU);
@@ -1425,7 +1470,7 @@ namespace neos::compilers::javascript
                                 op(opcode::I64Ne);
                                 branch(slow, true);
                                 get(cell);
-                                cached_load(opcode::I64LoadMem, layout::ObjectValues, alias::Values, true);
+                                unit_load(layout::ObjectValues, alias::Values, true);
                                 get(word);
                                 i64(3);
                                 op(opcode::I64Shl);
@@ -1438,12 +1483,12 @@ namespace neos::compilers::javascript
                                 site_load(opcode::I64LoadMem, layout::SitePrototype + 8u);
                                 set(holderShape);
                                 get(cell);
-                                mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+                                mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
                                 get(holderShape);
                                 op(opcode::I64Ne);
                                 branch(slow, true);
                                 get(cell);
-                                offset_load(layout::ObjectValues, alias::Values);
+                                unit_load(layout::ObjectValues, alias::Values);
                                 get(word);
                                 i64(3);
                                 op(opcode::I64Shl);
@@ -1473,7 +1518,7 @@ namespace neos::compilers::javascript
                                 op(opcode::I64Ne);
                                 branch(slow, true);
                                 get(cell);
-                                cached_load(opcode::I64LoadMem, layout::ObjectDictionary, alias::Dictionary, true);
+                                unit_load(layout::ObjectDictionary, alias::Values, true);
                                 cached_load(opcode::I64LoadMem, layout::DictionaryEntries, alias::Dictionary, true);
                                 get(word);
                                 i64(5);
@@ -1485,7 +1530,7 @@ namespace neos::compilers::javascript
                             end_control();
                             // (a dictionary: the key's data property at the position (of its dictionary's entries))
                             get(cell);
-                            offset_load(layout::ObjectDictionary, alias::Dictionary);
+                            unit_load(layout::ObjectDictionary, alias::Values);
                             tee(cell);
                             op(opcode::I64Eqz);
                             branch(slow, true);
@@ -1531,7 +1576,7 @@ namespace neos::compilers::javascript
             iControls.push_back(control{ control_kind::Block });
             cell_of(object);
             tee(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             set(word);
             entries();
             op(opcode::Else);
@@ -1565,19 +1610,17 @@ namespace neos::compilers::javascript
             branch(miss, true);
             cell_of(object);
             tee(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             tee(word);
             op(opcode::I64Eqz);
             branch(miss, true);
-            // (the entry: ((shape >> 4) ^ (shape >> 16) ^ key) & (entries - 1))
+            // (the entry: (shape ^ (shape >> 12) ^ key) & (entries - 1))
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
             site_load(opcode::I64LoadMem, layout::AllocMegamorphic);
             get(word);
-            i64(4);
-            op(opcode::I64ShrU);
             get(word);
-            i64(16);
+            i64(12);
             op(opcode::I64ShrU);
             op(opcode::I64Xor);
             get(keyValue);
@@ -1598,7 +1641,7 @@ namespace neos::compilers::javascript
             op(opcode::I32Ior);
             branch(miss, true);
             get(cell);
-            offset_load(layout::ObjectValues, alias::Values);
+            unit_load(layout::ObjectValues, alias::Values);
             get(entry);
             mem_load(opcode::I64LoadMem32U, layout::MegamorphicPosition, alias::Site);
             i64(3);
@@ -1652,7 +1695,7 @@ namespace neos::compilers::javascript
             branch(slow, true);
             cell_of(object);
             tee(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             set(shape);
             // (a megamorphic site (see the get stub): a writable own data property in the megamorphic cache: its value)
             property_site(site);
@@ -1670,10 +1713,8 @@ namespace neos::compilers::javascript
                 u32(iCompiler.allocation_state_global());
                 site_load(opcode::I64LoadMem, layout::AllocMegamorphic);
                 get(shape);
-                i64(4);
-                op(opcode::I64ShrU);
                 get(shape);
-                i64(16);
+                i64(12);
                 op(opcode::I64ShrU);
                 op(opcode::I64Xor);
                 get(keyValue);
@@ -1698,7 +1739,7 @@ namespace neos::compilers::javascript
                 op(opcode::I32Ior);
                 branch(slow, true);
                 get(cell);
-                offset_load(layout::ObjectValues, alias::Values);
+                unit_load(layout::ObjectValues, alias::Values);
                 get(entry);
                 mem_load(opcode::I64LoadMem32U, layout::MegamorphicPosition, alias::Site);
                 i64(3);
@@ -1725,7 +1766,7 @@ namespace neos::compilers::javascript
                 {
                     // (SiteOwn: it has the property at the position (its shape's: a writable data property): its value)
                     get(cell);
-                    offset_load(layout::ObjectValues, alias::Values);
+                    unit_load(layout::ObjectValues, alias::Values);
                     get(word);
                     i64(32);
                     op(opcode::I64ShrU);
@@ -1770,7 +1811,7 @@ namespace neos::compilers::javascript
                     branch(slow, true);
                     cell_of(address);
                     tee(address);
-                    mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+                    mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
                     get(entry);
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u) + 8u);
                     op(opcode::I64Ne);
@@ -1794,16 +1835,11 @@ namespace neos::compilers::javascript
                 site_load(opcode::I64LoadMem32U, layout::SitePosition);
                 tee(word);
                 get(cell);
-                mem_load(opcode::I64LoadMem32U, layout::ObjectValueCount, alias::Header);
-                op(opcode::I64Ne);
-                branch(slow, true);
-                get(word);
-                get(cell);
-                mem_load(opcode::I64LoadMem32U, layout::ObjectValueCapacity, alias::Header);
+                mem_load(opcode::I64LoadMem32U, layout::ObjectValueCapacity, alias::Values);
                 op(opcode::I64GeU);
                 branch(slow, true);
                 get(cell);
-                offset_load(layout::ObjectValues, alias::Values);
+                unit_load(layout::ObjectValues, alias::Values);
                 get(word);
                 i64(3);
                 op(opcode::I64Shl);
@@ -1811,14 +1847,9 @@ namespace neos::compilers::javascript
                 get(value);
                 mem_store(opcode::I64StoreMem, 0u, alias::Slot);
                 get(cell);
-                get(word);
-                i64(1);
-                op(opcode::I64Add);
-                mem_store(opcode::I64StoreMem32, layout::ObjectValueCount, alias::Header);
-                get(cell);
                 get(entry);
                 site_load(opcode::I64LoadMem, layout::SiteAdded);
-                mem_store(opcode::I64StoreMem, layout::ObjectShape, alias::Shape);
+                mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
                 undefined();
                 branch(done, false);
             });
@@ -1991,13 +2022,13 @@ namespace neos::compilers::javascript
             // (the prototype)
             cell_of(callee);
             tee(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteShape);
             op(opcode::I64Ne);
             branch(slow, true);
             get(cell);
-            offset_load(layout::ObjectValues, alias::Values);
+            unit_load(layout::ObjectValues, alias::Values);
             get(entry);
             site_load(opcode::I64LoadMem32U, e * layout::SiteEntrySize + layout::SitePosition);
             i64(3);
@@ -2065,37 +2096,25 @@ namespace neos::compilers::javascript
             i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
             op(opcode::I64And);
             set(slot);
-            // (the object: the template's copy; its handle (with its type: the second word), prototype and values' offset)
+            // (the object: the template's copy (its first word: its type, flags and kind); its prototype and values' word)
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteTemplate);
             set(pattern);
-            static_assert(layout::CellHandle == 12u && layout::ObjectSize % 8u == 0u);
-            for (std::uint32_t w = 0u; w < layout::ObjectSize / 8u; ++w)
+            static_assert(layout::ObjectSize % 8u == 0u);
+            header_word(slot, pattern, true);
+            for (std::uint32_t w = 1u; w < layout::ObjectSize / 8u; ++w)
             {
                 if (w * 8u == layout::ObjectProto || w * 8u == layout::ObjectValues)
                     continue;
                 get(slot);
                 get(pattern);
                 site_load(opcode::I64LoadMem, w * 8u);
-                if (w == 1u)
-                {
-                    get(slot);
-                    i64(static_cast<std::int64_t>(layout::HandleShift));
-                    op(opcode::I64ShrU);
-                    i64(32);
-                    op(opcode::I64Shl);
-                    op(opcode::I64Ior);
-                }
                 mem_store(opcode::I64StoreMem, w * 8u, alias_of_word(w * 8u, false));
             }
             get(slot);
             get(prototype);
             mem_store(opcode::I64StoreMem, layout::ObjectProto, alias::Proto);
-            get(slot);
-            get(slot);
-            i64(static_cast<std::int64_t>(layout::ObjectSize));
-            op(opcode::I64Add);
-            mem_store(opcode::I64StoreMem, layout::ObjectValues, alias::Values);
+            values_word(slot, pattern);
             get(slot);
             i64(static_cast<std::int64_t>(layout::HandleShift));
             op(opcode::I64ShrU);
@@ -2181,28 +2200,20 @@ namespace neos::compilers::javascript
         get(list);
         get(bumpNext);
         mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
-        // (the array: the template's copy; its handle (with its type), prototype, elements (their offset and number) and length)
+        // (the array: the template's copy (its first word: its type, flags and kind); its prototype, elements (their offset and number) and length)
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
         set(pattern);
         static_assert(layout::ArraySize % 8u == 0u && layout::ArrayLength % 8u == 0u);
-        for (std::uint32_t w = 0u; w < layout::ArraySize / 8u; ++w)
+        header_word(slot, pattern, true);
+        for (std::uint32_t w = 1u; w < layout::ArraySize / 8u; ++w)
         {
             if (w * 8u == layout::ObjectProto || w * 8u == layout::ArrayElements)
                 continue;
             get(slot);
             get(pattern);
             site_load(opcode::I64LoadMem, w * 8u);
-            if (w == 1u)
-            {
-                get(slot);
-                i64(static_cast<std::int64_t>(layout::HandleShift));
-                op(opcode::I64ShrU);
-                i64(32);
-                op(opcode::I64Shl);
-                op(opcode::I64Ior);
-            }
-            else if (w * 8u == layout::ArrayLength || w * 8u == layout::ArrayElements + 8u)
+            if (w * 8u == layout::ArrayLength || w * 8u == layout::ArrayElements + 8u)
             {
                 // (its length; its elements' number (with their capacity, the template's))
                 get(count);
@@ -2304,30 +2315,14 @@ namespace neos::compilers::javascript
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
         set(pattern);
-        for (std::uint32_t w = 0u; w < layout::ObjectSize / 8u; ++w)
+        header_word(slot, pattern, false);
+        for (std::uint32_t w = 1u; w < layout::ObjectSize / 8u; ++w)
         {
-            if (w * 8u == layout::ObjectProto || w * 8u == layout::ObjectShape || w * 8u == layout::ObjectValues)
+            if (w * 8u == layout::ObjectProto || w * 8u == layout::ObjectValues)
                 continue;
             get(slot);
             get(pattern);
             site_load(opcode::I64LoadMem, w * 8u);
-            if (w == 1u)
-            {
-                get(slot);
-                i64(static_cast<std::int64_t>(layout::HandleShift));
-                op(opcode::I64ShrU);
-                i64(32);
-                op(opcode::I64Shl);
-                op(opcode::I64Ior);
-            }
-            else if (w * 8u == layout::ObjectValueCount)
-            {
-                // (its values' number (with their capacity, the template's))
-                static_assert(layout::ObjectValueCount % 8u == 0u && layout::ObjectValueCapacity == layout::ObjectValueCount + 4u);
-                get(count);
-                op(opcode::I64UConvertI32);
-                op(opcode::I64Ior);
-            }
             mem_store(opcode::I64StoreMem, w * 8u, alias_of_word(w * 8u, false));
         }
         get(slot);
@@ -2337,12 +2332,8 @@ namespace neos::compilers::javascript
         get(slot);
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteShape);
-        mem_store(opcode::I64StoreMem, layout::ObjectShape, alias::Shape);
-        get(slot);
-        get(slot);
-        i64(static_cast<std::int64_t>(layout::ObjectSize));
-        op(opcode::I64Add);
-        mem_store(opcode::I64StoreMem, layout::ObjectValues, alias::Values);
+        mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
+        values_word(slot, pattern);
         get(slot);
         i64(static_cast<std::int64_t>(layout::HandleShift));
         op(opcode::I64ShrU);
@@ -2619,7 +2610,7 @@ namespace neos::compilers::javascript
             set(prototype);
             cell_of(prototype);
             tee(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
             site_load(opcode::I64LoadMem, layout::AllocPlainArrays);
@@ -2640,7 +2631,7 @@ namespace neos::compilers::javascript
             op(opcode::I64Ne);
             branch(miss, true);
             cell_of(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
             site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 16u);
@@ -2749,7 +2740,7 @@ namespace neos::compilers::javascript
             set(prototype);
             cell_of(prototype);
             tee(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
             site_load(opcode::I64LoadMem, layout::AllocPlainArrays);
@@ -2770,7 +2761,7 @@ namespace neos::compilers::javascript
             op(opcode::I64Ne);
             branch(miss, true);
             cell_of(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectShape, alias::Shape);
+            mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
             site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 16u);
@@ -8773,7 +8764,7 @@ namespace neos::compilers::javascript
             {
                 auto const storage = temporary();
                 cell_of(object);
-                offset_load(layout::ObjectValues, alias::Values);
+                unit_load(layout::ObjectValues, alias::Values);
                 set(storage);
                 for (std::size_t i = 0u; i < values.size(); ++i)
                 {

@@ -64,6 +64,42 @@
 namespace neos::javascript_runtime
 {
     std::byte* gRegionBase = nullptr;
+
+    // --- cells' types' operations (by kind)
+
+    namespace
+    {
+        constexpr cell_ops sNoCell{ "none", [](cell&) noexcept {}, [](cell&, tracer&) {} };
+        constexpr cell_ops sObjectOps = cell_ops_of<object>::make("object");
+        constexpr cell_ops sArrayOps = cell_ops_of<array_object>::make("array_object");
+        constexpr cell_ops sFunctionOps = cell_ops_of<function_object>::make("function_object");
+        constexpr cell_ops sStringOps = cell_ops_of<string>::make("string");
+        constexpr cell_ops sSymbolOps = cell_ops_of<symbol>::make("symbol");
+        constexpr cell_ops sBigIntOps = cell_ops_of<bigint>::make("bigint");
+        constexpr cell_ops sAccessorPairOps = cell_ops_of<accessor_pair>::make("accessor_pair");
+        constexpr cell_ops sEnvironmentOps = cell_ops_of<environment>::make("environment");
+        std::mutex sKindsMutex;
+        std::uint8_t sNextKind = KindFirstNumbered;
+    }
+
+    // (the fixed kinds' operations (constant: there before any cell is made))
+    cell_ops const* gCellOps[256] = { &sNoCell, &sObjectOps, &sArrayOps, &sFunctionOps, &sStringOps, &sSymbolOps, &sBigIntOps, &sAccessorPairOps,
+        &sEnvironmentOps };
+    static_assert(KindObject == 1u && KindArray == 2u && KindFunction == 3u && KindString == 4u && KindSymbol == 5u && KindBigInt == 6u &&
+        KindAccessorPair == 7u && KindEnvironment == 8u);
+
+    std::uint8_t number_kind(cell_ops const& aOps, std::uint8_t aKind)
+    {
+        std::lock_guard<std::mutex> lock{ sKindsMutex };
+        if (aKind == KindNone)
+        {
+            if (sNextKind == 0u)
+                std::abort();   // (more than 240 types)
+            aKind = sNextKind++;
+        }
+        gCellOps[aKind] = &aOps;
+        return aKind;
+    }
     thread_local heap* tHeap = nullptr;
     sole_isolate gSoleIsolate;
 
@@ -85,7 +121,7 @@ namespace neos::javascript_runtime
 
         constexpr std::uint32_t SizeClasses[] =
         {
-            16u, 32u, 48u, 64u, 80u, 96u, 112u, 128u, 144u, 160u, 176u, 192u, 208u, 224u, 240u, 256u,
+            16u, 24u, 32u, 40u, 48u, 56u, 64u, 72u, 80u, 88u, 96u, 104u, 112u, 120u, 128u, 144u, 160u, 176u, 192u, 208u, 224u, 240u, 256u,
             320u, 384u, 448u, 512u, 640u, 768u, 896u, 1024u, 1280u, 1536u, 1792u, 2048u, 2560u, 3072u, 4096u
         };
         constexpr std::size_t ClassCount = std::size(SizeClasses);
@@ -262,12 +298,12 @@ namespace neos::javascript_runtime
             {
                 static_assert(ClassCount <= allocation_state::Classes);
                 for (auto size : SizeClasses)
-                    iReciprocal[size / 16u] = ((std::uint64_t{ 1u } << 32u) + size - 1u) / size;
-                for (std::size_t c = 0u, size = 0u; size <= MaxSmall; size += 16u)
+                    iReciprocal[size / 8u] = ((std::uint64_t{ 1u } << 32u) + size - 1u) / size;
+                for (std::size_t c = 0u, size = 0u; size <= MaxSmall; size += 8u)
                 {
                     while (SizeClasses[c] < size)
                         ++c;
-                    iClassOf[size / 16u] = static_cast<std::uint8_t>(c);
+                    iClassOf[size / 8u] = static_cast<std::uint8_t>(c);
                 }
                 // (the allocation state (that compiled code uses): in the region)
                 iState = ::new (allocate(sizeof(allocation_state), true)) allocation_state{};
@@ -302,7 +338,7 @@ namespace neos::javascript_runtime
             {
                 if (aSize > MaxSmall)
                     return allocate_large(aSize, aRaw);
-                auto const ci = iClassOf[(aSize + 15u) / 16u];
+                auto const ci = iClassOf[(aSize + 7u) / 8u];
                 if (!aRaw)
                 {
                     // (cells: a slot that was freed (the free list's first: see allocation_state); else the next of the size class's run 
@@ -438,7 +474,7 @@ namespace neos::javascript_runtime
                     free_slot(aMemory);
                     return;
                 }
-                auto& c = iRawClasses[iClassOf[info.slotSize / 16u]];
+                auto& c = iRawClasses[iClassOf[info.slotSize / 8u]];
                 *static_cast<void**>(aMemory) = c.freeList;
                 c.freeList = aMemory;
             }
@@ -465,7 +501,7 @@ namespace neos::javascript_runtime
                 {
                     auto const& info = iPages[page];
                     if (info.owner == iOwner && info.slotSize != 0u && !info.raw && info.largeSize == 0u && !info.empty)
-                        iUnswept[iClassOf[info.slotSize / 16u]].push_back(page);
+                        iUnswept[iClassOf[info.slotSize / 8u]].push_back(page);
                 }
             }
             void finish_sweeping()
@@ -498,7 +534,7 @@ namespace neos::javascript_runtime
             // (the first first))
             void add_runs(std::uint32_t aSlotSize, std::span<std::pair<std::uint64_t, std::uint64_t> const> aRuns)
             {
-                auto& runs = iRuns[iClassOf[aSlotSize / 16u]];
+                auto& runs = iRuns[iClassOf[aSlotSize / 8u]];
                 for (auto r = aRuns.rbegin(); r != aRuns.rend(); ++r)
                     runs.push_back(*r);
             }
@@ -507,12 +543,7 @@ namespace neos::javascript_runtime
             {
                 clear_bit(&page_bits::allocated, aSlot);
                 clear_bit(&page_bits::finalized, aSlot);
-                if (iHandleOffset != 0u)
-                {
-                    std::uint32_t const none = 0u;
-                    std::memcpy(static_cast<std::byte*>(aSlot) + iHandleOffset, &none, sizeof(none));
-                }
-                auto& head = iState->freeLists[iClassOf[iPages[page_of(aSlot)].slotSize / 16u]];
+                auto& head = iState->freeLists[iClassOf[iPages[page_of(aSlot)].slotSize / 8u]];
                 *static_cast<std::uint64_t*>(aSlot) = head;
                 head = static_cast<std::uint64_t>(static_cast<std::byte*>(aSlot) - iBase);
             }
@@ -550,7 +581,7 @@ namespace neos::javascript_runtime
             {
                 auto const offset = static_cast<std::size_t>(static_cast<std::byte const*>(aSlot) - iBase);
                 aPage = offset >> PageShift;
-                aIndex = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[iPages[aPage].slotSize / 16u]) >> 32u);
+                aIndex = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[iPages[aPage].slotSize / 8u]) >> 32u);
             }
             bool small_cell(void const* aSlot) const
             {
@@ -589,13 +620,23 @@ namespace neos::javascript_runtime
                 auto const& info = iPages[page];
                 if (info.largeSize != 0u || info.raw || info.slotSize == 0u)
                     return;
-                auto const index = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[info.slotSize / 16u]) >> 32u);
+                auto const index = static_cast<std::size_t>((static_cast<std::uint64_t>(offset & (PageSize - 1u)) * iReciprocal[info.slotSize / 8u]) >> 32u);
                 (bits(page).*aBits)[index / 64u] |= std::uint64_t{ 1u } << (index % 64u);
             }
             void mark(void const* aSlot) { set_small_bit(&page_bits::marked, aSlot); }
             void finalize(void const* aSlot) { set_small_bit(&page_bits::finalized, aSlot); }
             // (a small cell's slot that holds a cell (the runs' slots allocated since the last sweep: in its bits (see fold_runs)))
             bool allocated(void const* aSlot) const { return !small_cell(aSlot) || test_bit(&page_bits::allocated, aSlot); }
+            // (... or (between collections: its bits do not have the slots of its size class's run allocated since it was folded) in its
+            // size class's run before its bump)
+            bool allocated_now(void const* aSlot) const
+            {
+                if (allocated(aSlot))
+                    return true;
+                auto const offset = static_cast<std::uint64_t>(static_cast<std::byte const*>(aSlot) - iBase);
+                auto const ci = iClassOf[iPages[page_of(aSlot)].slotSize / 8u];
+                return iRunStart[ci] != 0u && offset >= iRunStart[ci] && offset < iState->bump[ci];
+            }
             // (the size classes' runs' slots allocated so far (by the runtime and by compiled code: those before their bumps): in their 
             // pages' bits)
             void fold_runs()
@@ -629,16 +670,15 @@ namespace neos::javascript_runtime
                 }
                 iRunStart[ci] = bump;
             }
-            void set_handle_offset(std::size_t aOffset) { iHandleOffset = aOffset; }
             allocation_state& state() const { return *iState; }
             // (a page of small cells that its sweep found has none: not swept again (until it has cells: see allocate))
             void empty(std::size_t aPage)
             {
                 auto& info = iPages[aPage];
                 info.empty = true;
-                iEmpty[iClassOf[info.slotSize / 16u]].push_back(aPage);
+                iEmpty[iClassOf[info.slotSize / 8u]].push_back(aPage);
             }
-            std::uint32_t size_class(std::size_t aSize) const { return iClassOf[(aSize + 15u) / 16u]; }
+            std::uint32_t size_class(std::size_t aSize) const { return iClassOf[(aSize + 7u) / 8u]; }
             static std::uint32_t class_size(std::uint32_t aClass) { return SizeClasses[aClass]; }
             // (large cells' pages (their first), in descending address order (aVisit(cell)))
             template <typename Visit>
@@ -728,11 +768,10 @@ namespace neos::javascript_runtime
             std::vector<std::size_t> iEmpty[ClassCount];       ///< (pages of small cells that have none (see empty))
             void (*iSweeper)(void*, std::size_t) = nullptr;
             void* iSweeperData = nullptr;
-            std::uint8_t iClassOf[MaxSmall / 16u + 1u] = {};
+            std::uint8_t iClassOf[MaxSmall / 8u + 1u] = {};
             std::vector<page_bits*> iBits;                      ///< (each page's (of small cells), made when used)
             std::uint64_t iRunStart[ClassCount] = {};           ///< (each size class's run's first slot (region offset): see fold_run)
-            std::uint64_t iReciprocal[MaxSmall / 16u + 1u] = {};  ///< (by slot size / 16: 2^32 / the size, rounded up (see slot_index))
-            std::size_t iHandleOffset = 0u;                     ///< (see collector::record_handle_offset)
+            std::uint64_t iReciprocal[MaxSmall / 8u + 1u] = {};  ///< (by slot size / 8: 2^32 / the size, rounded up (see slot_index))
         };
 
         // --- rooted memory (root_allocate): a list of blocks
@@ -844,28 +883,16 @@ namespace neos::javascript_runtime
             auto const* h = host();
             return h != nullptr && h->version >= 8u && h->values != nullptr && stack_base() != nullptr;
         }
-        // (the live cell whose handle it is (its slot's handle field is the handle: a free slot's is 0), else null)
+        // (the live cell whose handle it is (its slot is allocated, and its cell made: its kind is set (see heap::make_with)), else null;
+        // while it collects: a slot of a dead cell is allocated until its page is swept, but not marked)
         cell* live_cell(std::uint32_t aHandle) const
         {
-            if (aHandle == 0u || iHandleOffset == 0u)
+            if (aHandle == 0u)
                 return nullptr;
             auto* const slot = iMemory.slot_starting_at(static_cast<std::size_t>(aHandle) << heap::HandleShift);
-            if (slot == nullptr)
-                return nullptr;
-            std::uint32_t h;
-            std::memcpy(&h, slot + iHandleOffset, sizeof(h));
-            // (while it collects: a slot that holds a cell (a dead cell's handle is not cleared unless it is destroyed: see sweep_page))
-            if (h != aHandle || (iCollecting && !iMemory.allocated(slot)))
+            if (slot == nullptr || !(iCollecting ? iMemory.allocated(slot) : iMemory.allocated_now(slot)) || reinterpret_cast<cell*>(slot)->cellKind == 0u)
                 return nullptr;
             return reinterpret_cast<cell*>(slot);
-        }
-        void record_handle_offset(cell& aCell)
-        {
-            if (iHandleOffset == 0u)
-            {
-                iHandleOffset = static_cast<std::size_t>(reinterpret_cast<std::byte const*>(&aCell.handle) - reinterpret_cast<std::byte const*>(&aCell));
-                iMemory.set_handle_offset(iHandleOffset);
-            }
         }
         void free_cell(cell* aCell, std::uint32_t aHandle);
         void added(cell& aCell);
@@ -926,9 +953,7 @@ namespace neos::javascript_runtime
             if (aWord >= iMemory.begin() && aWord < iMemory.end())
                 if (auto const* const slot = iMemory.slot_at(static_cast<std::uintptr_t>(aWord)))
                 {
-                    std::uint32_t handle;
-                    std::memcpy(&handle, slot + iHandleOffset, sizeof(handle));
-                    if (auto* const c = iHeap.find(handle); c != nullptr && reinterpret_cast<std::byte const*>(c) == slot && c->marked == 0u)
+                    if (auto* const c = live_cell(static_cast<std::uint32_t>(region_offset(slot) >> heap::HandleShift)); c != nullptr && c->marked == 0u)
                         push(*c);
                 }
         }
@@ -951,10 +976,8 @@ namespace neos::javascript_runtime
             auto const* const slot = iMemory.slot_at(address);
             if (slot == nullptr)
                 return true;
-            std::uint32_t handle;
-            std::memcpy(&handle, slot + iHandleOffset, sizeof(handle));
-            auto const* const c = iHeap.find(handle);
-            return c == nullptr || reinterpret_cast<std::byte const*>(c) != slot || c->marked != 0u;
+            auto const* const c = live_cell(static_cast<std::uint32_t>(region_offset(slot) >> heap::HandleShift));
+            return c == nullptr || c->marked != 0u;
         }
         bool marked(value aValue) const
         {
@@ -974,7 +997,8 @@ namespace neos::javascript_runtime
                     ++iMarked;
                     iMarkedBytes += iMemory.size_of(c);
                     if (c->type == cell_type::String)
-                        iMarkedBytes += static_cast<string*>(c)->text.capacity() * sizeof(char16_t);
+                        if (static_cast<string*>(c)->owned)
+                            iMarkedBytes += static_cast<string*>(c)->length * sizeof(char16_t);
                     c->trace(aTracer);
                 }
                 else if (!iEphemeronValues.empty())
@@ -1009,7 +1033,6 @@ namespace neos::javascript_runtime
         heap& iHeap;
         cell_memory iMemory;
         std::vector<cell*> iWork;
-        std::size_t iHandleOffset = 0u;
         std::uint64_t iStress = 0u;
         bool iQuarantine = false;
         bool iCheck = false;                ///< (testing: a dead cell that is not destroyed is checked to own nothing (see sweep_page))
@@ -1033,7 +1056,7 @@ namespace neos::javascript_runtime
 
     // --- the heap (an isolate's)
 
-    heap::heap() : iRootShape{ new shape{} }
+    heap::heap()
     {
     }
 
@@ -1052,6 +1075,7 @@ namespace neos::javascript_runtime
         auto* const h = new heap{};
         tHeap = h;
         h->iCollector = new collector{ *h };
+        h->iRootShape = new shape{};    // (in the region: the collector's)
         std::lock_guard<std::mutex> lock{ sIsolatesMutex };
         if (++sIsolates == 1u)
         {
@@ -1159,6 +1183,7 @@ namespace neos::javascript_runtime
             constexpr std::size_t base = (sizeof(object) + 7u) & ~std::size_t{ 7u };
             auto* const memory = static_cast<std::byte*>(iCollector->memory().allocate(base + sizeof(value), true));
             auto* const o = ::new (memory) object{ Undefined };
+            o->cellKind = cell_kind<object>();
             o->properties.use_storage(reinterpret_cast<value*>(memory + base), aRoom);
             iTemplates[aClass] = region_offset(memory);
         }
@@ -1174,6 +1199,7 @@ namespace neos::javascript_runtime
             constexpr std::size_t base = (sizeof(array_object) + 7u) & ~std::size_t{ 7u };
             auto* const memory = static_cast<std::byte*>(iCollector->memory().allocate(base + sizeof(value), true));
             auto* const a = ::new (memory) array_object{ Undefined };
+            a->cellKind = cell_kind<array_object>();
             a->ordinaryGet = false;
             a->properties.set_root(type_root_shape<array_object>());
             a->elements.use_storage(reinterpret_cast<value*>(memory + base), aRoom);
@@ -1208,7 +1234,6 @@ namespace neos::javascript_runtime
         if (static_cast<void*>(&aCell) != aMemory)
             std::abort();
         auto& c = *iCollector;
-        c.record_handle_offset(aCell);
         if (c.collecting())
         {
             aCell.marked = 1u;     // (a cell made while dead cells are freed (e.g. by a weak reference's clearing) lives)
@@ -1216,11 +1241,9 @@ namespace neos::javascript_runtime
             c.memory().set_bit(&cell_memory::page_bits::allocated, &aCell);
         }
         c.added(aCell);
-        // (its handle: its offset in the region (its slot's: a multiple of 16) >> HandleShift)
-        auto const offset = region_offset(&aCell);
-        if ((offset & ((std::uint64_t{ 1u } << HandleShift) - 1u)) != 0u)
+        // (its handle: its offset in the region (its slot's: a multiple of 8) >> HandleShift)
+        if ((region_offset(&aCell) & ((std::uint64_t{ 1u } << HandleShift) - 1u)) != 0u)
             std::abort();
-        aCell.handle = static_cast<std::uint32_t>(offset >> HandleShift);
     }
 
     cell* heap::find(std::uint32_t aHandle) const
@@ -1442,14 +1465,13 @@ namespace neos::javascript_runtime
         (void)aHandle;
         auto const size = iMemory.size_of(aCell);
         // (a plain object that owns nothing outside its cell (its properties' values in it): nothing to destroy)
-        if (!(&typeid(*aCell) == &typeid(object) && static_cast<object*>(aCell)->properties.owns_nothing() &&
+        if (!(aCell->cellKind == KindObject && static_cast<object*>(aCell)->properties.owns_nothing() &&
             static_cast<object*>(aCell)->extra_if() == nullptr))
-            aCell->~cell();
+            aCell->destroy();
         auto* const memory = reinterpret_cast<std::byte*>(aCell);
         if (iQuarantine)
             std::memset(memory, 0xDB, size);
-        std::uint32_t const none = 0u;
-        std::memcpy(memory + iHandleOffset, &none, sizeof(none));
+        aCell->cellKind = KindNone;
         iMemory.release(memory, !iQuarantine);
     }
 
@@ -1459,16 +1481,14 @@ namespace neos::javascript_runtime
         std::size_t freed = 0u;
         iMemory.for_each_large_descending([&](std::byte* aCell)
         {
-            std::uint32_t h;
-            std::memcpy(&h, aCell + iHandleOffset, sizeof(h));
-            if (h == 0u || h != static_cast<std::uint32_t>(region_offset(aCell) >> heap::HandleShift))
-                return;
             auto* const c = reinterpret_cast<cell*>(aCell);
+            if (c->cellKind == KindNone)
+                return;     // (not made yet)
             if (c->marked != 0u)
                 c->marked = 0u;
             else
             {
-                free_cell(c, h);
+                free_cell(c, c->handle());
                 ++freed;
             }
         });
@@ -1486,37 +1506,13 @@ namespace neos::javascript_runtime
         template <typename Raw>
         bool owns_nothing(cell& aCell, Raw const& aRaw)
         {
-            // (its type: by its vtable (the first one of a plain object's, and of an array's, found by their type: one load and compare,
-            // not the type's (two loads))
-            static std::atomic<void const*> sObjectTable = nullptr;
-            static std::atomic<void const*> sArrayTable = nullptr;
-            void const* table;
-            std::memcpy(&table, &aCell, sizeof(table));
-            bool isObject = table == sObjectTable.load(std::memory_order_relaxed);
-            bool isArray = !isObject && table == sArrayTable.load(std::memory_order_relaxed);
-            // (neither, once both are known: not one of them (a string's text is checked below))
-            if (!isObject && !isArray && aCell.type != cell_type::String && sObjectTable.load(std::memory_order_relaxed) != nullptr &&
-                sArrayTable.load(std::memory_order_relaxed) != nullptr)
-                return false;
-            if (!isObject && !isArray)
-            {
-                auto const& type = typeid(aCell);
-                if (&type == &typeid(object))
-                {
-                    sObjectTable.store(table, std::memory_order_relaxed);
-                    isObject = true;
-                }
-                else if (&type == &typeid(array_object))
-                {
-                    sArrayTable.store(table, std::memory_order_relaxed);
-                    isArray = true;
-                }
-            }
+            bool const isObject = aCell.cellKind == KindObject;
+            bool const isArray = aCell.cellKind == KindArray;
             if (isObject)
                 return static_cast<object&>(aCell).properties.owns_nothing(aRaw) && static_cast<object&>(aCell).extra_if() == nullptr;
-            // (a string whose text is in its cell (or none: a small string's, a slice's, a rope's))
+            // (a string whose code units are in its cell (or not its own: a slice's, a rope's))
             if (aCell.type == cell_type::String)
-                return !aRaw(static_cast<string&>(aCell).text.data());
+                return !static_cast<string&>(aCell).owned;
             if (isArray)
             {
                 auto& a = static_cast<array_object&>(aCell);
@@ -1533,7 +1529,7 @@ namespace neos::javascript_runtime
         auto const raw = [this](void const* aMemory) { return iMemory.raw(aMemory); };
         bool owns = true;
         if (aCell.type == cell_type::String)
-            owns = raw(static_cast<string&>(aCell).text.data());
+            owns = static_cast<string&>(aCell).owned;
         else if (aCell.type == cell_type::Object)
             owns = !owns_nothing(aCell, raw);
         if (owns)
@@ -1575,7 +1571,6 @@ namespace neos::javascript_runtime
         auto& tRuns = iSweptRuns;   // (the collector's: a thread_local's access is not cheap (the runtime is a module loaded at run time))
         tRuns.clear();
         bool live = false;
-        auto const handleOffset = iHandleOffset;
         auto const raw = [this](void const* aMemory) { return iMemory.raw(aMemory); };  // (region_raw: without finding the collector)
         auto const destroy = [&](std::size_t aIndex)
         {
@@ -1589,13 +1584,12 @@ namespace neos::javascript_runtime
             };
             if (iQuarantine)
             {
-                free_cell(c, c->handle);
+                free_cell(c, c->handle());
                 return;
             }
             if (!owns_nothing(*c, rawOutside))
-                c->~cell();
-            std::uint32_t const none = 0u;
-            std::memcpy(slot + handleOffset, &none, sizeof(none));
+                c->destroy();
+            c->cellKind = KindNone;
         };
         for (std::size_t w = 0u; w < words; ++w)
         {
@@ -1616,7 +1610,7 @@ namespace neos::javascript_runtime
                     };
                     if (!owns_nothing(*reinterpret_cast<cell*>(slot), rawOutside))
                     {
-                        std::fprintf(stderr, "JavaScript runtime: a dead cell (%s) owns storage, but is not to be destroyed\n", typeid(*reinterpret_cast<cell*>(slot)).name());
+                        std::fprintf(stderr, "JavaScript runtime: a dead cell (%s) owns storage, but is not to be destroyed\n", reinterpret_cast<cell*>(slot)->ops().name);
                         std::abort();
                     }
                     continue;
@@ -1826,19 +1820,18 @@ namespace neos::javascript_runtime
 
     // --- the traces of the cells of js.hpp
 
-    void string::trace(tracer& aTracer)
+    void string::do_trace(tracer& aTracer)
     {
         aTracer.mark(left);
         aTracer.mark(right);
-        aTracer.mark(base);
     }
 
-    void symbol::trace(tracer& aTracer)
+    void symbol::do_trace(tracer& aTracer)
     {
         aTracer.mark(description);
     }
 
-    void object::trace(tracer& aTracer)
+    void object::do_trace(tracer& aTracer)
     {
         aTracer.mark(proto);
         properties.trace(aTracer);
@@ -1865,15 +1858,15 @@ namespace neos::javascript_runtime
         }
     }
 
-    void array_object::trace(tracer& aTracer)
+    void array_object::do_trace(tracer& aTracer)
     {
-        object::trace(aTracer);
+        object::do_trace(aTracer);
         aTracer.mark(elements);
     }
 
-    void function_object::trace(tracer& aTracer)
+    void function_object::do_trace(tracer& aTracer)
     {
-        object::trace(aTracer);
+        object::do_trace(aTracer);
         aTracer.mark(realmGlobal);
         aTracer.mark(slots);
         aTracer.mark(environment);
@@ -1890,7 +1883,7 @@ namespace neos::javascript_runtime
         aTracer.mark(boundArguments);
     }
 
-    void environment::trace(tracer& aTracer)
+    void environment::do_trace(tracer& aTracer)
     {
         aTracer.mark(parent);
         aTracer.mark(slots);

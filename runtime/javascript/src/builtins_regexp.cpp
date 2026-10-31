@@ -51,9 +51,9 @@ namespace neos::javascript_runtime
         public:
             explicit regexp_object(value aPrototype) : object{ aPrototype, object_class::RegExp } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(source);
                 aTracer.mark(flags);
             }
@@ -78,9 +78,9 @@ namespace neos::javascript_runtime
         public:
             explicit regexp_string_iterator(value aPrototype) : object{ aPrototype, object_class::RegExpStringIterator } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(iteratingRegExp);
                 aTracer.mark(iteratedString);
             }
@@ -113,7 +113,7 @@ namespace neos::javascript_runtime
         // (a regexp's lastIndex: its own data property's (as a regexp has it: at a position known for its shape), else as Get has it)
         struct last_index_position
         {
-            shape const* layout = nullptr;
+            std::uint32_t layout = 0u;      ///< (its shape's word (see shape_ref): 0 none)
             std::uint32_t position = 0u;
             bool writable = false;
         };
@@ -169,8 +169,8 @@ namespace neos::javascript_runtime
         last_index_position const* known_last_index(regexp_object& aR, regexp_state& aState)
         {
             auto& k = aState.lastIndex;
-            auto const* layout = aR.properties.layout();
-            if (layout == nullptr)
+            auto const layout = aR.properties.shape_word();
+            if (layout == 0u)
                 return nullptr;
             if (layout != k.layout)
             {

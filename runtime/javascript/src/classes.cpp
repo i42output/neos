@@ -63,7 +63,7 @@ namespace neos::javascript_runtime
         public:
             class_definition() : cell{ cell_type::Internal } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 for (auto const* methods : { &instanceMethods, &staticMethods })
                     for (auto const& m : *methods)
