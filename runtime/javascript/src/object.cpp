@@ -219,6 +219,7 @@ namespace neos::javascript_runtime
         {
             auto* const memory = region_allocate(sizeof(dictionary));
             iDictionary = region_offset(::new (memory) dictionary{});
+            note_owner(this);
         }
         return *dictionary_of();
     }

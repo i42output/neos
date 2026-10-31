@@ -160,6 +160,8 @@ namespace neos::javascript_runtime
     void* region_allocate(std::size_t aSize);           ///< (gc.cpp: storage in the region that is not a cell)
     void region_release(void* aMemory) noexcept;      ///< (storage that region_allocate allocated (else (e.g. a cell's) nothing))
     bool region_raw(void const* aMemory);             ///< (gc.cpp: storage that region_allocate allocated (not a cell's))
+    void note_owner(void const* aMember) noexcept;    ///< (gc.cpp: a cell's member (at aMember) has storage outside its cell: the cell is 
+                                                        ///< destroyed when it dies (see collector::sweep_page))
     void publish_heap();                                ///< (the region, as the host's external memory (see layout::Memory))
     inline std::uint64_t region_offset(void const* aAddress)
     {
@@ -197,6 +199,8 @@ namespace neos::javascript_runtime
             aOther.iOffset = 0u;
             aOther.iSize = 0u;
             aOther.iCapacity = 0u;
+            if (iCapacity != 0u)
+                note_owner(this);
         }
         region_vector& operator=(region_vector&& aOther) noexcept
         {
@@ -206,6 +210,8 @@ namespace neos::javascript_runtime
                 std::swap(iOffset, aOther.iOffset);
                 std::swap(iSize, aOther.iSize);
                 std::swap(iCapacity, aOther.iCapacity);
+                if (iCapacity != 0u)
+                    note_owner(this);
             }
             return *this;
         }
@@ -245,6 +251,7 @@ namespace neos::javascript_runtime
             release_storage();
             iOffset = region_offset(storage);
             iCapacity = narrow(aCapacity);
+            note_owner(this);
         }
         void push_back(T const& aValue)
         {
@@ -522,6 +529,7 @@ namespace neos::javascript_runtime
     public:
         // --- the isolate's state
         collector& the_collector() const { return *iCollector; }
+        bool has_collector() const { return iCollector != nullptr; }
         shape* root_shape() const { return iRootShape; }
         shape* root_shape_of(std::size_t aType)
         {
@@ -1240,7 +1248,10 @@ namespace neos::javascript_runtime
         object_extra& extra()
         {
             if (!iExtra)
+            {
                 iExtra = std::make_unique<object_extra>();
+                note_owner(this);
+            }
             return *iExtra;
         }
         std::unique_ptr<object_extra> iExtra;
