@@ -455,8 +455,9 @@ namespace neos::language
             if (conceptIndex != 0u)
             {
                 auto const& name = aConcepts[static_cast<std::size_t>(conceptIndex - 1u)];
-                aNode.c.emplace(name.data(), name.size()); // (_concept: std::string's constructors)
-                aNode.c->association = static_cast<neolib::concept_association>(association);
+                std::remove_cvref_t<decltype(*aNode.c)> c{ name.data(), name.size() }; // (_concept: std::string's constructors)
+                c.association = static_cast<neolib::concept_association>(association);
+                aNode.c = c;
             }
             if (position != NoValue)
             {
@@ -772,4 +773,4 @@ namespace neos::language
             throw std::runtime_error(iMetaSource.to_error_text(aNode, aErrorText));
         throw std::runtime_error(aErrorText);
     }
-}
+}

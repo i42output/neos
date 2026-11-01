@@ -355,13 +355,15 @@ namespace neos::javascript_runtime
                     }
                     auto const slotSize = SizeClasses[ci];
                     auto& bump = iState->bump[ci];
-                    if (bump != 0u && bump + slotSize <= iState->bumpLimit[ci])
+                    if (bump != 0u && bump + slotSize <= iLimit[ci])
                     {
+                        // (a run's slot: the run's bytes were counted when it was taken (see allocate_cell), so not the caller's)
                         auto* const result = iBase + bump;
                         bump += slotSize;
+                        iState->allocatedBytes -= aSize;
                         return result;
                     }
-                    return allocate_cell(ci);
+                    return allocate_cell(ci, aSize);
                 }
                 return allocate_raw(ci);
             }
@@ -372,17 +374,18 @@ namespace neos::javascript_runtime
 #else
             [[gnu::noinline]]
 #endif
-            void* allocate_cell(std::size_t ci)
+            void* allocate_cell(std::size_t ci, std::size_t aSize)
             {
                 {
                     auto const slotSize = SizeClasses[ci];
                     for (;;)
                     {
                         auto& bump = iState->bump[ci];
-                        if (bump != 0u && bump + slotSize <= iState->bumpLimit[ci])
+                        if (bump != 0u && bump + slotSize <= iLimit[ci])
                         {
                             auto* const result = iBase + bump;
                             bump += slotSize;
+                            iState->allocatedBytes -= aSize;
                             return result;
                         }
                         // (the run's slots (allocated): in its page's bits)
@@ -392,7 +395,7 @@ namespace neos::javascript_runtime
                             auto const run = iRuns[ci].back();
                             iRuns[ci].pop_back();
                             iState->bump[ci] = run.first;
-                            iState->bumpLimit[ci] = run.second;
+                            take_run(ci, run.first, run.second);
                             iRunStart[ci] = run.first;
                             continue;
                         }
@@ -417,11 +420,24 @@ namespace neos::javascript_runtime
                         }
                         auto const start = static_cast<std::uint64_t>(page_address(page) - iBase);
                         iState->bump[ci] = start;
-                        iState->bumpLimit[ci] = start + (PageSize / slotSize) * slotSize;
+                        take_run(ci, start, start + (PageSize / slotSize) * slotSize);
                         iRunStart[ci] = start;
                     }
                 }
             }
+            // (a size class's next run of free slots [aStart, aLimit): its bytes counted as allocated now (compiled code allocates from
+            // it without counting), its limit compiled code's too (unless compiled code's allocations are each the runtime's: see
+            // compiled_runs))
+            void take_run(std::size_t ci, std::uint64_t aStart, std::uint64_t aLimit)
+            {
+                iLimit[ci] = aLimit;
+                iState->bumpLimit[ci] = iCompiledRuns ? aLimit : 0u;
+                iState->allocatedBytes += aLimit - aStart;
+            }
+        public:
+            // (whether compiled code allocates from the runs (else each of its allocations is the runtime's: e.g. collections by count))
+            void compiled_runs(bool aCompiled) { iCompiledRuns = aCompiled; }
+        private:
             // (storage that is not a cell's (see allocate))
             void* allocate_raw(std::size_t ci)
             {
@@ -494,6 +510,7 @@ namespace neos::javascript_runtime
                     iState->freeLists[ci] = 0u;
                     iState->bump[ci] = 0u;
                     iState->bumpLimit[ci] = 0u;
+                    iLimit[ci] = 0u;
                     iRuns[ci].clear();
                     iUnswept[ci].clear();
                 }
@@ -771,6 +788,8 @@ namespace neos::javascript_runtime
             std::uint8_t iClassOf[MaxSmall / 8u + 1u] = {};
             std::vector<page_bits*> iBits;                      ///< (each page's (of small cells), made when used)
             std::uint64_t iRunStart[ClassCount] = {};           ///< (each size class's run's first slot (region offset): see fold_run)
+            std::uint64_t iLimit[ClassCount] = {};              ///< (each size class's run's end (region offset): see take_run)
+            bool iCompiledRuns = true;
             std::uint64_t iReciprocal[MaxSmall / 8u + 1u] = {};  ///< (by slot size / 8: 2^32 / the size, rounded up (see slot_index))
         };
 
@@ -838,6 +857,8 @@ namespace neos::javascript_runtime
             environment_flag("NEOS_JS_GC_VERBOSE", iVerbose);
             if (environment_flag("NEOS_JS_GC_CHECK", flag))
                 iCheck = flag != 0u;
+            // (collections by count (stress): compiled code's allocations are each the runtime's, so that they are counted)
+            iMemory.compiled_runs(iStress == 0u);
             iMemory.set_sweeper([](void* aCollector, std::size_t aPage) { static_cast<collector*>(aCollector)->sweep_page(aPage); }, this);
             iHeap.iState = &iMemory.state();
             triggers();

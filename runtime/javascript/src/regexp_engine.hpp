@@ -153,9 +153,16 @@ namespace neos::javascript_runtime::regexp
         // few of each (e.g. a language's keywords), compared without hashing))
         bool wordSet = false;
         std::vector<std::vector<std::u16string>> words;
+        std::vector<std::uint64_t> wordFilter;                  ///< (by length: the bits (word_bit) of its words (a text whose bit is clear is none))
         std::size_t shortestWord = 0u;
         std::size_t longestWord = 0u;
     };
+
+    // (a word's (or a text's of its length) bit in its length's filter (see program::wordFilter): of its first, middle and last code units)
+    inline std::uint64_t word_bit(char16_t const* aText, std::size_t aLength)
+    {
+        return std::uint64_t{ 1u } << ((aText[0] * 37u + aText[aLength >> 1u] * 11u + aText[aLength - 1u]) & 63u);
+    }
 
     // (a SyntaxError (as syntax_error) if the pattern is not one)
     std::shared_ptr<program const> compile(std::u16string_view aPattern, std::uint32_t aFlags);

@@ -230,6 +230,12 @@ namespace neos::javascript_runtime
         return sHost;
     }
 
+    void validity_changed(std::uint64_t const* aWord)
+    {
+        if (sHost != nullptr && sHost->version >= 17u && sHost->watched_changed != nullptr)
+            sHost->watched_changed(aWord);
+    }
+
     void write_standard(int aStream, std::string_view aText)
     {
         if (sHost != nullptr && sHost->version >= 9u && sHost->std_write != nullptr)

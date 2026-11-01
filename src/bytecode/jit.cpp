@@ -435,6 +435,15 @@ namespace neos
                         std::uint64_t value = 0u;
                     };
                     std::vector<memory_read> reads;
+                    // (its code's watched tests (see optimizer::MemargWatched): each patch point's offset, the offset that it jumps to once
+                    // its word changes, and the word's address)
+                    struct watched_guard
+                    {
+                        std::size_t offset = 0u;
+                        std::size_t target = 0u;
+                        std::uintptr_t address = 0u;
+                    };
+                    std::vector<watched_guard> watched;
                     bool background = false;            ///< (made in the background (its reads are checked when it is installed))
                     std::uint64_t osrLoop = NoOsrLoop;  ///< (code that a call continues in from a loop (see osr_entry))
                     std::unique_ptr<tier_version> version;
@@ -1050,6 +1059,12 @@ namespace neos
                         void alu_mr(int aOp, bool aW, int aBase, std::int32_t aDisp, int aSrc) { auto const start = offset(); op_rm({ static_cast<std::uint8_t>(aOp * 8 + 1) }, aW, aSrc, aBase, aDisp); fusable(aOp, start); }
                         void alu_ri(int aOp, bool aW, int aDst, std::int32_t aImm)
                         {
+                            if (aOp == 7 && aImm == 0)
+                            {
+                                // (cmp x, 0: test x, x (the same flags for every condition: CF and OF are 0 either way))
+                                test_rr(aW, aDst, aDst);
+                                return;
+                            }
                             struct fused { assembler& a; int op; std::size_t start; ~fused() { a.fusable(op, start); } } const fusing{ *this, aOp, offset() };
                             if (fits_i8(aImm))
                             {
@@ -1197,6 +1212,14 @@ namespace neos
                                 fixup(aLabel);
                             }
                             within_boundary(start);
+                        }
+                        // (a patch point (see optimizer::MemargWatched): 5 bytes of nop, which a jump (jmp rel32) replaces once its word changes;
+                        // never lengthened)
+                        void patch_point()
+                        {
+                            static constexpr std::uint8_t Nop5[5] = { 0x0Fu, 0x1Fu, 0x44u, 0x00u, 0x00u };
+                            for (auto b : Nop5)
+                                emit8(b);
                         }
                         // (a label that is likely to be bound soon after the jumps to it: see label::near)
                         void near(std::size_t aLabel) { iLabels[aLabel].near = true; }
@@ -5808,6 +5831,8 @@ namespace neos
                     // instruction (base + index + offset); no check of an access that cannot be out of bounds). Its frames, calls, traps
                     // and results are as the baseline's (see code_generator)
 
+                    bool read_memory(void const* aAddress, void* aBuffer, std::size_t aCount);
+
                     class optimizing_generator
                     {
                     private:
@@ -5863,6 +5888,7 @@ namespace neos
                             choose_memory_base();
                             check_supported();
                             defer_conditions();
+                            find_watched_guards();
                             number();
                             liveness();
                             allocate();
@@ -5894,9 +5920,21 @@ namespace neos
                             for (auto const& site : iCallSites)
                                 aCallSites.emplace_back(a.label_offset(site.first), site.second);
                             std::sort(aCallSites.begin(), aCallSites.end());
+                            for (auto const& g : iWatchedGuards)
+                                if (g.patch != NoLabel)
+                                    iWatched.push_back(compiled_module::tier_job::watched_guard{ a.label_offset(g.patch), a.label_offset(g.target), g.address });
                             iCode = std::move(a.code);
                         }
                         bytes& code() { return iCode; }
+                        // (its watched tests' patch points (see find_watched_guards), and the words they assumed (memory, address, value))
+                        std::vector<compiled_module::tier_job::watched_guard> const& watched() const { return iWatched; }
+                        template <typename Visit>
+                        void watched_words(Visit aVisit) const
+                        {
+                            for (auto const& g : iWatchedGuards)
+                                if (g.patch != NoLabel)
+                                    aVisit(g.memory, g.offset, g.expected);
+                        }
                     private:
                         // --- preparation
                         void split_critical_edges()
@@ -7703,6 +7741,8 @@ namespace neos
                                 return;     // (constants are where they are used)
                             if (iDeferred[v])
                                 return;     // (see defer_and_branch)
+                            if (v < iWatchedPart.size() && iWatchedPart[v])
+                                return;     // (a watched test's load or comparison: its branch's patch point (see find_watched_guards))
                             switch (op)
                             {
                             case ssa::Param:
@@ -7808,6 +7848,22 @@ namespace neos
                             auto const& successors = f.blocks[iCurrentBlock].successors;
                             auto const whenTrue = forwarded(successors[0]);
                             auto const whenFalse = forwarded(successors[1]);
+                            if (auto const w = iWatchedOf.find(i.operands[0]); w != iWatchedOf.end())
+                            {
+                                // (a watched test (see find_watched_guards): a patch point; its word's change makes it a jump to the path
+                                // of the word's being other than the value (ne: the true edge))
+                                auto& g = iWatchedGuards[w->second];
+                                bool const ne = f.values[i.operands[0]].op == 0x52u;
+                                auto const other = ne ? whenTrue : whenFalse;
+                                auto const same = ne ? whenFalse : whenTrue;
+                                g.patch = a.new_label();
+                                a.bind(g.patch);
+                                a.patch_point();
+                                g.target = iBlockLabels[other];
+                                if (same != iNext)
+                                    a.jmp(iBlockLabels[same]);
+                                return;
+                            }
                             if (iDeferred[i.operands[0]])
                             {
                                 // (a condition of comparisons: their branches (see defer_conditions))
@@ -8333,6 +8389,76 @@ namespace neos
                             return width;
                         }
                         value iComparedLoad = ssa::None;    ///< (see compared_load: the load that the next comparison reads)
+                        // (watched tests (see optimizer::MemargWatched): a block's branch on a comparison (eq or ne, its only use) of a load 
+                        // (its only use) of a word of a fixed external memory at a constant address with a constant that the word has now:
+                        // no code for the load and comparison; the branch is a patch point (see branch). The code is installed only if the
+                        // word has that value then (see tier_job::reads); its runtime reports the word's changes (see watched_changed))
+                        static constexpr std::size_t NoLabel = ~std::size_t{};
+                        struct watched_test
+                        {
+                            std::uint32_t memory = 0u;
+                            std::uint64_t offset = 0u;      ///< (the word's, in its memory)
+                            std::uint64_t expected = 0u;
+                            std::uintptr_t address = 0u;    ///< (the word's)
+                            std::size_t patch = NoLabel;
+                            std::size_t target = NoLabel;
+                        };
+                        std::vector<watched_test> iWatchedGuards;
+                        std::unordered_map<value, std::size_t> iWatchedOf;     ///< (by comparison)
+                        std::vector<bool> iWatchedPart;
+                        std::vector<compiled_module::tier_job::watched_guard> iWatched;
+                        void find_watched_guards()
+                        {
+                            // (NEOS_JIT_WATCHED=0: none (each test is made))
+                            static bool const enabled = []() { auto const* e = std::getenv("NEOS_JIT_WATCHED"); return e == nullptr || *e != '0'; }();
+                            if (!enabled)
+                                return;
+                            for (std::uint32_t b = 0u; b < f.blocks.size(); ++b)
+                            {
+                                auto const& block = f.blocks[b];
+                                if (!block.reachable || block.successors.size() != 2u || block.code.empty())
+                                    continue;
+                                std::size_t last = block.code.size();
+                                while (last > 0u && f.values[block.code[last - 1u]].dead)
+                                    --last;
+                                if (last == 0u)
+                                    continue;
+                                auto const& t = f.values[block.code[last - 1u]];
+                                if (t.op != ssa::Branch || t.operands.size() != 1u)
+                                    continue;
+                                auto const c = t.operands[0];
+                                auto const& ci = f.values[c];
+                                if (iDeferred[c] || ci.dead || (ci.op != 0x51u && ci.op != 0x52u) || ci.flags != 0u || ci.operands.size() != 2u ||
+                                    f.uses[c] != 1u || ci.block != b)
+                                    continue;
+                                auto const n = constant(ci.operands[0]) ? 0u : 1u;
+                                if (!constant(ci.operands[n]) || constant(ci.operands[1u - n]))
+                                    continue;
+                                auto const l = ci.operands[1u - n];
+                                auto const& li = f.values[l];
+                                if (li.dead || li.op != 0x29u || (li.imm0 & optimizer::MemargWatched) == 0u || f.uses[l] != 1u || li.block != b ||
+                                    li.operands.size() != 1u || !constant(li.operands[0]))
+                                    continue;
+                                auto const memory = static_cast<std::uint32_t>(li.imm0 >> 32u);
+                                if (memory == 0u || memory > NEOS_RT_EXTERNAL_MEMORIES || !external_memory(memory).fixed)
+                                    continue;
+                                auto const& x = external_memory(memory);
+                                auto const offset = bits(li.operands[0]) + li.imm1;
+                                if (offset > x.size || x.size - offset < 8u || (offset & 7u) != 0u)
+                                    continue;
+                                auto const* const word = x.base + offset;
+                                auto const expected = bits(ci.operands[n]);
+                                std::uint64_t now = 0u;
+                                if (!read_memory(word, &now, 8u) || now != expected)
+                                    continue;
+                                if (iWatchedPart.empty())
+                                    iWatchedPart.assign(f.values.size(), false);
+                                iWatchedPart[l] = true;
+                                iWatchedPart[c] = true;
+                                iWatchedOf.emplace(c, iWatchedGuards.size());
+                                iWatchedGuards.push_back(watched_test{ memory, offset, expected, reinterpret_cast<std::uintptr_t>(word) });
+                            }
+                        }
                         void memory(value v)
                         {
                             auto const& i = f.values[v];
@@ -9535,6 +9661,11 @@ namespace neos
                             optimizing_generator generator{ d, *aJob.module, aJob.version.get(), function };
                             generator.generate(aJob.callSites);
                             aJob.code = std::move(generator.code());
+                            aJob.watched = generator.watched();
+                            generator.watched_words([&](std::uint32_t aMemory, std::uint64_t aAddress, std::uint64_t aValue)
+                            {
+                                aJob.reads.push_back({ aMemory, 8u, aAddress, aValue });
+                            });
                             auto const generated_at = std::chrono::steady_clock::now();
                             auto const us = [](auto aFrom, auto aTo) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(aTo - aFrom).count()); };
                             aJob.phases[1] = us(from, built_at);
@@ -9590,6 +9721,8 @@ namespace neos
                         }
                         return true;
                     }
+
+                    void watch_guards(compiled_module const& aModule, void* aCode, std::vector<compiled_module::tier_job::watched_guard> const& aGuards);
 
                     // (an optimization's last part (here): its code installed (the function's calls go there))
                     void const* install_optimization(compiled_module& aModule, compiled_module::tier_job& aJob)
@@ -9658,6 +9791,8 @@ namespace neos
                             m.tierState[f] = 2u;
                             return nullptr;
                         }
+                        if (optimizing)
+                            watch_guards(m, chunk.code, aJob.watched);
                         auto* const optimized = static_cast<std::uint8_t*>(chunk.code) + entry;
                         m.chunks.push_back(std::move(chunk));
                         // (calls of it go there: its indirect table entry and its entry (a jump: jmp [rip]; its address))
@@ -9943,6 +10078,7 @@ namespace neos
                         chunk.code = allocate_executable(job->code, chunk.size, job->version.get());
                         if (chunk.code == nullptr)
                             return nullptr;
+                        watch_guards(m, chunk.code, job->watched);
                         state.entry = chunk.code;
                         m.chunks.push_back(std::move(chunk));
                         job->version->osrLoop = aLoop;
@@ -10223,10 +10359,80 @@ namespace neos
                     tCoroutineStack = aLow;
                 }
 
+                namespace
+                {
+                    // (the patch points of optimized code's watched tests (see optimizer::MemargWatched), by their words' addresses: each
+                    // becomes a jump to its test's other path once its word changes (see watched_changed))
+                    struct watched_site
+                    {
+                        std::uint8_t* at = nullptr;
+                        std::uint8_t const* target = nullptr;
+                        compiled_module const* module = nullptr;
+                    };
+                    std::mutex sWatchedMutex;
+                    std::unordered_multimap<std::uintptr_t, watched_site> sWatched;
+                    std::atomic<bool> sAnyWatched = false;      ///< (sWatched is not empty (a word's change is reported often: see watched_changed))
+
+                    void patch_watched(watched_site const& aSite)
+                    {
+                        std::uint8_t jump[5] = { 0xE9u };
+                        auto const rel = static_cast<std::int32_t>(aSite.target - (aSite.at + 5));
+                        std::memcpy(jump + 1, &rel, sizeof(rel));
+                        patch_code(aSite.at, jump, sizeof(jump));
+                    }
+
+                    // (an installed optimization's watched tests (its code at aCode): registered; one whose word has changed already
+                    // jumps at once)
+                    void watch_guards(compiled_module const& aModule, void* aCode, std::vector<compiled_module::tier_job::watched_guard> const& aGuards)
+                    {
+                        if (aGuards.empty())
+                            return;
+                        auto* const code = static_cast<std::uint8_t*>(aCode);
+                        {
+                            std::lock_guard<std::mutex> lock{ sWatchedMutex };
+                            for (auto const& g : aGuards)
+                                sWatched.emplace(g.address, watched_site{ code + g.offset, code + g.target, &aModule });
+                            sAnyWatched.store(true, std::memory_order_relaxed);
+                        }
+                    }
+
+                    void unwatch_module(compiled_module const& aModule)
+                    {
+                        std::lock_guard<std::mutex> lock{ sWatchedMutex };
+                        for (auto i = sWatched.begin(); i != sWatched.end();)
+                            if (i->second.module == &aModule)
+                                i = sWatched.erase(i);
+                            else
+                                ++i;
+                        sAnyWatched.store(!sWatched.empty(), std::memory_order_relaxed);
+                    }
+                }
+
+                void watched_changed(void const* aAddress)
+                {
+                    // (the words' changes are on the program's thread, as are installations (watch_guards): sAnyWatched is current)
+                    if (!sAnyWatched.load(std::memory_order_relaxed))
+                        return;
+                    std::vector<watched_site> sites;
+                    {
+                        std::lock_guard<std::mutex> lock{ sWatchedMutex };
+                        auto const [first, last] = sWatched.equal_range(reinterpret_cast<std::uintptr_t>(aAddress));
+                        if (first == last)
+                            return;
+                        for (auto i = first; i != last; ++i)
+                            sites.push_back(i->second);
+                        sWatched.erase(first, last);
+                        sAnyWatched.store(!sWatched.empty(), std::memory_order_relaxed);
+                    }
+                    for (auto const& site : sites)
+                        patch_watched(site);
+                }
+
                 compiled_module::~compiled_module()
                 {
                     if (tiering && background)
                         tier_worker::instance().closing(*this);
+                    unwatch_module(*this);
                     if (blockEnds != nullptr)
                         for (std::size_t f = 0u; f < description.functions.size(); ++f)
                             delete blockEnds[f].load();
@@ -10531,6 +10737,10 @@ namespace neos
 #else // not x86-64
 
                 void set_coroutine_stack(std::uint64_t)
+                {
+                }
+
+                void watched_changed(void const*)
                 {
                 }
 

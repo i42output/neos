@@ -2863,7 +2863,9 @@ namespace neos
                                         // (what its location held (of this epoch: an access of it whose value is known), so that accesses at other
                                         // bases that held other values there are at other addresses (and, aligned, not overlapped))
                                         std::optional<std::uint64_t> held;
-                                        bool const alignedBase = c != 0u && width != 0u && aligned(st.operands[0], 8u, 4) && st.imm1 % 8u == 0u;
+                                        // (bases that are multiples of 8, accessed at the same offset with the same width (at most 8): the same
+                                        // address, or addresses at least 8 apart, whatever the offset (e.g. an object's 32 bit word at 4))
+                                        bool const alignedBase = c != 0u && width != 0u && width <= 8u && aligned(st.operands[0], 8u, 4);
                                         if (alignedBase)
                                         {
                                             std::size_t scanned = 0u;
@@ -5083,6 +5085,242 @@ namespace neos
                             return changed;
                         }
 
+                        // (guards that leave (a branch to a deopt) on bounds of the same value (an unsigned comparison of it with constants),
+                        // one after another on a path (each block's only predecessor the one before it), the last's bound the strongest
+                        // (e.g. an object's capacity checked before each of a constructor's adds): the first checks the strongest, the others
+                        // are then decided (the code between them is not run before the first leaves: its deopt is the earlier one's, which
+                        // is valid there); the stores they kept apart (e.g. the shapes between the adds) are then dead)
+                        bool widen_guards(function& aFunction)
+                        {
+                            auto& blocks = aFunction.blocks;
+                            auto& values = aFunction.values;
+                            // (a block that only leaves (a deopt), or jumps to one that does)
+                            auto const leaves_now = [&](std::uint32_t aBlock) -> bool
+                            {
+                                for (int hop = 0; hop < 4; ++hop)
+                                {
+                                    auto const& b = blocks[aBlock];
+                                    if (b.code.empty())
+                                        return false;
+                                    auto const& t = values[b.code.back()];
+                                    if (t.dead)
+                                        return false;
+                                    if (b.successors.empty())
+                                        return t.op == Deopt;
+                                    if (t.op != Jump || b.successors.size() != 1u)
+                                        return false;
+                                    for (auto v : b.code)
+                                        if (v != b.code.back() && !values[v].dead && values[v].op != Phi && !values[v].constant())
+                                            return false;
+                                    aBlock = b.successors[0];
+                                }
+                                return false;
+                            };
+                            // (each block's: found once (0: not yet, 1: no, 2: yes))
+                            std::vector<std::uint8_t> leaving(blocks.size(), 0u);
+                            auto const leaves = [&](std::uint32_t aBlock) -> bool
+                            {
+                                if (leaving[aBlock] == 0u)
+                                    leaving[aBlock] = leaves_now(aBlock) ? 2u : 1u;
+                                return leaving[aBlock] == 2u;
+                            };
+                            // (any guard that leaves on a bound at all: else nothing to do)
+                            {
+                                std::size_t guards = 0u;
+                                for (auto const b : aFunction.order)
+                                {
+                                    auto const& x = blocks[b];
+                                    if (x.code.empty() || x.successors.size() != 2u)
+                                        continue;
+                                    auto const& t = values[x.code.back()];
+                                    if (t.dead || t.op != Branch || t.operands.size() != 1u)
+                                        continue;
+                                    auto const op = values[t.operands[0]].op;
+                                    if ((op == 0x49u || op == 0x4Bu || op == 0x4Du || op == 0x4Fu || op == 0x54u || op == 0x56u || op == 0x58u || op == 0x5Au) &&
+                                        (leaves(x.successors[0]) || leaves(x.successors[1])))
+                                        ++guards;
+                                }
+                                if (guards < 2u)
+                                    return false;
+                            }
+                            // (a branch's condition as a bound of a value (an unsigned comparison with a constant): the value, its kind (64
+                            // bits), and its range on the edge that does not leave)
+                            struct bound { value subject = None; bool wide = false; std::uint64_t lo = 0u; std::uint64_t hi = 0u; bool onTrue = false; std::uint32_t next = 0u; };
+                            auto const bound_of = [&](std::uint32_t aBlock, bound& aBound) -> bool
+                            {
+                                auto const& b = blocks[aBlock];
+                                if (b.code.empty() || b.successors.size() != 2u || b.successors[0] == b.successors[1])
+                                    return false;
+                                auto const& t = values[b.code.back()];
+                                if (t.dead || t.op != Branch || t.operands.size() != 1u)
+                                    return false;
+                                bool const trueLeaves = leaves(b.successors[0]);
+                                bool const falseLeaves = leaves(b.successors[1]);
+                                if (trueLeaves == falseLeaves)
+                                    return false;
+                                auto const& c = values[t.operands[0]];
+                                if (c.dead || c.operands.size() != 2u || c.flags != 0u)
+                                    return false;
+                                // (lt_u gt_u le_u ge_u, i32 then i64)
+                                int relation;
+                                bool wide;
+                                switch (c.op)
+                                {
+                                case 0x49u: relation = 0; wide = false; break;
+                                case 0x4Bu: relation = 1; wide = false; break;
+                                case 0x4Du: relation = 2; wide = false; break;
+                                case 0x4Fu: relation = 3; wide = false; break;
+                                case 0x54u: relation = 0; wide = true; break;
+                                case 0x56u: relation = 1; wide = true; break;
+                                case 0x58u: relation = 2; wide = true; break;
+                                case 0x5Au: relation = 3; wide = true; break;
+                                default: return false;
+                                }
+                                std::size_t n;
+                                if (values[c.operands[1]].constant() && !values[c.operands[0]].constant())
+                                    n = 1u;
+                                else if (values[c.operands[0]].constant() && !values[c.operands[1]].constant())
+                                {
+                                    // (the constant first: the relation swapped (lt and gt, le and ge))
+                                    n = 0u;
+                                    static int const sSwapped[] = { 1, 0, 3, 2 };
+                                    relation = sSwapped[relation];
+                                }
+                                else
+                                    return false;
+                                std::uint64_t const max = wide ? ~0ull : 0xFFFFFFFFull;
+                                auto const k = values[c.operands[n]].imm0 & max;
+                                // (the subject's range where the condition is true)
+                                std::uint64_t lo = 0u;
+                                std::uint64_t hi = max;
+                                switch (relation)
+                                {
+                                case 0: if (k == 0u) return false; hi = k - 1u; break;      // (x < k)
+                                case 1: if (k == max) return false; lo = k + 1u; break;     // (x > k)
+                                case 2: hi = k; break;                                      // (x <= k)
+                                default: lo = k; break;                                     // (x >= k)
+                                }
+                                aBound.subject = c.operands[1u - n];
+                                aBound.wide = wide;
+                                aBound.onTrue = falseLeaves;
+                                if (falseLeaves)
+                                {
+                                    aBound.lo = lo;
+                                    aBound.hi = hi;
+                                }
+                                else
+                                {
+                                    // (the false range: the complement, which is one interval only if the true range is at an end)
+                                    if (lo == 0u && hi != max)
+                                    {
+                                        aBound.lo = hi + 1u;
+                                        aBound.hi = max;
+                                    }
+                                    else if (hi == max && lo != 0u)
+                                    {
+                                        aBound.lo = 0u;
+                                        aBound.hi = lo - 1u;
+                                    }
+                                    else
+                                        return false;
+                                }
+                                aBound.next = falseLeaves ? b.successors[0] : b.successors[1];
+                                return true;
+                            };
+                            constexpr std::size_t MaxWalk = 64u;
+                            bool changed = false;
+                            std::vector<std::uint32_t> chain;
+                            std::vector<bool> done(blocks.size(), false);
+                            for (auto const first : aFunction.order)
+                            {
+                                if (done[first])
+                                    continue;
+                                bound b1;
+                                if (!bound_of(first, b1))
+                                    continue;
+                                // (the path from it: blocks whose only predecessor is the one before, through other guards' edges that do
+                                // not leave and jumps)
+                                chain.clear();
+                                bound strongest = b1;
+                                std::uint32_t strongestBlock = first;
+                                auto at = b1.next;
+                                for (std::size_t walked = 0u; walked < MaxWalk; ++walked)
+                                {
+                                    auto const& b = blocks[at];
+                                    if (b.predecessors.size() != 1u || b.loopHeader || b.code.empty())
+                                        break;
+                                    bound x;
+                                    if (bound_of(at, x))
+                                    {
+                                        if (x.subject == b1.subject && x.wide == b1.wide && x.onTrue == b1.onTrue)
+                                        {
+                                            chain.push_back(at);
+                                            if (x.lo >= strongest.lo && x.hi <= strongest.hi && (x.lo != strongest.lo || x.hi != strongest.hi))
+                                            {
+                                                strongest = x;
+                                                strongestBlock = at;
+                                            }
+                                        }
+                                        at = x.next;
+                                        continue;
+                                    }
+                                    auto const& t = values[b.code.back()];
+                                    if (!t.dead && t.op == Jump && b.successors.size() == 1u)
+                                    {
+                                        at = b.successors[0];
+                                        continue;
+                                    }
+                                    // (another guard that leaves (not a bound): its edge that does not)
+                                    if (!t.dead && t.op == Branch && b.successors.size() == 2u && leaves(b.successors[0]) != leaves(b.successors[1]))
+                                    {
+                                        at = leaves(b.successors[0]) ? b.successors[1] : b.successors[0];
+                                        continue;
+                                    }
+                                    break;
+                                }
+                                if (strongestBlock == first)
+                                    continue;
+                                // (the first: the strongest's condition (a copy, in the first block, before its branch); those after it on
+                                // the path whose ranges hold the strongest's: decided (their edges that do not leave))
+                                auto const& sc = values[values[blocks[strongestBlock].code.back()].operands[0]];
+                                instruction copy;
+                                copy.op = sc.op;
+                                copy.type = sc.type;
+                                copy.operands = sc.operands;
+                                copy.block = first;
+                                copy.origin = sc.origin;
+                                values.push_back(copy);
+                                auto const copied = static_cast<value>(values.size() - 1u);
+                                auto& firstCode = blocks[first].code;
+                                firstCode.insert(firstCode.end() - 1, copied);
+                                values[firstCode.back()].operands[0] = copied;
+                                value constants01[2] = { None, None };
+                                for (auto const c : chain)
+                                {
+                                    bound x;
+                                    if (!bound_of(c, x) || x.lo > strongest.lo || x.hi < strongest.hi)
+                                        continue;
+                                    int const bit = x.onTrue ? 1 : 0;
+                                    if (constants01[bit] == None)
+                                    {
+                                        instruction k;
+                                        k.op = 0x41u;
+                                        k.type = I32;
+                                        k.imm0 = static_cast<std::uint64_t>(bit);
+                                        k.block = c;
+                                        values.push_back(k);
+                                        constants01[bit] = static_cast<value>(values.size() - 1u);
+                                    }
+                                    values[blocks[c].code.back()].operands[0] = constants01[bit];
+                                    done[c] = true;
+                                }
+                                changed = true;
+                            }
+                            if (changed)
+                                aFunction.usesCurrent = false;
+                            return changed;
+                        }
+
                         // (what the branches that lead to a block decided about values compared (eq, ne, eqz) with constants: each such value's
                         // possible constants (or the constants that it is not), from every path to the block (a loop's back edge: nothing
                         // known); a branch whose comparison that decides is then a constant's (e.g. a second check of a value that a first
@@ -6560,6 +6798,8 @@ namespace neos
                         number_values(aFunction);
                         aFunction.usesCurrent = false;
                         changes(decide_branches(aFunction));
+                        if (changes(widen_guards(aFunction)))
+                            edges = true;
                         for (int pass = 0; pass < 2; ++pass)
                         {
                             bool const changed = changes(fold_constants(aFunction));

@@ -2615,6 +2615,10 @@ namespace neos::javascript_runtime::regexp
                     start = end + 1u;
                 }
                 result->wordSet = words;
+                result->wordFilter.assign(result->words.size(), 0u);
+                for (std::size_t length = 1u; length < result->words.size(); ++length)
+                    for (auto const& word : result->words[length])
+                        result->wordFilter[length] |= word_bit(word.data(), length);
             }
         }
         literal_prefix(root, result->prefix);
@@ -2668,6 +2672,8 @@ namespace neos::javascript_runtime::regexp
             if (aStart != 0u || aInput.size() < aProgram.shortestWord || aInput.size() > aProgram.longestWord)
                 return match_result::NoMatch;
             auto const& same = aProgram.words[aInput.size()];
+            if (!aInput.empty() && (aProgram.wordFilter[aInput.size()] & word_bit(aInput.data(), aInput.size())) == 0u)
+                return match_result::NoMatch;
             if (std::none_of(same.begin(), same.end(), [&](std::u16string const& aWord) { return aWord[0] == aInput[0] && std::u16string_view{ aWord } == aInput; }))
                 return match_result::NoMatch;
             aCaptures.resize(2u);

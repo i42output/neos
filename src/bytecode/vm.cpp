@@ -1244,6 +1244,9 @@ namespace neos
                                 break;
                             case 10:
                                 {
+                                    // (the bodies' tokens: at most one for each of the section's bytes (room for them all: not grown by
+                                    // doubling, which copies them and holds both copies at once))
+                                    iTokens.reserve(iTokens.size() + size);
                                     auto const count = r.u();
                                     for (std::uint64_t i = 0u; i < count; ++i)
                                     {
@@ -2966,6 +2969,11 @@ namespace neos
                         tRunning.program->fix_global(aGlobal);
                 }
 
+                void host_watched_changed(void const* aAddress)
+                {
+                    jit::watched_changed(aAddress);
+                }
+
                 void host_values(neos_rt_coroutine* aCoroutine, void (*aVisit)(void* aData, unsigned long long const* aValues, size_t aCount), void* aData)
                 {
                     if (aVisit == nullptr)
@@ -3249,7 +3257,7 @@ namespace neos
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link };
+                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link, host_watched_changed };
             }
 
             void const* runtime::host()

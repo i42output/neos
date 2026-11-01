@@ -326,6 +326,8 @@ namespace neos::language
             }
             if (ok)
                 emit_module(aProgram);
+            // (the parsed sources' ASTs were kept for the passes (each walks them again): not needed once the program is compiled)
+            iParsed.clear();
         }
         catch(...)
         {

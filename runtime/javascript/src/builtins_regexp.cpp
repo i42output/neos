@@ -1262,7 +1262,7 @@ namespace neos::javascript_runtime
                             auto const& same = program.words[length];
                             if (length == 0u)
                                 found = !same.empty();
-                            else
+                            else if ((program.wordFilter[length] & regexp::word_bit(text.data(), length)) != 0u)
                             {
                                 auto const* const t = text.data();
                                 auto const first = t[0];

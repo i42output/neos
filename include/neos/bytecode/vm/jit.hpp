@@ -202,6 +202,9 @@ namespace neos
                 // (the lowest address of the stack of the coroutine that the calling thread is running (0: none, the thread's own 
                 // stack): generated code's stack limit)
                 void set_coroutine_stack(std::uint64_t aLow);
+                // (the word at aAddress has changed: the optimized code's tests of it (its watched loads' comparisons: see 
+                // optimizer::MemargWatched) take their other paths from now on (on the program's thread))
+                void watched_changed(void const* aAddress);
             }
         }
     }

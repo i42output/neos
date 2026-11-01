@@ -73,6 +73,10 @@
 
 namespace neos::javascript_runtime
 {
+    // (a validity word has changed (see property_table::changed): reported to the host (optimized code's watched loads of it: see
+    // neos_rt_host::watched_changed))
+    void validity_changed(std::uint64_t const* aWord);
+
     // --- values
 
     using value = std::uint64_t;
@@ -1130,16 +1134,22 @@ namespace neos::javascript_runtime
         value value_at(std::uint32_t aPosition) const { return values()[aPosition]; }    ///< (a shape's data property's value (by its position))
         void set_value_at(std::uint32_t aPosition, value aValue) { changed(); values()[aPosition] = aValue; }   ///< (... set)
         // (a watched object's table (its shape has a validity word: see watch): each change of its properties (its shape, values or 
-        // their storage) changes the word)
+        // their storage) changes the word (reported: see validity_changed))
         void changed()
         {
             if (iShape != nullptr)
             {
                 if (iShape->validity != nullptr)
+                {
                     ++*iShape->validity;
+                    validity_changed(iShape->validity);
+                }
             }
             else if (auto* const d = dictionary_of(); d != nullptr && d->validity != nullptr)
+            {
                 ++*d->validity;
+                validity_changed(d->validity);
+            }
         }
         std::uint64_t* watch_dictionary();      ///< (a dictionary's validity word (made if it has none): see watch)
         void reshape(shape* aShape) { changed(); iShape = aShape; }    ///< (its shape: one of the same keys (and positions))

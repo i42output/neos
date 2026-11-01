@@ -1042,19 +1042,20 @@ namespace neos::compilers::javascript
 
     void function_generator::values_word(std::uint32_t aSlot, std::uint32_t aPattern)
     {
-        // (a new object's values' word: its values' storage in its cell (after it), and their capacity (the template's))
+        // (a new object's values' word: its values' storage in its cell (after it), and their capacity (the template's: a word of
+        // its own, so that code that knows the template knows the new object's capacity (its adds' checks of it are then decided)))
+        static_assert(layout::ObjectValueCapacity == layout::ObjectValues + 4u);
         get(aSlot);
         get(aSlot);
         i64(static_cast<std::int64_t>(layout::ObjectSize));
         op(opcode::I64Add);
         i64(static_cast<std::int64_t>(layout::ValueUnitShift));
         op(opcode::I64ShrU);
+        mem_store(opcode::I64StoreMem32, layout::ObjectValues, alias::Values);
+        get(aSlot);
         get(aPattern);
-        site_load(opcode::I64LoadMem, layout::ObjectValues);
-        i64(static_cast<std::int64_t>(0xFFFFFFFF00000000ull));
-        op(opcode::I64And);
-        op(opcode::I64Ior);
-        mem_store(opcode::I64StoreMem, layout::ObjectValues, alias::Values);
+        site_load(opcode::I64LoadMem32U, layout::ObjectValueCapacity);
+        mem_store(opcode::I64StoreMem32, layout::ObjectValueCapacity, alias::Values);
     }
 
     void function_generator::site_load(opcode aOpcode, std::uint32_t aOffset)
@@ -1479,7 +1480,13 @@ namespace neos::compilers::javascript
                             iControls.push_back(control{ control_kind::Block });
                             {
                                 get(holderShape);
-                                mem_load(opcode::I64LoadMem, 0u, alias::Validity);
+                                // (a watched load (memarg flag 0x400): the runtime reports each change of the word (see the runtime's
+                                // property_table::changed), so an optimizing tier's test of it (with the value it has then) is not made:
+                                // the change makes the test take its other path)
+                                op(opcode::I64LoadMem);
+                                u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+                                u32(layout::Memory);
+                                u32(0u);
                                 get(entry);
                                 site_load(opcode::I64LoadMem, layout::SiteValidityValue);
                                 op(opcode::I64Ne);
@@ -1527,7 +1534,13 @@ namespace neos::compilers::javascript
                             iControls.push_back(control{ control_kind::Block });
                             {
                                 get(holderShape);
-                                mem_load(opcode::I64LoadMem, 0u, alias::Validity);
+                                // (a watched load (memarg flag 0x400): the runtime reports each change of the word (see the runtime's
+                                // property_table::changed), so an optimizing tier's test of it (with the value it has then) is not made:
+                                // the change makes the test take its other path)
+                                op(opcode::I64LoadMem);
+                                u32(static_cast<std::uint32_t>(memory_flags(opcode::I64LoadMem)) | 0x400u | alias_flags(alias::Validity));
+                                u32(layout::Memory);
+                                u32(0u);
                                 get(entry);
                                 site_load(opcode::I64LoadMem, layout::SiteValidityValue);
                                 op(opcode::I64Ne);
@@ -1995,7 +2008,6 @@ namespace neos::compilers::javascript
         auto const state = temporary();
         auto const list = temporary();
         auto const slot = temporary();
-        auto const bytes = temporary();
         auto const bumpNext = temporary();
         auto const pattern = temporary();
         begin(control_kind::Block, I64);
@@ -2046,9 +2058,9 @@ namespace neos::compilers::javascript
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SitePrototype);
             op(opcode::I64Ne);
             branch(slow, true);
-            // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not), if the bytes allocated
-            // are within the limit; else the runtime's (allocate_slot: it may collect). The object is made after (one path: what it 
-            // has is known to the code that follows))
+            // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not; the run's bytes were 
+            // counted as allocated when the runtime took it); else the runtime's (allocate_slot: it may collect). The object is made 
+            // after (one path: what it has is known to the code that follows))
             begin(control_kind::Block, I64);
             auto const allocated = iControls.size() - 1u;
             begin(control_kind::Block);
@@ -2073,19 +2085,6 @@ namespace neos::compilers::javascript
             volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
             op(opcode::I64GtU);
             branch(refill, true);   // (no run (0): its limit is 0 too)
-            get(state);
-            volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
-            get(entry);
-            site_load(opcode::I64LoadMem32U, e * layout::SiteEntrySize + layout::SiteSlotSize);
-            op(opcode::I64Add);
-            tee(bytes);
-            get(state);
-            volatile_load(opcode::I64LoadMem, layout::AllocLimit, false, alias::Alloc);
-            op(opcode::I64GeU);
-            branch(refill, true);
-            get(state);
-            get(bytes);
-            mem_store(opcode::I64StoreMem, layout::AllocBytes, alias::Alloc);
             get(list);
             get(bumpNext);
             mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
@@ -2128,7 +2127,6 @@ namespace neos::compilers::javascript
         end_control();
         release(pattern);
         release(bumpNext);
-        release(bytes);
         release(slot);
         release(list);
         release(state);
@@ -2147,7 +2145,6 @@ namespace neos::compilers::javascript
         auto const state = temporary();
         auto const list = temporary();
         auto const slot = temporary();
-        auto const bytes = temporary();
         auto const bumpNext = temporary();
         auto const pattern = temporary();
         begin(control_kind::Block, I64);
@@ -2170,8 +2167,8 @@ namespace neos::compilers::javascript
         op(opcode::I64Shl);
         op(opcode::I64Add);
         tee(list);
-        // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the bytes allocated (the
-        // runtime's if they reach the limit))
+        // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the run's bytes were counted
+        // as allocated when the runtime took it)
         volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
         tee(slot);
         get(entry);
@@ -2182,19 +2179,6 @@ namespace neos::compilers::javascript
         volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
         op(opcode::I64GtU);
         branch(slow, true);     // (no run (0): its limit is 0 too)
-        get(state);
-        volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
-        get(entry);
-        site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
-        op(opcode::I64Add);
-        tee(bytes);
-        get(state);
-        volatile_load(opcode::I64LoadMem, layout::AllocLimit, false, alias::Alloc);
-        op(opcode::I64GeU);
-        branch(slow, true);
-        get(state);
-        get(bytes);
-        mem_store(opcode::I64StoreMem, layout::AllocBytes, alias::Alloc);
         get(list);
         get(bumpNext);
         mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
@@ -2243,7 +2227,6 @@ namespace neos::compilers::javascript
         end_control();
         release(pattern);
         release(bumpNext);
-        release(bytes);
         release(slot);
         release(list);
         release(state);
@@ -2260,7 +2243,6 @@ namespace neos::compilers::javascript
         auto const state = temporary();
         auto const list = temporary();
         auto const slot = temporary();
-        auto const bytes = temporary();
         auto const bumpNext = temporary();
         auto const pattern = temporary();
         begin(control_kind::Block, I64);
@@ -2283,8 +2265,8 @@ namespace neos::compilers::javascript
         op(opcode::I64Shl);
         op(opcode::I64Add);
         tee(list);
-        // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the bytes allocated (the
-        // runtime's if they reach the limit))
+        // (the next slot of its size class's run of free slots (if it is within it: none (0) is not); the run's bytes were counted
+        // as allocated when the runtime took it)
         volatile_load(opcode::I64LoadMem, layout::AllocBump, true, alias::Alloc);
         tee(slot);
         get(entry);
@@ -2295,19 +2277,6 @@ namespace neos::compilers::javascript
         volatile_load(opcode::I64LoadMem, layout::AllocBumpLimit, false, alias::Alloc);
         op(opcode::I64GtU);
         branch(slow, true);     // (no run (0): its limit is 0 too)
-        get(state);
-        volatile_load(opcode::I64LoadMem, layout::AllocBytes, false, alias::Alloc);
-        get(entry);
-        site_load(opcode::I64LoadMem32U, layout::SiteSlotSize);
-        op(opcode::I64Add);
-        tee(bytes);
-        get(state);
-        volatile_load(opcode::I64LoadMem, layout::AllocLimit, false, alias::Alloc);
-        op(opcode::I64GeU);
-        branch(slow, true);
-        get(state);
-        get(bytes);
-        mem_store(opcode::I64StoreMem, layout::AllocBytes, alias::Alloc);
         get(list);
         get(bumpNext);
         mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
@@ -2333,7 +2302,6 @@ namespace neos::compilers::javascript
         end_control();
         release(pattern);
         release(bumpNext);
-        release(bytes);
         release(slot);
         release(list);
         release(state);

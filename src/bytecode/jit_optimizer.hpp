@@ -84,6 +84,10 @@ namespace neos
                     // (a memarg flag: a load (i64) of an offset within the memory (an address in it, below its size by at least 
                     // MemargOffsetMargin): accesses at it plus less than the margin need not be checked)
                     constexpr std::uint64_t MemargOffset = 0x200u;
+                    // (a memarg flag: a load (i64) of a word whose changes the program's runtime reports (neos_rt_host::watched_changed),
+                    // at a constant address of a fixed external memory: optimized code's test of it (its equality with a constant that it
+                    // has when the code is made) is a patch point (no code: once the word changes, a jump to the test's other path))
+                    constexpr std::uint64_t MemargWatched = 0x400u;
                     constexpr std::uint64_t MemargOffsetMargin = 0x10000u;
                     // (a memarg's alias class (its flags' bits 12 to 15): accesses of different classes (other than 0) are of different 
                     // words (a store of one class does not change what a load of another reads); class 0: any word (the default))

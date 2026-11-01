@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 16
+#define NEOS_RUNTIME_PLUGIN_VERSION 17
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -345,6 +345,11 @@ typedef struct neos_rt_host
        order they were loaded; then for a function that the code of a language that has no runtime plugin defines (e.g. neoscript's: see 
        bytecode::LinksSection)): nonzero if one has, else 0 */
     int (*link)(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue);
+    /* (version 17) the 64 bit word at aAddress (of an external memory) has changed: the code optimized on its value (its watched loads:
+       loads of the word that the code compares with a constant, flagged as watched (see bytecode::optimizer::MemargWatched)) no longer 
+       assumes it (it takes the comparison's other path from now on). A plugin whose code flags a load as watched calls this after each 
+       change of the word's value (on the thread that runs the program, as the program would change it) */
+    void (*watched_changed)(void const* aAddress);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);
