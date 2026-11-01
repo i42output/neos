@@ -80,6 +80,8 @@ namespace neos
                 // (linking: the value of the running program's global named aName that a loaded runtime plugin other than aLanguage's 
                 // has (see neos_rt_host::link): aType and aValue are a neos_rt_type* and a neos_rt_value*; false if none has)
                 bool link(char const* aName, char const* aLanguage, void* aType, void* aValue);
+                // (the value of the running program's global named aName that aLanguage's runtime plugin has (if it is loaded))
+                bool link_of(char const* aName, std::string const& aLanguage, void* aType, void* aValue);
                 // the function an import named "x::f" refers to (the runtime plugin for "x" is loaded on first use);
                 // throws std::runtime_error if there is none or if its type differs from the import's (WebAssembly
                 // value types)

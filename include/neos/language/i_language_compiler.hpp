@@ -153,6 +153,9 @@ namespace neos::language
                                                                 ///< (e.g. before the language's own pass over it): 0, the compiler's (counted))
         virtual bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) = 0; ///< (the name of a function's frame (empty: it has none); 
                                                                 ///< false: the compiler's (the function's name))
+        virtual bool linked_function(neolib::i_string_view const& aName) const = 0; ///< (a function that the language's code defines (its 
+                                                                ///< qualified name) that the code of a linked program's other translation units calls 
+                                                                ///< by its name (see bytecode::LinksSection))
         // interface
     public:
         static const neolib::uuid& iid() { static neolib::uuid sId = neolib::make_uuid("6A3B5D0E-2C47-4C1F-9E58-7B1D2A90C3F4"); return sId; }

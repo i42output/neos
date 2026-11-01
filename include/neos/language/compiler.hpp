@@ -282,6 +282,7 @@ namespace neos::language
             std::optional<std::string> frameName;
             std::string frameSource;
             std::uint32_t firstLine = 0u;
+            i_language_compiler* language = nullptr;    ///< (that of the code that defines it)
         };
         struct wasm_module
         {
@@ -475,7 +476,9 @@ namespace neos::language
         i_language_compiler* language(std::string const& aLanguage) const;
         fragment pop_value();
         std::vector<fragment> pop_fragments(neolib::i_string_view const& aSource, fragment_kind aKind);
+        bool compile_module(program& aProgram);                 ///< (its translation units, but those of iLinkedUnits)
         void emit_module(program& aProgram);
+        std::string link_signature(wasm_function const& aFunction) const;
         void check_rebinding(i_symbol_table_entry const& aVariable, neolib::i_string_view const& aName, type aValueType) const;
         std::optional<std::size_t> line_indent(neolib::i_string_view const& aSource) const;
         void close_indented(std::size_t aIndent);
@@ -510,6 +513,11 @@ namespace neos::language
         bool iTrapOnOverflow = false;
         bool iQuiet = false;
         bool iLinked = false;                                   ///< (see linked)
+        program const* iLinkedProgram = nullptr;                ///< (the linked program being compiled)
+        std::map<translation_unit const*, std::uint32_t> iLinkedUnits; ///< (its translation units after the first: the 
+                                                                ///< indices of their modules (see bytecode::LinkedSection))
+        std::vector<std::pair<std::string, std::vector<std::byte>>> iLinkedModules; ///< (their languages and modules)
+        std::vector<std::size_t> iUnitFunctionEnds;             ///< (the module's functions of each translation unit: those before its end)
         std::set<std::string> iSourceFiles;
         std::optional<bool> iBigintPromotion;
         compilation_state_stack_t iCompilationStateStack;

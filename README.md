@@ -50,14 +50,17 @@ neos -s ~/code/neos/languages/python.neos hello.py
 The build's `bin` folder has no schemas, so to run neos from there without installing it, give `-s` a path, e.g. from the `languages` folder: `neos -s python.neos examples/Python/hello.py`.
 
 ## Linking
-A program can be made of translation units of different languages: give neos the files that make it up. The files that follow the program that are of other languages (by their file types: each of a different language) are linked with it:
+A program can be made of more than one translation unit, of any languages: give neos the files that make it up, separated by commas (the arguments that follow are the program's, as a program's of one file are; its first file names it, e.g. Python's `sys.argv[0]`):
 
 ```
-neos lib.py main.js
-neos fib.lua format.py main.js
+neos lib.py,main.js
+neos fib.lua,format.py,main.js data.txt
+neos lib.py,main.py --verbose
 ```
 
-Their top levels run in turn, in the order they are given (a library before the code that uses it). The code of each language uses the globals of the others (e.g. the functions that their top levels define) by their names: a name that a unit uses but does not bind (where it would otherwise be an error, e.g. JavaScript's `ReferenceError` or Python's `NameError`, or a nil global in Lua) is another unit's, if one has a global of that name. Functions can be called across languages, and passed to each other's functions (callbacks):
+(In PowerShell, quote them: `neos "lib.py,main.js"`.)
+
+Their top levels run in turn, in the order they are given (a library before the code that uses it). The code of each language uses the globals of the others (e.g. the functions that their top levels define) by their names: a name that a unit uses but does not bind (where it would otherwise be an error, e.g. JavaScript's `ReferenceError` or Python's `NameError`, or a nil global in Lua) is another unit's, if one has a global of that name. Each unit is a program of its own, whose globals are its own (e.g. a Python unit's module `__main__`), whatever the languages of the others (JavaScript's units share their global object, and Lua's their global table, as their scripts do). Functions can be called across translation units, and passed to each other's functions (callbacks):
 
 | Value | Crosses as |
 |---|---|
@@ -66,7 +69,18 @@ Their top levels run in turn, in the order they are given (a library before the 
 | functions | a function of the other language that calls it |
 | other values | an object of the other language that refers to it (given back, it is the value it was) |
 
-An error that a call raises (an exception that the called code does not handle) is raised by the call in the calling language. Examples (and scripts that run them) are in `languages/examples/mix`. To give a program a file of another language as its first argument (rather than link it), put `--` before it: `neos main.py -- data.js`.
+An error that a call raises (an exception that the called code does not handle) is raised by the call in the calling language.
+
+neoscript (a language with no runtime plugin) takes part through its types: the other units call the functions and procedures that a neoscript unit defines at its top level (not a namespace's or a class's) by their names (those whose parameters and results are booleans, integers, floats or strings); a neoscript unit calls the other units' functions (and reads their other values, as functions with no parameters) by importing them in the namespace `link`, with the types that its code gives them:
+
+```
+namespace link
+{
+    import fn shout(s : string) -> string;
+}
+```
+
+Examples (and scripts that run them) are in `languages/examples/link`.
 
 ## Console
 `-c` (`--console`) loads the program into the neos console instead of running it; `neos` with no program starts the console with nothing loaded. In the console, `c` compiles the program, `r` runs it and `h` lists the other commands.
@@ -104,7 +118,7 @@ set NEOS_RUNTIME_PLUGIN_PATH=C:\usr\local\bin\plugins
 | `-c`, `--console` | Start the console (with the program loaded) rather than run the program |
 | `--compile` | Compile the program when the console starts |
 | `--img[=<path>]` | Make an executable image of the program rather than run it |
-| `-l`, `--load <program>` | Program to load (the option name can be omitted); more than one: a linked program, each a translation unit of a different language (see [Linking](#linking)) |
+| `-l`, `--load <program>` | Program to load (the option name can be omitted); a linked program: its translation units, separated by commas (see [Linking](#linking)) |
 | `-t`, `--trace <0-5>` | Compiler trace |
 | `--restricted` | Restricted mode: programs cannot call runtime plugin functions that can change the host environment |
 | `--no-preparse` | No language's own pass over a source before it is parsed |

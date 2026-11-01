@@ -1,0 +1,31 @@
+// Linking example (see neoscript.sh): neoscript's top-level functions, which Python (neoscript.py) and JavaScript (neoscript.js) call; it 
+// calls Python's (neoscript.py's), imported in the namespace link with the types that it gives them
+
+using neo.string;
+using neo.stream;
+
+namespace link
+{
+    import fn shout(s : string) -> string;
+    import fn square(x : i32) -> i32;
+}
+
+fn add(x, y : i32) -> i32
+{
+    return x + y;
+}
+
+fn hypot2(x, y : f64) -> f64
+{
+    return x * x + y * y;
+}
+
+fn label(s : string) -> string
+{
+    return "<" + s + ">";
+}
+
+proc main()
+{
+    neo::print("neoscript.neo: " + link::shout("neoscript") + " square(12) = " + neo::to_string(link::square(12)) + "\n");
+}

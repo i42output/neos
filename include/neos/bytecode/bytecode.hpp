@@ -36,6 +36,7 @@
 #include <neos/neos.hpp>
 #include <cstdint>
 #include <string_view>
+#include <optional>
 #include <neolib/core/variant.hpp>
 #include <neolib/core/vector.hpp>
 #include <neolib/core/optional.hpp>
@@ -86,6 +87,40 @@ namespace neos
         // then, for each function that the module defines (a count, then each, in order): its name (empty: it has no frame), its 
         // source (an index) and its first line
         inline constexpr char FramesSection[] = "neos.frames";
+
+        // linking (a program of more than one translation unit, of any languages: see neos_rt_link_type): the custom section of the modules 
+        // of the translation units after the first (each compiled on its own, a program of its own: its top level runs when its turn comes, 
+        // when the program calls the VM's function neos::link_run(its index)): a count, then for each its language 
+        // and its module; and the custom section of the functions of a module that the code of the program's other translation units calls
+        // by their names (e.g. neoscript's, whose language has no runtime plugin): a count, then for each its name, its language, its index and
+        // its link signature
+        inline constexpr char LinkedSection[] = "neos.linked";
+        inline constexpr char LinksSection[] = "neos.links";
+        // (a module's import of a function that another translation unit's code defines (its global of the name): "link::<name>#<link 
+        // signature>")
+        inline constexpr char LinkNamespace[] = "link";
+        // (a link signature: a code for each parameter, then '>', then the result's code: 'b' bool, 'i' a signed and 'u' an unsigned integer 
+        // of at most 32 bits, 'I' and 'U' of 64 bits, 'f' f32, 'F' f64, 's' string, 'v' (a result) none)
+        inline constexpr std::optional<char> link_code(language::type aType)
+        {
+            switch (aType)
+            {
+            case language::type::Void: return 'v';
+            case language::type::Boolean: return 'b';
+            case language::type::I8:
+            case language::type::I16:
+            case language::type::I32: return 'i';
+            case language::type::U8:
+            case language::type::U16:
+            case language::type::U32: return 'u';
+            case language::type::I64: return 'I';
+            case language::type::U64: return 'U';
+            case language::type::F32: return 'f';
+            case language::type::F64: return 'F';
+            case language::type::String: return 's';
+            default: return std::nullopt;
+            }
+        }
 
         inline string_header string_header_of(std::string_view aText)
         {

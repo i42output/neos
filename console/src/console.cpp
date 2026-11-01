@@ -135,25 +135,8 @@ void main_loop(boost::program_options::variables_map& aOptions)
             if (aOptions.count("t"))
                 process_command(context, interactive, "t " + boost::lexical_cast<std::string>(aOptions["t"].as<uint32_t>()));
             if (aOptions.count("load"))
-            {
-                auto const& programs = aOptions["load"].as<std::vector<std::string>>();
-                if (programs.size() == 1u)
-                    process_command(context, interactive, "l " + programs.front());
-                else
-                {
-                    // (a linked program: its translation units (see neos::context::load_program))
-                    try
-                    {
-                        context.load_program(programs);
-                        for (auto const& p : programs)
-                            std::cout << "Program: " << p << std::endl;
-                    }
-                    catch (std::exception const& e)
-                    {
-                        std::cerr << (std::string_view{ e.what() }.find("error:") == std::string_view::npos ? "Error: " : "") << e.what() << std::endl;
-                    }
-                }
-            }
+                for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
+                    process_command(context, interactive, "l " + p);
             if (aOptions.count("restricted"))
                 process_command(context, interactive, "restricted on");
             if (aOptions.count("c") || aOptions.count("compile"))
@@ -353,8 +336,8 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
         configure(context, aOptions, aArguments);
         if (aOptions.count("schema"))
             context.load_schema(aOptions["schema"].as<std::string>());
-        // (more than one: a linked program, each of its translation units of a different language)
-        context.load_program(aOptions["load"].as<std::vector<std::string>>());
+        for (auto const& p : aOptions["load"].as<std::vector<std::string>>())
+            context.load_program(p);
         try
         {
             context.compile_program();
@@ -394,49 +377,6 @@ int run_program(boost::program_options::variables_map& aOptions, std::vector<std
 
 namespace
 {
-    // (the number of the program's translation units in argv, from aProgram: the program, and the files that follow it that are of other 
-    // languages (by their file types: an installed schema's), each of a different language (they are linked with it: see 
-    // neos::context::load_program); a "--" that precedes such a file ends them (the file is an argument; the "--" is not); *aSeparator: 
-    // the index of that "--" (else argc))
-    int unit_count(int argc, char* argv[], int aProgram, int& aSeparator)
-    {
-        aSeparator = argc;
-        if (aProgram >= argc)
-            return 0;
-        auto const installed = neos::language::schema::installed();
-        auto const schema_of = [&](std::string_view aPath) -> std::optional<std::string>
-        {
-            auto const extension = std::filesystem::path{ aPath }.extension().string();
-            for (auto const& [e, path] : installed)
-                if (e == extension)
-                    return path;
-            return {};
-        };
-        std::vector<std::optional<std::string>> languages{ schema_of(argv[aProgram]) };
-        auto const unit = [&](int aIndex)
-        {
-            std::error_code ec;
-            auto const language = schema_of(argv[aIndex]);
-            return language && std::filesystem::is_regular_file(argv[aIndex], ec) && 
-                std::find(languages.begin(), languages.end(), language) == languages.end() ? language : std::nullopt;
-        };
-        int count = 1;
-        for (int i = aProgram + 1; i < argc; ++i, ++count)
-        {
-            if (std::string_view{ argv[i] } == "--")
-            {
-                if (i + 1 < argc && unit(i + 1))
-                    aSeparator = i;
-                break;
-            }
-            auto const language = unit(i);
-            if (!language)
-                break;
-            languages.push_back(language);
-        }
-        return count;
-    }
-
     // (the index in argv of the program to run: its first argument that is not an option (or an option's value); the arguments
     // that follow it are the program's own (argc: none))
     int program_index(int argc, char* argv[])
@@ -473,15 +413,15 @@ int main(int argc, char* argv[])
     {
         // (the program's arguments: not the console's options)
         int const program = program_index(argc, argv);
-        // (its translation units: a linked program's are more than one)
-        int separator = argc;
-        int const units = unit_count(argc, argv, program, separator);
         std::vector<std::string> programArguments;
         for (int i = program; i < argc; ++i)
-            if (i == program || i >= program + units && i != separator)
-                programArguments.emplace_back(argv[i]);
+            programArguments.emplace_back(argv[i]);
+        // (a linked program (its translation units' paths separated by commas: see neos::context::load_program): its first is its name)
+        if (std::error_code ec; !programArguments.empty() && programArguments.front().find(',') != std::string::npos &&
+            !std::filesystem::is_regular_file(programArguments.front(), ec))
+            programArguments.front() = programArguments.front().substr(0u, programArguments.front().find(','));
         // (a program after "--": it is the console's positional argument)
-        std::vector<char*> consoleArguments{ argv, argv + std::min(argc, program + std::max(units, 1)) };
+        std::vector<char*> consoleArguments{ argv, argv + std::min(argc, program + 1) };
         if (program < argc && std::string_view{ argv[program - 1] } == "--")
             consoleArguments.erase(consoleArguments.begin() + (program - 1));
         argc = static_cast<int>(consoleArguments.size());

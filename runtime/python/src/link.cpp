@@ -235,6 +235,8 @@ namespace neos::python_runtime
             {
                 thread_local std::string tError;
                 thread_local std::deque<std::string> tStrings;
+                // (called on the program that the host runs (the function's: see neos_rt_link_type))
+                struct entered { void* previous = enter_program(); ~entered() { leave_program(previous); } } const entering;
                 *aResultType = NEOS_RT_VOID;
                 *aResult = neos_rt_value{};
                 std::vector<object*> arguments;
@@ -292,8 +294,10 @@ namespace neos::python_runtime
             if (h == nullptr || h->version < 16u || h->link == nullptr)
                 return nullptr;
             // (objects are found once (the name's proxy); other values each time (they can change))
+            // (by the program's module (a linked program's translation units of the language each have their own) and name)
             static std::map<std::string, object*, std::less<>> sImported;
-            if (auto const existing = sImported.find(std::string_view{ aName }); existing != sImported.end())
+            auto const importKey = main_module_key() + "/" + aName;
+            if (auto const existing = sImported.find(importKey); existing != sImported.end())
                 return new_reference(existing->second);
             neos_rt_type type = NEOS_RT_VOID;
             neos_rt_value value{};
@@ -302,13 +306,15 @@ namespace neos::python_runtime
             bool const proxy = type == NEOS_RT_OBJECT && value.object != nullptr && value.object->type != &sLinkType.base;
             auto* const result = from_linked(type, value, true, aName);
             if (proxy)
-                sImported.emplace(aName, new_reference(result));
+                sImported.emplace(importKey, new_reference(result));
             return result;
         }
 
         // (neos_runtime_plugin_link: a name of the program's module __main__ (its namespace's))
         int link_global(char const* aName, neos_rt_type* aType, neos_rt_value* aValue)
         {
+            // (the running program's (the host's: a linked program's translation units of the language are each a program of their own))
+            struct entered { void* previous = enter_program(); ~entered() { leave_program(previous); } } const entering;
             // (the module's names, once its getter is registered (its code has begun to run: see python::register_namespace))
             if (aName == nullptr || std::string_view{ aName }.starts_with("__") || !namespace_registered("__main__"))
                 return 0;

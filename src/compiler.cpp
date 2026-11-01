@@ -173,13 +173,50 @@ namespace neos::language
         iPreparseTime = {};
         iParseTime = {};
         iSourceFiles.clear();
-        // (a linked program: its translation units are of more than one language)
-        iLinked = false;
-        for (auto const& unit : aProgram.translationUnits)
-            if (unit.schema != nullptr && aProgram.translationUnits.front().schema != nullptr &&
-                unit.schema->meta().language != aProgram.translationUnits.front().schema->meta().language)
-                iLinked = true;
+        // (a linked program: it has more than one translation unit)
+        iLinked = aProgram.translationUnits.size() > 1u;
+        iLinkedProgram = iLinked ? &aProgram : nullptr;
+        iLinkedUnits.clear();
+        iLinkedModules.clear();
+        struct linked_end { compiler& c; ~linked_end() { c.iLinkedProgram = nullptr; c.iLinkedUnits.clear(); c.iLinkedModules.clear(); } } const ending{ *this };
+        // its translation units after the first: each compiled on its own (first), a program of its own (see i_code_generator::linked); 
+        // its module is the program's (see bytecode::LinkedSection)
+        if (iLinked)
+        {
+            for (auto& unit : aProgram.translationUnits)
+            {
+                if (unit.schema == nullptr || &unit == &aProgram.translationUnits.front())
+                    continue;
+                auto const& unitLanguage = unit.schema->meta().language;
+                program linkedProgram;
+                linkedProgram.translationUnits.push_back(translation_unit{ unit.schema, {}, ast{ linkedProgram.symbolTable } });
+                auto& fragments = linkedProgram.translationUnits.back().fragments;
+                // (its fragments (moved: their sources stay where they are), given back once it is compiled)
+                fragments.splice(fragments.end(), unit.fragments);
+                struct give_back
+                {
+                    source_fragments_t& from;
+                    source_fragments_t& to;
+                    ~give_back()
+                    {
+                        for (auto f = from.begin(); f != from.end();)
+                            if (f->imported())
+                                f = from.erase(f);
+                            else
+                                to.splice(to.end(), from, f++);
+                    }
+                } const givingBack{ fragments, unit.fragments };
+                if (!compile_module(linkedProgram))
+                    return false;
+                iLinkedUnits[&unit] = static_cast<std::uint32_t>(iLinkedModules.size());
+                iLinkedModules.emplace_back(unitLanguage, linkedProgram.text);
+            }
+        }
+        return compile_module(aProgram);
+    }
 
+    bool compiler::compile_module(program& aProgram)
+    {
         bool ok = true;
 
         auto reset = [&]()
@@ -217,7 +254,7 @@ namespace neos::language
             iForwardDeclarations.clear();
             iDeclarationPass = true;
             for (auto& unit : aProgram.translationUnits)
-                if (ok)
+                if (ok && !iLinkedUnits.contains(&unit))
                     ok = compile(aProgram, unit);
             iDeclarationPass = false;
             if (ok)
@@ -254,9 +291,13 @@ namespace neos::language
                     iInference.pass = pass;
                     try
                     {
+                        iUnitFunctionEnds.clear();
                         for (auto& unit : aProgram.translationUnits)
-                            if (ok)
+                        {
+                            if (ok && !iLinkedUnits.contains(&unit))
                                 ok = compile(aProgram, unit);
+                            iUnitFunctionEnds.push_back(iModule.functions.size());
+                        }
                         // global variables that no function uses can be locals of the entry point
                         std::set<std::string> entryGlobals;
                         for (auto const& global : iInference.globals)
@@ -727,6 +768,7 @@ namespace neos::language
             while (qualifiedName.starts_with("::"))
                 qualifiedName.erase(0, 2);
             index = add_function(qualifiedName, false);
+            iModule.functions[index].language = state().language;
             iModule.functions[index].frameSource = source_name();
             iModule.functions[index].firstLine = aSource.empty() ? 1u : source_line(aSource.to_std_string_view().data());
             state().pendingFunction = index;
@@ -3334,29 +3376,89 @@ namespace neos::language
         state().function = std::nullopt;
     }
 
+    std::string compiler::link_signature(wasm_function const& aFunction) const
+    {
+        // (an import of another translation unit's function (see bytecode::LinkNamespace): its parameters and result are linked values)
+        std::string result;
+        auto const& signature = aFunction.signature;
+        auto const unlinkable = [&]()
+        {
+            throw std::runtime_error("'" + aFunction.name + "': a linked function's parameters and result are booleans, integers, floats or strings");
+        };
+        if (signature.parameters().has_value())
+            for (auto const& parameter : signature.parameters().value())
+            {
+                auto const code = bytecode::link_code(parameter.parameter_type());
+                if (parameter.direction() != parameter_direction::In || !code || *code == 'v')
+                    unlinkable();
+                result += *code;
+            }
+        auto const code = bytecode::link_code(signature.return_type());
+        if (!code)
+            unlinkable();
+        result += '>';
+        result += *code;
+        return result;
+    }
+
     void compiler::emit_module(program& aProgram)
     {
         using bytecode::opcode;
         // (a linked program: the entry points of its translation units (their top levels), called in turn by its entry point (the last's
-        // result is its result))
-        if (iLinked)
+        // result is its result): the first's, then the others' (each compiled on its own: see compile), run by the VM's function 
+        // neos::link_run (its index))
+        if (iLinked && &aProgram == iLinkedProgram)
         {
-            std::vector<std::uint32_t> entries;
-            for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
-                if (iModule.functions[id].entry && !iModule.functions[id].fromImportedFragment && !iModule.functions[id].imported)
-                    entries.push_back(id);
-            if (entries.size() > 1u)
+            struct step
             {
+                std::optional<std::uint32_t> entry;
+                std::uint32_t linked = 0u;
+            };
+            std::vector<step> steps;
+            std::size_t begin = 0u;
+            for (std::size_t u = 0u; u < aProgram.translationUnits.size() && u < iUnitFunctionEnds.size(); ++u)
+            {
+                auto const end = iUnitFunctionEnds[u];
+                if (auto const linked = iLinkedUnits.find(&aProgram.translationUnits[u]); linked != iLinkedUnits.end())
+                    steps.push_back(step{ std::nullopt, linked->second });
+                else
+                {
+                    // (its entry point: a function that is one, else its function main)
+                    auto const unitEntry = [&](bool aNamed)
+                    {
+                        bool found = false;
+                        for (auto id = static_cast<std::uint32_t>(begin); id < end; ++id)
+                            if (auto const& f = iModule.functions[id]; !f.fromImportedFragment && !f.imported && (aNamed ? f.name == "main" : f.entry))
+                            {
+                                steps.push_back(step{ id });
+                                found = true;
+                            }
+                        return found;
+                    };
+                    if (!unitEntry(false))
+                        unitEntry(true);
+                }
+                begin = end;
+            }
+            if (steps.size() > 1u || (!steps.empty() && !steps.back().entry))
+            {
+                auto const linkRun = runtime_function("neos::link_run", { type::I32 }, type::Void);
                 auto const linkedEntry = add_function("__neos_link__", false);
                 auto& function = iModule.functions[linkedEntry];
-                function.signature = iModule.functions[entries.back()].signature;
+                if (steps.back().entry)
+                    function.signature = iModule.functions[*steps.back().entry].signature;
                 function.signature.set_name(neolib::string{ function.name });
-                for (auto const e : entries)
+                for (auto const& s : steps)
                 {
+                    if (!s.entry)
+                    {
+                        put_op(function.body, opcode::I32Const);
+                        put_s64(function.body, static_cast<std::int32_t>(s.linked));
+                    }
                     put_op(function.body, opcode::CallFunction);
-                    function.relocations.emplace_back(static_cast<std::uint32_t>(function.body.size()), e);
+                    function.relocations.emplace_back(static_cast<std::uint32_t>(function.body.size()), s.entry.value_or(linkRun));
                     function.body.resize(function.body.size() + 5u);
-                    if (e != entries.back() && wasm_type(iModule.functions[e].signature.return_type()))
+                    if (s.entry && &s != &steps.back() && wasm_type(iModule.functions[*s.entry].signature.return_type()))
                         put_op(function.body, opcode::Drop);
                 }
                 function.compiled = true;
@@ -3473,6 +3575,8 @@ namespace neos::language
                 auto const& function = iModule.functions[order[i]];
                 if (function.importNamespace == "neos" && function.name.starts_with("__neos_"))
                     put_name(section, "neos::" + function.name.substr(7u, function.name.find('(') - 7u)); // (the VM's own function)
+                else if (function.importNamespace.empty() && function.name.starts_with(std::string{ bytecode::LinkNamespace } + "::"))
+                    put_name(section, function.name + "#" + link_signature(function)); // (another translation unit's function: see bytecode::LinkNamespace)
                 else
                     put_name(section, function.importNamespace.empty() ? function.name : function.importNamespace + "::" + function.name);
                 section.push_back(0x00u);
@@ -3643,6 +3747,76 @@ namespace neos::language
                 put_name(section, f.frameName.value_or(std::string{}));
                 put_u32(section, sourceIndex[f.frameSource]);
                 put_u32(section, f.firstLine);
+            }
+            put_section(module, 0u, section);
+        }
+        if (iLinked)
+        {
+            // the functions that the code of the program's other translation units calls by their names (see bytecode::LinksSection): those 
+            // that their language links whose parameters and result are linked values (an overloaded name is none's)
+            struct link
+            {
+                std::string name;
+                std::string language;
+                std::uint32_t index;
+                std::string signature;
+            };
+            std::vector<link> links;
+            std::map<std::string, std::uint32_t> names;
+            for (std::uint32_t i = importCount; i < order.size(); ++i)
+            {
+                auto const& f = iModule.functions[order[i]];
+                if (f.language == nullptr || f.entry || f.stub || f.fromImportedFragment || f.name.find("::") != std::string::npos || 
+                    !f.language->linked_function(neolib::string_view{ f.name }))
+                    continue;
+                ++names[f.name];
+                std::string signature;
+                bool linkable = true;
+                auto const& fs = f.signature;
+                if (fs.parameters().has_value())
+                    for (auto const& parameter : fs.parameters().value())
+                    {
+                        auto const code = bytecode::link_code(parameter.parameter_type());
+                        if (parameter.direction() != parameter_direction::In || !code || *code == 'v')
+                            linkable = false;
+                        else
+                            signature += *code;
+                    }
+                auto const result = bytecode::link_code(fs.return_type());
+                if (!linkable || !result)
+                    continue;
+                signature += '>';
+                signature += *result;
+                links.push_back(link{ f.name, f.language->language().to_std_string(), i, signature });
+            }
+            std::erase_if(links, [&](link const& l) { return names[l.name] > 1u; });
+            if (!links.empty())
+            {
+                bytes section;
+                put_name(section, bytecode::LinksSection);
+                put_u32(section, links.size());
+                for (auto const& l : links)
+                {
+                    put_name(section, l.name);
+                    put_name(section, l.language);
+                    put_u32(section, l.index);
+                    put_name(section, l.signature);
+                }
+                put_section(module, 0u, section);
+            }
+        }
+        if (iLinked && &aProgram == iLinkedProgram && !iLinkedModules.empty())
+        {
+            // the modules of its translation units after the first (see bytecode::LinkedSection)
+            bytes section;
+            put_name(section, bytecode::LinkedSection);
+            put_u32(section, iLinkedModules.size());
+            for (auto const& linked : iLinkedModules)
+            {
+                put_name(section, linked.first);
+                put_u32(section, linked.second.size());
+                for (auto b : linked.second)
+                    section.push_back(static_cast<std::uint8_t>(b));
             }
             put_section(module, 0u, section);
         }

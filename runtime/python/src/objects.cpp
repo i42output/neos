@@ -6457,6 +6457,13 @@ namespace neos::python_runtime
             return std::string{ aName };
         }
 
+        void adopt_function(object* aFunction, void* aProgram)
+        {
+            if (aFunction != nullptr && aFunction->type == &sScriptFunctionType.base)
+                if (auto& f = *reinterpret_cast<script_function_object*>(aFunction); f.program == nullptr)
+                    f.program = aProgram;
+        }
+
         object* make_script_function(char const* aName, std::int32_t aIndex, char const* aSignature, object* aDefaults)
         {
             std::string module;

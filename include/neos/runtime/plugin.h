@@ -188,17 +188,21 @@ typedef union neos_rt_value
     neos_rt_object* object;
 } neos_rt_value;
 
-/* (version 16) linking: the translation units of a program can be of different languages (e.g. "neos a.js b.py": see 
-   neos::context::load_program), the code of each language run by the language's runtime plugin; the code of one language calls the 
-   functions (and uses the other values) of another's by their names, as linked values: NEOS_RT_VOID (no value: undefined, null, None,
+/* (version 16) linking: a program can be made of more than one translation unit (e.g. "neos a.js b.py c.py": see 
+   neos::context::load_program), of any languages, the code of each language run by the language's runtime plugin; each unit is a program
+   of its own (the host runs those after the first when their turns come: see bytecode::LinkedSection); the code of each unit calls the
+   functions (and uses the other values) of the others by their names, as linked values: NEOS_RT_VOID (no value: undefined, null, None,
    nil, ...), NEOS_RT_BOOL (b), NEOS_RT_I64 (an integer), NEOS_RT_F64 (a float), NEOS_RT_STRING (UTF-8) or NEOS_RT_OBJECT (any other 
    value: a linked object). A language runtime plugin that takes part:
+   - runs more than one program of its language on a thread (each with globals of its own (as the language's code sees them), its 
+     functions called on their own program);
    - defines NEOS_RUNTIME_PLUGIN_LINK { (if the running program's code of the plugin's language has a global named aName (e.g. a function
      that its top level defines): store its value, as a linked value, in *aType and *aValue (an object: a new reference; a string: valid 
-     until the calling thread's next call of the plugin) and return nonzero; else return 0) }
+     until the calling thread's next call of the plugin) and return nonzero; else return 0) } (the host asks it with each translation unit's
+     program running in turn);
    - finds a name that its language's code uses but does not bind (where it would otherwise be an error, e.g. JavaScript's ReferenceError, 
      Python's NameError) with neos_rt_host::link: as a value of its own (a linked object: a value of its own that refers to it, e.g. a 
-     function that calls it);
+     function that calls it; a linked object of its own language's: the value it refers to);
    - passes its values to the other languages (arguments and results of calls of linked objects) as linked values: a value that is not
      a bool, a number or a string as a linked object of its own (that refers to the value), or, a value of its own that refers to a 
      linked object of another language's, as that object (so that a value given back to the language that it is of is the value it was).
@@ -335,9 +339,11 @@ typedef struct neos_rt_host
        and the program's code does not set it): code optimized after this may use its value as a constant (e.g. the address of a 
        table that the plugin made for the program) */
     void (*fix_global)(unsigned aGlobal);
-    /* (version 16) linking (see neos_rt_link_type): the value of the running program's global named aName that a runtime plugin other 
-       than aLanguage's (the caller's namespace) has, as a linked value stored in *aType and *aValue (see NEOS_RUNTIME_PLUGIN_LINK; the 
-       plugins that the program has loaded are asked, in the order they were loaded): nonzero if one has, else 0 */
+    /* (version 16) linking (see neos_rt_link_type): the value of a global named aName of another translation unit than the caller's (the 
+       running program's code of the language aLanguage: the caller's namespace), as a linked value stored in *aType and *aValue (see 
+       NEOS_RUNTIME_PLUGIN_LINK: the program's translation units are asked in turn, the plugins of each that the program has loaded in the 
+       order they were loaded; then for a function that the code of a language that has no runtime plugin defines (e.g. neoscript's: see 
+       bytecode::LinksSection)): nonzero if one has, else 0 */
     int (*link)(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue);
 } neos_rt_host;
 

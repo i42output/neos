@@ -128,8 +128,8 @@ namespace neos
         void add_package(const std::string& aPath, const std::string& aSource); ///< (a package's source that is not a file (aPath: where the 
                                                         ///< schema's packages would be, e.g. "<schema folder>/packages/python/builtins.py"))
         const language::schema& schema() const;
-        void load_program(std::string const& aPath);
-        void load_program(std::vector<std::string> const& aPaths);  ///< (a program of more than one translation unit, each of a different language 
+        void load_program(std::string const& aPath);                ///< (a linked program (see below): its translation units' paths separated by commas)
+        void load_program(std::vector<std::string> const& aPaths);  ///< (a program of more than one translation unit, each of a language 
                                                         ///< (the schema for its file type (the first's: the context's schema, if loaded)), linked: 
                                                         ///< their top levels run in turn, and each uses the others' globals by their names)
         void load_program(std::istream& aStream);

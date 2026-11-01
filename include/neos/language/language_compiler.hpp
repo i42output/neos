@@ -119,6 +119,7 @@ namespace neos::language
         i_fragment const* release_integer(std::uint32_t, bool) override { return nullptr; }
         std::uint32_t source_line(i_source_fragment const&, std::size_t) override { return 0u; }
         bool frame_name(std::uint32_t, neolib::i_string&) override { return false; }
+        bool linked_function(neolib::i_string_view const&) const override { return false; }
         // the compiler's services
     protected:
         i_code_generator& generator() const { return *iGenerator; }

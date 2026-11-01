@@ -651,6 +651,14 @@ namespace neos::python_runtime
         object* b_import(std::vector<object*> const& aArgs, object* aKwargs);   // (__import__ (exec.cpp))
         object* b_eval(std::vector<object*> const& aArgs, object* aKwargs);
         void* current_program();                        // (the program that runs (exec's): null for the program)
+        void* enter_program();                          // (code of the program that the host runs is called from outside it (e.g. by another
+                                                        // language's code): that program is the one that runs (a linked program's translation
+                                                        // units are each a program of its own: see neos_rt_link_type));
+                                                        // the one that ran (see leave_program)
+        void leave_program(void* aPrevious);
+        std::string main_module_key();                  // (the name, inside the runtime, of the running program's module __main__)
+        void adopt_function(object* aFunction, void* aProgram); // (a function of the program's that was made before it was known to be a 
+                                                        // program of its own (see enter_program): called on it)
         void* switch_program(void* aProgram);           // (the previous one)
         void* program_context(void* aProgram);          // (a function's program (exec's, or null: the program) as the host's context (null: running))
         object* exec_current_globals();                 // (borrowed: null if none)

@@ -74,6 +74,20 @@ namespace neos::python_runtime
             thread_local std::vector<exec_namespace> tNamespaces;
             thread_local void* tProgram = nullptr;      ///< (the program running (of exec): null for the program)
             thread_local void* tMainProgram = nullptr;  ///< (the program's context, once another has run)
+            // (more than one program on the thread: a linked program's translation units after the first Python one (see neos_rt_link_type),
+            // each a program of its own; each's module __main__ is its own (named, inside the runtime, "__main__#<n>"), its functions called
+            // on its own program, as exec's are)
+            thread_local void* tFirstMain = nullptr;    ///< (the context of the program that registered its __main__ first)
+            thread_local std::map<void*, std::string> tUnitMains;   ///< (the others' (their contexts): their __main__'s names)
+
+            // (the name, inside the runtime, of a module of the program that runs (its module __main__: its own))
+            std::string module_key(char const* aName)
+            {
+                if (tProgram != nullptr && !tUnitMains.empty() && std::strcmp(aName, "__main__") == 0)
+                    if (auto const unit = tUnitMains.find(tProgram); unit != tUnitMains.end())
+                        return unit->second;
+                return aName;
+            }
 
             // (the code of source: compile's result)
             struct code_object
@@ -442,10 +456,36 @@ namespace neos::python_runtime
             release(ns.globals);
         }
 
+        void* enter_program()
+        {
+            // (the program, or another (e.g. a translation unit's of another language, or one that exec loaded): its functions (and the 
+            // program's) are called on their own programs from it)
+            auto const previous = tProgram;
+            if (tFirstMain != nullptr)
+            {
+                auto* const context = host()->thread_context();
+                tProgram = context == tFirstMain ? nullptr : context;
+                if (tProgram != nullptr && tMainProgram == nullptr)
+                    tMainProgram = tFirstMain;
+            }
+            return previous;
+        }
+
+        void leave_program(void* aPrevious)
+        {
+            tProgram = aPrevious;
+        }
+
+        std::string main_module_key()
+        {
+            return module_key("__main__");
+        }
+
         // python::module_namespace(name, getter): globals()
         object* fn_module_namespace(char const* aName, object* aGetter)
         {
-            auto& ns = module_namespaces()[aName];
+            auto const key = module_key(aName);
+            auto& ns = module_namespaces()[key];
             if (ns == nullptr)
             {
                 ns = make_dict();
@@ -473,7 +513,7 @@ namespace neos::python_runtime
             }
             if (aGetter == nullptr || kind_of(aGetter) == NEOS_PY_NONE)
             {
-                auto const registered = namespace_getters().find(aName);
+                auto const registered = namespace_getters().find(key);
                 aGetter = registered != namespace_getters().end() ? registered->second : nullptr;
             }
             if (aGetter != nullptr && kind_of(aGetter) != NEOS_PY_NONE)
@@ -528,34 +568,59 @@ namespace neos::python_runtime
 
         bool namespace_registered(char const* aName)
         {
-            return namespace_getters().contains(std::string_view{ aName });
+            return namespace_getters().contains(module_key(aName));
         }
 
         // python::register_namespace(module, getter): the getter of a module's names (its namespace's)
         void fn_register_namespace(char const* aName, object* aGetter)
         {
-            auto& g = namespace_getters()[aName];
+            if (std::strcmp(aName, "__main__") == 0)
+            {
+                // (the program's module __main__ (its code begins to run): another program's than the first's, a program of its own (its 
+                // functions are called on it))
+                auto* const context = host()->thread_context();
+                if (tFirstMain == nullptr)
+                    tFirstMain = context;
+                else if (context != tFirstMain && !tUnitMains.contains(context))
+                {
+                    tUnitMains.emplace(context, "__main__#" + std::to_string(tUnitMains.size() + 1u));
+                    if (tMainProgram == nullptr)
+                        tMainProgram = tFirstMain;
+                    tProgram = context;
+                    // (its getter, made before)
+                    adopt_function(aGetter, context);
+                }
+            }
+            auto& g = namespace_getters()[module_key(aName)];
             retain(aGetter);
             release(g);
             g = aGetter;
+        }
+
+        // (a builtin, or (a linked program: see neos_rt_link_type) a global of one of its other translation units (asked without the 
+        // NameError pending: their code (e.g. another Python unit's) may run))
+        object* builtin_or_linked(char const* aName)
+        {
+            auto const builtin = fn_builtin(aName);
+            if (builtin == nullptr && failed() && std::string_view{ error_text() }.starts_with("NameError"))
+            {
+                clear_error();
+                if (auto const linked = linked_global(aName))
+                    return linked;
+                if (!failed())
+                    return error("NameError", "name '" + std::string{ aName } + "' is not defined");
+            }
+            return builtin;
         }
 
         // python::global_lookup(module, name): a name that a module does not bind (one bound in its namespace (globals()), or a
         // builtin)
         object* fn_global_lookup(char const* aModule, char const* aName)
         {
-            if (auto const ns = module_namespaces().find(aModule); ns != module_namespaces().end())
+            if (auto const ns = module_namespaces().find(module_key(aModule)); ns != module_namespaces().end())
                 if (auto const value = mapping_find(ns->second, aName))
                     return value;
-            auto const builtin = fn_builtin(aName);
-            // (a program linked with code of other languages: a name that is not a builtin may be one of their globals)
-            if (builtin == nullptr && failed() && std::string_view{ error_text() }.starts_with("NameError"))
-                if (auto const linked = linked_global(aName))
-                {
-                    clear_error();
-                    return linked;
-                }
-            return builtin;
+            return builtin_or_linked(aName);
         }
 
         // python::import_star(module, from): from m import * of a module that is not a source of the program's (a runtime module): its 
@@ -624,7 +689,7 @@ namespace neos::python_runtime
                         return error("NameError", "name '" + std::string{ aName } + "' is not defined");
                 }
             }
-            return fn_builtin(aName);
+            return builtin_or_linked(aName);
         }
 
         // python::exec_globals(): globals() of code that exec runs

@@ -183,6 +183,7 @@ namespace neos::compilers::neoscript
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool complete_signature(i_function_signature& aSignature, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
+        bool linked_function(neolib::i_string_view const& aName) const override;
         i_fragment const* literal(i_operand_type const& aOperand) override;
         // constructs
     private:

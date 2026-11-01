@@ -321,6 +321,17 @@ namespace neos
                                     return true;
                             return false;
                         }
+                        // (linking: the linked object of the running program's global aName that aLanguage's plugin has, if it is loaded)
+                        bool link_of(char const* aName, std::string const& aLanguage, neos_rt_type* aType, neos_rt_value* aValue)
+                        {
+                            neos_rt_plugin_link link = nullptr;
+                            {
+                                std::lock_guard<std::recursive_mutex> lock{ iMutex };
+                                if (auto const p = iPlugins.find(aLanguage); p != iPlugins.end())
+                                    link = p->second.link;
+                            }
+                            return link != nullptr && link(aName, aType, aValue) != 0;
+                        }
                         function const& resolve(std::string const& aImport)
                         {
                             std::lock_guard<std::recursive_mutex> lock{ iMutex };
@@ -460,6 +471,12 @@ namespace neos
                 {
                     return aName != nullptr && aType != nullptr && aValue != nullptr && 
                         registry::instance().link(aName, aLanguage, static_cast<neos_rt_type*>(aType), static_cast<neos_rt_value*>(aValue));
+                }
+
+                bool link_of(char const* aName, std::string const& aLanguage, void* aType, void* aValue)
+                {
+                    return aName != nullptr && aType != nullptr && aValue != nullptr &&
+                        registry::instance().link_of(aName, aLanguage, static_cast<neos_rt_type*>(aType), static_cast<neos_rt_value*>(aValue));
                 }
 
                 void program_end()

@@ -200,6 +200,32 @@ namespace neos
 
     void context::load_program(std::string const& aPath)
     {
+        // (a linked program: its translation units' paths, separated by commas (a path that is a file's is one path, whatever it contains); 
+        // none: the program's)
+        if (aPath.empty() && iProgram.translationUnits.size() > 1u)
+        {
+            std::vector<std::string> paths;
+            for (auto const& unit : iProgram.translationUnits)
+                paths.push_back(unit.fragments.front().source_file_path()->to_std_string());
+            load_program(paths);
+            return;
+        }
+        if (std::error_code ec; aPath.find(',') != std::string::npos && !std::filesystem::is_regular_file(aPath, ec))
+        {
+            std::vector<std::string> paths;
+            for (std::size_t start = 0u; start <= aPath.size();)
+            {
+                auto const end = std::min(aPath.find(',', start), aPath.size());
+                if (end > start)
+                    paths.push_back(aPath.substr(start, end - start));
+                start = end + 1u;
+            }
+            if (paths.size() > 1u)
+            {
+                load_program(paths);
+                return;
+            }
+        }
         std::string const path = (aPath.empty() && !iProgram.translationUnits.empty() ? iProgram.translationUnits.front().fragments.front().source_file_path()->to_std_string() : aPath);
         if (!schema_loaded() && !path.empty())
         {
@@ -224,7 +250,6 @@ namespace neos
         // (the first unit: the context's schema (the one for its file type, if none is loaded))
         load_program(aPaths.front());
         iLinkedSchemas.clear();
-        std::vector<std::string> languages{ schema().meta().language };
         for (auto path = std::next(aPaths.begin()); path != aPaths.end(); ++path)
         {
             // (the others: the schema for their file types (the context's, if it is for it))
@@ -243,11 +268,6 @@ namespace neos
                     linkedSchema = std::make_shared<language::schema>(*schemaPath, concept_libraries(), compiler().show_parse_times());
                 unitSchema = linkedSchema;
             }
-            auto const& language = unitSchema->meta().language;
-            if (std::find(languages.begin(), languages.end(), language) != languages.end())
-                throw compiler_error("cannot link '" + *path + "': the program has a translation unit of its language (" + language + 
-                    "); each of a linked program's translation units is of a different language");
-            languages.push_back(language);
             load_unit(language::source_fragment{ neolib::string{ *path } }, unitSchema);
         }
     }

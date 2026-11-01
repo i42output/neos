@@ -351,6 +351,11 @@ namespace neos
 
                 class machine;
 
+                // (linking (see bytecode::LinkedSection): a translation unit after the first run (the running program's 
+                // neos::link_run); the linked value of a global of another translation unit (see neos_rt_host::link))
+                void link_run(std::uint32_t aUnit);
+                int host_link(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue);
+
                 // the programs that a thread is running: each invocation of a program's function (by the thread, a runtime plugin 
                 // or a coroutine), innermost first, so that its frames can be walked (see neos_rt_host::frames)
                 struct activation
@@ -451,6 +456,8 @@ namespace neos
                                     d.call = jit::import_call::ObjectRelease;
                                 else if (*f.import == "neos::assume")
                                     d.call = jit::import_call::Assume;
+                                else if (f.import->starts_with(std::string{ bytecode::LinkNamespace } + "::") || *f.import == "neos::link_run")
+                                    ; // (the VM's (see link_call and link_run))
                                 else if (!d.checked)
                                     d.plugin = plugin_function(*f.import);
                                 if (d.plugin)
@@ -1259,7 +1266,32 @@ namespace neos
                                 }
                                 break;
                             case 0:
-                                if (r.name() == bytecode::FramesSection)
+                                if (auto const sectionName = r.name(); sectionName == bytecode::LinkedSection)
+                                {
+                                    for (auto n = r.u(); n > 0u; --n)
+                                    {
+                                        auto language = r.name();
+                                        auto const length = static_cast<std::size_t>(r.u());
+                                        if (r.position() + length > iModule.size())
+                                            throw exceptions::out_of_text();
+                                        auto const* const begin = reinterpret_cast<std::byte const*>(iModule.data() + r.position());
+                                        iLinkedModules.emplace_back(std::move(language), text{ begin, begin + length });
+                                        r.seek(r.position() + length);
+                                    }
+                                }
+                                else if (sectionName == bytecode::LinksSection)
+                                {
+                                    for (auto n = r.u(); n > 0u; --n)
+                                    {
+                                        link_export l;
+                                        l.name = r.name();
+                                        l.language = r.name();
+                                        l.function = static_cast<std::uint32_t>(r.u());
+                                        l.signature = r.name();
+                                        iOwnLinks.push_back(std::move(l));
+                                    }
+                                }
+                                else if (sectionName == bytecode::FramesSection)
                                 {
                                     for (auto n = r.u(); n > 0u; --n)
                                         iSources.push_back(r.name());
@@ -1815,6 +1847,8 @@ namespace neos
                         Allocate,
                         Checked,
                         Assume,
+                        LinkRun,
+                        Link,
                         Runtime
                     };
                     import_kind resolve_import(std::uint32_t aFunction)
@@ -1836,11 +1870,14 @@ namespace neos
                             { "neos::raise", import_kind::Raise },  // (an error: the program stops)
                             { "neos::exit", import_kind::Exit },    // (the program stops: its exit status)
                             { "neos::allocate", import_kind::Allocate }, // (memory (zeroed) of a size: its address)
-                            { "neos::assume", import_kind::Assume }     // (the program's claim that its operand is not 0: nothing is done)
+                            { "neos::assume", import_kind::Assume },    // (the program's claim that its operand is not 0: nothing is done)
+                            { "neos::link_run", import_kind::LinkRun }  // (a translation unit after the first runs: see link_run)
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
                         if (auto const host = sHostFunctions.find(name); host != sHostFunctions.end())
                             return host->second;
+                        if (name.starts_with(std::string{ bytecode::LinkNamespace } + "::"))
+                            return import_kind::Link;
                         if (jit::checked_arithmetic(name))
                             return import_kind::Checked;
                         // a function of a runtime plugin (called through libffi)
@@ -2041,6 +2078,12 @@ namespace neos
                             break;
                         case import_kind::Assume:
                             break;
+                        case import_kind::LinkRun:
+                            link_run(as_u32(aBuffer[0]));
+                            break;
+                        case import_kind::Link:
+                            link_call(aFunction, aBuffer);
+                            break;
                         case import_kind::Checked:
                             {
                                 auto const code = *jit::checked_arithmetic(*iFunctions.at(aFunction).import);
@@ -2059,6 +2102,174 @@ namespace neos
                     bool restricted() const { return iRestricted; }
                     compile_service const& source_compiler() const { return iCompileService; }    ///< (see neos_rt_host::load)
                     std::vector<std::string> const& arguments() const { return iArguments; }    ///< (see neos_rt_host::arguments)
+                    // linking (see bytecode::LinkedSection and bytecode::LinksSection)
+                    struct link_export
+                    {
+                        std::string name;
+                        std::string language;
+                        std::uint32_t function = 0u;
+                        std::string signature;
+                        machine* program = nullptr;
+                        jit::compiled_module* native = nullptr;
+                    };
+                    // (the modules of the translation units after the first, by their indices: their languages and texts)
+                    std::pair<std::string, text> const& linked_module(std::uint32_t aUnit) const
+                    {
+                        if (aUnit >= iLinkedModules.size())
+                            throw trap{ "invalid translation unit" };
+                        return iLinkedModules[aUnit];
+                    }
+                    // (the program that it is linked with (the thread's: the one that it runs first), whose links are its functions' and
+                    // those of the translation units that it runs)
+                    machine* linker() const { return iLinker; }
+                    std::vector<link_export> const& links() const { return iLinks; }
+                    // (the program of the translation unit that it is (or whose code loaded it))
+                    machine* unit() const { return iUnit; }
+                    void set_unit(machine* aUnit) { iUnit = aUnit; }
+                    // (the programs of the translation units after the first (see link_run), in the order they ran: their 
+                    // languages, programs and native code)
+                    struct linked_unit
+                    {
+                        std::string language;
+                        machine* program = nullptr;
+                        jit::compiled_module* native = nullptr;
+                    };
+                    std::vector<linked_unit> const& units() const { return iUnits; }
+                    void add_unit(std::string const& aLanguage, machine* aProgram, jit::compiled_module* aNative) { iUnits.push_back(linked_unit{ aLanguage, aProgram, aNative }); }
+                    jit::compiled_module* linker_native() const { return iLinker != nullptr ? iLinker->iNative : nullptr; }
+                    void set_linker(machine* aLinker, jit::compiled_module* aNative)
+                    {
+                        iLinker = aLinker;
+                        iNative = aNative;
+                        if (aLinker != nullptr)
+                            for (auto l : iOwnLinks)
+                            {
+                                l.program = this;
+                                l.native = aNative;
+                                aLinker->iLinks.push_back(std::move(l));
+                            }
+                    }
+                private:
+                    // (an import of another translation unit's function (see bytecode::LinkNamespace): "link::<name>#<link signature>"; 
+                    // its arguments are linked values, as is its result)
+                    void link_call(std::uint32_t aFunction, value* aBuffer)
+                    {
+                        auto const& import = *iFunctions.at(aFunction).import;
+                        auto const prefix = std::string_view{ bytecode::LinkNamespace }.size() + 2u;
+                        auto const hash = import.find('#');
+                        auto const arrow = hash == std::string::npos ? std::string::npos : import.find('>', hash);
+                        if (arrow == std::string::npos || arrow + 1u >= import.size())
+                            throw trap{ "invalid import '" + import + "'" };
+                        std::string const name = import.substr(prefix, hash - prefix);
+                        std::string_view const parameters{ import.data() + hash + 1u, arrow - hash - 1u };
+                        char const resultCode = import[arrow + 1u];
+                        neos_rt_type type = NEOS_RT_VOID;
+                        neos_rt_value v = {};
+                        if (host_link(name.c_str(), nullptr, &type, &v) == 0)
+                            throw trap{ "'" + name + "' is not defined (no translation unit of the program has a global of the name)" };
+                        struct release_value
+                        {
+                            neos_rt_type& type;
+                            neos_rt_value& value;
+                            ~release_value() { if (type == NEOS_RT_OBJECT && value.object != nullptr) value.object->type->release(value.object); }
+                        };
+                        release_value const releasing{ type, v };
+                        neos_rt_type resultType = NEOS_RT_VOID;
+                        neos_rt_value result = {};
+                        release_value const releasingResult{ resultType, result };
+                        auto const* const linkType = type == NEOS_RT_OBJECT && v.object != nullptr ? reinterpret_cast<neos_rt_link_type const*>(v.object->type) : nullptr;
+                        if (linkType != nullptr && linkType->callable(v.object) != 0)
+                        {
+                            std::vector<neos_rt_type> types(parameters.size());
+                            std::vector<neos_rt_value> arguments(parameters.size());
+                            for (std::size_t i = 0u; i < parameters.size(); ++i)
+                            {
+                                auto& t = types[i];
+                                auto& a = arguments[i];
+                                switch (parameters[i])
+                                {
+                                case 'b': t = NEOS_RT_BOOL; a.b = as_u32(aBuffer[i]) != 0u ? 1 : 0; break;
+                                case 'i': t = NEOS_RT_I64; a.i64 = as_i32(aBuffer[i]); break;
+                                case 'u': t = NEOS_RT_I64; a.i64 = as_u32(aBuffer[i]); break;
+                                case 'I': t = NEOS_RT_I64; a.i64 = as_i64(aBuffer[i]); break;
+                                case 'U': t = NEOS_RT_I64; a.i64 = static_cast<long long>(aBuffer[i]); break;
+                                case 'f': t = NEOS_RT_F64; a.f64 = as_f32(aBuffer[i]); break;
+                                case 'F': t = NEOS_RT_F64; a.f64 = as_f64(aBuffer[i]); break;
+                                case 's':
+                                    {
+                                        t = NEOS_RT_STRING;
+                                        auto const pointer = string_pointer(as_u32(aBuffer[i]));
+                                        a.string = pointer != nullptr ? pointer : "";
+                                    }
+                                    break;
+                                default: throw trap{ "invalid import '" + import + "'" };
+                                }
+                            }
+                            if (auto const error = linkType->call(v.object, static_cast<unsigned>(parameters.size()), types.data(), arguments.data(), &resultType, &result))
+                                throw trap{ error };
+                        }
+                        else if (parameters.empty())
+                        {
+                            // (a value that is not a function: the call's result (borrowed))
+                            resultType = type;
+                            result = v;
+                            if (resultType == NEOS_RT_OBJECT && result.object != nullptr)
+                                result.object->type->retain(result.object);
+                        }
+                        else
+                            throw trap{ "'" + name + "' is not a function" };
+                        auto const wrong = [&](char const* aWhat) -> trap
+                        {
+                            static char const* const sKinds[] = { "no value", "a boolean", "", "", "", "an integer", "", "", "", "a float", "a string", "an object" };
+                            auto const kind = static_cast<std::size_t>(resultType) < std::size(sKinds) ? sKinds[resultType] : "";
+                            return trap{ "'" + name + "' returned " + kind + ", not " + aWhat };
+                        };
+                        auto const integer = [&]() -> std::int64_t
+                        {
+                            switch (resultType)
+                            {
+                            case NEOS_RT_I64: return result.i64;
+                            case NEOS_RT_BOOL: return result.b != 0 ? 1 : 0;
+                            case NEOS_RT_F64:
+                                if (std::trunc(result.f64) == result.f64 && std::abs(result.f64) < 9.2e18)
+                                    return static_cast<std::int64_t>(result.f64);
+                                break;
+                            default:
+                                break;
+                            }
+                            throw wrong("an integer");
+                        };
+                        auto const real = [&]() -> double
+                        {
+                            switch (resultType)
+                            {
+                            case NEOS_RT_F64: return result.f64;
+                            case NEOS_RT_I64: return static_cast<double>(result.i64);
+                            default: throw wrong("a float");
+                            }
+                        };
+                        switch (resultCode)
+                        {
+                        case 'v': break;
+                        case 'b':
+                            if (resultType != NEOS_RT_BOOL && resultType != NEOS_RT_I64)
+                                throw wrong("a boolean");
+                            aBuffer[0] = of_bool(resultType == NEOS_RT_BOOL ? result.b != 0 : result.i64 != 0);
+                            break;
+                        case 'i': aBuffer[0] = of_i32(static_cast<std::int32_t>(integer())); break;
+                        case 'u': aBuffer[0] = of_u32(static_cast<std::uint32_t>(integer())); break;
+                        case 'I': case 'U': aBuffer[0] = of_i64(integer()); break;
+                        case 'f': aBuffer[0] = of_f32(static_cast<float>(real())); break;
+                        case 'F': aBuffer[0] = of_f64(real()); break;
+                        case 's':
+                            if (resultType != NEOS_RT_STRING)
+                                throw wrong("a string");
+                            aBuffer[0] = of_u32(allocate_string(result.string != nullptr ? std::string_view{ result.string } : std::string_view{}));
+                            break;
+                        default: throw trap{ "invalid import '" + import + "'" };
+                        }
+                    }
+                public:
                     // (a global's storage (its word): the interpreter and generated code use it (it does not move))
                     value* global_address(std::uint32_t aIndex)
                     {
@@ -2115,6 +2326,13 @@ namespace neos
                     std::vector<jit::object_slot> iObjects = std::vector<jit::object_slot>(1u); ///< (0 is no object)
                     jit::object_table iObjectTable = { iObjects.data(), 1u, 0u }; ///< (the slots, as generated code uses them)
                     std::unordered_map<std::string, std::uint32_t> iFunctionExports;
+                    std::vector<std::pair<std::string, text>> iLinkedModules;
+                    std::vector<link_export> iOwnLinks;
+                    std::vector<link_export> iLinks;
+                    machine* iLinker = nullptr;
+                    jit::compiled_module* iNative = nullptr;   ///< (its native code, if it runs as native code (see set_linker))
+                    machine* iUnit = nullptr;
+                    std::vector<linked_unit> iUnits;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
                     mutable std::optional<std::uint32_t> iErrorGlobal;    ///< (error_global's)
                     mutable std::pair<std::size_t, std::size_t> iErrorGlobalFor{ ~std::size_t{ 0u }, 0u };
@@ -2517,6 +2735,8 @@ namespace neos
                         p.entry = p.program->export_function("main");
                         if (tRunning.native != nullptr)
                             p.native = p.program->compile();
+                        p.program->set_linker(tRunning.program->linker(), p.native.get());
+                        p.program->set_unit(tRunning.program->unit());
                         running const context{ p.program.get(), p.native.get() };
                         auto const previous = tRunning;
                         tRunning = context;
@@ -2581,6 +2801,37 @@ namespace neos
                         return tError.c_str();
                     }
                     return nullptr;
+                }
+
+                void link_run(std::uint32_t aUnit)
+                {
+                    // a translation unit after the first (see bytecode::LinkedSection): its module is loaded (as 
+                    // neos_rt_host::load's are), a program of its own, then its entry point runs
+                    if (tRunning.program == nullptr)
+                        throw trap{ "no program is running" };
+                    auto& program = *tRunning.program;
+                    auto const& linked = program.linked_module(aUnit);
+                    running context;
+                    {
+                        std::lock_guard<std::mutex> lock{ loaded_mutex() };
+                        auto& p = loaded_programs().emplace_back();
+                        p.program = std::make_unique<machine>(linked.second, program.output(), program.input(), program.error_output(),
+                            p.instructions, program.restricted(), program.source_compiler(), program.arguments());
+                        p.entry = p.program->export_function("main");
+                        if (tRunning.native != nullptr)
+                            p.native = p.program->compile();
+                        p.program->set_linker(program.linker(), p.native.get());
+                        p.program->set_unit(p.program.get());
+                        context = running{ p.program.get(), p.native.get() };
+                        if (program.linker() != nullptr)
+                            program.linker()->add_unit(linked.first, p.program.get(), p.native.get());
+                    }
+                    auto const previous = tRunning;
+                    tRunning = context;
+                    auto* const handle = host_thread_context();
+                    tRunning = previous;
+                    if (auto const error = host_run(handle, NEOS_RT_VOID, nullptr))
+                        throw trap{ error };
                 }
 
                 void host_external_memory_at(unsigned aIndex, void* aBase, unsigned long long aSize, unsigned aFlags)
@@ -2843,9 +3094,156 @@ namespace neos
                     return stream != nullptr && stream->flush() ? 0 : -1;
                 }
 
+                // (a linked object (see neos_rt_link_type) of a function that the code of a language that has no runtime plugin defines (see 
+                // bytecode::LinksSection))
+                struct linked_function
+                {
+                    neos_rt_object base;
+                    std::atomic<std::uint32_t> references{ 1u };
+                    machine::link_export link;
+                };
+
+                char const* call_linked_function(neos_rt_object* aObject, unsigned aCount, neos_rt_type const* aTypes, neos_rt_value const* aArguments,
+                    neos_rt_type* aResultType, neos_rt_value* aResult)
+                {
+                    auto const& l = reinterpret_cast<linked_function*>(aObject)->link;
+                    thread_local std::string tError;
+                    auto const fail = [&](std::string aMessage) { tError = "TypeError: " + std::move(aMessage); return tError.c_str(); };
+                    auto const arrow = l.signature.find('>');
+                    std::string_view const parameters{ l.signature.data(), arrow };
+                    if (aCount != parameters.size())
+                        return fail(l.name + "() takes " + std::to_string(parameters.size()) + " argument" + (parameters.size() == 1u ? "" : "s") + 
+                            " (" + std::to_string(aCount) + " given)");
+                    std::vector<neos_rt_type> types(aCount);
+                    std::vector<neos_rt_value> arguments(aCount);
+                    for (unsigned i = 0u; i < aCount; ++i)
+                    {
+                        auto const& a = aArguments[i];
+                        auto const t = aTypes[i];
+                        auto& v = arguments[i];
+                        auto const argument = [&](char const* aWhat) { return fail(l.name + "(): argument " + std::to_string(i + 1u) + " must be " + aWhat); };
+                        bool const integral = t == NEOS_RT_I64 || t == NEOS_RT_BOOL || (t == NEOS_RT_F64 && std::trunc(a.f64) == a.f64 && std::abs(a.f64) < 9.2e18);
+                        std::int64_t const integer = t == NEOS_RT_I64 ? a.i64 : t == NEOS_RT_BOOL ? (a.b != 0 ? 1 : 0) : t == NEOS_RT_F64 && integral ? static_cast<std::int64_t>(a.f64) : 0;
+                        bool const numeric = t == NEOS_RT_I64 || t == NEOS_RT_F64;
+                        double const real = t == NEOS_RT_F64 ? a.f64 : static_cast<double>(a.i64);
+                        switch (parameters[i])
+                        {
+                        case 'b':
+                            if (t != NEOS_RT_BOOL && t != NEOS_RT_I64)
+                                return argument("a boolean");
+                            types[i] = NEOS_RT_BOOL;
+                            v.b = (t == NEOS_RT_BOOL ? a.b != 0 : a.i64 != 0) ? 1 : 0;
+                            break;
+                        case 'i': if (!integral) return argument("an integer"); types[i] = NEOS_RT_I32; v.i32 = static_cast<int>(integer); break;
+                        case 'u': if (!integral) return argument("an integer"); types[i] = NEOS_RT_U32; v.u32 = static_cast<unsigned>(integer); break;
+                        case 'I': if (!integral) return argument("an integer"); types[i] = NEOS_RT_I64; v.i64 = integer; break;
+                        case 'U': if (!integral) return argument("an integer"); types[i] = NEOS_RT_U64; v.u64 = static_cast<unsigned long long>(integer); break;
+                        case 'f': if (!numeric) return argument("a number"); types[i] = NEOS_RT_F32; v.f32 = static_cast<float>(real); break;
+                        case 'F': if (!numeric) return argument("a number"); types[i] = NEOS_RT_F64; v.f64 = real; break;
+                        case 's': if (t != NEOS_RT_STRING) return argument("a string"); types[i] = NEOS_RT_STRING; v.string = a.string; break;
+                        default: return fail("invalid link signature");
+                        }
+                    }
+                    neos_rt_type resultType = NEOS_RT_VOID;
+                    switch (l.signature[arrow + 1u])
+                    {
+                    case 'b': resultType = NEOS_RT_BOOL; break;
+                    case 'i': resultType = NEOS_RT_I32; break;
+                    case 'u': resultType = NEOS_RT_U32; break;
+                    case 'I': resultType = NEOS_RT_I64; break;
+                    case 'U': resultType = NEOS_RT_U64; break;
+                    case 'f': resultType = NEOS_RT_F32; break;
+                    case 'F': resultType = NEOS_RT_F64; break;
+                    case 's': resultType = NEOS_RT_STRING; break;
+                    default: break;
+                    }
+                    neos_rt_value result = {};
+                    // (called on its own program)
+                    auto const previous = tRunning;
+                    tRunning = running{ l.program, l.native };
+                    struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };
+                    if (auto const error = l.program->call_from_plugin(l.native, l.function, aCount, types.data(), arguments.data(), resultType, &result))
+                        return error;
+                    switch (resultType)
+                    {
+                    case NEOS_RT_BOOL: *aResultType = NEOS_RT_BOOL; aResult->b = result.b; break;
+                    case NEOS_RT_I32: *aResultType = NEOS_RT_I64; aResult->i64 = result.i32; break;
+                    case NEOS_RT_U32: *aResultType = NEOS_RT_I64; aResult->i64 = result.u32; break;
+                    case NEOS_RT_I64: *aResultType = NEOS_RT_I64; aResult->i64 = result.i64; break;
+                    case NEOS_RT_U64: *aResultType = NEOS_RT_I64; aResult->i64 = static_cast<long long>(result.u64); break;
+                    case NEOS_RT_F32: *aResultType = NEOS_RT_F64; aResult->f64 = result.f32; break;
+                    case NEOS_RT_F64: *aResultType = NEOS_RT_F64; aResult->f64 = result.f64; break;
+                    case NEOS_RT_STRING: *aResultType = NEOS_RT_STRING; aResult->string = result.string; break;
+                    default: *aResultType = NEOS_RT_VOID; break;
+                    }
+                    return nullptr;
+                }
+
+                // (the linked objects' types: by their languages)
+                neos_rt_link_type const* linked_function_type(std::string const& aLanguage)
+                {
+                    struct link_type
+                    {
+                        std::string language;
+                        neos_rt_link_type type;
+                    };
+                    static std::mutex sMutex;
+                    static std::map<std::string, std::unique_ptr<link_type>> sTypes;
+                    std::lock_guard<std::mutex> lock{ sMutex };
+                    auto& t = sTypes[aLanguage];
+                    if (t == nullptr)
+                    {
+                        t = std::make_unique<link_type>();
+                        t->language = aLanguage;
+                        t->type.base.name = "neos.linked_function";
+                        t->type.base.retain = [](neos_rt_object* aObject) { reinterpret_cast<linked_function*>(aObject)->references.fetch_add(1u, std::memory_order_relaxed); };
+                        t->type.base.release = [](neos_rt_object* aObject)
+                        {
+                            auto* const f = reinterpret_cast<linked_function*>(aObject);
+                            if (f->references.fetch_sub(1u, std::memory_order_acq_rel) == 1u)
+                                delete f;
+                        };
+                        t->type.language = t->language.c_str();
+                        t->type.callable = [](neos_rt_object*) { return 1; };
+                        t->type.call = call_linked_function;
+                    }
+                    return &t->type;
+                }
+
                 int host_link(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue)
                 {
-                    return runtime::link(aName, aLanguage, aType, aValue) ? 1 : 0;
+                    // the translation units other than the caller's, in turn, each's program running: the first's (the program's: the code of
+                    // its languages), then the others' (a program of its own each: see link_run)
+                    auto* const linker = tRunning.program != nullptr ? tRunning.program->linker() : nullptr;
+                    auto* const caller = tRunning.program != nullptr ? tRunning.program->unit() : nullptr;
+                    if (linker == nullptr)
+                        return runtime::link(aName, aLanguage, aType, aValue) ? 1 : 0;
+                    if (aName == nullptr)
+                        return 0;
+                    auto const previous = tRunning;
+                    struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };
+                    tRunning = running{ linker, linker->linker_native() };
+                    if (runtime::link(aName, caller == linker ? aLanguage : nullptr, aType, aValue))
+                        return 1;
+                    for (auto const& u : linker->units())
+                    {
+                        if (u.program == caller)
+                            continue;
+                        tRunning = running{ u.program, u.native };
+                        if (runtime::link_of(aName, u.language, aType, aValue))
+                            return 1;
+                    }
+                    tRunning = previous;
+                    // (then a function of the program's modules (see bytecode::LinksSection))
+                    for (auto const& l : linker->links())
+                        if (l.name == aName && (aLanguage == nullptr || l.language != aLanguage || l.program->unit() != caller))
+                        {
+                            auto* const f = new linked_function{ { &linked_function_type(l.language)->base }, 1u, l };
+                            *aType = NEOS_RT_OBJECT;
+                            aValue->object = &f->base;
+                            return 1;
+                        }
+                    return 0;
                 }
 
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
@@ -2905,6 +3303,8 @@ namespace neos
                     if (useJit)
                         native = m.compile();
                     iJit = static_cast<bool>(native);
+                    m.set_linker(&m, native.get());
+                    m.set_unit(&m);
                     auto const previous = tRunning;
                     tRunning = running{ &m, native.get() };
                     struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };

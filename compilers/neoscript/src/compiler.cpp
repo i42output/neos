@@ -635,6 +635,14 @@ namespace neos::compilers::neoscript
         return true;
     }
 
+    bool compiler::linked_function(neolib::i_string_view const& aName) const
+    {
+        // (a linked program: the functions and procedures that a translation unit defines at its top level (not a namespace's or a type's) are 
+        // called by the code of its other languages by their names (main, the entry point, aside))
+        auto const name = aName.to_std_string_view();
+        return name.find("::") == std::string_view::npos && name != "main";
+    }
+
     type_info* compiler::resolve_alias(alias_info& aAlias) const
     {
         if (aAlias.target != nullptr || aAlias.resolving)
