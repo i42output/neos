@@ -5222,6 +5222,15 @@ namespace neos
                                     aEqual = false;
                                     return true;
                                 }
+                                // (another i32 that is not a constant (e.g. a flag loaded): itself, as (value != 0) (a second branch on the
+                                // same value is then decided))
+                                if (c.type == I32 && !c.constant() && c.op != 0x71u && c.op != 0x72u)
+                                {
+                                    aSubject = aCondition;
+                                    aConstant = 0u;
+                                    aEqual = false;
+                                    return true;
+                                }
                                 return false;
                             };
                             // (a branch on a conjunction (i32.and) of comparisons: on its true edge, each is true (!= 0); on a disjunction's

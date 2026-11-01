@@ -467,6 +467,8 @@ namespace neos
 
                     struct unsupported : std::runtime_error { using std::runtime_error::runtime_error; };
 
+                    bool has_jcc_erratum();
+
                     class assembler
                     {
                     public:
@@ -477,8 +479,18 @@ namespace neos
                         struct label
                         {
                             std::optional<std::size_t> offset;
-                            ssa::small_vector<std::size_t, 2> fixups; // positions of rel32 fields (most labels': one or two)
+                            ssa::small_vector<std::size_t, 2> fixups; // positions of rel32 fields (most labels': one or two) (a short jump's: its rel8)
+                            ssa::small_vector<std::uint32_t, 2> shorts; // (each fixup's: a short jump's number (see iShortJumps), else NotShort)
+                            bool near = false;  ///< (likely to be bound soon after the jumps to it (e.g. a block that is likely to run): see jcc)
                         };
+                        static constexpr std::uint32_t NotShort = ~std::uint32_t{};
+                        // (forward jumps to near labels (see label::near) are short (rel8); those that are too far are made long by relax)
+                        std::size_t iShortJumps = 0u;
+                        std::size_t iLastJumpLength = 5u;
+                        // (the code's alignments for execution (see align_executable): their nops' start and end, and the alignment)
+                        struct alignment_point { std::size_t start; std::size_t end; std::size_t alignment; };
+                        std::vector<alignment_point> iAlignments;
+                        bool const iJccErratum = has_jcc_erratum();   ///< (see within_boundary)
                         std::vector<label> iLabels;
                         std::map<std::uint64_t, std::size_t> iConstants;
                         // (cold code (rarely executed): emitted to its own section, which follows the function's code)
@@ -554,13 +566,177 @@ namespace neos
                                 { 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00 },
                                 { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
                                 { 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 } };
+                            auto const start = code.size();
                             while (code.size() % aAlignment != 0u)
                             {
                                 auto const length = std::min<std::size_t>(9u, aAlignment - code.size() % aAlignment);
                                 for (std::size_t i = 0u; i < length; ++i)
                                     emit8(Nops[length - 1u][i]);
                             }
+                            iAlignments.push_back(alignment_point{ start, code.size(), aAlignment });
                             barrier();
+                        }
+                        static void nops(bytes& aCode, std::size_t aLength)
+                        {
+                            static constexpr std::uint8_t Nops[9][9] = {
+                                { 0x90 },
+                                { 0x66, 0x90 },
+                                { 0x0F, 0x1F, 0x00 },
+                                { 0x0F, 0x1F, 0x40, 0x00 },
+                                { 0x0F, 0x1F, 0x44, 0x00, 0x00 },
+                                { 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00 },
+                                { 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00 },
+                                { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+                                { 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 } };
+                            while (aLength != 0u)
+                            {
+                                auto const length = std::min<std::size_t>(9u, aLength);
+                                aCode.insert(aCode.end(), Nops[length - 1u], Nops[length - 1u] + length);
+                                aLength -= length;
+                            }
+                        }
+                        // (the short jumps that do not reach their labels: long (the code after each moves: labels, fixups and the 
+                        // alignments for execution with it, those alignments' nops made again), until every short jump reaches; before
+                        // emit_constants, after the code's labels are bound; positions recorded before the first short jump do not move)
+                        void relax()
+                        {
+                            if (iShortJumps == 0u)
+                                return;
+                            barrier();
+                            iLastJump.reset();
+                            iBoundAfterJump.clear();
+                            struct jump { std::size_t field; std::size_t target; std::size_t label; std::size_t index; bool conditional; bool expanded; };
+                            std::vector<jump> jumps;
+                            jumps.reserve(iShortJumps);
+                            for (std::size_t l = 0u; l < iLabels.size(); ++l)
+                            {
+                                auto const& label = iLabels[l];
+                                for (std::size_t k = 0u; k < label.fixups.size(); ++k)
+                                    if (label.fixups[k] != NoFixup && label.shorts[k] != NotShort)
+                                    {
+                                        if (!label.offset)
+                                            throw std::logic_error("neos::jit: unbound label");
+                                        auto const f = label.fixups[k];
+                                        jumps.push_back(jump{ f, *label.offset, l, k, code[f - 1u] != 0xEBu, false });
+                                    }
+                            }
+                            std::sort(jumps.begin(), jumps.end(), [](jump const& aA, jump const& aB) { return aA.field < aB.field; });
+                            // (the changes, by position: an expanded jump (its 2 bytes become 6 or 5) or an alignment (its nops))
+                            struct change { std::size_t start; std::size_t end; std::size_t newLength; std::size_t jump; };
+                            std::vector<change> changes;
+                            std::vector<std::int64_t> shiftAfter;   // (the code's shift after each change)
+                            auto const layout = [&]()
+                            {
+                                changes.clear();
+                                std::size_t j = 0u;
+                                std::size_t a = 0u;
+                                std::int64_t shift = 0;
+                                shiftAfter.clear();
+                                while (true)
+                                {
+                                    while (j < jumps.size() && !jumps[j].expanded)
+                                        ++j;
+                                    bool const haveJump = j < jumps.size();
+                                    bool const haveAlignment = a < iAlignments.size();
+                                    if (!haveJump && !haveAlignment)
+                                        break;
+                                    if (haveJump && (!haveAlignment || jumps[j].field - 1u < iAlignments[a].start))
+                                    {
+                                        auto const n = jumps[j].conditional ? 6u : 5u;
+                                        changes.push_back(change{ jumps[j].field - 1u, jumps[j].field + 1u, n, j });
+                                        shift += static_cast<std::int64_t>(n) - 2;
+                                        ++j;
+                                    }
+                                    else
+                                    {
+                                        auto const& x = iAlignments[a];
+                                        auto const newStart = static_cast<std::size_t>(static_cast<std::int64_t>(x.start) + shift);
+                                        auto const n = (x.alignment - newStart % x.alignment) % x.alignment;
+                                        changes.push_back(change{ x.start, x.end, n, ~std::size_t{} });
+                                        shift += static_cast<std::int64_t>(n) - static_cast<std::int64_t>(x.end - x.start);
+                                        ++a;
+                                    }
+                                    shiftAfter.push_back(shift);
+                                }
+                            };
+                            // (a position's new position (not within a change: its end is after it))
+                            auto const moved = [&](std::size_t aPosition) -> std::size_t
+                            {
+                                auto const at = std::upper_bound(changes.begin(), changes.end(), aPosition, [](std::size_t aValue, change const& aChange) { return aValue < aChange.end; });
+                                auto const i = static_cast<std::size_t>(at - changes.begin());
+                                return static_cast<std::size_t>(static_cast<std::int64_t>(aPosition) + (i == 0u ? 0 : shiftAfter[i - 1u]));
+                            };
+                            for (int round = 0;; ++round)
+                            {
+                                layout();
+                                bool more = false;
+                                for (auto& x : jumps)
+                                {
+                                    if (x.expanded)
+                                        continue;
+                                    auto const rel = static_cast<std::int64_t>(moved(x.target)) - static_cast<std::int64_t>(moved(x.field) + 1u);
+                                    if (rel < -128 || rel > 127)
+                                    {
+                                        x.expanded = true;
+                                        more = true;
+                                    }
+                                }
+                                if (!more)
+                                    break;
+                            }
+                            bool anyExpanded = false;
+                            for (auto const& c : changes)
+                                if (c.jump != ~std::size_t{} || c.newLength != c.end - c.start)
+                                    anyExpanded = true;
+                            if (!anyExpanded)
+                                return;
+                            // (the code again, with its changes)
+                            bytes result;
+                            result.reserve(code.size() + 4u * jumps.size());
+                            std::size_t from = 0u;
+                            for (auto const& c : changes)
+                            {
+                                result.insert(result.end(), code.begin() + static_cast<std::ptrdiff_t>(from), code.begin() + static_cast<std::ptrdiff_t>(c.start));
+                                if (c.jump != ~std::size_t{})
+                                {
+                                    auto const opcode = code[c.start];
+                                    if (jumps[c.jump].conditional)
+                                    {
+                                        result.push_back(0x0Fu);
+                                        result.push_back(static_cast<std::uint8_t>(0x80u + (opcode & 0x0Fu)));
+                                    }
+                                    else
+                                        result.push_back(0xE9u);
+                                    result.insert(result.end(), 4u, 0u);
+                                }
+                                else
+                                    nops(result, c.newLength);
+                                from = c.end;
+                            }
+                            result.insert(result.end(), code.begin() + static_cast<std::ptrdiff_t>(from), code.end());
+                            // (labels, fixups (an expanded jump's: its rel32, long) and alignments where they are now)
+                            for (auto& label : iLabels)
+                            {
+                                if (label.offset)
+                                    label.offset = moved(*label.offset);
+                                for (auto& f : label.fixups)
+                                    if (f != NoFixup)
+                                        f = moved(f);
+                            }
+                            for (auto const& c : changes)
+                                if (c.jump != ~std::size_t{})
+                                {
+                                    auto const& x = jumps[c.jump];
+                                    iLabels[x.label].fixups[x.index] = moved(c.start) + c.newLength - 4u;
+                                    iLabels[x.label].shorts[x.index] = NotShort;
+                                }
+                            for (auto& x : iAlignments)
+                            {
+                                auto const start = moved(x.start);
+                                x.end = start + (x.alignment - start % x.alignment) % x.alignment;
+                                x.start = start;
+                            }
+                            code = std::move(result);
                         }
                         bool in_cold() const { return iInCold; }
                         void begin_cold() { iInCold = true; ++iEvents; }
@@ -585,12 +761,21 @@ namespace neos
                         void resolve()
                         {
                             for (auto const& l : iLabels)
-                                for (auto f : l.fixups)
+                                for (std::size_t k = 0u; k < l.fixups.size(); ++k)
                                 {
+                                    auto const f = l.fixups[k];
                                     if (f == NoFixup)
                                         continue;
                                     if (!l.offset)
                                         throw std::logic_error("neos::jit: unbound label");
+                                    if (l.shorts[k] != NotShort)
+                                    {
+                                        auto const rel = static_cast<std::int64_t>(*l.offset) - static_cast<std::int64_t>(f + 1u);
+                                        if (rel < -128 || rel > 127)
+                                            throw std::logic_error("neos::jit: short jump out of range (see relax)");
+                                        code[f] = static_cast<std::uint8_t>(static_cast<std::int8_t>(rel));
+                                        continue;
+                                    }
                                     auto const rel = static_cast<std::int32_t>(static_cast<std::int64_t>(*l.offset) - static_cast<std::int64_t>(f + 4u));
                                     std::memcpy(&code[f], &rel, sizeof(rel));
                                 }
@@ -602,10 +787,23 @@ namespace neos
                                 return static_cast<std::size_t>(static_cast<std::int64_t>(aField + 4u) + rel);
                             };
                             for (auto const& l : iLabels)
-                                for (auto f : l.fixups)
+                                for (std::size_t k = 0u; k < l.fixups.size(); ++k)
                                 {
+                                    auto const f = l.fixups[k];
                                     if (f == NoFixup)
                                         continue;
+                                    if (l.shorts[k] != NotShort)
+                                    {
+                                        // (a short jump to a jmp: to the jmp's destination, if a short jump reaches it)
+                                        auto const at = static_cast<std::int64_t>(f + 1u) + static_cast<std::int8_t>(code[f]);
+                                        if (at < 0 || static_cast<std::size_t>(at) + 5u > code.size() || code[static_cast<std::size_t>(at)] != 0xE9u)
+                                            continue;
+                                        auto const next = static_cast<std::int64_t>(destination(static_cast<std::size_t>(at) + 1u));
+                                        auto const rel = next - static_cast<std::int64_t>(f + 1u);
+                                        if (rel >= -128 && rel <= 127)
+                                            code[f] = static_cast<std::uint8_t>(static_cast<std::int8_t>(rel));
+                                        continue;
+                                    }
                                     bool const jump = (f >= 1u && code[f - 1u] == 0xE9u) || (f >= 2u && code[f - 2u] == 0x0Fu && (code[f - 1u] & 0xF0u) == 0x80u);
                                     if (!jump)
                                         continue;
@@ -830,6 +1028,18 @@ namespace neos
                             }
                             fusable(7, start);
                         }
+                        // (cmp the 16 bits at [aBase + aDisp], aImm)
+                        void cmp16_mi(int aBase, std::int32_t aDisp, std::uint16_t aImm)
+                        {
+                            auto const start = offset();
+                            auto const value = static_cast<std::int16_t>(aImm);
+                            bool const short8 = value >= -128 && value <= 127;
+                            op_rm({ static_cast<std::uint8_t>(short8 ? 0x83u : 0x81u) }, false, 7, aBase, aDisp, 0x66);
+                            emit8(static_cast<std::uint8_t>(aImm));
+                            if (!short8)
+                                emit8(static_cast<std::uint8_t>(aImm >> 8u));
+                            fusable(7, start);
+                        }
                         void movzx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xB6 }, false, aDst, aSrc, -1, true); }
                         void movzx8_load(int aDst, int aBase, std::int32_t aDisp) { op_rm({ 0x0F, 0xB6 }, false, aDst, aBase, aDisp); }
                         void movsx8(int aDst, int aSrc) { op_rr({ 0x0F, 0xBE }, false, aDst, aSrc, -1, true); }
@@ -953,23 +1163,44 @@ namespace neos
                         void jmp(std::size_t aLabel)
                         {
                             auto const at = offset();
-                            emit8(0xE9u);
-                            fixup(aLabel);
+                            auto const number = short_jump(aLabel);
+                            if (number != NotShort)
+                            {
+                                emit8(0xEBu);
+                                fixup(aLabel, number);
+                            }
+                            else
+                            {
+                                emit8(0xE9u);
+                                fixup(aLabel);
+                            }
+                            iLastJumpLength = number != NotShort ? 2u : 5u;
                             if (!iInCold)
                                 iLastJump = std::make_pair(at, aLabel);
                             within_boundary(at);
                             if (!iInCold && iLastJump)
-                                iLastJump->first = code.size() - 5u;
+                                iLastJump->first = code.size() - iLastJumpLength;
                         }
                         void jcc(std::uint8_t aCc, std::size_t aLabel)
                         {
                             // (with the instruction that it is fused with (cmp, test, add, sub or and, just before it))
                             auto const start = iFused && iFused->second == offset() ? iFused->first : offset();
-                            emit8(0x0Fu);
-                            emit8(static_cast<std::uint8_t>(0x80u + aCc));
-                            fixup(aLabel);
+                            if (auto const number = short_jump(aLabel); number != NotShort)
+                            {
+                                emit8(static_cast<std::uint8_t>(0x70u + aCc));
+                                fixup(aLabel, number);
+                            }
+                            else
+                            {
+                                emit8(0x0Fu);
+                                emit8(static_cast<std::uint8_t>(0x80u + aCc));
+                                fixup(aLabel);
+                            }
                             within_boundary(start);
                         }
+                        // (a label that is likely to be bound soon after the jumps to it: see label::near)
+                        void near(std::size_t aLabel) { iLabels[aLabel].near = true; }
+
                         void call(std::size_t aLabel) { auto const start = offset(); emit8(0xE8u); fixup(aLabel); within_boundary(start); }
                         // (aDst = the address of aLabel (lea aDst, [rip + rel32]))
                         void lea_label(int aDst, std::size_t aLabel)
@@ -1044,14 +1275,27 @@ namespace neos
                             iFused.reset();
                         }
                     private:
-                        void fixup(std::size_t aLabel)
+                        void fixup(std::size_t aLabel, std::uint32_t aShort = NotShort)
                         {
                             iLabels[aLabel].fixups.push_back(offset());
+                            iLabels[aLabel].shorts.push_back(aShort);
                             if (iInCold)
                                 iColdFixups.emplace_back(aLabel, iLabels[aLabel].fixups.size() - 1u);
                             else
                                 iRunFixups.emplace_back(aLabel, iLabels[aLabel].fixups.size() - 1u);
-                            emit32(0u);
+                            if (aShort != NotShort)
+                                emit8(0u);
+                            else
+                                emit32(0u);
+                        }
+                        // (a jump to aLabel: short (its number), else NotShort (a label that is not near, or bound (a backward jump), or a 
+                        // jump that was too far before)
+                        std::uint32_t short_jump(std::size_t aLabel)
+                        {
+                            auto const& l = iLabels[aLabel];
+                            if (iInCold || !l.near || l.offset)
+                                return NotShort;
+                            return static_cast<std::uint32_t>(iShortJumps++);
                         }
                         // (an instruction that a jump after it can be moved by: it starts here (see within_boundary))
                         void lengthenable()
@@ -1072,7 +1316,7 @@ namespace neos
                         // a boundary that it did not, and a jump that cannot be moved stays
                         void within_boundary(std::size_t aStart)
                         {
-                            if (iInCold)
+                            if (iInCold || !iJccErratum)
                                 return;
                             std::size_t constexpr Boundary = 32u;
                             std::size_t constexpr MaxPrefixes = 2u;     // (added to an instruction: more slow its decoding (and the loop))
@@ -1248,6 +1492,53 @@ namespace neos
                     {
                         static bool const sBmi2 = query_bmi2();
                         return sBmi2;
+                    }
+
+                    // (a processor whose microcode's mitigation of the "jump conditional code" erratum makes a jump that crosses (or ends at)
+                    // a 32 byte boundary slow (see assembler::within_boundary): Intel's Skylake and the cores derived from it (Cascade Lake,
+                    // Cooper Lake, Kaby Lake, Coffee Lake, Whiskey Lake, Amber Lake, Comet Lake); others' code is not lengthened for it)
+                    bool query_jcc_erratum()
+                    {
+                        // (NEOS_JIT_JCC_ERRATUM: 1, as if the processor had it; 0, as if not)
+                        if (auto const* e = std::getenv("NEOS_JIT_JCC_ERRATUM"); e != nullptr && *e != '\0')
+                            return *e != '0';
+                        unsigned r[4];
+#if defined(_MSC_VER)
+                        int q[4];
+                        __cpuid(q, 0);
+                        for (int i = 0; i < 4; ++i) r[i] = static_cast<unsigned>(q[i]);
+#else
+                        if (!__get_cpuid(0u, &r[0], &r[1], &r[2], &r[3]))
+                            return false;
+#endif
+                        // ("GenuineIntel": ebx, edx, ecx)
+                        if (r[1] != 0x756E6547u || r[3] != 0x49656E69u || r[2] != 0x6C65746Eu || r[0] < 1u)
+                            return false;
+#if defined(_MSC_VER)
+                        __cpuid(q, 1);
+                        auto const signature = static_cast<unsigned>(q[0]);
+#else
+                        unsigned signature, b, c, d;
+                        if (!__get_cpuid(1u, &signature, &b, &c, &d))
+                            return false;
+#endif
+                        auto const family = (signature >> 8u) & 0xFu;
+                        if (family != 6u)
+                            return false;
+                        auto const model = ((signature >> 4u) & 0xFu) | (((signature >> 16u) & 0xFu) << 4u);
+                        switch (model)
+                        {
+                        case 0x4Eu: case 0x5Eu: case 0x55u: case 0x8Eu: case 0x9Eu: case 0xA5u: case 0xA6u:
+                            return true;
+                        default:
+                            return false;
+                        }
+                    }
+
+                    bool has_jcc_erratum()
+                    {
+                        static bool const sJccErratum = query_jcc_erratum();
+                        return sJccErratum;
                     }
 
                     bool has_sse41()
@@ -5597,6 +5888,7 @@ namespace neos
                             a.load(false, RAX, R15, ContextTrap);
                             a.mov_ri(RCX, exit, true);
                             a.jmp_r(RCX);
+                            a.relax();
                             a.emit_constants();
                             a.resolve();
                             for (auto const& site : iCallSites)
@@ -6466,8 +6758,16 @@ namespace neos
                             iDeferred.resize(f.values.size(), false);
                             layout();
                             iBlockLabels.assign(f.blocks.size(), 0u);
-                            for (auto b : f.order)
-                                iBlockLabels[b] = a.new_label();
+                            {
+                                // (the likely blocks' labels: near (see assembler::jcc: short jumps to them))
+                                auto const cold = cold_blocks();
+                                for (auto b : f.order)
+                                {
+                                    iBlockLabels[b] = a.new_label();
+                                    if (!cold[b])
+                                        a.near(iBlockLabels[b]);
+                                }
+                            }
                             // prologue
                             a.push(RBP);
                             a.mov_rr(true, RBP, RSP);
@@ -8004,6 +8304,7 @@ namespace neos
                             case 0x29u: width = wide ? 8u : 0u; break;     // (i64.load)
                             case 0x2Du: width = wide ? 0u : 1u; break;     // (i32.load8_u)
                             case 0x31u: width = wide ? 1u : 0u; break;     // (i64.load8_u)
+                            case 0x35u: width = wide ? 4u : 0u; break;     // (i64.load32_u)
                             default: break;
                             }
                             if (width == 0u)
@@ -8022,9 +8323,12 @@ namespace neos
                                 // (a byte's: eq, ne and the unsigned relations, with a constant of a byte (the load extends with zeros))
                                 if (width == 1u && (b > 0xFFu || (relation >= 2 && (relation & 1) == 0)))
                                     return 0u;
+                                // (an i64's low 32 bits (i64.load32_u): eq, ne and the unsigned relations, with a constant of 32 bits)
+                                if (l.op == 0x35u && (b > 0xFFFFFFFFull || (relation >= 2 && (relation & 1) == 0)))
+                                    return 0u;
                                 return width;
                             }
-                            if (width == 1u || other >= iLocations.size() || iLocations[other].kind != location::Register || is_float_type(f.values[other].type))
+                            if (width == 1u || l.op == 0x35u || other >= iLocations.size() || iLocations[other].kind != location::Register || is_float_type(f.values[other].type))
                                 return 0u;
                             return width;
                         }
@@ -8173,7 +8477,14 @@ namespace neos
                                 auto cc = sCcs[op - (w ? 0x51u : 0x46u)];
                                 if ((i.flags & ssa::Top16) != 0u)
                                 {
-                                    // (the first's top 16 bits and the constant's low 16 bits (see ssa::Top16): BMI2's rotate, else a shift)
+                                    // (the first's top 16 bits and the constant's low 16 bits (see ssa::Top16): a slot's (its value in the 
+                                    // frame), else BMI2's rotate, else a shift)
+                                    if (!constant(first) && where(first).kind == location::Slot)
+                                    {
+                                        a.cmp16_mi(RBP, where(first).disp + 6, static_cast<std::uint16_t>(bits(second)));
+                                        condition(v, cc);
+                                        return;
+                                    }
                                     auto const x = gpr(first, RAX);
                                     if (iBmi2)
                                         a.rorx(RAX, x, 48u);
@@ -8211,8 +8522,24 @@ namespace neos
                                     condition(v, cc);
                                     return;
                                 }
+                                if (w && !constant(first) && where(first).kind == location::Slot && constant(second) && (cc == B || cc == AE) &&
+                                    (bits(second) & 0xFFFFFFFFFFFFull) == 0u)
+                                {
+                                    // (a value in the frame below (or not below) a constant whose low 48 bits are zero: its top 16 bits are
+                                    // below (or not below) the constant's (cmp of the 16 bits in the frame: no load))
+                                    a.cmp16_mi(RBP, where(first).disp + 6, static_cast<std::uint16_t>(bits(second) >> 48u));
+                                    condition(v, cc);
+                                    return;
+                                }
                                 auto const x = gpr(first, RAX);
-                                if (w && constant(second) && !fits_i32(static_cast<std::int64_t>(bits(second))))
+                                // (an i64 whose high 32 bits are zero (i64.load32_u, i64.extend_i32_u) and a constant of 32 bits, compared for
+                                // equality or unsignedly: their low 32 bits (cmp of 32 bits: no rex.w))
+                                auto const relation = static_cast<int>(op - (w ? 0x51u : 0x46u));
+                                bool const narrow = w && constant(second) && bits(second) <= 0xFFFFFFFFull && (relation < 2 || (relation & 1) != 0) &&
+                                    !constant(first) && (f.values[first].op == 0x35u || f.values[first].op == 0xADu);
+                                if (narrow)
+                                    a.alu_ri(7, false, x, static_cast<std::int32_t>(static_cast<std::uint32_t>(bits(second))));
+                                else if (w && constant(second) && !fits_i32(static_cast<std::int64_t>(bits(second))))
                                     a.alu_rip(7, true, x, a.constant(bits(second)));    // (a 64 bit constant: from the constants (cmp x, [rip + c]))
                                 else
                                     alu(7, w, x, operand_of(second, RCX));
@@ -9207,11 +9534,11 @@ namespace neos
                             auto const ssa_at = std::chrono::steady_clock::now();
                             optimizing_generator generator{ d, *aJob.module, aJob.version.get(), function };
                             generator.generate(aJob.callSites);
+                            aJob.code = std::move(generator.code());
                             auto const generated_at = std::chrono::steady_clock::now();
                             auto const us = [](auto aFrom, auto aTo) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(aTo - aFrom).count()); };
                             aJob.phases[1] = us(from, built_at);
                             aJob.phases[2] = us(built_at, ssa_at) + us(ssa_at, generated_at);
-                            aJob.code = std::move(generator.code());
                             aJob.optimizing = true;
                         }
                         catch (ssa::unsupported const& e)

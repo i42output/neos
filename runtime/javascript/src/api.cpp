@@ -2078,10 +2078,13 @@ namespace neos::javascript_runtime
                     if (depth == 2u)
                         return result;
                     auto& p = obj(prototype);
-                    auto const* layout = p.properties.layout();
-                    if (layout == nullptr || !ordinary_type(p) || p.properties.find(aKey))
+                    if (p.properties.layout() == nullptr || !ordinary_type(p) || p.properties.find(aKey))
                         return result;
-                    e.prototypes[depth] = { prototype, shape_word(layout) };
+                    // (watched: its shape is changed only by the runtime (compiled code's check of it is not undone by its own stores: 
+                    // see the set stub's SiteAdd))
+                    if (watch(p) == nullptr || p.properties.layout() == nullptr)
+                        return result;
+                    e.prototypes[depth] = { prototype, shape_word(p.properties.layout()) };
                     prototype = p.proto();
                 }
                 e.kind = jsl::SiteAdd;

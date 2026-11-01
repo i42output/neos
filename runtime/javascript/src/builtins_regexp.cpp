@@ -127,6 +127,7 @@ namespace neos::javascript_runtime
             // the built-in at this position of its prototype's (shapes do not change: their keys' positions and attributes are known))
             shape const* execOwn = nullptr;
             shape const* execPrototype = nullptr;
+            object const* execPrototypeObject = nullptr;    ///< (execOwn's prototype (an object's shape is its prototype's))
             std::uint32_t execPosition = 0u;
             last_index_position lastIndex;      ///< (see known_last_index)
             // (a match's array's shapes (see builtin_exec): of a new array (made by make_array), then with its index, input and groups)
@@ -504,15 +505,15 @@ namespace neos::javascript_runtime
         bool find_builtin_exec(regexp_object& r, regexp_state& aState);
         inline bool has_builtin_exec(regexp_object& r, regexp_state& aState)
         {
-            if (!r.matcher || r.proto() != the_realm().regexpPrototype)
+            if (!r.matcher)
                 return false;
-            // (a regexp of a shape known not to have its own exec, whose prototype (of the shape it had then) has the built-in at the 
-            // position it had then)
-            auto& p = obj(r.proto());
-            auto const* ownShape = r.properties.layout();
-            auto const* prototypeShape = p.properties.layout();
-            if (ownShape != nullptr && ownShape == aState.execOwn && prototypeShape != nullptr && prototypeShape == aState.execPrototype)
-                return p.properties.value_at(aState.execPosition) == aState.k.execFunction;
+            // (a regexp of a shape known not to have its own exec (its shape's prototype %RegExp.prototype%, that one's then), whose 
+            // prototype (of the shape it had then) has the built-in at the position it had then)
+            if (auto const* ownShape = r.properties.layout(); ownShape != nullptr && ownShape == aState.execOwn)
+                if (auto const& p = *aState.execPrototypeObject; p.properties.layout() == aState.execPrototype && aState.execPrototype != nullptr)
+                    return p.properties.value_at(aState.execPosition) == aState.k.execFunction;
+            if (r.proto() != the_realm().regexpPrototype)
+                return false;
             return find_builtin_exec(r, aState);
         }
         bool find_builtin_exec(regexp_object& r, regexp_state& aState)
@@ -529,6 +530,7 @@ namespace neos::javascript_runtime
                 return false;
             aState.execOwn = ownShape;
             aState.execPrototype = prototypeShape;
+            aState.execPrototypeObject = &p;
             aState.execPosition = exec.position();
             return true;
         }

@@ -1821,7 +1821,9 @@ namespace neos::compilers::javascript
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u));
                     set(address);
                     cell_of(address);
-                    mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
+                    // (a watched object's shape (the runtime watches an add's prototypes): only the runtime changes it (compiled code
+                    // stores no watched object's shape), so its class is the validity words')
+                    mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Validity);
                     get(entry);
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u) + 8u);
                     op(opcode::I64Ne);
