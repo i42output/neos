@@ -2296,7 +2296,9 @@ namespace neos::compilers::python
             // functions by their names in it))
             // (its functions' annotations are evaluated in its namespace; its classes' string annotations are resolved in it (e.g. by
             // dataclasses: "x: 'ClassVar[int]'", or any under "from __future__ import annotations"))
-            if (introspective(text) || !annotations.empty() || string_annotation(text) || importsStar())
+            // (a program linked with code of other languages: they use its names (see neos_rt_link_type), and it uses theirs (the names
+            // that it does not bind: found by the runtime (python::global_lookup)))
+            if (introspective(text) || !annotations.empty() || string_annotation(text) || importsStar() || generator().linked())
             {
                 iPyIntrospective.insert("__main__");
                 std::vector<std::string> names;
@@ -8541,6 +8543,24 @@ namespace neos::compilers::python
     {
         fragment value{ aValue };
         py_coerce(value, aTarget);
+        return result(value);
+    }
+
+    i_fragment const* compiler::owned_value(i_fragment const& aValue)
+    {
+        // (an object that a statement's temporary holds (see py_owned): taken from it (the temporary is zeroed: the statement's end 
+        // releases nothing), its reference the code's that uses the value)
+        if (!in_function())
+            return nullptr;
+        fragment value{ aValue };
+        auto& function = py_function();
+        auto const holder = held_by(value, function.pendingObjects);
+        if (!holder)
+            return nullptr;
+        function.pendingObjects.erase(std::find(function.pendingObjects.begin(), function.pendingObjects.end(), *holder));
+        put_i32(value, 0);
+        put_local(value, opcode::LocalSet, *holder);
+        function.freeObjects.push_back(*holder);
         return result(value);
     }
 

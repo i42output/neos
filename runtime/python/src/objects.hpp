@@ -483,6 +483,7 @@ namespace neos::python_runtime
 
         object* call(object* aCallable, object* aArgs, object* aKwargs);
         object* fn_builtin(char const* aName);
+        object* linked_global(char const* aName);      // (link.cpp: another language's global (see neos_rt_link_type); null: none)
         void fn_raise(object* aException);              // (raise exception: an exception or its class)
         void fn_raise_from(object* aException, object* aCause);  // (raise exception from cause)
         void raise_exception(object* aException);
@@ -635,6 +636,7 @@ namespace neos::python_runtime
         object* b_generic_function(std::vector<object*> const& aArgs, object* aKwargs);
         // (exec.cpp)
         object* fn_module_namespace(char const* aName, object* aGetter);
+        bool namespace_registered(char const* aName);  // (a module's getter of its names has been registered (python::register_namespace))
         object* fn_global_lookup(char const* aModule, char const* aName);
         void fn_import_star(char const* aModule, object* aFrom);
         void fn_register_namespace(char const* aName, object* aGetter);

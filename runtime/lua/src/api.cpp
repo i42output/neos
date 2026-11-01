@@ -924,6 +924,7 @@ namespace neos::lua_runtime
             { "upval_get", NEOS_RT_FUNCTION(api::upval_get), I64, 2u, { I64, I32 }, 0u },
             { "upval_set", NEOS_RT_FUNCTION(api::upval_set), I64, 3u, { I64, I32, I64 }, 0u },
             { "upval_box", NEOS_RT_FUNCTION(api::upval_box), I64, 2u, { I64, I32 }, 0u },
+            { "link", NEOS_RT_FUNCTION(link_globals), I64, 0u, {}, 0u },
             { "getglobal", NEOS_RT_FUNCTION(api::getglobal), I64, 2u, { I64, I64 }, 0u },
             { "setglobal", NEOS_RT_FUNCTION(api::setglobal), I64, 3u, { I64, I64, I64 }, 0u },
             { "getenv", NEOS_RT_FUNCTION(api::getenv), I64, 1u, { I64 }, 0u },

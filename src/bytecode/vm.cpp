@@ -2843,10 +2843,15 @@ namespace neos
                     return stream != nullptr && stream->flush() ? 0 : -1;
                 }
 
+                int host_link(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue)
+                {
+                    return runtime::link(aName, aLanguage, aType, aValue) ? 1 : 0;
+                }
+
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global };
+                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link };
             }
 
             void const* runtime::host()

@@ -54,6 +54,8 @@ namespace neos::language
         virtual void trace_output(neolib::i_string const& aText) = 0;
         virtual bool bigint_promotion() const = 0;              ///< (integers of any size (type::Integer))
         virtual bool overflow_traps() const = 0;                ///< (fixed size integer arithmetic traps on overflow)
+        virtual bool linked() const = 0;                        ///< (the program's translation units are of more than one language: the code
+                                                                ///< of each uses the others' globals by their names (see neos_rt_link_type))
         // the operand stack (bottom: 0)
     public:
         virtual std::size_t operand_count() const = 0;

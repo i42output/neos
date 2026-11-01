@@ -967,6 +967,12 @@ namespace neos::compilers::lua
             call("init", { I32, I32 }, I64);
             put_op(code, opcode::GlobalSet);
             put_u32(code, iProgramGlobal);
+            // (a program linked with code of other languages: the globals that it reads that are nil may be theirs)
+            if (generator().linked() && !iLoad)
+            {
+                call("link", {}, I64);
+                put_op(code, opcode::Drop);
+            }
             for (auto const& [text, global] : iLiteralOrder)
             {
                 put_op(code, opcode::I32Const);

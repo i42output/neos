@@ -69,3 +69,8 @@ NEOS_RUNTIME_PLUGIN_END
 {
     neos::javascript_runtime::program_ended();
 }
+
+NEOS_RUNTIME_PLUGIN_LINK
+{
+    return neos::javascript_runtime::link_global(aName, aType, aValue);
+}

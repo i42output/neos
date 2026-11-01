@@ -530,7 +530,12 @@ namespace neos::javascript_runtime
                     if (auto const p = g.own(name); p != nullptr && !p->accessor())
                         return p->data();
                 if (!has_property(global, name))
+                {
+                    // (a linked program: another language's global)
+                    if (auto const linked = linked_global(name))
+                        return *linked;
                     throw_reference_error(name_text(name) + " is not defined");
+                }
                 return get(global, name);
             });
         }
@@ -571,7 +576,12 @@ namespace neos::javascript_runtime
                 }
                 auto const global = the_realm().global;
                 if (!has_property(global, name))
+                {
+                    // (a linked program: another language's global)
+                    if (auto const linked = linked_global(name))
+                        return *linked;
                     return Undefined;
+                }
                 return get(global, name);
             });
         }

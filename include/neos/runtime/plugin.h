@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 15
+#define NEOS_RUNTIME_PLUGIN_VERSION 16
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -187,6 +187,39 @@ typedef union neos_rt_value
     char const* string;
     neos_rt_object* object;
 } neos_rt_value;
+
+/* (version 16) linking: the translation units of a program can be of different languages (e.g. "neos a.js b.py": see 
+   neos::context::load_program), the code of each language run by the language's runtime plugin; the code of one language calls the 
+   functions (and uses the other values) of another's by their names, as linked values: NEOS_RT_VOID (no value: undefined, null, None,
+   nil, ...), NEOS_RT_BOOL (b), NEOS_RT_I64 (an integer), NEOS_RT_F64 (a float), NEOS_RT_STRING (UTF-8) or NEOS_RT_OBJECT (any other 
+   value: a linked object). A language runtime plugin that takes part:
+   - defines NEOS_RUNTIME_PLUGIN_LINK { (if the running program's code of the plugin's language has a global named aName (e.g. a function
+     that its top level defines): store its value, as a linked value, in *aType and *aValue (an object: a new reference; a string: valid 
+     until the calling thread's next call of the plugin) and return nonzero; else return 0) }
+   - finds a name that its language's code uses but does not bind (where it would otherwise be an error, e.g. JavaScript's ReferenceError, 
+     Python's NameError) with neos_rt_host::link: as a value of its own (a linked object: a value of its own that refers to it, e.g. a 
+     function that calls it);
+   - passes its values to the other languages (arguments and results of calls of linked objects) as linked values: a value that is not
+     a bool, a number or a string as a linked object of its own (that refers to the value), or, a value of its own that refers to a 
+     linked object of another language's, as that object (so that a value given back to the language that it is of is the value it was).
+   A linked object's type (its first member, as any object's) is a neos_rt_link_type. */
+typedef struct neos_rt_link_type
+{
+    neos_rt_object_type base;                           /* (its name, retain and release) */
+    char const* language;                               /* the language whose value it is (its plugin's namespace, e.g. "python") */
+    /* nonzero if it can be called */
+    int (*callable)(neos_rt_object* aObject);
+    /* call it with aCount linked values (aTypes, aArguments: objects and strings are borrowed); its result is stored in *aResultType and 
+       *aResult (an object is a new reference; a string is valid until the calling thread's next call of a linked object of its language); 
+       returns NULL, or the error message ("type: message", valid until the next call) of an error that the call raised (e.g. an 
+       exception that the code it called did not handle) */
+    char const* (*call)(neos_rt_object* aObject, unsigned aCount, neos_rt_type const* aTypes, neos_rt_value const* aArguments,
+        neos_rt_type* aResultType, neos_rt_value* aResult);
+} neos_rt_link_type;
+
+#define NEOS_RUNTIME_PLUGIN_LINK_NAME "neos_runtime_plugin_link"
+
+typedef int (*neos_rt_plugin_link)(char const* aName, neos_rt_type* aType, neos_rt_value* aValue);
 
 /* a frame of the running program (see neos_rt_host::frames): a call of one of its functions that has not returned. Its 
    function's name and its source's name are as the compiler named them (valid while the program is loaded); its line is the 
@@ -302,6 +335,10 @@ typedef struct neos_rt_host
        and the program's code does not set it): code optimized after this may use its value as a constant (e.g. the address of a 
        table that the plugin made for the program) */
     void (*fix_global)(unsigned aGlobal);
+    /* (version 16) linking (see neos_rt_link_type): the value of the running program's global named aName that a runtime plugin other 
+       than aLanguage's (the caller's namespace) has, as a linked value stored in *aType and *aValue (see NEOS_RUNTIME_PLUGIN_LINK; the 
+       plugins that the program has loaded are asked, in the order they were loaded): nonzero if one has, else 0 */
+    int (*link)(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);
@@ -313,6 +350,7 @@ NEOS_RUNTIME_PLUGIN_EXPORT char const* neos_runtime_plugin_error(void);
 NEOS_RUNTIME_PLUGIN_EXPORT long const* neos_runtime_plugin_error_pending(void);
 NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_set_host(neos_rt_host const* aHost);
 NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void);
+NEOS_RUNTIME_PLUGIN_EXPORT int neos_runtime_plugin_link(char const* aName, neos_rt_type* aType, neos_rt_value* aValue);
 #endif
 
 #define NEOS_RT_FUNCTION(f) ((neos_rt_function_pointer)(f))
@@ -331,6 +369,10 @@ NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void);
 
 /* (optional) a plugin with work to finish when a program ends defines: NEOS_RUNTIME_PLUGIN_END { ... } */
 #define NEOS_RUNTIME_PLUGIN_END NEOS_RUNTIME_PLUGIN_EXPORT void neos_runtime_plugin_end(void)
+
+/* (optional) a language runtime plugin whose values programs of other languages use (see neos_rt_link_type) defines: 
+   NEOS_RUNTIME_PLUGIN_LINK { (the global aName's value in *aType and *aValue: nonzero; else 0) } */
+#define NEOS_RUNTIME_PLUGIN_LINK NEOS_RUNTIME_PLUGIN_EXPORT int neos_runtime_plugin_link(char const* aName, neos_rt_type* aType, neos_rt_value* aValue)
 
 #ifdef __cplusplus
 }

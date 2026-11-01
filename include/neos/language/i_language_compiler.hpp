@@ -125,6 +125,9 @@ namespace neos::language
         virtual i_fragment const* variable_value(i_fragment const& aValue, neolib::i_string_view const& aName, i_symbol_table_entry const& aVariable) = 0; ///< (a 
                                                                 ///< variable's value (aValue) as the language reads it (e.g. checked: bound); null: aValue)
         virtual i_fragment const* convert_value(i_fragment const& aValue, type aTarget) = 0;
+        virtual i_fragment const* owned_value(i_fragment const& aValue) = 0; ///< (an object value (e.g. one that convert_value made) whose 
+                                                                ///< reference the code that uses it takes over (the language no longer releases
+                                                                ///< it, e.g. at the end of its statement); null: none is the language's to give)
         virtual i_fragment const* void_value(i_fragment const& aStatement) = 0; ///< (a statement (e.g. a call of a function that returns
                                                                 ///< nothing) used as a value: the language's value of it (null: an error))
         virtual i_fragment const* division_by_zero(std::int32_t aKind) = 0; ///< (aKind: 0 int /, 1 float /, 2 float //, 3 float %, 4 int //, 5 int %)

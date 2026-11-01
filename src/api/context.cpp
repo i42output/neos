@@ -140,18 +140,23 @@ namespace neos
         std::string const schemaPath = (aSchemaPath.empty() && iSchema ? schema().path() : aSchemaPath);
         if (schemaPath.empty())
             throw no_schema_path_specified();
+        auto const* const previous = iSchema.get();
         iSchema.reset();
         iSchema = std::make_shared<language::schema>(schemaPath, concept_libraries(), compiler().show_parse_times());
+        // (a linked program's units of other languages have their own schemas (see load_program))
         for (auto& unit : program().translationUnits)
-            unit.schema = iSchema;
+            if (unit.schema == nullptr || unit.schema.get() == previous)
+                unit.schema = iSchema;
     }
 
     void context::load_schema(std::string const& aSchemaPath, std::string const& aSchemaSource)
     {
+        auto const* const previous = iSchema.get();
         iSchema.reset();
         iSchema = std::make_shared<language::schema>(aSchemaPath, concept_libraries(), compiler().show_parse_times(), aSchemaSource);
         for (auto& unit : program().translationUnits)
-            unit.schema = iSchema;
+            if (unit.schema == nullptr || unit.schema.get() == previous)
+                unit.schema = iSchema;
     }
 
     void context::add_plugin(neolib::i_plugin& aPlugin)
@@ -207,6 +212,44 @@ namespace neos
         }
         iProgram = decltype(iProgram){};
         auto& unit = load_unit(language::source_fragment{ neolib::string{ path } });
+    }
+
+    void context::load_program(std::vector<std::string> const& aPaths)
+    {
+        if (aPaths.size() <= 1u)
+        {
+            load_program(aPaths.empty() ? std::string{} : aPaths.front());
+            return;
+        }
+        // (the first unit: the context's schema (the one for its file type, if none is loaded))
+        load_program(aPaths.front());
+        iLinkedSchemas.clear();
+        std::vector<std::string> languages{ schema().meta().language };
+        for (auto path = std::next(aPaths.begin()); path != aPaths.end(); ++path)
+        {
+            // (the others: the schema for their file types (the context's, if it is for it))
+            auto const extension = std::filesystem::path{ *path }.extension().string();
+            std::shared_ptr<language::schema> unitSchema;
+            auto const& extensions = schema().meta().sourcecodeFileExtension;
+            if (std::find(extensions.begin(), extensions.end(), extension) != extensions.end())
+                unitSchema = iSchema;
+            else
+            {
+                auto const schemaPath = language::schema::find(extension);
+                if (!schemaPath)
+                    throw compiler_error("no schema found for file type '" + extension + "' (of '" + *path + "')");
+                auto& linkedSchema = iLinkedSchemas[*schemaPath];
+                if (linkedSchema == nullptr)
+                    linkedSchema = std::make_shared<language::schema>(*schemaPath, concept_libraries(), compiler().show_parse_times());
+                unitSchema = linkedSchema;
+            }
+            auto const& language = unitSchema->meta().language;
+            if (std::find(languages.begin(), languages.end(), language) != languages.end())
+                throw compiler_error("cannot link '" + *path + "': the program has a translation unit of its language (" + language + 
+                    "); each of a linked program's translation units is of a different language");
+            languages.push_back(language);
+            load_unit(language::source_fragment{ neolib::string{ *path } }, unitSchema);
+        }
     }
 
     void context::load_program(std::istream& aStream)
@@ -286,7 +329,12 @@ namespace neos
     std::optional<neos::text> context::compile_source(std::string const& aLanguage, std::string const& aSource, std::string const& aSourceName,
         std::string const& aOptions, std::string& aError)
     {
-        if (!schema_loaded() || schema().meta().language != aLanguage)
+        // (the context's schema, or (a linked program) that of its units of the language)
+        auto sourceSchema = schema_loaded() && schema().meta().language == aLanguage ? iSchema : std::shared_ptr<language::schema>{};
+        for (auto const& linkedSchema : iLinkedSchemas)
+            if (sourceSchema == nullptr && linkedSchema.second->meta().language == aLanguage)
+                sourceSchema = linkedSchema.second;
+        if (sourceSchema == nullptr)
         {
             aError = "no schema for language '" + aLanguage + "'";
             return {};
@@ -295,7 +343,7 @@ namespace neos
         neolib::string source{ aSource };
         if (!source.empty() && source.to_std_string_view().back() != '\n')
             source.append("\n", 1u);
-        compiled.translationUnits.push_back(translation_unit_t{ iSchema, { language::source_fragment{ neolib::string{ aSourceName }, source } },
+        compiled.translationUnits.push_back(translation_unit_t{ sourceSchema, { language::source_fragment{ neolib::string{ aSourceName }, source } },
             language::ast{ compiled.symbolTable } });
         compiler().set_language_options(aLanguage, aOptions);
         compiler().set_quiet(true);
@@ -371,7 +419,7 @@ namespace neos
             add_plugin(*plugin);
     }
 
-    context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment)
+    context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment, std::shared_ptr<language::schema> aSchema)
     {
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
@@ -380,16 +428,16 @@ namespace neos
         if (!fragmentStream)
             throw compiler_error("failed to open source file '" + aFragment.source_file_path()->to_std_string() + "'");
 
-        return load_unit(std::move(aFragment), fragmentStream);
+        return load_unit(std::move(aFragment), fragmentStream, std::move(aSchema));
     }
 
-    context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment, std::istream& aStream)
+    context::translation_unit_t& context::load_unit(language::source_fragment&& aFragment, std::istream& aStream, std::shared_ptr<language::schema> aSchema)
     {
         if (!schema_loaded())
             throw compiler_error("no schema loaded");
 
         auto& unit = *program().translationUnits.insert(program().translationUnits.end(), 
-            translation_unit_t{ iSchema, { std::move(aFragment) }, language::ast{ program().symbolTable } });
+            translation_unit_t{ aSchema != nullptr ? aSchema : iSchema, { std::move(aFragment) }, language::ast{ program().symbolTable } });
 
         load_fragment(unit.fragments.back(), aStream);
 
@@ -402,11 +450,13 @@ namespace neos
             throw invalid_fragment();
 
         auto const sourceFilePath = aFragment.source_file_path().value().to_std_string();
+        // (the packages of the language of the unit being compiled (a linked program's units have their own schemas))
+        auto const* const unitSchema = compiler().current_schema() != nullptr ? compiler().current_schema() : schema_loaded() ? &schema() : nullptr;
         // (a package's source that is not a file (see add_package))
-        if (!iPackages.empty() && schema_loaded())
-            for (auto const& ext : schema().meta().sourcecodeFileExtension)
+        if (!iPackages.empty() && unitSchema != nullptr)
+            for (auto const& ext : unitSchema->meta().sourcecodeFileExtension)
             {
-                auto const tryPath = (std::filesystem::path{ schema().path() }.parent_path() / "packages" / schema().meta().language / (sourceFilePath + ext)).generic_string();
+                auto const tryPath = (std::filesystem::path{ unitSchema->path() }.parent_path() / "packages" / unitSchema->meta().language / (sourceFilePath + ext)).generic_string();
                 if (auto const package = iPackages.find(tryPath); package != iPackages.end())
                 {
                     aFragment.source_file_path().value() = tryPath;
@@ -417,11 +467,13 @@ namespace neos
             }
         std::optional<std::ifstream> fragmentStream;
         fragmentStream.emplace(sourceFilePath, std::ios::binary);
+        if (!*fragmentStream && unitSchema == nullptr)
+            throw no_schema_loaded();
         if (!*fragmentStream)
-            for (auto const& ext : schema().meta().sourcecodeFileExtension)
+            for (auto const& ext : unitSchema->meta().sourcecodeFileExtension)
             {
                 // (packages live alongside the schema, not relative to the current working directory)
-                std::string tryPath = (std::filesystem::path{ schema().path() }.parent_path() / "packages" / schema().meta().language / (sourceFilePath + ext)).generic_string();
+                std::string tryPath = (std::filesystem::path{ unitSchema->path() }.parent_path() / "packages" / unitSchema->meta().language / (sourceFilePath + ext)).generic_string();
                 fragmentStream.emplace(tryPath, std::ios::binary);
                 if (*fragmentStream)
                 {

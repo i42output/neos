@@ -325,6 +325,7 @@ namespace neos::language
         void set_quiet(bool aQuiet) { iQuiet = aQuiet; }    ///< (syntax errors are not reported on the standard error stream: only thrown)
         std::set<std::string> const& source_files() const { return iSourceFiles; } ///< (the files of the source fragments that the program 
                                                                         ///< compiled last is compiled from (e.g. its packages): see neos --cache)
+        schema const* current_schema() const;                          ///< (the schema of the translation unit being compiled; null: none)
         bool compile(program& aProgram, translation_unit& aUnit);
         bool compile(program& aProgram, translation_unit& aUnit, i_source_fragment& aFragment);
         bool compile(const i_source_fragment& aFragment) final;
@@ -393,6 +394,7 @@ namespace neos::language
         void trace_output(neolib::i_string const& aText) final;
         bool bigint_promotion() const final;
         bool overflow_traps() const final;
+        bool linked() const final;
         std::size_t operand_count() const final;
         std::size_t operand_base() const final;
         i_operand_type const& operand(std::size_t aIndex) const final;
@@ -507,6 +509,7 @@ namespace neos::language
         bool iPreparse = true;
         bool iTrapOnOverflow = false;
         bool iQuiet = false;
+        bool iLinked = false;                                   ///< (see linked)
         std::set<std::string> iSourceFiles;
         std::optional<bool> iBigintPromotion;
         compilation_state_stack_t iCompilationStateStack;

@@ -526,6 +526,11 @@ namespace neos::python_runtime
             return true;
         }
 
+        bool namespace_registered(char const* aName)
+        {
+            return namespace_getters().contains(std::string_view{ aName });
+        }
+
         // python::register_namespace(module, getter): the getter of a module's names (its namespace's)
         void fn_register_namespace(char const* aName, object* aGetter)
         {
@@ -542,7 +547,15 @@ namespace neos::python_runtime
             if (auto const ns = module_namespaces().find(aModule); ns != module_namespaces().end())
                 if (auto const value = mapping_find(ns->second, aName))
                     return value;
-            return fn_builtin(aName);
+            auto const builtin = fn_builtin(aName);
+            // (a program linked with code of other languages: a name that is not a builtin may be one of their globals)
+            if (builtin == nullptr && failed() && std::string_view{ error_text() }.starts_with("NameError"))
+                if (auto const linked = linked_global(aName))
+                {
+                    clear_error();
+                    return linked;
+                }
+            return builtin;
         }
 
         // python::import_star(module, from): from m import * of a module that is not a source of the program's (a runtime module): its 

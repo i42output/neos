@@ -104,6 +104,7 @@ namespace neos::language
         i_fragment const* void_value(i_fragment const&) override { return nullptr; }
         i_fragment const* variable_value(i_fragment const&, neolib::i_string_view const&, i_symbol_table_entry const&) override { return nullptr; }
         i_fragment const* convert_value(i_fragment const&, type) override { return nullptr; }
+        i_fragment const* owned_value(i_fragment const&) override { return nullptr; }
         i_fragment const* division_by_zero(std::int32_t) override { return nullptr; }
         type argument_type(i_operand_type const&) override { return type::UNKNOWN; }
         void function_start() override {}

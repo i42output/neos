@@ -280,6 +280,7 @@ namespace neos
                         neos_rt_plugin const* description = nullptr;
                         std::map<std::string, function> functions;
                         neos_rt_plugin_end end = nullptr;
+                        neos_rt_plugin_link link = nullptr;     ///< (a language runtime's: see neos_rt_link_type)
                     };
 
                     class registry
@@ -303,6 +304,22 @@ namespace neos
                             }
                             for (auto end : ends)
                                 end();
+                        }
+                        // (linking: the linked object of the running program's global aName that a plugin other than aLanguage's has, 
+                        // asking those loaded in the order they were loaded)
+                        bool link(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue)
+                        {
+                            std::vector<neos_rt_plugin_link> links;
+                            {
+                                std::lock_guard<std::recursive_mutex> lock{ iMutex };
+                                for (auto const& ns : iLoadOrder)
+                                    if (auto const& p = iPlugins.at(ns); p.link != nullptr && (aLanguage == nullptr || ns != aLanguage))
+                                        links.push_back(p.link);
+                            }
+                            for (auto link : links)
+                                if (link(aName, aType, aValue) != 0)
+                                    return true;
+                            return false;
                         }
                         function const& resolve(std::string const& aImport)
                         {
@@ -402,6 +419,7 @@ namespace neos
                                 auto const errorPending = reinterpret_cast<neos_rt_plugin_error_pending>(lib->symbol(NEOS_RUNTIME_PLUGIN_ERROR_PENDING_NAME));
                                 long const* const pending = error != nullptr && errorPending != nullptr ? errorPending() : nullptr;
                                 p.end = reinterpret_cast<neos_rt_plugin_end>(lib->symbol(NEOS_RUNTIME_PLUGIN_END_NAME));
+                                p.link = reinterpret_cast<neos_rt_plugin_link>(lib->symbol(NEOS_RUNTIME_PLUGIN_LINK_NAME));
                                 for (unsigned i = 0u; i < description->functionCount; ++i)
                                 {
                                     auto const& d = description->functions[i];
@@ -425,6 +443,7 @@ namespace neos
                                         throw std::runtime_error("runtime plugin function '" + added.name + "': unsupported signature");
                                 }
                                 p.lib = std::move(lib);
+                                iLoadOrder.push_back(aNamespace);
                                 return iPlugins.emplace(aNamespace, std::move(p)).first->second;
                             }
                             throw std::runtime_error("runtime plugin '" + fileName + "' not found (searched NEOS_RUNTIME_PLUGIN_PATH, the executable's directory and neos's home)");
@@ -433,7 +452,14 @@ namespace neos
                     private:
                         std::recursive_mutex iMutex;
                         std::map<std::string, plugin> iPlugins;
+                        std::vector<std::string> iLoadOrder;    ///< (the plugins' namespaces, in the order they were loaded)
                     };
+                }
+
+                bool link(char const* aName, char const* aLanguage, void* aType, void* aValue)
+                {
+                    return aName != nullptr && aType != nullptr && aValue != nullptr && 
+                        registry::instance().link(aName, aLanguage, static_cast<neos_rt_type*>(aType), static_cast<neos_rt_value*>(aValue));
                 }
 
                 void program_end()

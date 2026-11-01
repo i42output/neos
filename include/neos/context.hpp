@@ -129,6 +129,9 @@ namespace neos
                                                         ///< schema's packages would be, e.g. "<schema folder>/packages/python/builtins.py"))
         const language::schema& schema() const;
         void load_program(std::string const& aPath);
+        void load_program(std::vector<std::string> const& aPaths);  ///< (a program of more than one translation unit, each of a different language 
+                                                        ///< (the schema for its file type (the first's: the context's schema, if loaded)), linked: 
+                                                        ///< their top levels run in turn, and each uses the others' globals by their names)
         void load_program(std::istream& aStream);
         language::compiler& compiler() final;
         void compile_program();
@@ -169,8 +172,9 @@ namespace neos
         std::vector<outline_node> outline(std::string const& aSchemaPath, std::string_view aSource);
     private:
         void init();
-        translation_unit_t& load_unit(language::source_fragment&& aFragment);
-        translation_unit_t& load_unit(language::source_fragment&& aFragment, std::istream& aStream);
+        translation_unit_t& load_unit(language::source_fragment&& aFragment, std::shared_ptr<language::schema> aSchema = {}); ///< (aSchema: the 
+                                                        ///< unit's (none: the context's))
+        translation_unit_t& load_unit(language::source_fragment&& aFragment, std::istream& aStream, std::shared_ptr<language::schema> aSchema = {});
         void load_fragment(language::i_source_fragment& aFragment) final;
         void load_fragment(language::i_source_fragment& aFragment, std::istream& aStream);
     private:
@@ -189,6 +193,8 @@ namespace neos
         mutable std::mutex iConceptCacheMutex;
         mutable std::unordered_map<std::string, neolib::ref_ptr<language::i_semantic_concept>, concept_symbol_hash, std::equal_to<>> iConceptCache;
         std::shared_ptr<language::schema> iSchema;
+        std::map<std::string, std::shared_ptr<language::schema>> iLinkedSchemas; ///< (by path: the schemas of a linked program's translation 
+                                                        ///< units that are not of the context's schema's language (see load_program))
         language::compiler iCompiler;
         program_t iProgram;
         std::vector<std::unique_ptr<bytecode::vm::thread>> iThreads;

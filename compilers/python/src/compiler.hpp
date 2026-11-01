@@ -256,6 +256,7 @@ namespace neos::compilers::python
         i_fragment const* void_value(i_fragment const& aStatement) override;
         i_fragment const* variable_value(i_fragment const& aValue, neolib::i_string_view const& aName, i_symbol_table_entry const& aVariable) override;
         i_fragment const* convert_value(i_fragment const& aValue, type aTarget) override;
+        i_fragment const* owned_value(i_fragment const& aValue) override;
         i_fragment const* division_by_zero(std::int32_t aKind) override;
         type argument_type(i_operand_type const& aOperand) override;
         void function_start() override;

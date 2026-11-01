@@ -62,6 +62,12 @@ namespace neos::javascript_runtime
     std::unordered_map<value, global_binding>& global_lexicals();
     std::span<neos_rt_function const> api_functions();
 
+    // (link.cpp: linking (see neos_rt_link_type): a name that the program's JavaScript uses but that is not a global, if another language's 
+    // code has a global of that name (its value as JavaScript's); a global of the program's JavaScript, for another language's code (see 
+    // NEOS_RUNTIME_PLUGIN_LINK))
+    std::optional<value> linked_global(value aName);
+    int link_global(char const* aName, neos_rt_type* aType, neos_rt_value* aValue);
+
     // (functions.cpp)
     value make_closure(std::uint32_t aNumber, std::uint32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::uint32_t aLength, value aSource);
     value make_arguments_object(value aCallee, std::span<value const> aArguments, bool aMapped);

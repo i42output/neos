@@ -135,6 +135,16 @@ namespace neos::language
         return iTrapOnOverflow;
     }
 
+    bool compiler::linked() const
+    {
+        return iLinked;
+    }
+
+    schema const* compiler::current_schema() const
+    {
+        return !iCompilationStateStack.empty() && state().unit != nullptr ? state().unit->schema.get() : nullptr;
+    }
+
     bool compiler::bigint_promotion() const
     {
         if (iBigintPromotion)
@@ -163,6 +173,12 @@ namespace neos::language
         iPreparseTime = {};
         iParseTime = {};
         iSourceFiles.clear();
+        // (a linked program: its translation units are of more than one language)
+        iLinked = false;
+        for (auto const& unit : aProgram.translationUnits)
+            if (unit.schema != nullptr && aProgram.translationUnits.front().schema != nullptr &&
+                unit.schema->meta().language != aProgram.translationUnits.front().schema->meta().language)
+                iLinked = true;
 
         bool ok = true;
 
@@ -2678,15 +2694,28 @@ namespace neos::language
                     put_u32(value.fragmentCode.as_std_vector(), counter);
                     value.valueType = t;
                     coerce(value, type::Object);
+                    // (the variable holds a reference of its own: the converted value's, if the language gives it (the statement's 
+                    // temporary's is not released at each iteration's end: it would be the last iteration's only), else one retained)
+                    bool owned = false;
+                    if (language() != nullptr)
+                        if (auto const* taken = language()->owned_value(value))
+                        {
+                            value = fragment{ *taken };
+                            owned = true;
+                        }
                     append(statement, value);
-                    // (the variable holds a reference of its own: the converted value's reference is the statement's (a temporary's))
                     auto const held = temporary(type::Object);
                     put_op(code, opcode::LocalTee);
                     put_u32(code, held);
-                    put_op(code, opcode::CallFunction);
-                    statement.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()),
-                        runtime_function("neos::object_retain", { type::Object }, type::Void) });
-                    code.resize(code.size() + 5u);
+                    if (!owned)
+                    {
+                        put_op(code, opcode::CallFunction);
+                        statement.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()),
+                            runtime_function("neos::object_retain", { type::Object }, type::Void) });
+                        code.resize(code.size() + 5u);
+                    }
+                    else
+                        put_op(code, opcode::Drop);
                     put_op(code, opcode::LocalGet);
                     put_u32(code, held);
                     put_op(code, global ? opcode::GlobalGet : opcode::LocalGet);
@@ -3308,6 +3337,32 @@ namespace neos::language
     void compiler::emit_module(program& aProgram)
     {
         using bytecode::opcode;
+        // (a linked program: the entry points of its translation units (their top levels), called in turn by its entry point (the last's
+        // result is its result))
+        if (iLinked)
+        {
+            std::vector<std::uint32_t> entries;
+            for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)
+                if (iModule.functions[id].entry && !iModule.functions[id].fromImportedFragment && !iModule.functions[id].imported)
+                    entries.push_back(id);
+            if (entries.size() > 1u)
+            {
+                auto const linkedEntry = add_function("__neos_link__", false);
+                auto& function = iModule.functions[linkedEntry];
+                function.signature = iModule.functions[entries.back()].signature;
+                function.signature.set_name(neolib::string{ function.name });
+                for (auto const e : entries)
+                {
+                    put_op(function.body, opcode::CallFunction);
+                    function.relocations.emplace_back(static_cast<std::uint32_t>(function.body.size()), e);
+                    function.body.resize(function.body.size() + 5u);
+                    if (e != entries.back() && wasm_type(iModule.functions[e].signature.return_type()))
+                        put_op(function.body, opcode::Drop);
+                }
+                function.compiled = true;
+                function.entry = true;
+            }
+        }
         // function index space: imports first
         std::vector<std::uint32_t> order;
         for (std::uint32_t id = 0u; id < iModule.functions.size(); ++id)

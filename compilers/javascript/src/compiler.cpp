@@ -551,8 +551,9 @@ namespace neos::compilers::javascript
         iAnnexBFunctions.clear();
         // (a script's top-level lexical declarations are bindings of the global lexical environment that other scripts (e.g. eval code,
         // functions the Function constructor makes, $262.evalScript's scripts) see: a script's that no function uses is a local of the
-        // script's function unless its source could run other code that names it)
-        if (iKind == code_kind::EvaluateScript || (iKind == code_kind::Script && !iModule && script_may_run_code()))
+        // script's function unless its source could run other code that names it (or the program is linked with code of other languages,
+        // which uses its globals by their names: see neos_rt_link_type))
+        if (iKind == code_kind::EvaluateScript || (iKind == code_kind::Script && !iModule && (script_may_run_code() || generator().linked())))
             for (auto& b : script->top->bindings)
                 if (b->lexical())
                     b->captured = true;

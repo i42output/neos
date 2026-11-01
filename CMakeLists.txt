@@ -403,7 +403,8 @@ add_neos_runtime_plugin(lua
     runtime/lua/src/lib_io.cpp
     runtime/lua/src/lib_os.cpp
     runtime/lua/src/lib_utf8.cpp
-    runtime/lua/src/lib_debug.cpp)
+    runtime/lua/src/lib_debug.cpp
+    runtime/lua/src/link.cpp)
 target_include_directories(lua PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include") # (Lua's values)
 
 add_neos_runtime_plugin(javascript
@@ -452,6 +453,7 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/modules.cpp
     runtime/javascript/src/builtins_async.cpp
     runtime/javascript/src/bigint.cpp
+    runtime/javascript/src/link.cpp
     runtime/javascript/src/stubs.cpp
     runtime/javascript/src/intl.cpp
     runtime/javascript/src/intl_locale.cpp

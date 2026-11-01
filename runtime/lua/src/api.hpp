@@ -51,6 +51,10 @@ namespace neos::lua_runtime
     };
 
     void set_host(neos_rt_host const* aHost);
+    // (link.cpp: linking (see neos_rt_link_type): lua::link (the program is linked with code of other languages: the globals table finds 
+    // their globals); a global of the program's Lua, for another language's code (see NEOS_RUNTIME_PLUGIN_LINK))
+    value link_globals();
+    int link_global(char const* aName, neos_rt_type* aType, neos_rt_value* aValue);
     program_info* find_program(void* aProgram);
     program_info& register_program(std::uint32_t aDispatcher, std::uint32_t aResultsGlobal);
     void forget_program(void* aProgram);
