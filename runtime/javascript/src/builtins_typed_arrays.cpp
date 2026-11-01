@@ -83,7 +83,7 @@ namespace neos::javascript_runtime
             store_element(aTypedArray.type, numeric, aTypedArray.element(static_cast<std::size_t>(aIndex)));
     }
 
-    std::optional<property_descriptor> typed_array_object::get_own_property(value aKey)
+    std::optional<property_descriptor> typed_array_object::do_get_own_property(value aKey)
     {
         if (auto const index = numeric_key(aKey))
         {
@@ -95,7 +95,7 @@ namespace neos::javascript_runtime
         return ordinary_get_own_property(aKey);
     }
 
-    bool typed_array_object::define_own_property(value aKey, property_descriptor const& aDescriptor)
+    bool typed_array_object::do_define_own_property(value aKey, property_descriptor const& aDescriptor)
     {
         if (auto const index = numeric_key(aKey))
         {
@@ -113,24 +113,24 @@ namespace neos::javascript_runtime
                 typed_array_set_element(*this, *index, *aDescriptor.valueField);
             return true;
         }
-        return object::define_own_property(aKey, aDescriptor);
+        return object::do_define_own_property(aKey, aDescriptor);
     }
 
-    bool typed_array_object::has_property(value aKey)
+    bool typed_array_object::do_has_property(value aKey)
     {
         if (auto const index = numeric_key(aKey))
             return valid_index(*index);
-        return object::has_property(aKey);
+        return object::do_has_property(aKey);
     }
 
-    value typed_array_object::get(value aKey, value aReceiver)
+    value typed_array_object::do_get(value aKey, value aReceiver)
     {
         if (auto const index = numeric_key(aKey))
             return typed_array_get_element(*this, *index);
-        return object::get(aKey, aReceiver);
+        return object::do_get(aKey, aReceiver);
     }
 
-    bool typed_array_object::set(value aKey, value aValue, value aReceiver)
+    bool typed_array_object::do_set(value aKey, value aValue, value aReceiver)
     {
         if (auto const index = numeric_key(aKey))
         {
@@ -143,17 +143,17 @@ namespace neos::javascript_runtime
                 return true;
             return ordinary_set(aKey, aValue, aReceiver);
         }
-        return object::set(aKey, aValue, aReceiver);
+        return object::do_set(aKey, aValue, aReceiver);
     }
 
-    bool typed_array_object::delete_property(value aKey)
+    bool typed_array_object::do_delete_property(value aKey)
     {
         if (auto const index = numeric_key(aKey))
             return !valid_index(*index);
-        return object::delete_property(aKey);
+        return object::do_delete_property(aKey);
     }
 
-    value_list typed_array_object::own_property_keys()
+    value_list typed_array_object::do_own_property_keys()
     {
         value_list result;
         if (!out_of_bounds())
@@ -168,7 +168,7 @@ namespace neos::javascript_runtime
         return result;
     }
 
-    bool typed_array_object::prevent_extensions()
+    bool typed_array_object::do_prevent_extensions()
     {
         if (!fixed_length())
             return false;

@@ -451,11 +451,11 @@ namespace neos::javascript_runtime
                 std::u16string_view const k = str(aKey);
                 return std::binary_search(exports.begin(), exports.end(), k);
             }
-            value get_prototype_of() override { return Null; }
-            bool set_prototype_of(value aPrototype) override { return aPrototype == Null; }
-            bool is_extensible() override { return false; }
-            bool prevent_extensions() override { return true; }
-            std::optional<property_descriptor> get_own_property(value aKey) override
+            value do_get_prototype_of() { return Null; }
+            bool do_set_prototype_of(value aPrototype) { return aPrototype == Null; }
+            bool do_is_extensible() { return false; }
+            bool do_prevent_extensions() { return true; }
+            std::optional<property_descriptor> do_get_own_property(value aKey) 
             {
                 if (is_symbol(aKey))
                     return ordinary_get_own_property(aKey);
@@ -464,7 +464,7 @@ namespace neos::javascript_runtime
                 auto const v = get(aKey, value_of(*this));
                 return property_descriptor::data(v, AttributeWritable | AttributeEnumerable);
             }
-            bool define_own_property(value aKey, property_descriptor const& aDescriptor) override
+            bool do_define_own_property(value aKey, property_descriptor const& aDescriptor) 
             {
                 if (is_symbol(aKey))
                     return ordinary_define_own_property(aKey, aDescriptor);
@@ -478,13 +478,13 @@ namespace neos::javascript_runtime
                     return same_value(*aDescriptor.valueField, *current->valueField);
                 return true;
             }
-            bool has_property(value aKey) override
+            bool do_has_property(value aKey) 
             {
                 if (is_symbol(aKey))
                     return ordinary_get_own_property(aKey).has_value();
                 return exported(aKey);
             }
-            value get(value aKey, value aReceiver) override
+            value do_get(value aKey, value aReceiver) 
             {
                 if (is_symbol(aKey))
                     return ordinary_get(aKey, aReceiver);
@@ -498,14 +498,14 @@ namespace neos::javascript_runtime
                     throw_reference_error(name + " is not defined");
                 return binding_value(*binding.module, binding.name);
             }
-            bool set(value, value, value) override { return false; }
-            bool delete_property(value aKey) override
+            bool do_set(value, value, value) { return false; }
+            bool do_delete_property(value aKey) 
             {
                 if (is_symbol(aKey))
                     return ordinary_delete(aKey);
                 return !exported(aKey);
             }
-            value_list own_property_keys() override
+            value_list do_own_property_keys() 
             {
                 value_list result;
                 for (auto const& e : exports)

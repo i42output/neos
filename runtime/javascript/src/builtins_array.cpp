@@ -626,7 +626,7 @@ namespace neos::javascript_runtime
         {
             auto const o = to_object(aThis);
             if (auto* a = as_array(o); a != nullptr && !a->sparse && a->extensible && a->lengthWritable && a->length != 0u &&
-                a->elements.size() == a->length && a->proto == the_realm().arrayPrototype && plain_prototypes())
+                a->elements.size() == a->length && a->proto() == the_realm().arrayPrototype && plain_prototypes())
             {
                 // (a plain array: its last element (a hole's value is undefined: its prototypes have no elements), as the steps below
                 // would leave it (no trailing holes))
@@ -668,9 +668,9 @@ namespace neos::javascript_runtime
             state.plainArrays[0] = ~std::uint64_t{};
             return;
         }
-        state.plainArrays[0] = reinterpret_cast<std::uintptr_t>(arrayShape);
+        state.plainArrays[0] = shape_ref::word_of(arrayShape);
         state.plainArrays[1] = r.objectPrototype;
-        state.plainArrays[2] = reinterpret_cast<std::uintptr_t>(objectShape);
+        state.plainArrays[2] = shape_ref::word_of(objectShape);
     }
 
     bool plain_array_prototypes()
@@ -678,7 +678,7 @@ namespace neos::javascript_runtime
         {
             auto const& r = the_realm();
             auto* ap = as_array(r.arrayPrototype);
-            if (ap == nullptr || ap->sparse || !ap->elements.empty() || obj(r.arrayPrototype).proto != r.objectPrototype)
+            if (ap == nullptr || ap->sparse || !ap->elements.empty() || obj(r.arrayPrototype).proto() != r.objectPrototype)
                 return false;
             struct plain_cache
             {
@@ -708,7 +708,7 @@ namespace neos::javascript_runtime
         {
             auto const o = to_object(aThis);
             if (auto* a = as_array(o); a != nullptr && !a->sparse && a->extensible && a->lengthWritable && a->elements.size() == a->length &&
-                a->length + aArguments.size() < 0xFFFFFFFFull && a->proto == the_realm().arrayPrototype && plain_prototypes())
+                a->length + aArguments.size() < 0xFFFFFFFFull && a->proto() == the_realm().arrayPrototype && plain_prototypes())
             {
                 // (a plain array: its elements)
                 remember_plain_arrays();
@@ -815,7 +815,7 @@ namespace neos::javascript_runtime
             }
             auto const first = get(o, key(0.0));
             if (auto* a = as_array(o); a != nullptr && !a->sparse && a->elements.size() == a->length && a->lengthWritable &&
-                std::find(a->elements.begin(), a->elements.end(), Empty) == a->elements.end() && a->proto == the_realm().arrayPrototype)
+                std::find(a->elements.begin(), a->elements.end(), Empty) == a->elements.end() && a->proto() == the_realm().arrayPrototype)
             {
                 a->elements.erase(a->elements.begin());
                 --a->length;
@@ -870,7 +870,7 @@ namespace neos::javascript_runtime
             auto const a = array_species_create(o, count);
             // (a plain array's slice made by %Array%: its elements (a hole is one in the slice too))
             if (auto* const source = as_array(o), *const result = as_array(a); source != nullptr && result != nullptr && source != result &&
-                !source->sparse && !result->sparse && source->proto == the_realm().arrayPrototype && result->proto == the_realm().arrayPrototype &&
+                !source->sparse && !result->sparse && source->proto() == the_realm().arrayPrototype && result->proto() == the_realm().arrayPrototype &&
                 result->extensible && result->lengthWritable && result->elements.empty() && result->properties.size() == 0u && 
                 result->length == static_cast<std::uint32_t>(count) && plain_prototypes())
             {

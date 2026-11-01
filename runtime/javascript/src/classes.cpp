@@ -63,7 +63,7 @@ namespace neos::javascript_runtime
         public:
             class_definition() : cell{ cell_type::Internal } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 for (auto const* methods : { &instanceMethods, &staticMethods })
                     for (auto const& m : *methods)
@@ -228,7 +228,7 @@ namespace neos::javascript_runtime
         }
         else
         {
-            obj(f).proto = parent;
+            obj(f).set_proto(parent);
             set_function_name(f, aName);
         }
         auto& fn = function_of(f);

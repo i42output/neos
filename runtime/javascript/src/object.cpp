@@ -57,7 +57,11 @@ namespace neos::javascript_runtime
 
     shape::~shape()
     {
-        // (the shapes that it transitions to: its (a shape's parent is the one that transitions to it))
+        // (a base root's roots of other prototypes; the shapes that it transitions to: its (a shape's parent is the one that transitions 
+        // to it))
+        if (iProtoRoots)
+            for (auto const& r : *iProtoRoots)
+                delete r.second;
         if (iManyTransitions)
             for (auto const& t : *iManyTransitions)
                 delete t.second;
@@ -84,6 +88,8 @@ namespace neos::javascript_runtime
         auto* const next = new shape{};
         ++shapes;
         pin_interned(aKey);     // (an equal key later (e.g. of another run of the same code) is this one: its transition is found)
+        next->proto = proto;
+        next->base = base;
         next->parent = this;
         next->key = aKey;
         next->attributes = aAttributes;
@@ -102,6 +108,44 @@ namespace neos::javascript_runtime
             }
         }
         return next;
+    }
+
+    shape* shape::root_for(value aPrototype)
+    {
+        if (base != this)
+            return base->root_for(aPrototype);
+        if (aPrototype == proto)
+            return this;
+        if (!iProtoRoots)
+            iProtoRoots = std::make_unique<std::unordered_map<value, shape*>>();
+        if (auto const existing = iProtoRoots->find(aPrototype); existing != iProtoRoots->end())
+            return existing->second;
+        auto& shapes = the_heap().shape_count();
+        if (shapes >= MaxShapes)
+            return nullptr;
+        auto* const root = new shape{};
+        ++shapes;
+        root->proto = aPrototype;
+        root->base = this;
+        root->validity = validity;
+        iProtoRoots->emplace(aPrototype, root);
+        return root;
+    }
+
+    shape* shape::with_proto(value aPrototype)
+    {
+        if (aPrototype == proto)
+            return this;
+        auto* s = base->root_for(aPrototype);
+        if (s == nullptr)
+            return nullptr;
+        for (auto const& slot : slots())
+        {
+            s = s->transition(slot.key, slot.attributes);
+            if (s == nullptr)
+                return nullptr;
+        }
+        return s;
     }
 
     std::optional<std::uint32_t> shape::position(value aKey)
@@ -139,10 +183,46 @@ namespace neos::javascript_runtime
         return iSlots;
     }
 
-    void accessor_pair::trace(tracer& aTracer)
+    void accessor_pair::do_trace(tracer& aTracer)
     {
         aTracer.mark(getter);
         aTracer.mark(setter);
+    }
+
+    // --- objects' extras (the heap's: few objects have one)
+
+    namespace
+    {
+        using extra_table = std::unordered_map<object const*, std::unique_ptr<object::object_extra>>;
+        extra_table& extras()
+        {
+            static isolate_local<extra_table> sExtras;
+            return *sExtras;
+        }
+    }
+
+    object::~object()
+    {
+        if (hasExtra)
+            extras().erase(this);
+    }
+
+    object::object_extra& object::extra()
+    {
+        if (!hasExtra)
+        {
+            auto& e = extras()[this];
+            e = std::make_unique<object_extra>();
+            hasExtra = 1u;
+            note_owner(this);
+            return *e;
+        }
+        return *find_extra();
+    }
+
+    object::object_extra* object::find_extra() const
+    {
+        return extras().find(this)->second.get();
     }
 
     // --- property tables
@@ -164,7 +244,7 @@ namespace neos::javascript_runtime
         auto const& t = *iTable;
         if (t.iShape == nullptr)
             return t.entries()[iPosition].data;
-        auto const v = t.iValues[iPosition];
+        auto const v = t.values()[iPosition];
         return (t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u ? cell_of<accessor_pair>(v).getter : v;
     }
 
@@ -173,7 +253,7 @@ namespace neos::javascript_runtime
         auto const& t = *iTable;
         if (t.iShape == nullptr)
             return t.entries()[iPosition].setter;
-        return (t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u ? cell_of<accessor_pair>(t.iValues[iPosition]).setter : Undefined;
+        return (t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u ? cell_of<accessor_pair>(t.values()[iPosition]).setter : Undefined;
     }
 
     void property_ref::set_data(value aData)
@@ -183,9 +263,9 @@ namespace neos::javascript_runtime
         if (t.iShape == nullptr)
             t.entries()[iPosition].data = aData;
         else if ((t.iShape->slots()[iPosition].attributes & AttributeAccessor) != 0u)
-            cell_of<accessor_pair>(t.iValues[iPosition]).getter = aData;
+            cell_of<accessor_pair>(t.values()[iPosition]).getter = aData;
         else
-            t.iValues[iPosition] = aData;
+            t.values()[iPosition] = aData;
     }
 
     void property_ref::set(value aData, value aSetter, std::uint8_t aAttributes)
@@ -205,20 +285,20 @@ namespace neos::javascript_runtime
         }
         if ((aAttributes & AttributeAccessor) != 0u)
         {
-            auto& pair = cell_of<accessor_pair>(t.iValues[iPosition]);
+            auto& pair = cell_of<accessor_pair>(t.values()[iPosition]);
             pair.getter = aData;
             pair.setter = aSetter;
         }
         else
-            t.iValues[iPosition] = aData;
+            t.values()[iPosition] = aData;
     }
 
     property_table::dictionary& property_table::dict()
     {
-        if (iDictionary == 0u)
+        if (iStorage == 0u)
         {
             auto* const memory = region_allocate(sizeof(dictionary));
-            iDictionary = region_offset(::new (memory) dictionary{});
+            iStorage = unit_of(::new (memory) dictionary{});
             note_owner(this);
         }
         return *dictionary_of();
@@ -226,20 +306,71 @@ namespace neos::javascript_runtime
 
     void property_table::release_dictionary() noexcept
     {
-        if (iDictionary == 0u)
+        if (iShape != nullptr || iStorage == 0u)
             return;
         changed();
         auto* const d = dictionary_of();
         d->~dictionary();
         region_release(d);
-        iDictionary = 0u;
+        iStorage = 0u;
+    }
+
+    void property_table::set_root(shape* aBase)
+    {
+        // (its prototype kept)
+        auto const prototype = proto();
+        changed();
+        if (iShape == nullptr)
+            release_dictionary();
+        if (auto* const root = aBase->root_for(prototype); root != nullptr)
+            iShape = root;
+        else
+        {
+            iShape = aBase;
+            make_dictionary();
+            dict().proto = prototype;
+        }
+    }
+
+    void property_table::set_proto(value aPrototype)
+    {
+        if (iShape != nullptr)
+        {
+            if (iShape->proto == aPrototype)
+                return;
+            changed();
+            if (auto* const s = iShape->with_proto(aPrototype); s != nullptr)
+            {
+                iShape = s;
+                return;
+            }
+            make_dictionary();
+        }
+        changed();
+        dict().proto = aPrototype;
+    }
+
+    void property_table::grow(std::size_t aCapacity)
+    {
+        if (aCapacity <= iCapacity)
+            return;
+        if (aCapacity > 0xFFFFFFFFull)
+            throw std::bad_alloc{};
+        auto* const storage = static_cast<value*>(region_allocate(aCapacity * sizeof(value)));
+        if (auto const count = iShape->count; count != 0u)
+            std::memcpy(static_cast<void*>(storage), values(), count * sizeof(value));
+        if (iCapacity != 0u)
+            region_release(values());
+        iStorage = unit_of(storage);
+        iCapacity = static_cast<std::uint32_t>(aCapacity);
+        note_owner(this);
     }
 
     property_ref property_table::find(value aKey)
     {
         if (iShape != nullptr)
         {
-            if (iValues.size() == 0u)
+            if (iShape->count == 0u)
                 return {};
             auto const position = iShape->position(aKey);
             return position ? property_ref{ *this, *position } : property_ref{};
@@ -259,7 +390,7 @@ namespace neos::javascript_runtime
     {
         changed();
         if (iShape != nullptr)
-            iValues.reserve(aCapacity);
+            grow(aCapacity);
         else
             entries().reserve(aCapacity);
     }
@@ -271,20 +402,27 @@ namespace neos::javascript_runtime
         changed();
         // (its entries: its shape's keys and attributes, and its values (an accessor's getter and setter))
         auto const slots = iShape->slots();
-        entries().reserve(iValues.size());
-        for (std::uint32_t i = 0u; i < iValues.size(); ++i)
+        auto const count = iShape->count;
+        auto* const memory = region_allocate(sizeof(dictionary));
+        auto* const d = ::new (memory) dictionary{};
+        d->proto = iShape->proto;
+        d->entries.reserve(count);
+        auto const* const v = values();
+        for (std::uint32_t i = 0u; i < count; ++i)
         {
-            property e{ slots[i].key, iValues[i], Undefined, slots[i].attributes };
+            property e{ slots[i].key, v[i], Undefined, slots[i].attributes };
             if (e.accessor())
             {
-                auto const& pair = cell_of<accessor_pair>(iValues[i]);
+                auto const& pair = cell_of<accessor_pair>(v[i]);
                 e.data = pair.getter;
                 e.setter = pair.setter;
             }
-            entries().push_back(e);
+            d->entries.push_back(e);
         }
-        iValues = region_vector<value>{};
+        release_values();
         iShape = nullptr;
+        iStorage = unit_of(d);
+        note_owner(this);
         if (entries().size() > FewKeys)
             reindex();
     }
@@ -297,9 +435,9 @@ namespace neos::javascript_runtime
             if (auto* const next = iShape->transition(aKey, aAttributes))
             {
                 // (an accessor's value: its getter and setter (a pair))
-                iValues.push_back((aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData);
+                push((aAttributes & AttributeAccessor) != 0u ? value_of(the_heap().make<accessor_pair>(aData, aSetter)) : aData);
                 iShape = next;
-                return property_ref{ *this, static_cast<std::uint32_t>(iValues.size() - 1u) };
+                return property_ref{ *this, next->count - 1u };
             }
             make_dictionary();
         }
@@ -314,7 +452,7 @@ namespace neos::javascript_runtime
     void property_table::add(value aData, shape* aShape)
     {
         changed();
-        iValues.push_back(aData);
+        push(aData);
         iShape = aShape;
     }
 
@@ -359,9 +497,9 @@ namespace neos::javascript_runtime
     {
         if (aShape != 0u)
         {
-            if (reinterpret_cast<std::uintptr_t>(iShape) != aShape || aPosition >= iValues.size())
+            if (std::uint64_t{ iShape.word() } != aShape || aPosition >= iShape->count)
                 return false;
-            aResult = iValues[aPosition];
+            aResult = values()[aPosition];
             return true;
         }
         if (iShape != nullptr || aPosition >= entries().size())
@@ -375,10 +513,10 @@ namespace neos::javascript_runtime
 
     bool property_table::cached_store(std::uint64_t aShape, std::uint32_t aPosition, value aValue)
     {
-        if (aShape == 0u || reinterpret_cast<std::uintptr_t>(iShape) != aShape || aPosition >= iValues.size())
+        if (aShape == 0u || std::uint64_t{ iShape.word() } != aShape || aPosition >= iShape->count)
             return false;
         changed();
-        iValues[aPosition] = aValue;
+        values()[aPosition] = aValue;
         return true;
     }
 
@@ -388,12 +526,13 @@ namespace neos::javascript_runtime
         {
             // (its shape's keys (once a collection: the shapes that it shares with others were marked by them))
             auto const epoch = aTracer.epoch();
-            for (auto* s = iShape; s != nullptr && s->epoch != epoch; s = s->parent)
+            for (shape* s = iShape; s != nullptr && s->epoch != epoch; s = s->parent)
             {
                 s->epoch = epoch;
                 aTracer.mark(s->key);
             }
-            aTracer.mark(std::span<value const>{ iValues.data(), iValues.size() });
+            if (iShape->count != 0u)
+                aTracer.mark(std::span<value const>{ values(), iShape->count });
         }
         else
             for (auto const& e : entries())
@@ -426,6 +565,7 @@ namespace neos::javascript_runtime
         *word = 1u;
         auto* const root = new shape{};
         ++h.shape_count();
+        root->proto = current->proto;
         root->validity = word;
         h.watchedRootShapes.push_back(root);
         auto* s = root;
@@ -472,18 +612,18 @@ namespace neos::javascript_runtime
             global_object_changed(*this, aKey);
     }
 
-    value object::get_prototype_of()
+    value object::do_get_prototype_of()
     {
-        return proto;
+        return proto();
     }
 
     bool object::ordinary_set_prototype_of(value aPrototype)
     {
-        if (aPrototype == proto)
+        if (aPrototype == proto())
             return true;
         if (!extensible)
             return false;
-        if (proto == Null && is_object_prototype(*this))
+        if (proto() == Null && is_object_prototype(*this))
             return false;   // (an immutable prototype exotic object (SetImmutablePrototype))
         auto p = aPrototype;
         while (p != Null)
@@ -493,23 +633,23 @@ namespace neos::javascript_runtime
                 return false;
             if (o.cls == object_class::Proxy)
                 break;
-            p = o.proto;
+            p = o.proto();
         }
-        proto = aPrototype;
+        set_proto(aPrototype);
         return true;
     }
 
-    bool object::set_prototype_of(value aPrototype)
+    bool object::do_set_prototype_of(value aPrototype)
     {
         return ordinary_set_prototype_of(aPrototype);
     }
 
-    bool object::is_extensible()
+    bool object::do_is_extensible()
     {
         return extensible;
     }
 
-    bool object::prevent_extensions()
+    bool object::do_prevent_extensions()
     {
         extensible = false;
         return true;
@@ -523,7 +663,7 @@ namespace neos::javascript_runtime
         return p->descriptor();
     }
 
-    std::optional<property_descriptor> object::get_own_property(value aKey)
+    std::optional<property_descriptor> object::do_get_own_property(value aKey)
     {
         return ordinary_get_own_property(aKey);
     }
@@ -660,7 +800,7 @@ namespace neos::javascript_runtime
         return validate_and_apply_property_descriptor(this, aKey, is_extensible(), aDescriptor, current);
     }
 
-    bool object::define_own_property(value aKey, property_descriptor const& aDescriptor)
+    bool object::do_define_own_property(value aKey, property_descriptor const& aDescriptor)
     {
         // (ordinary: the table is the object's own properties)
         auto const p = properties.find(aKey);
@@ -670,7 +810,7 @@ namespace neos::javascript_runtime
         return validate_and_apply_property_descriptor(this, aKey, extensible, aDescriptor, current);
     }
 
-    bool object::has_property(value aKey)
+    bool object::do_has_property(value aKey)
     {
         for (object* o = this;;)
         {
@@ -680,7 +820,7 @@ namespace neos::javascript_runtime
             if (parent == Null)
                 return false;
             auto& p = obj(parent);
-            if (&typeid(p) != &typeid(object) && &typeid(p) != &typeid(function_object))
+            if (!ordinary_type(p))
                 return p.has_property(aKey);
             o = &p;
         }
@@ -704,7 +844,7 @@ namespace neos::javascript_runtime
         return javascript_runtime::call(getter, aReceiver);
     }
 
-    value object::get(value aKey, value aReceiver)
+    value object::do_get(value aKey, value aReceiver)
     {
         // (ordinary: own properties are the table's; the prototype chain is followed while it is ordinary)
         for (object* o = this;;)
@@ -722,7 +862,7 @@ namespace neos::javascript_runtime
             if (parent == Null)
                 return Undefined;
             auto& next = obj(parent);
-            if (&typeid(next) != &typeid(object) && &typeid(next) != &typeid(function_object))
+            if (!ordinary_type(next))
                 return next.get(aKey, aReceiver);
             o = &next;
         }
@@ -773,7 +913,7 @@ namespace neos::javascript_runtime
         return set_with_own_descriptor(*this, aKey, aValue, aReceiver, get_own_property(aKey));
     }
 
-    bool object::set(value aKey, value aValue, value aReceiver)
+    bool object::do_set(value aKey, value aValue, value aReceiver)
     {
         // (fast path: an ordinary receiver that is this object and has the property as a writable data property)
         if (auto p = properties.find(aKey))
@@ -794,7 +934,7 @@ namespace neos::javascript_runtime
         if (aReceiver == value_of(*this) && extensible && !mirrored && ordinary_type(*this))
         {
             bool absent = true;
-            for (auto parent = proto; parent != Null;)
+            for (auto parent = proto(); parent != Null;)
             {
                 auto& p = obj(parent);
                 if (!ordinary_type(p) || p.properties.find(aKey) != nullptr)
@@ -802,7 +942,7 @@ namespace neos::javascript_runtime
                     absent = false;
                     break;
                 }
-                parent = p.proto;
+                parent = p.proto();
             }
             if (absent)
             {
@@ -828,7 +968,7 @@ namespace neos::javascript_runtime
         return false;
     }
 
-    bool object::delete_property(value aKey)
+    bool object::do_delete_property(value aKey)
     {
         auto const p = properties.find(aKey);
         if (p == nullptr)
@@ -870,17 +1010,17 @@ namespace neos::javascript_runtime
         return result;
     }
 
-    value_list object::own_property_keys()
+    value_list object::do_own_property_keys()
     {
         return ordinary_own_property_keys();
     }
 
-    value object::call(value, arguments)
+    value object::do_call(value, arguments)
     {
         throw_type_error("not a function");
     }
 
-    value object::construct(arguments, value)
+    value object::do_construct(arguments, value)
     {
         throw_type_error("not a constructor");
     }
@@ -924,6 +1064,7 @@ namespace neos::javascript_runtime
         // (the elements become ordinary properties: indices first (they are ordered by index anyway))
         property_table table;
         table.set_root(type_root_shape<array_object>());   // (an array's shapes are its own)
+        table.set_proto(proto());
         for (std::size_t i = 0u; i < elements.size(); ++i)
             if (elements[i] != Empty)
                 table.add(index_key(i), elements[i], Undefined, AttributesDefault);
@@ -933,7 +1074,7 @@ namespace neos::javascript_runtime
         elements.shrink_to_fit();
     }
 
-    std::optional<property_descriptor> array_object::get_own_property(value aKey)
+    std::optional<property_descriptor> array_object::do_get_own_property(value aKey)
     {
         if (aKey == the_names().length)
             return property_descriptor::data(number(length), static_cast<std::uint8_t>(lengthWritable ? AttributeWritable : 0u));
@@ -1014,13 +1155,13 @@ namespace neos::javascript_runtime
         return true;
     }
 
-    bool array_object::define_own_property(value aKey, property_descriptor const& aDescriptor)
+    bool array_object::do_define_own_property(value aKey, property_descriptor const& aDescriptor)
     {
         if (aKey == the_names().length)
             return set_length(aDescriptor);
         auto const index = array_index(aKey);
         if (!index)
-            return object::define_own_property(aKey, aDescriptor);
+            return object::do_define_own_property(aKey, aDescriptor);
         if (*index >= length && !lengthWritable)
             return false;
         if (!sparse)
@@ -1050,14 +1191,14 @@ namespace neos::javascript_runtime
                 return false;
             make_sparse();
         }
-        if (!object::define_own_property(aKey, aDescriptor))
+        if (!object::do_define_own_property(aKey, aDescriptor))
             return false;
         if (*index >= length)
             length = *index + 1u;
         return true;
     }
 
-    bool array_object::has_property(value aKey)
+    bool array_object::do_has_property(value aKey)
     {
         if (!sparse)
             if (auto const index = array_index(aKey))
@@ -1075,7 +1216,7 @@ namespace neos::javascript_runtime
         return parent != Null && obj(parent).has_property(aKey);
     }
 
-    value array_object::get(value aKey, value aReceiver)
+    value array_object::do_get(value aKey, value aReceiver)
     {
         if (aKey == the_names().length)
             return number(length);
@@ -1090,7 +1231,7 @@ namespace neos::javascript_runtime
         return ordinary_get(aKey, aReceiver);
     }
 
-    bool array_object::set(value aKey, value aValue, value aReceiver)
+    bool array_object::do_set(value aKey, value aValue, value aReceiver)
     {
         if (!sparse && aReceiver == value_of(*this))
             if (auto const index = array_index(aKey); index && *index < elements.size() && elements[*index] != Empty)
@@ -1101,7 +1242,7 @@ namespace neos::javascript_runtime
         return ordinary_set(aKey, aValue, aReceiver);
     }
 
-    bool array_object::delete_property(value aKey)
+    bool array_object::do_delete_property(value aKey)
     {
         if (aKey == the_names().length)
             return false;
@@ -1120,7 +1261,7 @@ namespace neos::javascript_runtime
         return ordinary_delete(aKey);
     }
 
-    value_list array_object::own_property_keys()
+    value_list array_object::do_own_property_keys()
     {
         value_list result;
         if (!sparse)
@@ -1148,7 +1289,7 @@ namespace neos::javascript_runtime
 
     // --- functions
 
-    value function_object::call(value aThis, arguments aArguments)
+    value function_object::do_call(value aThis, arguments aArguments)
     {
         realm_scope scope{ functionRealm };
         switch (kind)
@@ -1169,7 +1310,7 @@ namespace neos::javascript_runtime
         return Undefined;
     }
 
-    value function_object::construct(arguments aArguments, value aNewTarget)
+    value function_object::do_construct(arguments aArguments, value aNewTarget)
     {
         realm_scope scope{ functionRealm };
         switch (kind)

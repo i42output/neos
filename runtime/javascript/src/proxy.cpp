@@ -51,27 +51,27 @@ namespace neos::javascript_runtime
             {
             }
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(target);
                 aTracer.mark(handler);
             }
-            value get_prototype_of() override;
-            bool set_prototype_of(value aPrototype) override;
-            bool is_extensible() override;
-            bool prevent_extensions() override;
-            std::optional<property_descriptor> get_own_property(value aKey) override;
-            bool define_own_property(value aKey, property_descriptor const& aDescriptor) override;
-            bool has_property(value aKey) override;
-            value get(value aKey, value aReceiver) override;
-            bool set(value aKey, value aValue, value aReceiver) override;
-            bool delete_property(value aKey) override;
-            value_list own_property_keys() override;
-            bool callable() const override { return isCallable; }
-            bool constructor() const override { return isConstructor; }
-            value call(value aThis, arguments aArguments) override;
-            value construct(arguments aArguments, value aNewTarget) override;
+            value do_get_prototype_of();
+            bool do_set_prototype_of(value aPrototype);
+            bool do_is_extensible();
+            bool do_prevent_extensions();
+            std::optional<property_descriptor> do_get_own_property(value aKey);
+            bool do_define_own_property(value aKey, property_descriptor const& aDescriptor);
+            bool do_has_property(value aKey);
+            value do_get(value aKey, value aReceiver);
+            bool do_set(value aKey, value aValue, value aReceiver);
+            bool do_delete_property(value aKey);
+            value_list do_own_property_keys();
+            bool do_callable() const { return isCallable; }
+            bool do_constructor() const { return isConstructor; }
+            value do_call(value aThis, arguments aArguments);
+            value do_construct(arguments aArguments, value aNewTarget);
         private:
             // (ValidateNonRevokedProxy, the target and handler (as they are now: a trap can revoke the proxy), then GetMethod(handler,
             // name): undefined if there is no trap)
@@ -117,7 +117,7 @@ namespace neos::javascript_runtime
             return aDescriptor->configurable.value_or(false);
         }
 
-        value proxy_object::get_prototype_of()
+        value proxy_object::do_get_prototype_of()
         {
             auto const [t, target, handler] = trap("getPrototypeOf");
             if (t == Undefined)
@@ -133,7 +133,7 @@ namespace neos::javascript_runtime
             return handlerProto;
         }
 
-        bool proxy_object::set_prototype_of(value aPrototype)
+        bool proxy_object::do_set_prototype_of(value aPrototype)
         {
             auto const [t, target, handler] = trap("setPrototypeOf");
             if (t == Undefined)
@@ -148,7 +148,7 @@ namespace neos::javascript_runtime
             return true;
         }
 
-        bool proxy_object::is_extensible()
+        bool proxy_object::do_is_extensible()
         {
             auto const [t, target, handler] = trap("isExtensible");
             if (t == Undefined)
@@ -159,7 +159,7 @@ namespace neos::javascript_runtime
             return result;
         }
 
-        bool proxy_object::prevent_extensions()
+        bool proxy_object::do_prevent_extensions()
         {
             auto const [t, target, handler] = trap("preventExtensions");
             if (t == Undefined)
@@ -170,7 +170,7 @@ namespace neos::javascript_runtime
             return result;
         }
 
-        std::optional<property_descriptor> proxy_object::get_own_property(value aKey)
+        std::optional<property_descriptor> proxy_object::do_get_own_property(value aKey)
         {
             auto const [t, target, handler] = trap("getOwnPropertyDescriptor");
             if (t == Undefined)
@@ -209,7 +209,7 @@ namespace neos::javascript_runtime
             return resultDesc;
         }
 
-        bool proxy_object::define_own_property(value aKey, property_descriptor const& aDescriptor)
+        bool proxy_object::do_define_own_property(value aKey, property_descriptor const& aDescriptor)
         {
             auto const [t, target, handler] = trap("defineProperty");
             if (t == Undefined)
@@ -245,7 +245,7 @@ namespace neos::javascript_runtime
             return true;
         }
 
-        bool proxy_object::has_property(value aKey)
+        bool proxy_object::do_has_property(value aKey)
         {
             auto const [t, target, handler] = trap("has");
             if (t == Undefined)
@@ -265,7 +265,7 @@ namespace neos::javascript_runtime
             return result;
         }
 
-        value proxy_object::get(value aKey, value aReceiver)
+        value proxy_object::do_get(value aKey, value aReceiver)
         {
             auto const [t, target, handler] = trap("get");
             if (t == Undefined)
@@ -284,7 +284,7 @@ namespace neos::javascript_runtime
             return trapResult;
         }
 
-        bool proxy_object::set(value aKey, value aValue, value aReceiver)
+        bool proxy_object::do_set(value aKey, value aValue, value aReceiver)
         {
             auto const [t, target, handler] = trap("set");
             if (t == Undefined)
@@ -304,7 +304,7 @@ namespace neos::javascript_runtime
             return true;
         }
 
-        bool proxy_object::delete_property(value aKey)
+        bool proxy_object::do_delete_property(value aKey)
         {
             auto const [t, target, handler] = trap("deleteProperty");
             if (t == Undefined)
@@ -321,7 +321,7 @@ namespace neos::javascript_runtime
             return true;
         }
 
-        value_list proxy_object::own_property_keys()
+        value_list proxy_object::do_own_property_keys()
         {
             auto const [t, target, handler] = trap("ownKeys");
             if (t == Undefined)
@@ -370,7 +370,7 @@ namespace neos::javascript_runtime
             return trapResult;
         }
 
-        value proxy_object::call(value aThis, arguments aArguments)
+        value proxy_object::do_call(value aThis, arguments aArguments)
         {
             auto const [t, target, handler] = trap("apply");
             if (t == Undefined)
@@ -379,7 +379,7 @@ namespace neos::javascript_runtime
             return call_trap(handler, t, target, aThis, argArray);
         }
 
-        value proxy_object::construct(arguments aArguments, value aNewTarget)
+        value proxy_object::do_construct(arguments aArguments, value aNewTarget)
         {
             auto const [t, target, handler] = trap("construct");
             if (t == Undefined)

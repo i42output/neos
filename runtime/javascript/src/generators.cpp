@@ -85,9 +85,9 @@ namespace neos::javascript_runtime
                     host()->coroutine_delete(coroutine);
             }
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(callee);
                 aTracer.mark(thisValue);
                 aTracer.mark(environment);
@@ -532,9 +532,9 @@ namespace neos::javascript_runtime
         public:
             explicit async_from_sync_iterator(value aPrototype) : object{ aPrototype, object_class::AsyncFromSyncIterator } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(sync);
             }
         public:
@@ -694,7 +694,7 @@ namespace neos::javascript_runtime
             value aInstancePrototype, char const* aTag)
         {
             auto const c = make_native(aName, aLength, aConstructor, true);
-            obj(c).proto = aRealm.function;
+            obj(c).set_proto(aRealm.function);
             auto const p = make_object(aRealm.functionPrototype);
             obj(c).put(the_names().prototype, p, 0u);
             obj(p).put(the_names().constructor, c, AttributeConfigurable);

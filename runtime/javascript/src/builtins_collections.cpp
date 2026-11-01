@@ -256,9 +256,9 @@ namespace neos::javascript_runtime
         public:
             collection_object(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 data.trace(aTracer);
                 // (the cursors of its iterators that die are removed (they are positions in the iterators' cells))
                 if (data.has_cursors())
@@ -276,9 +276,9 @@ namespace neos::javascript_runtime
         public:
             collection_iterator(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(collection);
             }
         public:
@@ -292,9 +292,9 @@ namespace neos::javascript_runtime
         public:
             weak_collection(value aPrototype, object_class aClass) : object{ aPrototype, aClass } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 if (data.empty())
                     return;
                 // (ephemerons: a value is marked if its key is; the entries whose keys die are removed)
@@ -313,9 +313,9 @@ namespace neos::javascript_runtime
         public:
             explicit finalization_registry(value aPrototype) : object{ aPrototype, object_class::FinalizationRegistry } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(cleanup);
                 if (cells.empty())
                     return;

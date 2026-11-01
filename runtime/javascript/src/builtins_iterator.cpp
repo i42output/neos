@@ -80,9 +80,9 @@ namespace neos::javascript_runtime
         public:
             iterator_helper(value aPrototype, helper_kind aKind) : object{ aPrototype, object_class::IteratorHelper }, kind{ aKind } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(iterated);
                 aTracer.mark(function);
                 aTracer.mark(inner);
@@ -132,9 +132,9 @@ namespace neos::javascript_runtime
         public:
             wrap_for_valid_iterator(value aPrototype) : object{ aPrototype, object_class::WrapForValidIterator } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(iterated);
             }
         public:

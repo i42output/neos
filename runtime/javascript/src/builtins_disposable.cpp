@@ -72,7 +72,7 @@ namespace neos::javascript_runtime
         public:
             dispose_capability() : cell{ cell_type::Internal } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 trace_resources(aTracer, resources);
             }
@@ -88,9 +88,9 @@ namespace neos::javascript_runtime
             {
             }
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 trace_resources(aTracer, resources);
             }
         public:
@@ -220,7 +220,7 @@ namespace neos::javascript_runtime
             {
             }
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
                 operation.trace(aTracer);
                 aTracer.mark(resolve);
@@ -259,8 +259,8 @@ namespace neos::javascript_runtime
                 }
                 auto const onFulfilled = make_native(the_names().empty, 1u, dispose_job_fulfilled);
                 auto const onRejected = make_native(the_names().empty, 1u, dispose_job_rejected);
-                obj(onFulfilled).internal() = TagInternal | aJob.handle;
-                obj(onRejected).internal() = TagInternal | aJob.handle;
+                obj(onFulfilled).internal() = TagInternal | aJob.handle();
+                obj(onRejected).internal() = TagInternal | aJob.handle();
                 perform_promise_then(promise, onFulfilled, onRejected);
                 return;
             }

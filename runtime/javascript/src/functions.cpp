@@ -133,9 +133,9 @@ namespace neos::javascript_runtime
         public:
             arguments_object(value aPrototype) : object{ aPrototype, object_class::Arguments } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(env);
             }
         public:
@@ -149,7 +149,7 @@ namespace neos::javascript_runtime
             }
             value read(std::uint32_t aSlot) const { return cell_of<environment>(env).slots[aSlot]; }
             void write(std::uint32_t aSlot, value aValue) { cell_of<environment>(env).slots[aSlot] = aValue; }
-            std::optional<property_descriptor> get_own_property(value aKey) override
+            std::optional<property_descriptor> do_get_own_property(value aKey) 
             {
                 auto desc = ordinary_get_own_property(aKey);
                 if (!desc)
@@ -159,7 +159,7 @@ namespace neos::javascript_runtime
                     desc->valueField = read(slot);
                 return desc;
             }
-            bool define_own_property(value aKey, property_descriptor const& aDescriptor) override
+            bool do_define_own_property(value aKey, property_descriptor const& aDescriptor) 
             {
                 std::uint32_t slot;
                 bool const isMapped = mapped(aKey, slot);
@@ -182,14 +182,14 @@ namespace neos::javascript_runtime
                 }
                 return true;
             }
-            value get(value aKey, value aReceiver) override
+            value do_get(value aKey, value aReceiver) 
             {
                 std::uint32_t slot;
                 if (mapped(aKey, slot))
                     return read(slot);
                 return ordinary_get(aKey, aReceiver);
             }
-            bool set(value aKey, value aValue, value aReceiver) override
+            bool do_set(value aKey, value aValue, value aReceiver) 
             {
                 std::uint32_t slot;
                 bool isMapped = aReceiver == value_of(*this) && mapped(aKey, slot);
@@ -197,7 +197,7 @@ namespace neos::javascript_runtime
                     write(slot, aValue);
                 return ordinary_set(aKey, aValue, aReceiver);
             }
-            bool delete_property(value aKey) override
+            bool do_delete_property(value aKey) 
             {
                 std::uint32_t slot;
                 bool const isMapped = mapped(aKey, slot);
@@ -206,7 +206,7 @@ namespace neos::javascript_runtime
                     unmap(aKey);
                 return result;
             }
-            bool has_property(value aKey) override
+            bool do_has_property(value aKey) 
             {
                 if (properties.find(aKey) != nullptr)
                     return true;

@@ -1000,9 +1000,9 @@ namespace neos::javascript_runtime
         public:
             array_iterator(value aPrototype) : object{ aPrototype, object_class::ArrayIterator } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(iterated);
             }
         public:

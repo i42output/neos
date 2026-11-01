@@ -59,41 +59,41 @@ namespace neos::javascript_runtime
                     return {};
                 return property_descriptor::data(make_string(str(internal())[*index]), AttributeEnumerable);
             }
-            std::optional<property_descriptor> get_own_property(value aKey) override
+            std::optional<property_descriptor> do_get_own_property(value aKey) 
             {
                 if (auto const desc = ordinary_get_own_property(aKey))
                     return desc;
                 return string_property(aKey);
             }
-            bool define_own_property(value aKey, property_descriptor const& aDescriptor) override
+            bool do_define_own_property(value aKey, property_descriptor const& aDescriptor) 
             {
                 if (auto const current = string_property(aKey))
                     return is_compatible_property_descriptor(is_extensible(), aDescriptor, current);
                 return ordinary_define_own_property(aKey, aDescriptor);
             }
-            bool has_property(value aKey) override
+            bool do_has_property(value aKey) 
             {
                 if (string_property(aKey))
                     return true;
-                return object::has_property(aKey);
+                return object::do_has_property(aKey);
             }
-            value get(value aKey, value aReceiver) override
+            value do_get(value aKey, value aReceiver) 
             {
                 if (auto const desc = string_property(aKey))
                     return *desc->valueField;
                 return ordinary_get(aKey, aReceiver);
             }
-            bool set(value aKey, value aValue, value aReceiver) override
+            bool do_set(value aKey, value aValue, value aReceiver) 
             {
                 return ordinary_set(aKey, aValue, aReceiver);
             }
-            bool delete_property(value aKey) override
+            bool do_delete_property(value aKey) 
             {
                 if (string_property(aKey))
                     return false;
                 return ordinary_delete(aKey);
             }
-            value_list own_property_keys() override
+            value_list do_own_property_keys() 
             {
                 value_list result;
                 auto const length = string_length(internal());
@@ -841,9 +841,9 @@ namespace neos::javascript_runtime
         public:
             explicit string_iterator(value aPrototype) : object{ aPrototype, object_class::StringIterator } {}
         public:
-            void trace(tracer& aTracer) override
+            void do_trace(tracer& aTracer) 
             {
-                object::trace(aTracer);
+                object::do_trace(aTracer);
                 aTracer.mark(iterated);
             }
         public:
