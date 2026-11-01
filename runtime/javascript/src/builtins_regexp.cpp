@@ -504,11 +504,11 @@ namespace neos::javascript_runtime
         bool find_builtin_exec(regexp_object& r, regexp_state& aState);
         inline bool has_builtin_exec(regexp_object& r, regexp_state& aState)
         {
-            if (!r.matcher || r.proto != the_realm().regexpPrototype)
+            if (!r.matcher || r.proto() != the_realm().regexpPrototype)
                 return false;
             // (a regexp of a shape known not to have its own exec, whose prototype (of the shape it had then) has the built-in at the 
             // position it had then)
-            auto& p = obj(r.proto);
+            auto& p = obj(r.proto());
             auto const* ownShape = r.properties.layout();
             auto const* prototypeShape = p.properties.layout();
             if (ownShape != nullptr && ownShape == aState.execOwn && prototypeShape != nullptr && prototypeShape == aState.execPrototype)
@@ -519,7 +519,7 @@ namespace neos::javascript_runtime
         {
             // (as has_builtin_exec, without the shapes it knows: found, and known)
             auto const& keys = aState.k;
-            auto& p = obj(r.proto);
+            auto& p = obj(r.proto());
             auto const* ownShape = r.properties.layout();
             auto const* prototypeShape = p.properties.layout();
             if (r.own(keys.exec) != nullptr)

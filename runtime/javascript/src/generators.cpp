@@ -694,7 +694,7 @@ namespace neos::javascript_runtime
             value aInstancePrototype, char const* aTag)
         {
             auto const c = make_native(aName, aLength, aConstructor, true);
-            obj(c).proto = aRealm.function;
+            obj(c).set_proto(aRealm.function);
             auto const p = make_object(aRealm.functionPrototype);
             obj(c).put(the_names().prototype, p, 0u);
             obj(p).put(the_names().constructor, c, AttributeConfigurable);

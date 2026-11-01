@@ -958,8 +958,6 @@ namespace neos::compilers::javascript
             return alias::Shape;
         if (aOffset == layout::ObjectValues)
             return alias::Values;
-        if (aOffset == layout::ObjectProto)
-            return alias::Proto;
         if (aOffset == layout::ObjectDictionary)
             return alias::Dictionary;
         if (aArray && (aOffset == layout::ArrayElements || aOffset == layout::ArrayElements + 8u || aOffset == (layout::ArrayLength & ~7u)))
@@ -1006,6 +1004,22 @@ namespace neos::compilers::javascript
         u32(aOffset);
         i64(static_cast<std::int64_t>(layout::ValueUnitShift));
         op(opcode::I64Shl);
+    }
+
+    void function_generator::proto_load(std::uint32_t aCell, std::size_t aMiss)
+    {
+        // (a cell's (an object's) prototype: its shape's (one without a shape (a dictionary's): to aMiss))
+        auto const shape = temporary();
+        get(aCell);
+        mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
+        tee(shape);
+        op(opcode::I64Eqz);
+        branch(aMiss, true);
+        get(shape);
+        i64(static_cast<std::int64_t>(layout::ValueUnitShift));
+        op(opcode::I64Shl);
+        mem_load(opcode::I64LoadMem, layout::ShapeProto, alias::Proto);
+        release(shape);
     }
 
     void function_generator::header_word(std::uint32_t aSlot, std::uint32_t aPattern, bool aShape)
@@ -1422,8 +1436,9 @@ namespace neos::compilers::javascript
                         i64(static_cast<std::int64_t>(layout::SiteHolder | (1u << 8u)));
                         op(opcode::I64Ne);
                         branch(slow, true);
-                        get(cell);
-                        mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+                        // (its prototype: the entry's (an object's shape is its prototype's: the receiver's is the entry's))
+                        get(entry);
+                        site_load(opcode::I64LoadMem, layout::SitePrototype);
                         end_control();
                         end_control();
                         tee(cell);
@@ -1788,12 +1803,10 @@ namespace neos::compilers::javascript
                 i64(layout::SiteAdd);
                 op(opcode::I64Ne);
                 branch(slow, true);
-                get(cell);
-                mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
-                set(address);
                 for (std::uint32_t depth = 1u; depth <= 2u; ++depth)
                 {
-                    // (the prototype at this depth (if the entry's depth is at least that): the entry's, of the same shape)
+                    // (the prototype at this depth (if the entry's depth is at least that): the entry's (an object's shape is its 
+                    // prototype's: the receiver's, then each prototype's, is the entry's), of the same shape; the last's prototype is null)
                     get(word);
                     i64(8);
                     op(opcode::I64ShrU);
@@ -1804,27 +1817,17 @@ namespace neos::compilers::javascript
                     op(opcode::If);
                     iCode.push_back(0x40u);
                     iControls.push_back(control{ control_kind::Block });
-                    get(address);
                     get(entry);
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u));
-                    op(opcode::I64Ne);
-                    branch(slow, true);
+                    set(address);
                     cell_of(address);
-                    tee(address);
                     mem_load(opcode::I64LoadMem32U, layout::ObjectShape, alias::Shape);
                     get(entry);
                     site_load(opcode::I64LoadMem, layout::SitePrototype + 16u * (depth - 1u) + 8u);
                     op(opcode::I64Ne);
                     branch(slow, true);
-                    get(address);
-                    mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
-                    set(address);
                     end_control();
                 }
-                get(address);
-                constant(values::Null);
-                op(opcode::I64Ne);
-                branch(slow, true);
                 get(cell);
                 mem_load(opcode::I32LoadMem8U, layout::ObjectExtensible, alias::Header);
                 op(opcode::I32Eqz);
@@ -2036,9 +2039,9 @@ namespace neos::compilers::javascript
             op(opcode::I64Add);
             mem_load(opcode::I64LoadMem, 0u, alias::Slot);
             tee(prototype);
-            constant(0xFFFF000000000000ull);
-            op(opcode::I64And);
-            constant(values::TagObject);
+            // (the entry's (its objects' root shape is the entry's: an object's shape is its prototype's))
+            get(entry);
+            site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SitePrototype);
             op(opcode::I64Ne);
             branch(slow, true);
             // (its slot: the next of its size class's run of free slots (if it is within it: none (0) is not), if the bytes allocated
@@ -2096,24 +2099,17 @@ namespace neos::compilers::javascript
             i64(static_cast<std::int64_t>(std::uint64_t{ 0xFFFFFFFFu } << layout::HandleShift));
             op(opcode::I64And);
             set(slot);
-            // (the object: the template's copy (its first word: its type, flags and kind); its prototype and values' word)
+            // (the object: the template's copy (its type, flags and kind); its shape (the entry's root shape of its prototype) and values'
+            // word)
             get(entry);
             site_load(opcode::I64LoadMem, e * layout::SiteEntrySize + layout::SiteTemplate);
             set(pattern);
-            static_assert(layout::ObjectSize % 8u == 0u);
-            header_word(slot, pattern, true);
-            for (std::uint32_t w = 1u; w < layout::ObjectSize / 8u; ++w)
-            {
-                if (w * 8u == layout::ObjectProto || w * 8u == layout::ObjectValues)
-                    continue;
-                get(slot);
-                get(pattern);
-                site_load(opcode::I64LoadMem, w * 8u);
-                mem_store(opcode::I64StoreMem, w * 8u, alias_of_word(w * 8u, false));
-            }
+            static_assert(layout::ObjectSize == 16u && layout::ObjectValues == 8u);
+            header_word(slot, pattern, false);
             get(slot);
-            get(prototype);
-            mem_store(opcode::I64StoreMem, layout::ObjectProto, alias::Proto);
+            get(entry);
+            site_load(opcode::I64LoadMem32U, e * layout::SiteEntrySize + layout::SitePrototype + 8u);
+            mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
             values_word(slot, pattern);
             get(slot);
             i64(static_cast<std::int64_t>(layout::HandleShift));
@@ -2200,15 +2196,20 @@ namespace neos::compilers::javascript
         get(list);
         get(bumpNext);
         mem_store(opcode::I64StoreMem, layout::AllocBump, alias::Alloc);
-        // (the array: the template's copy (its first word: its type, flags and kind); its prototype, elements (their offset and number) and length)
+        // (the array: the template's copy (its type, flags and kind); its shape (the entry's: its prototype's), elements (their offset and
+        // number) and length)
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
         set(pattern);
         static_assert(layout::ArraySize % 8u == 0u && layout::ArrayLength % 8u == 0u);
-        header_word(slot, pattern, true);
+        header_word(slot, pattern, false);
+        get(slot);
+        get(entry);
+        site_load(opcode::I64LoadMem32U, layout::SitePrototype + 8u);
+        mem_store(opcode::I64StoreMem32, layout::ObjectShape, alias::Shape);
         for (std::uint32_t w = 1u; w < layout::ArraySize / 8u; ++w)
         {
-            if (w * 8u == layout::ObjectProto || w * 8u == layout::ArrayElements)
+            if (w * 8u == layout::ArrayElements)
                 continue;
             get(slot);
             get(pattern);
@@ -2222,10 +2223,6 @@ namespace neos::compilers::javascript
             }
             mem_store(opcode::I64StoreMem, w * 8u, alias_of_word(w * 8u, true));
         }
-        get(slot);
-        get(entry);
-        site_load(opcode::I64LoadMem, layout::SitePrototype);
-        mem_store(opcode::I64StoreMem, layout::ObjectProto, alias::Proto);
         get(slot);
         get(slot);
         i64(static_cast<std::int64_t>(layout::ArraySize));
@@ -2316,19 +2313,8 @@ namespace neos::compilers::javascript
         site_load(opcode::I64LoadMem, layout::SiteTemplate);
         set(pattern);
         header_word(slot, pattern, false);
-        for (std::uint32_t w = 1u; w < layout::ObjectSize / 8u; ++w)
-        {
-            if (w * 8u == layout::ObjectProto || w * 8u == layout::ObjectValues)
-                continue;
-            get(slot);
-            get(pattern);
-            site_load(opcode::I64LoadMem, w * 8u);
-            mem_store(opcode::I64StoreMem, w * 8u, alias_of_word(w * 8u, false));
-        }
-        get(slot);
-        get(entry);
-        site_load(opcode::I64LoadMem, layout::SitePrototype);
-        mem_store(opcode::I64StoreMem, layout::ObjectProto, alias::Proto);
+        static_assert(layout::ObjectSize == 16u && layout::ObjectValues == 8u);
+        // (its shape: the entry's (its prototype's))
         get(slot);
         get(entry);
         site_load(opcode::I64LoadMem, layout::SiteShape);
@@ -2585,8 +2571,7 @@ namespace neos::compilers::javascript
             op(opcode::I32Eqz);
             op(opcode::I32Ior);
             branch(miss, true);
-            get(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            proto_load(cell, miss);
             op(opcode::GlobalGet);
             u32(iCompiler.array_prototype_global());
             op(opcode::I64Ne);
@@ -2622,8 +2607,10 @@ namespace neos::compilers::javascript
             mem_load(opcode::I32LoadMem, layout::ArrayElements + 8u, alias::Elements);
             op(opcode::I32Ior);
             branch(miss, true);
-            get(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            // (its prototype: the one it had then (its shape is the one it had then))
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 8u);
             tee(prototype);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());
@@ -2717,8 +2704,7 @@ namespace neos::compilers::javascript
             op(opcode::I32Eqz);
             op(opcode::I32Ior);
             branch(miss, true);
-            get(cell);
-            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            proto_load(cell, miss);
             op(opcode::GlobalGet);
             u32(iCompiler.array_prototype_global());
             op(opcode::I64Ne);
@@ -2752,8 +2738,10 @@ namespace neos::compilers::javascript
             mem_load(opcode::I32LoadMem, layout::ArrayElements + 8u, alias::Elements);
             op(opcode::I32Ior);
             branch(miss, true);
-            get(prototype);
-            mem_load(opcode::I64LoadMem, layout::ObjectProto, alias::Proto);
+            // (its prototype: the one it had then (its shape is the one it had then))
+            op(opcode::GlobalGet);
+            u32(iCompiler.allocation_state_global());
+            site_load(opcode::I64LoadMem, layout::AllocPlainArrays + 8u);
             tee(prototype);
             op(opcode::GlobalGet);
             u32(iCompiler.allocation_state_global());

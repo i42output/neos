@@ -781,7 +781,7 @@ namespace neos::javascript_runtime
         auto const length = length_of_array_like(aObject);
         value_list result;
         // (a plain array's, or a typed array's elements: as [[Get]] of their indices (a hole: undefined))
-        if (auto const* a = as_array(aObject); a != nullptr && !a->sparse && a->proto == the_realm().arrayPrototype && plain_array_prototypes())
+        if (auto const* a = as_array(aObject); a != nullptr && !a->sparse && a->proto() == the_realm().arrayPrototype && plain_array_prototypes())
         {
             result.reserve(static_cast<std::size_t>(length));
             for (std::size_t i = 0u; static_cast<double>(i) < length; ++i)

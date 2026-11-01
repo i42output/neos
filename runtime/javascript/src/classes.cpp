@@ -228,7 +228,7 @@ namespace neos::javascript_runtime
         }
         else
         {
-            obj(f).proto = parent;
+            obj(f).set_proto(parent);
             set_function_name(f, aName);
         }
         auto& fn = function_of(f);

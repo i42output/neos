@@ -950,6 +950,11 @@ namespace neos::javascript_runtime
             value key;
             std::uint8_t attributes;
         };
+        // (the prototype of the objects of the shape (compiled code reads it: layout::ShapeProto); a root's shapes have its prototype: 
+        // a base root's (heap::root_shape, type_root_shape, a watched object's) is null, its other prototypes' roots are its own (see
+        // root_for))
+        value proto = Null;
+        shape* base = nullptr;          ///< (the base root whose shapes it is one of (a base root: itself))
         shape* parent = nullptr;
         value key = 0u;                 ///< (the key that its parent's transition to it added)
         std::uint8_t attributes = 0u;   ///< (... and its attributes)
@@ -958,6 +963,8 @@ namespace neos::javascript_runtime
         std::uint64_t* validity = nullptr;  ///< (a watched object's shape (its own: see watch): the object's validity word (in the region),
                                             ///< which each change of its properties changes; its transitions' are the same)
         shape* transition(value aKey, std::uint8_t aAttributes);  ///< (the shape with aKey added; null if there are no more shapes)
+        shape* root_for(value aPrototype);      ///< (a base root's: its root of objects of the prototype (null if there are no more shapes))
+        shape* with_proto(value aPrototype);    ///< (the shape of the same keys of objects of the prototype (null if there are no more shapes))
         std::optional<std::uint32_t> position(value aKey);  ///< (a key's position)
         std::span<slot const> slots();  ///< (its keys and their attributes, by position)
     private:
@@ -965,8 +972,11 @@ namespace neos::javascript_runtime
         std::unique_ptr<std::unordered_map<value, shape*>> iManyTransitions;
         std::unique_ptr<std::unordered_map<value, std::uint32_t>> iIndex;   ///< (built when a key is found in a shape of many keys)
         std::vector<slot> iSlots;       ///< (built when they are wanted)
+        std::unique_ptr<std::unordered_map<value, shape*>> iProtoRoots;     ///< (a base root's: its roots of other prototypes (they are 
+                                                                            ///< kept: a prototype that dies has no objects; a later object
+                                                                            ///< of its handle is a prototype of the same value))
     public:
-        shape() = default;
+        shape() : base{ this } {}
         shape(shape const&) = delete;
         shape& operator=(shape const&) = delete;
         ~shape();                       ///< (object.cpp: and the shapes that it transitions to (its isolate's end: see end_isolate))
@@ -1096,13 +1106,16 @@ namespace neos::javascript_runtime
             iCapacity = static_cast<std::uint32_t>(std::min<std::size_t>(aCapacity, 0xFFFFFFFFu));
         }
         void make_dictionary();                 ///< (no shape (its layout its own) from now on)
-        void set_root(shape* aRoot)             ///< (its shape (it has no properties): a root shape)
+        void set_root(shape* aBase);            ///< (its shape (it has no properties): a base root's for its prototype)
+        value proto() const                     ///< (its object's prototype: its shape's, else its dictionary's)
         {
-            changed();
-            if (iShape == nullptr)
-                release_dictionary();
-            iShape = aRoot;
+            if (iShape != nullptr)
+                return iShape->proto;
+            auto const* d = dictionary_of();
+            return d != nullptr ? d->proto : Null;
         }
+        void set_proto(value aPrototype);       ///< (its object's prototype: its shape one of the prototype's (else it has none: its 
+                                                ///< dictionary's))
         std::size_t size() const { return iShape != nullptr ? iShape->count : entries().size() - deleted(); }
         bool none() const   ///< (it has no properties (as size() == 0, without finding the dictionary's entries if it has none))
         {
@@ -1172,10 +1185,11 @@ namespace neos::javascript_runtime
         // (u64), then their number (u32)) and (if it has many) its keys' positions; made (in the region) when it has no shape)
         struct dictionary
         {
-            region_vector<property> entries;
+            region_vector<property> entries;    ///< (first: compiled code reads it (layout::DictionaryEntries))
             std::unique_ptr<std::unordered_map<value, std::uint32_t>> index;
             std::uint32_t deleted = 0u;
             std::uint64_t* validity = nullptr;  ///< (a watched object's (see watch))
+            value proto = Null;                 ///< (its object's prototype)
         };
         static std::uint32_t unit_of(void const* aMemory) { return static_cast<std::uint32_t>(region_offset(aMemory) >> 3u); }
         value* values() const { return reinterpret_cast<value*>(gRegionBase + (std::uint64_t{ iStorage } << 3u)); }
@@ -1335,7 +1349,11 @@ namespace neos::javascript_runtime
     class object : public cell
     {
     public:
-        explicit object(value aPrototype, object_class aClass = object_class::Ordinary) : cell{ cell_type::Object }, proto{ aPrototype } { cls = aClass; }
+        explicit object(value aPrototype, object_class aClass = object_class::Ordinary) : cell{ cell_type::Object }
+        {
+            cls = aClass;
+            properties.set_proto(aPrototype);
+        }
     public:
         void do_trace(tracer& aTracer);   ///< (its prototype, properties, internal value (a WeakRef's target is weak) and private elements)
     public:
@@ -1419,10 +1437,11 @@ namespace neos::javascript_runtime
         object_extra const* extra_if() const { return hasExtra ? find_extra() : nullptr; }
         object_extra* extra_if() { return hasExtra ? find_extra() : nullptr; }
     public:
-        // (compiled code reads the prototype and the properties (see neos::language::javascript::layout): their offsets are checked 
-        // when the runtime starts; its class and flags are its cell's)
+        // (compiled code reads the properties (see neos::language::javascript::layout): their offsets are checked when the runtime 
+        // starts; its class and flags are its cell's; its prototype is its shape's (or its dictionary's))
         property_table properties;
-        value proto;
+        value proto() const { return properties.proto(); }
+        void set_proto(value aPrototype) { properties.set_proto(aPrototype); }
     public:
         ~object();
     private:

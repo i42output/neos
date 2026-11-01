@@ -241,7 +241,7 @@ namespace neos::language::javascript
     {
         inline constexpr std::uint32_t Memory = 2u;                 ///< (the external memory's index: JavaScript's)
         inline constexpr std::uint32_t HandleShift = 3u;            ///< (a cell's offset: its handle << HandleShift (an address's index scaled by 8))
-        inline constexpr std::uint32_t ObjectProto = 16u;           ///< (value: an object's prototype)
+        inline constexpr std::uint32_t ShapeProto = 0u;             ///< (value: a shape's (its objects') prototype (a shape is at its word << ValueUnitShift))
         inline constexpr std::uint32_t ObjectShape = 4u;            ///< (u32: its properties' shape (its region offset >> 3; 0: none: a dictionary))
         inline constexpr std::uint32_t ObjectValues = 8u;          ///< (u32: a shape's: the region offset of its properties' values (value) >>
                                                                     ///< ValueUnitShift; their number is its shape's)
@@ -255,10 +255,10 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t ObjectExtensible = 2u;      ///< (u8: it is extensible (checked by the runtime: see check_layout))
         inline constexpr std::uint32_t ClassArray = 1u;             ///< (an array (exotic): its elements)
         inline constexpr std::uint32_t ClassHTMLDDA = 40u;          ///< (an object that [[IsHTMLDDA]] (ToBoolean: false))
-        inline constexpr std::uint32_t ArrayElements = 24u;         ///< (u64: the offset of an array's elements (value), then their number)
-        inline constexpr std::uint32_t ArrayLength = 40u;           ///< (u32: its length)
-        inline constexpr std::uint32_t ArrayLengthWritable = 44u;   ///< (u8: its length is writable)
-        inline constexpr std::uint32_t ArraySparse = 45u;           ///< (u8: its elements are its properties' (not ArrayElements'))
+        inline constexpr std::uint32_t ArrayElements = 16u;         ///< (u64: the offset of an array's elements (value), then their number)
+        inline constexpr std::uint32_t ArrayLength = 32u;           ///< (u32: its length)
+        inline constexpr std::uint32_t ArrayLengthWritable = 36u;   ///< (u8: its length is writable)
+        inline constexpr std::uint32_t ArraySparse = 37u;           ///< (u8: its elements are its properties' (not ArrayElements'))
         inline constexpr std::uint32_t StringLength = 4u;          ///< (u32: a string's length (its code units))
         inline constexpr std::uint32_t StringChars = 8u;           ///< (u64: the offset of its code units (u16), if it is flat (else 0))
         inline constexpr std::uint32_t PropertySize = 32u;          ///< (a dictionary's property: its key, its value (an accessor's getter), its
@@ -269,8 +269,8 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t PropertyAttributes = 24u;    ///< (u8)
         inline constexpr std::uint32_t EnvironmentParent = 8u;     ///< (value: an environment's parent)
         inline constexpr std::uint32_t EnvironmentSlots = 16u;      ///< (u64: the offset of its slots (values))
-        inline constexpr std::uint32_t FunctionEnvironment = 104u;  ///< (value: a function's environment (its closure's))
-        inline constexpr std::uint32_t FunctionDispatch = 112u;     ///< (u64: a function's dispatch key: a function of a program's that the
+        inline constexpr std::uint32_t FunctionEnvironment = 96u;  ///< (value: a function's environment (its closure's))
+        inline constexpr std::uint32_t FunctionDispatch = 104u;     ///< (u64: a function's dispatch key: a function of a program's that the
                                                                     ///< dispatcher calls: its program's serial (32 bits, not 0) then its number
                                                                     ///< (for the dispatcher: the low 32 bits); else all ones)
         inline constexpr std::uint32_t ClassFunction = 2u;          ///< (a function (ObjectClass))
@@ -325,8 +325,8 @@ namespace neos::language::javascript
         inline constexpr std::uint32_t MegamorphicKey = 8u;
         inline constexpr std::uint32_t MegamorphicPosition = 16u;
         inline constexpr std::uint32_t MegamorphicWritable = 20u;   ///< (u32: not 0: the property is writable (a set can store it))
-        inline constexpr std::uint32_t ObjectSize = 24u;            ///< (an ordinary object's size (its values' storage in its cell follows it))
-        inline constexpr std::uint32_t ArraySize = 48u;             ///< (an array's size (an array literal's elements' storage in its cell follows it))
+        inline constexpr std::uint32_t ObjectSize = 16u;            ///< (an ordinary object's size (its values' storage in its cell follows it))
+        inline constexpr std::uint32_t ArraySize = 40u;             ///< (an array's size (an array literal's elements' storage in its cell follows it))
         inline constexpr std::uint32_t MaxLiteralElements = 16u;    ///< (an array literal's elements that its site's arrays have room for)
         inline constexpr std::uint32_t MaxLiteralProperties = 32u;  ///< (an object literal's properties that its site's objects have room for)
         enum : std::uint8_t

@@ -264,7 +264,7 @@ namespace neos::javascript_runtime
                         if (!name.empty())
                             return name;
                     }
-                    o = object.proto;
+                    o = object.proto();
                     if (o == Null)
                         break;
                 }
@@ -561,7 +561,7 @@ namespace neos::javascript_runtime
                     return entries(items, prefix + " {", "}", aIndent);
                 }
                 std::string name = constructor_name(aValue);
-                if (o.proto == Null)
+                if (o.proto() == Null)
                     name = "[Object: null prototype]";
                 else if (name == "Object")
                     name.clear();

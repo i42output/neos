@@ -118,7 +118,7 @@ namespace neos::javascript_runtime
                 return static_cast<std::size_t>(static_cast<std::byte const*>(aField) - reinterpret_cast<std::byte const*>(&o));
             };
             bool const ok =
-                at(&o.proto) == jsl::ObjectProto &&
+                reinterpret_cast<std::byte const*>(&root_shape()->proto) - reinterpret_cast<std::byte const*>(root_shape()) == jsl::ShapeProto &&
                 at(o.properties.shape_field()) == jsl::ObjectShape &&
                 at(o.properties.values_field()) == jsl::ObjectValues &&
                 at(o.properties.capacity_field()) == jsl::ObjectValueCapacity &&
@@ -170,7 +170,7 @@ namespace neos::javascript_runtime
                 sizeof(array.sparse) == 1u && sizeof(array.cls) == 1u;
             if (!ok || !arrayOk)
                 std::fprintf(stderr, "JavaScript runtime: object prototype %zu, shape %zu, values %zu, dictionary %zu, class %zu, extensible %zu; array elements %zu, length %zu, sparse %zu\n",
-                    at(&o.proto), at(o.properties.shape_field()), at(o.properties.values_field()), at(o.properties.capacity_field()), at(&o.cls),
+                    std::size_t{ 0u }, at(o.properties.shape_field()), at(o.properties.values_field()), at(o.properties.capacity_field()), at(&o.cls),
                     at(&o.extensible), field(array, array.elements.offset_field()), field(array, &array.length), field(array, &array.sparse));
             if (!ok || !environmentOk || !arrayOk || !stringOk)
             {
@@ -1268,9 +1268,9 @@ namespace neos::javascript_runtime
             object const* o = &aTypedArray;
             for (std::size_t d = 1u; d < typed_array_length_cache::MaxDepth; ++d)
             {
-                if (o->proto == Null)
+                if (o->proto() == Null)
                     return false;
-                o = &obj(o->proto);
+                o = &obj(o->proto());
                 if (!o->ordinaryGet || o->properties.layout() == nullptr)
                     return false;
                 if (auto const p = o->properties.find(the_names().length))
@@ -1304,12 +1304,12 @@ namespace neos::javascript_runtime
                 bool same = true;
                 for (std::size_t d = 1u; d < cache.depth; ++d)
                 {
-                    if (o->proto == Null)
+                    if (o->proto() == Null)
                     {
                         same = false;
                         break;
                     }
-                    o = &obj(o->proto);
+                    o = &obj(o->proto());
                     if (o != cache.objects[d] || o->properties.layout() != cache.shapes[d] || cache.shapes[d] == nullptr)
                     {
                         same = false;
@@ -1493,7 +1493,7 @@ namespace neos::javascript_runtime
             // methods) its property at the position is compared (see holder_value))
             bool prototypes_match(object const& aReceiver, site const& aSite, bool aHolder)
             {
-                auto p = aReceiver.proto;
+                auto p = aReceiver.proto();
                 for (std::uint8_t i = 0u; i < aSite.depth; ++i)
                 {
                     if (p != aSite.prototypes[i].object)
@@ -1503,7 +1503,7 @@ namespace neos::javascript_runtime
                         return false;
                     if (!(aHolder && i + 1u == aSite.depth) && shape_word(o.properties.layout()) != aSite.prototypes[i].shape)
                         return false;
-                    p = o.proto;
+                    p = o.proto();
                 }
                 return true;
             }
@@ -1587,7 +1587,7 @@ namespace neos::javascript_runtime
                             table[megamorphic_index(e.shape, aKey)] = megamorphic_entry{ e.shape, aKey, e.position, p->writable() && layout->validity == nullptr ? 1u : 0u, 0u };
                             return;
                         }
-                        auto prototype = o.proto;
+                        auto prototype = o.proto();
                         for (std::uint8_t depth = 0u; depth < 2u && prototype != Null; ++depth)
                         {
                             auto& holder = obj(prototype);
@@ -1609,7 +1609,7 @@ namespace neos::javascript_runtime
                                 e.position = p.position();
                                 return;
                             }
-                            prototype = holder.proto;
+                            prototype = holder.proto();
                         }
                     }
                     else if (is_string(aObject) && aKey != the_names().length && !array_index(aKey))
@@ -1730,6 +1730,11 @@ namespace neos::javascript_runtime
                     if (e.function != aCallee || e.key != 0u)
                         continue;
                     auto& h = the_heap();
+                    // (its objects' prototype (its prototype property's value now: compiled code checks that it is) and their root shape)
+                    auto const prototype = f.properties.at(f.prototypePosition).data();
+                    auto* const root = h.root_shape()->root_for(prototype);
+                    if (root == nullptr)
+                        break;
                     constexpr std::size_t base = (sizeof(object) + 7u) & ~std::size_t{ 7u };
                     auto const size = base + std::min<std::size_t>(f.constructedProperties, MaxCellValues) * sizeof(value);
                     auto const sizeClass = h.size_class(size);
@@ -1740,6 +1745,7 @@ namespace neos::javascript_runtime
                     e.position = f.prototypePosition;
                     e.added = h.object_template(sizeClass, (slotSize - base) / sizeof(value));
                     e.reserved2 = slotSize;
+                    e.prototypes[0] = { prototype, shape_word(root) };
                     break;
                 }
                 return thisValue;
@@ -1766,14 +1772,14 @@ namespace neos::javascript_runtime
                 for (std::size_t i = 0u; i < count; ++i)
                     a.elements.push_back(Undefined);
                 a.length = static_cast<std::uint32_t>(count);
-                if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone)
+                if (auto* const entries = site_of(aSite); entries != nullptr && entries[0].kind == jsl::SiteNone && a.properties.layout() != nullptr)
                 {
                     auto& e = entries[0];
                     e.kind = jsl::SiteArray;
                     e.depth = static_cast<std::uint8_t>(sizeClass);
                     e.added = h.array_template(sizeClass, capacity);
                     e.reserved2 = slotSize;
-                    e.prototypes[0].object = the_realm().arrayPrototype;
+                    e.prototypes[0] = { the_realm().arrayPrototype, shape_word(a.properties.layout()) };
                 }
                 return value_of(a);
             });
@@ -1789,7 +1795,7 @@ namespace neos::javascript_runtime
             auto* const s = o.properties.layout();
             constexpr std::size_t base = (sizeof(object) + 7u) & ~std::size_t{ 7u };
             if (o.cellKind != KindObject || s == nullptr || o.properties.size() != static_cast<std::size_t>(aCount) || o.has_private_elements() ||
-                o.proto != the_realm().objectPrototype || !o.extensible)
+                o.proto() != the_realm().objectPrototype || !o.extensible)
                 return Undefined;
             for (auto const& slot : s->slots())
                 if (slot.attributes != AttributesDefault)
@@ -1811,7 +1817,7 @@ namespace neos::javascript_runtime
             e.shape = shape_word(s);
             e.added = h.object_template(sizeClass, (slotSize - base) / sizeof(value));
             e.reserved2 = slotSize;
-            e.prototypes[0].object = o.proto;
+            e.prototypes[0].object = o.proto();
             return Undefined;
         }
 
@@ -2017,7 +2023,7 @@ namespace neos::javascript_runtime
                         if (e->kind == jsl::SiteOwn && o.properties.cached_store(e->shape, e->position, aValue))
                             return aValue;
                         if (e->kind == jsl::SiteAdd && o.extensible && prototypes_match(o, *e, false) &&
-                            (e->depth == 0u ? o.proto : obj(e->prototypes[e->depth - 1u].object).proto) == Null)
+                            (e->depth == 0u ? o.proto() : obj(e->prototypes[e->depth - 1u].object).proto()) == Null)
                         {
                             o.properties.add(aValue, shape_ref::from_word(e->added));
                             return aValue;
@@ -2055,7 +2061,7 @@ namespace neos::javascript_runtime
                 if (after == nullptr || after->parent != before || after->key != aKey || after->attributes != AttributesDefault)
                     return result;
                 // (no prototype (each of them ordinary) has the property; the last's prototype is null)
-                auto prototype = o.proto;
+                auto prototype = o.proto();
                 std::uint8_t depth = 0u;
                 for (; prototype != Null; ++depth)
                 {
@@ -2066,7 +2072,7 @@ namespace neos::javascript_runtime
                     if (layout == nullptr || !ordinary_type(p) || p.properties.find(aKey))
                         return result;
                     e.prototypes[depth] = { prototype, shape_word(layout) };
-                    prototype = p.proto;
+                    prototype = p.proto();
                 }
                 e.kind = jsl::SiteAdd;
                 e.depth = depth;

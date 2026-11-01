@@ -478,7 +478,7 @@ namespace neos::javascript_runtime
         value realm::* const defaults[] = { &realm::functionPrototype, &realm::generatorFunctionPrototype, &realm::asyncFunctionPrototype,
             &realm::asyncGeneratorFunctionPrototype };
         if (aNewTarget != Undefined)
-            obj(f).proto = get_prototype_from_constructor(aNewTarget, defaults[aKind]);
+            obj(f).set_proto(get_prototype_from_constructor(aNewTarget, defaults[aKind]));
         return f;
     }
 

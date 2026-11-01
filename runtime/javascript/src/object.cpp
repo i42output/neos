@@ -57,7 +57,11 @@ namespace neos::javascript_runtime
 
     shape::~shape()
     {
-        // (the shapes that it transitions to: its (a shape's parent is the one that transitions to it))
+        // (a base root's roots of other prototypes; the shapes that it transitions to: its (a shape's parent is the one that transitions 
+        // to it))
+        if (iProtoRoots)
+            for (auto const& r : *iProtoRoots)
+                delete r.second;
         if (iManyTransitions)
             for (auto const& t : *iManyTransitions)
                 delete t.second;
@@ -84,6 +88,8 @@ namespace neos::javascript_runtime
         auto* const next = new shape{};
         ++shapes;
         pin_interned(aKey);     // (an equal key later (e.g. of another run of the same code) is this one: its transition is found)
+        next->proto = proto;
+        next->base = base;
         next->parent = this;
         next->key = aKey;
         next->attributes = aAttributes;
@@ -102,6 +108,44 @@ namespace neos::javascript_runtime
             }
         }
         return next;
+    }
+
+    shape* shape::root_for(value aPrototype)
+    {
+        if (base != this)
+            return base->root_for(aPrototype);
+        if (aPrototype == proto)
+            return this;
+        if (!iProtoRoots)
+            iProtoRoots = std::make_unique<std::unordered_map<value, shape*>>();
+        if (auto const existing = iProtoRoots->find(aPrototype); existing != iProtoRoots->end())
+            return existing->second;
+        auto& shapes = the_heap().shape_count();
+        if (shapes >= MaxShapes)
+            return nullptr;
+        auto* const root = new shape{};
+        ++shapes;
+        root->proto = aPrototype;
+        root->base = this;
+        root->validity = validity;
+        iProtoRoots->emplace(aPrototype, root);
+        return root;
+    }
+
+    shape* shape::with_proto(value aPrototype)
+    {
+        if (aPrototype == proto)
+            return this;
+        auto* s = base->root_for(aPrototype);
+        if (s == nullptr)
+            return nullptr;
+        for (auto const& slot : slots())
+        {
+            s = s->transition(slot.key, slot.attributes);
+            if (s == nullptr)
+                return nullptr;
+        }
+        return s;
     }
 
     std::optional<std::uint32_t> shape::position(value aKey)
@@ -271,6 +315,41 @@ namespace neos::javascript_runtime
         iStorage = 0u;
     }
 
+    void property_table::set_root(shape* aBase)
+    {
+        // (its prototype kept)
+        auto const prototype = proto();
+        changed();
+        if (iShape == nullptr)
+            release_dictionary();
+        if (auto* const root = aBase->root_for(prototype); root != nullptr)
+            iShape = root;
+        else
+        {
+            iShape = aBase;
+            make_dictionary();
+            dict().proto = prototype;
+        }
+    }
+
+    void property_table::set_proto(value aPrototype)
+    {
+        if (iShape != nullptr)
+        {
+            if (iShape->proto == aPrototype)
+                return;
+            changed();
+            if (auto* const s = iShape->with_proto(aPrototype); s != nullptr)
+            {
+                iShape = s;
+                return;
+            }
+            make_dictionary();
+        }
+        changed();
+        dict().proto = aPrototype;
+    }
+
     void property_table::grow(std::size_t aCapacity)
     {
         if (aCapacity <= iCapacity)
@@ -326,6 +405,7 @@ namespace neos::javascript_runtime
         auto const count = iShape->count;
         auto* const memory = region_allocate(sizeof(dictionary));
         auto* const d = ::new (memory) dictionary{};
+        d->proto = iShape->proto;
         d->entries.reserve(count);
         auto const* const v = values();
         for (std::uint32_t i = 0u; i < count; ++i)
@@ -485,6 +565,7 @@ namespace neos::javascript_runtime
         *word = 1u;
         auto* const root = new shape{};
         ++h.shape_count();
+        root->proto = current->proto;
         root->validity = word;
         h.watchedRootShapes.push_back(root);
         auto* s = root;
@@ -533,16 +614,16 @@ namespace neos::javascript_runtime
 
     value object::do_get_prototype_of()
     {
-        return proto;
+        return proto();
     }
 
     bool object::ordinary_set_prototype_of(value aPrototype)
     {
-        if (aPrototype == proto)
+        if (aPrototype == proto())
             return true;
         if (!extensible)
             return false;
-        if (proto == Null && is_object_prototype(*this))
+        if (proto() == Null && is_object_prototype(*this))
             return false;   // (an immutable prototype exotic object (SetImmutablePrototype))
         auto p = aPrototype;
         while (p != Null)
@@ -552,9 +633,9 @@ namespace neos::javascript_runtime
                 return false;
             if (o.cls == object_class::Proxy)
                 break;
-            p = o.proto;
+            p = o.proto();
         }
-        proto = aPrototype;
+        set_proto(aPrototype);
         return true;
     }
 
@@ -853,7 +934,7 @@ namespace neos::javascript_runtime
         if (aReceiver == value_of(*this) && extensible && !mirrored && ordinary_type(*this))
         {
             bool absent = true;
-            for (auto parent = proto; parent != Null;)
+            for (auto parent = proto(); parent != Null;)
             {
                 auto& p = obj(parent);
                 if (!ordinary_type(p) || p.properties.find(aKey) != nullptr)
@@ -861,7 +942,7 @@ namespace neos::javascript_runtime
                     absent = false;
                     break;
                 }
-                parent = p.proto;
+                parent = p.proto();
             }
             if (absent)
             {
@@ -983,6 +1064,7 @@ namespace neos::javascript_runtime
         // (the elements become ordinary properties: indices first (they are ordered by index anyway))
         property_table table;
         table.set_root(type_root_shape<array_object>());   // (an array's shapes are its own)
+        table.set_proto(proto());
         for (std::size_t i = 0u; i < elements.size(); ++i)
             if (elements[i] != Empty)
                 table.add(index_key(i), elements[i], Undefined, AttributesDefault);

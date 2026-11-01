@@ -1182,7 +1182,7 @@ namespace neos::javascript_runtime
         {
             constexpr std::size_t base = (sizeof(object) + 7u) & ~std::size_t{ 7u };
             auto* const memory = static_cast<std::byte*>(iCollector->memory().allocate(base + sizeof(value), true));
-            auto* const o = ::new (memory) object{ Undefined };
+            auto* const o = ::new (memory) object{ Null };
             o->cellKind = cell_kind<object>();
             o->properties.use_storage(reinterpret_cast<value*>(memory + base), aRoom);
             iTemplates[aClass] = region_offset(memory);
@@ -1198,7 +1198,7 @@ namespace neos::javascript_runtime
         {
             constexpr std::size_t base = (sizeof(array_object) + 7u) & ~std::size_t{ 7u };
             auto* const memory = static_cast<std::byte*>(iCollector->memory().allocate(base + sizeof(value), true));
-            auto* const a = ::new (memory) array_object{ Undefined };
+            auto* const a = ::new (memory) array_object{ Null };
             a->cellKind = cell_kind<array_object>();
             a->ordinaryGet = false;
             a->properties.set_root(type_root_shape<array_object>());
@@ -1833,7 +1833,7 @@ namespace neos::javascript_runtime
 
     void object::do_trace(tracer& aTracer)
     {
-        aTracer.mark(proto);
+        aTracer.mark(properties.proto());
         properties.trace(aTracer);
         auto const* const extra = extra_if();
         if (extra == nullptr)
