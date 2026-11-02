@@ -1,27 +1,26 @@
--- Example Ada program
+-- Example Ada program: the program's exit status
 
-with Process;
-use Process;
+with Ada.Command_Line;
 
-package body Example is
+procedure ExitCode is
 
-	ExitCode : Integer;
-	
-	function Count(Step : Integer) return Integer is
+	function Count (Step : Integer) return Integer is
+		X : Integer := 0;
 	begin
-		Integer x := 0;
-		for i in 1 .. 42  loop
-			x := x + Step;
+		for I in 1 .. 42 loop
+			X := X + Step;
 		end loop;
-		return x;
+		return X;
 	end Count;
 
-	procedure Test(Step : Integer; Result : out Integer) is
+	procedure Test (Step : Integer; Result : out Integer) is
 	begin
-		Result = Count(C);
-	end test;
+		Result := Count (Step);
+	end Test;
+
+	Code : Integer;
 
 begin
-		Test(10, ExitCode);
-		Process.SetExitCode(ExitCode);
-end Example;
+	Test (10, Code);
+	Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Exit_Status (Code));
+end ExitCode;
