@@ -490,10 +490,10 @@ namespace neos
                             std::optional<std::size_t> offset;
                             ssa::small_vector<std::size_t, 2> fixups; // positions of rel32 fields (most labels': one or two) (a short jump's: its rel8)
                             ssa::small_vector<std::uint32_t, 2> shorts; // (each fixup's: a short jump's number (see iShortJumps), else NotShort)
-                            bool near = false;  ///< (likely to be bound soon after the jumps to it (e.g. a block that is likely to run): see jcc)
+                            bool soon = false;  ///< (likely to be bound soon after the jumps to it (e.g. a block that is likely to run): see jcc) (not "near": a macro of windows.h)
                         };
                         static constexpr std::uint32_t NotShort = ~std::uint32_t{};
-                        // (forward jumps to near labels (see label::near) are short (rel8); those that are too far are made long by relax)
+                        // (forward jumps to labels bound soon (see label::soon) are short (rel8); those that are too far are made long by relax)
                         std::size_t iShortJumps = 0u;
                         std::size_t iLastJumpLength = 5u;
                         // (the code's alignments for execution (see align_executable): their nops' start and end, and the alignment)
@@ -1221,8 +1221,8 @@ namespace neos
                             for (auto b : Nop5)
                                 emit8(b);
                         }
-                        // (a label that is likely to be bound soon after the jumps to it: see label::near)
-                        void near(std::size_t aLabel) { iLabels[aLabel].near = true; }
+                        // (a label that is likely to be bound soon after the jumps to it: see label::soon)
+                        void soon(std::size_t aLabel) { iLabels[aLabel].soon = true; }
 
                         void call(std::size_t aLabel) { auto const start = offset(); emit8(0xE8u); fixup(aLabel); within_boundary(start); }
                         // (aDst = the address of aLabel (lea aDst, [rip + rel32]))
@@ -1311,12 +1311,12 @@ namespace neos
                             else
                                 emit32(0u);
                         }
-                        // (a jump to aLabel: short (its number), else NotShort (a label that is not near, or bound (a backward jump), or a 
+                        // (a jump to aLabel: short (its number), else NotShort (a label that is not bound soon, or bound (a backward jump), or a 
                         // jump that was too far before)
                         std::uint32_t short_jump(std::size_t aLabel)
                         {
                             auto const& l = iLabels[aLabel];
-                            if (iInCold || !l.near || l.offset)
+                            if (iInCold || !l.soon || l.offset)
                                 return NotShort;
                             return static_cast<std::uint32_t>(iShortJumps++);
                         }
@@ -6797,13 +6797,13 @@ namespace neos
                             layout();
                             iBlockLabels.assign(f.blocks.size(), 0u);
                             {
-                                // (the likely blocks' labels: near (see assembler::jcc: short jumps to them))
+                                // (the likely blocks' labels: bound soon (see assembler::jcc: short jumps to them))
                                 auto const cold = cold_blocks();
                                 for (auto b : f.order)
                                 {
                                     iBlockLabels[b] = a.new_label();
                                     if (!cold[b])
-                                        a.near(iBlockLabels[b]);
+                                        a.soon(iBlockLabels[b]);
                                 }
                             }
                             // prologue

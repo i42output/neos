@@ -439,7 +439,6 @@ add_neos_runtime_plugin(javascript
     runtime/javascript/src/builtins_disposable.cpp
     runtime/javascript/src/unicode.cpp
     runtime/javascript/src/unicode_data.cpp
-    runtime/javascript/src/host262.cpp
     runtime/javascript/src/builtins_buffers.cpp
     runtime/javascript/src/builtins_typed_arrays.cpp
     runtime/javascript/src/builtins_atomics.cpp
@@ -470,6 +469,14 @@ target_include_directories(javascript PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compi
 # __tls_get_addr (x86-64 ELF))
 if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
     target_compile_options(javascript PRIVATE -mtls-dialect=gnu2)
+endif()
+
+# the test262 host (print and $262, defined when the environment variable NEOS_TEST262 is set: for running ECMAScript's conformance
+# tests); off by default (a build for running programs has no test host)
+option(NEOS_TEST262_HOST "JavaScript's test262 host (print and $262)" OFF)
+if(NEOS_TEST262_HOST)
+    target_sources(javascript PRIVATE runtime/javascript/src/host262.cpp)
+    target_compile_definitions(javascript PRIVATE NEOS_JS_TEST262_HOST)
 endif()
 
 # ICU (Intl, ECMA-402): its C API (on Windows the system's ICU (icu.dll: the Windows SDK's icu.h); elsewhere the system's libicu); without

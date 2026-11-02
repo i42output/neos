@@ -301,11 +301,14 @@ namespace neos::language
         using i_semantic_concept::instance;
         void instance(neolib::i_ref_ptr<i_semantic_concept>& aInstance) const final
         {
-            aInstance = iInstance;
+            if (iInstance)
+                aInstance.reset(iInstance);
+            else
+                aInstance.reset();
         }
         void set_instance(i_semantic_concept& aInstance) final
         {
-            iInstance.reset(&aInstance);
+            iInstance = &aInstance;
         }
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) override {}
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) override {}
@@ -314,7 +317,9 @@ namespace neos::language
         neolib::string_view iName;
         neolib::string_view iBase;
         emit_type iEmitAs;
-        neolib::ref_ptr<i_semantic_concept> iInstance;
+        // (an instance's copy of its concept (see clone): its instance, which owns it (not a reference to it: they would refer to each
+        // other, and neither would be destroyed))
+        i_semantic_concept* iInstance = nullptr;
     };
 
     class unimplemented_semantic_concept : public semantic_concept<unimplemented_semantic_concept>

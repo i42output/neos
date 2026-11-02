@@ -222,11 +222,15 @@ namespace neos::language
         auto reset = [&]()
         {
             for (auto& unit : aProgram.translationUnits)
+            {
                 for (auto fragment = unit.fragments.begin(); fragment != unit.fragments.end();)
                     if (fragment->imported())
                         fragment = unit.fragments.erase(fragment);
                     else
                         (fragment++)->set_status(compilation_status::Pending);
+                // (the fragments' ASTs that the previous pass made: each pass makes them again (the last pass's are kept))
+                unit.ast.root()->children().clear();
+            }
             iModule = {};
             iSymbolInfo.clear();
             iSymbolSequence = 0u;
@@ -356,6 +360,8 @@ namespace neos::language
     {
         void walk_ast(i_context& context, ast& ast, fold_stack& foldStack, parser::ast_node const& parserAstNode, i_ast_node& astNode)
         {
+            // (room for its children (not grown by doubling: a node's spare room is kept as long as the AST))
+            static_cast<ast_node::children_t&>(astNode.children()).as_std_vector().reserve(parserAstNode.children.size());
             for (auto const& childParserNode : parserAstNode.children)
             {
                 astNode.children().push_back(neolib::make_ref<ast_node>(std::monostate{}, astNode));
@@ -3655,6 +3661,14 @@ namespace neos::language
         }
         {
             bytes section;
+            {
+                // (room for the bodies (their code, and a little for each one's locals and size): not grown by doubling, which copies
+                // them and holds both copies at once)
+                std::size_t room = 16u;
+                for (std::uint32_t i = importCount; i < order.size(); ++i)
+                    room += iModule.functions[order[i]].body.size() + 16u + 6u * iModule.functions[order[i]].locals.size();
+                section.reserve(room);
+            }
             put_u32(section, order.size() - importCount);
             bytes body;
             std::vector<std::pair<std::uint32_t, std::uint8_t>> runs;
@@ -3822,9 +3836,9 @@ namespace neos::language
             }
             put_section(module, 0u, section);
         }
-        aProgram.text.clear();
-        for (auto b : module)
-            aProgram.text.push_back(std::byte{ b });
+        // (the module's bytes as the program's text (copied once: then the module's are freed))
+        aProgram.text.assign(reinterpret_cast<std::byte const*>(module.data()), reinterpret_cast<std::byte const*>(module.data() + module.size()));
+        bytes{}.swap(module);
         if (trace() >= 1)
             iContext.cout() << "Emitted WASM module: " << aProgram.text.size() << " bytes, " << order.size() << " function(s)" << std::endl;
     }

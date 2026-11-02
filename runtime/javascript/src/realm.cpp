@@ -37,6 +37,9 @@
 #include "api.hpp"
 #include "gc.hpp"
 
+#include <chrono>
+#include <thread>
+
 namespace neos::javascript_runtime
 {
     namespace
@@ -336,7 +339,57 @@ namespace neos::javascript_runtime
         init_intl(r);
         init_typed_arrays(r);
         init_console(r);
-        init_host262(r);
+#if defined(NEOS_JS_TEST262_HOST)
+        init_host262(r);    // (a build with the test262 host (see CMakeLists.txt: NEOS_TEST262_HOST))
+#endif
     }
     }
 }
+
+#if !defined(NEOS_JS_TEST262_HOST)
+namespace neos::javascript_runtime
+{
+    // (a build without the test262 host (host262.cpp: see CMakeLists.txt, NEOS_TEST262_HOST): there are no agents; the program waits 
+    // on its own)
+    double monotonic_ms()
+    {
+        static auto const sStart = std::chrono::steady_clock::now();
+        return std::chrono::duration<double, std::milli>{ std::chrono::steady_clock::now() - sStart }.count();
+    }
+
+    bool in_agent()
+    {
+        return false;
+    }
+
+    bool agents_running()
+    {
+        return false;
+    }
+
+    bool agent_enqueue_job(std::function<void()>&)
+    {
+        return false;
+    }
+
+    void agent_yield()
+    {
+    }
+
+    void agent_block(std::function<bool()> const& aDone, std::optional<double> aDeadline)
+    {
+        for (;;)
+        {
+            if (aDone())
+                return;
+            auto const now = monotonic_ms();
+            if (aDeadline && now >= *aDeadline)
+                return;
+            double wait = 1.0;
+            if (aDeadline)
+                wait = std::min(wait, *aDeadline - now);
+            std::this_thread::sleep_for(std::chrono::duration<double, std::milli>{ std::max(wait, 0.0) });
+        }
+    }
+}
+#endif

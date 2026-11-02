@@ -203,7 +203,7 @@ namespace neos
             }
             children_t& children() const final
             {
-                return *iChildren;
+                return iChildren;
             }
         public:
             neolib::i_string_view const& source() const final
@@ -321,7 +321,7 @@ namespace neos
             }
         private:
             i_ast_node* iParent = nullptr;
-            std::unique_ptr<children_t> iChildren = std::make_unique<children_t>();
+            mutable children_t iChildren;   ///< (in the node: not an allocation of its own)
             ast_node_value iValue;
         };
 
@@ -358,4 +358,4 @@ namespace neos
             neolib::ref_ptr<ast_node> iRoot = neolib::make_ref<ast_node>();
         };
     }
-}
+}

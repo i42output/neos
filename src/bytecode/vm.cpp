@@ -227,7 +227,7 @@ namespace neos
                 class reader
                 {
                 public:
-                    reader(std::vector<std::uint8_t> const& aBytes, std::size_t aPosition = 0u) : iBytes{ aBytes }, iPosition{ aPosition } {}
+                    reader(std::span<std::uint8_t const> aBytes, std::size_t aPosition = 0u) : iBytes{ aBytes }, iPosition{ aPosition } {}
                 public:
                     std::size_t position() const { return iPosition; }
                     void seek(std::size_t aPosition) { iPosition = aPosition; }
@@ -285,7 +285,7 @@ namespace neos
                         return result;
                     }
                 private:
-                    std::vector<std::uint8_t> const& iBytes;
+                    std::span<std::uint8_t const> iBytes;
                     std::size_t iPosition;
                 };
 
@@ -399,8 +399,10 @@ namespace neos
                         iSerial{ ++sSerial }, iOutput{ aOutput }, iInput{ aInput }, iErrorOutput{ aErrorOutput }, iInstructions{ aInstructions }, iRestricted{ aRestricted },
                         iCompileService{ aCompileService }, iArguments{ aArguments }
                     {
-                        iModule.assign(reinterpret_cast<std::uint8_t const*>(aText.data()), reinterpret_cast<std::uint8_t const*>(aText.data()) + aText.size());
+                        // (the text is read only while it is parsed (its bodies' tokens, its data copied to the memory): not copied)
+                        iModule = std::span<std::uint8_t const>{ reinterpret_cast<std::uint8_t const*>(aText.data()), aText.size() };
                         parse();
+                        iModule = {};
                     }
                     ~machine()
                     {
@@ -2294,7 +2296,7 @@ namespace neos
                     bool const iRestricted; ///< runtime plugin functions that can change the host environment cannot be called
                     compile_service const iCompileService;
                     std::vector<std::string> const iArguments;
-                    std::vector<std::uint8_t> iModule;
+                    std::span<std::uint8_t const> iModule;    ///< (the text, while it is parsed (see the constructor))
                     std::vector<std::uint64_t> iTokens;   ///< decoded function bodies
                     std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end (see block_tables)
                     std::vector<std::size_t> iElses;      ///< if token -> token after its else (0 if none)
