@@ -207,6 +207,8 @@ package Ada.Synchronous_Task_Control
      with Nonblocking => False;
 private
   protected type Suspension_Object is
+     --  (its ceiling: the highest (any task may use it, D.10(9)))
+     pragma Interrupt_Priority;
      procedure Set_True;
      procedure Set_False;
      function Current_State return Boolean;

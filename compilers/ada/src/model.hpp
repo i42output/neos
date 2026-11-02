@@ -111,6 +111,9 @@ namespace neos::compilers::ada
         ada_type* type = nullptr;
         node* default_expression = nullptr;
         bool discriminant = false;
+        bool stored = false;                ///< (a discriminant of the parent of a type with new discriminants that is not one of them (see
+                                            ///< types.cpp): its value (default_expression: the derivation's constraint's), for the
+                                            ///< parent's variant parts and views; not a component of the type)
         bool aliased = false;
         // (its position: the variant that it is in (none: the record's own components) and its offset in the record)
         int variant = -1;                   ///< (an index in the record's variants)
@@ -174,6 +177,8 @@ namespace neos::compilers::ada
         bool controlled = false;            ///< (it has controlled parts (needs finalization))
         bool synchronized_interface = false;
         bool packed = false;
+        bool unchecked_union = false;       ///< (aspect Unchecked_Union (B.3.3): its discriminants are not checked; Program_Error where
+                                            ///< they would be needed and a view lacks inferable discriminants)
         bool fortran = false;
         std::uint32_t machine_radix = 0u;   ///< (a Machine_Radix clause's (0: none, 2))               ///< (an array type of convention Fortran: its canonical order is column major (5.5.2(10/3)))
         bool has_tasks = false;
@@ -397,6 +402,10 @@ namespace neos::compilers::ada
         std::uint64_t alignment_clause = 0u;    ///< (an object whose alignment is specified (Alignment aspect or clause): in storage elements)
         std::uint64_t size_clause = 0u;         ///< (an object whose size is specified (Size aspect or clause): in bits)
         node* initial = nullptr;            ///< (an object's initial value)
+        node* priority = nullptr;           ///< (a task or protected unit's, or the main subprogram's: its Priority or Interrupt_Priority (D.1, D.3))
+        bool interrupt_priority = false;    ///< (Interrupt_Priority (its default: Interrupt_Priority'Last))
+        bool volatile_object = false;       ///< (an object specified Volatile or Atomic (C.6))
+        bool volatile_components = false;   ///< (an object specified Volatile_Components or Atomic_Components (C.6))
         bool aliased = false;
         bool by_reference = false;          ///< (a parameter passed by reference)
         bool captured = false;              ///< (a nested subprogram refers to it)

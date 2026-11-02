@@ -31,12 +31,14 @@
 
 package body Ada.Dispatching.Non_Preemptive is
 
-   --  (neos's dispatching does not depend on priorities (see
-   --  Ada.Dynamic_Priorities): no task has a higher active priority than the
-   --  running task)
+   --  (a dispatching point: the ready tasks of a higher active priority run
+   --  first (the runtime's scheduler))
+   procedure Dispatch;
+   pragma Import (Neos, Dispatch, "ada::dispatch");
+
    procedure Yield_To_Higher is
    begin
-      null;
+      Dispatch;
    end Yield_To_Higher;
 
 end Ada.Dispatching.Non_Preemptive;

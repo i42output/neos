@@ -29,9 +29,9 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos's dispatching does not depend on deadlines (its tasks run in turn: see
---  Ada.Task_Identification): a task's deadlines are values that this package
---  keeps. The release time that Get_Last_Release_Time gives is the time at
+--  neos's dispatching does not depend on deadlines (its scheduler dispatches
+--  by priority: see the Ada runtime's tasking): a task's deadlines are values
+--  that this package keeps. The release time that Get_Last_Release_Time gives is the time at
 --  which the task was last released by Delay_Until_And_Set_Deadline (other
 --  releases are not recorded; Ada.Real_Time.Time_First if there has been
 --  none).

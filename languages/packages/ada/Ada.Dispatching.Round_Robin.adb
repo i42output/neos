@@ -29,9 +29,9 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos does not support the Round_Robin_Within_Priorities policy: its tasks
---  run until they block or yield, at every priority (the predefined policy
---  that applies is FIFO_Within_Priorities' order without preemption).
+--  neos does not support the Round_Robin_Within_Priorities policy (its
+--  scheduler has no time slices): FIFO_Within_Priorities applies at every
+--  priority.
 
 package body Ada.Dispatching.Round_Robin is
 

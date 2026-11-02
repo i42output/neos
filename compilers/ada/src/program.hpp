@@ -226,6 +226,10 @@ namespace neos::compilers::ada
         entity* entry_implementation(ada_type* aType, entity* aOperation);
         entity* deep_operation(ada_type* aType, bool aFinalize);
         bool iNormalizeScalars = false;                         ///< (pragma Normalize_Scalars or Initialize_Scalars in the partition (H.1))
+        bool iCeilingLocking = false;                           ///< (pragma Locking_Policy (Ceiling_Locking) in the partition (D.3))
+        bool iPriorityQueuing = false;                          ///< (pragma Queuing_Policy (Priority_Queuing) in the partition (D.4))
+        std::vector<entity*> iInterruptHandlers;                ///< (the protected procedures that can be interrupt handlers (C.3.1))
+        std::map<entity*, std::vector<std::pair<entity*, node*>>> iAttachHandlers;  ///< (by protected unit: its procedures attached to interrupts (C.3.1))
         std::optional<std::int64_t> invalid_value(ada_type* aType);   ///< (a scalar subtype's invalid representation (an out of range one), if any)  ///< (a tagged type's deep Adjust or Finalize: its controlled parts' (see TagAdjust))    ///< (a task or protected type's entry implementing an interface's operation: a procedure that calls it)
         std::map<std::pair<ada_type*, entity*>, entity*> iEntryImplementations;                    ///< (a tagged type's tag: its dispatch table's address)
         std::uint64_t tag_table_cell();                           ///< (a cell: the address of a table of the program's tags)
@@ -297,6 +301,8 @@ namespace neos::compilers::ada
         std::uint64_t protected_table(ada_type* aType);           ///< (a protected type's entries' barriers and bodies (static))                                    ///< (Ada.Finalization is part of the program)
         bool is_controlled(ada_type* aType);
         bool needs_finalization(ada_type* aType);
+        bool inferable_discriminants(node* aExpression);         ///< (an expression of an unchecked union type: B.3.3(13/2))
+        bool unconstrained_union_part(ada_type* aType);           ///< (a subcomponent of an unchecked union type whose nominal subtype is unconstrained)
         int controlled_slot(std::string const& aOperation, ada_type* aType = nullptr);
         void note_function_type(std::uint32_t aFunction, std::vector<type> const& aParameters, type aResult);
         void note_indirect_type(std::uint32_t aSignature, std::vector<type> const& aParameters, type aResult);

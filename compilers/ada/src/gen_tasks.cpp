@@ -163,6 +163,15 @@ namespace neos::compilers::ada
         runtime("task_create", { type::I64, type::I64, type::I64, type::I64 }, type::I64);
         store64(program::TaskHandle);
         check();
+        // (its base priority, if specified (D.1(17)): its expression evaluated now (it may name the object's discriminants))
+        if (unit->priority != nullptr || unit->interrupt_priority)
+        {
+            get(aAddress);
+            load64(program::TaskHandle);
+            unit_priority(unit, t, aAddress);
+            runtime("task_priority", { type::I64, type::I64 }, type::Void);
+            check();
+        }
         // (a nested task type's: its body's elaboration flag (its activation before then raises Program_Error))
         if (unit->scope != nullptr && unit->scope->level > 0)
         {
@@ -291,7 +300,57 @@ namespace neos::compilers::ada
             i64(0);
         i64(iAllocating ? 0 : 1);
         runtime("po_create", { type::I64, type::I64, type::I64, type::I64, type::I64 }, type::I64);
-        drop();
+        // (its ceiling priority, if specified (D.3(6)): its expression evaluated now (it may name the object's discriminants))
+        if (t->unit != nullptr && (t->unit->priority != nullptr || t->unit->interrupt_priority))
+        {
+            unit_priority(t->unit, t, aAddress);
+            runtime("po_ceiling", { type::I64, type::I64 }, type::Void);
+            check();
+        }
+        else
+            drop();
+        // (its procedures attached to interrupts (C.3.1(7/3)): each interrupt's expression evaluated now (it may name the object's
+        // discriminants); a handler: a descriptor (procedure, static link, object), as an access value's)
+        if (auto handlers = iProgram.iAttachHandlers.find(t->unit); t->unit != nullptr && handlers != iProgram.iAttachHandlers.end())
+            for (auto const& [procedure, interrupt] : handlers->second)
+            {
+                iProgram.define_subprogram(procedure);
+                iInstances.emplace_back(t, aAddress);
+                expression(interrupt, interrupt->type != nullptr ? interrupt->type : iProgram.integer());
+                iInstances.pop_back();
+                auto const d = temporary(type::I64);
+                i64(24);
+                runtime("allocate", { type::I64 }, type::I64);
+                set(d);
+                get(d);
+                function_index(procedure->sub->function_index);
+                op(opcode::I64UConvertI32);
+                store64(0u);
+                get(d);
+                static_link_for(procedure);
+                store64(8u);
+                get(d);
+                get(aAddress);
+                store64(16u);
+                get(d);
+                release(d);
+                runtime("interrupt_attach_static", { type::I64, type::I64 }, type::Void);
+                check();
+            }
+    }
+
+    void function_generator::unit_priority(entity* aUnit, ada_type* aType, std::uint32_t aAddress)
+    {
+        // (a task or protected unit's Priority or Interrupt_Priority (Interrupt_Priority'Last if it has none), of an object (its
+        // discriminants))
+        if (aUnit->priority == nullptr)
+        {
+            i64(31);
+            return;
+        }
+        iInstances.emplace_back(aType, aAddress);
+        expression(aUnit->priority, iProgram.integer());
+        iInstances.pop_back();
     }
 
     void function_generator::allocator(node* aAllocator, ada_type* aType)
@@ -1405,6 +1464,19 @@ namespace neos::compilers::ada
             if (aName == "identity")
                 return;
             runtime(aName == "callable" ? "task_callable" : "task_terminated", { type::I64 }, type::I64);
+            return;
+        }
+        if (aName == "caller")
+        {
+            // (E'Caller (C.7.1(14/3)): the caller of the call being accepted (within an accept statement for E), or of the call that
+            // the protected entry body is for)
+            auto* entryName = prefix->is(construct::Apply) ? prefix->child(0) : prefix;
+            auto* entry = entryName->ent != nullptr ? entryName->ent : prefix->ent;
+            if (entry == nullptr || entry->kind != entity_kind::Entry)
+                iProgram.error(aAttribute, "'Caller of a name that is not an entry");
+            auto* owner = entry->scope != nullptr ? entry->scope->owner : nullptr;
+            i64(owner != nullptr && owner->kind == entity_kind::Protected ? -1 : entry_key(entry) << 32);
+            runtime("entry_caller", { type::I64 }, type::I64);
             return;
         }
         if (aName == "count")

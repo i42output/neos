@@ -1590,6 +1590,24 @@ namespace neos
                                     iReachable = false;
                                     return;
                                 }
+                                if (aInline == nullptr && iInlines.empty() && iOptions.deopt && iOptions.slowCall && !iOptions.noDeopt.contains(aPosition) &&
+                                    iDeopts.size() < 60000u && iStack.size() >= iFrames.back().height + callee.parameters->size() && iOptions.slowCall(aCallee, aPosition))
+                                {
+                                    // (a slow path's call (see options::slowCall): the function's own code makes it (its arguments, and the
+                                    // operand stack below them, are the deopt's))
+                                    auto const& f = iModule.functions[iFunction];
+                                    auto const arguments = static_cast<std::uint32_t>(callee.parameters->size());
+                                    iDeopts.push_back(deopt{ aPosition, aCallee, arguments, static_cast<std::uint32_t>(iStack.size() - arguments),
+                                        static_cast<std::uint32_t>(f.parameters->size() + f.locals->size()), false });
+                                    emit(0x41u);
+                                    emit(iDeopts.size() - 1u);
+                                    emit(0x10u);
+                                    emit(intrinsics::deopt(iModule));
+                                    emit(0x00u);
+                                    unwind();
+                                    iReachable = false;
+                                    return;
+                                }
                                 for (std::size_t i = 0u; i < callee.parameters->size(); ++i)
                                     pop();
                                 emit(0x10u);

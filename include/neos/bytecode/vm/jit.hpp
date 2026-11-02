@@ -94,9 +94,15 @@ namespace neos
                     Plugin,         ///< a runtime plugin function (function_description::plugin), directly if its signature allows
                     ObjectRetain,   ///< neos::object_retain (host_interface::objectRetain)
                     ObjectRelease,  ///< neos::object_release (host_interface::objectRelease)
-                    Assume          ///< neos::assume (i32): no call (no code): the program's claim that its operand is not 0 where the
+                    Assume,         ///< neos::assume (i32): no call (no code): the program's claim that its operand is not 0 where the
                                     ///< call is (optimized code may assume it (see ssa::Assume))
+                    StackLow        ///< neos::stack_low (-> i32): no call: nonzero if the call stack is near its end (see StackLowMargin)
                 };
+
+                // (neos::stack_low: the call stack is near its end when less than this is left of it (generated code's native stack, above
+                // the limit that its functions' entries check (which traps)): a language whose functions check it where they are entered
+                // (e.g. Ada's Storage_Error) raises its own exception there, before a call can exhaust the stack)
+                constexpr std::uint32_t StackLowMargin = 64u * 1024u;
 
                 struct function_description
                 {

@@ -226,6 +226,16 @@ namespace neos::compilers::ada
                             auto const pragmaName = name_text(clause->child(0)->source);
                             if (pragmaName == "normalize_scalars" || pragmaName == "initialize_scalars")
                                 iNormalizeScalars = true;
+                            // (the partition's locking and queuing policies (D.3, D.4))
+                            for (auto* a : clause->children)
+                                if (a->is(construct::PragmaArgument) && !a->children.empty())
+                                {
+                                    auto const policy = name_text(a->children.back()->source);
+                                    if (pragmaName == "locking_policy" && policy == "ceiling_locking")
+                                        iCeilingLocking = true;
+                                    else if (pragmaName == "queuing_policy" && policy == "priority_queuing")
+                                        iPriorityQueuing = true;
+                                }
                             if (pragmaName == "elaborate" || pragmaName == "elaborate_all")
                                 for (auto* a : clause->children)
                                     if (a->is(construct::PragmaArgument) && !a->children.empty())

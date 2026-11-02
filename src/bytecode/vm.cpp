@@ -393,6 +393,7 @@ namespace neos
                 {
                 public:
                     static constexpr std::size_t MaxCallDepth = 100000u;
+                    static constexpr std::size_t StackLowFrames = 64u;  ///< (neos::stack_low: the interpreter's frames near MaxCallDepth)
                 public:
                     machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aErrorOutput, std::uint64_t& aInstructions, bool aRestricted,
                         compile_service const& aCompileService, std::vector<std::string> const& aArguments) :
@@ -458,6 +459,8 @@ namespace neos
                                     d.call = jit::import_call::ObjectRelease;
                                 else if (*f.import == "neos::assume")
                                     d.call = jit::import_call::Assume;
+                                else if (*f.import == "neos::stack_low")
+                                    d.call = jit::import_call::StackLow;
                                 else if (f.import->starts_with(std::string{ bytecode::LinkNamespace } + "::") || *f.import == "neos::link_run")
                                     ; // (the VM's (see link_call and link_run))
                                 else if (!d.checked)
@@ -1852,6 +1855,7 @@ namespace neos
                         Allocate,
                         Checked,
                         Assume,
+                        StackLow,
                         LinkRun,
                         Link,
                         Runtime
@@ -1876,6 +1880,7 @@ namespace neos
                             { "neos::exit", import_kind::Exit },    // (the program stops: its exit status)
                             { "neos::allocate", import_kind::Allocate }, // (memory (zeroed) of a size: its address)
                             { "neos::assume", import_kind::Assume },    // (the program's claim that its operand is not 0: nothing is done)
+                            { "neos::stack_low", import_kind::StackLow },   // (nonzero if the call stack is near its end: see jit::StackLowMargin)
                             { "neos::link_run", import_kind::LinkRun }  // (a translation unit after the first runs: see link_run)
                         };
                         auto const& name = *iFunctions.at(aFunction).import;
@@ -2082,6 +2087,13 @@ namespace neos
                             aBuffer[0] = of_u32(allocate(as_u32(aBuffer[0])));
                             break;
                         case import_kind::Assume:
+                            break;
+                        case import_kind::StackLow:
+                            {
+                                // (the interpreter's: its frames near the limit (generated code's: see jit::StackLowMargin))
+                                auto const* const frames = tActivation != nullptr ? tActivation->frames : nullptr;
+                                aBuffer[0] = of_u32(frames != nullptr && frames->size() + StackLowFrames >= MaxCallDepth ? 1u : 0u);
+                            }
                             break;
                         case import_kind::LinkRun:
                             link_run(as_u32(aBuffer[0]));

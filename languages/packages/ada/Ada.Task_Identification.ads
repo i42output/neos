@@ -214,7 +214,8 @@ package Ada.Task_Identification
    function  Is_Callable            (T : Task_Id) return Boolean;
    function  Activation_Is_Complete (T : Task_Id) return Boolean;
 private
-   -- (a task's id (the runtime's): 0 is no task, 1 the environment task)
-   type Task_Id is range -2 ** 63 .. 2 ** 63 - 1;
+   -- (a task's id (the runtime's): 0 is no task (the default, C.7.1(2/2)), 1
+   -- the environment task)
+   type Task_Id is range -2 ** 63 .. 2 ** 63 - 1 with Default_Value => 0;
    Null_Task_Id : constant Task_Id := 0;
 end Ada.Task_Identification;

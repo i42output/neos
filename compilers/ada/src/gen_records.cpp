@@ -194,17 +194,31 @@ namespace neos::compilers::ada
         for (auto const& c : base->components)
             if (c.dynamic && c.offset && c.type->view()->kind != type_kind::Array)
             {
-                // (a dynamically sized record component: its size)
+                // (a dynamically sized record component: its size (one of a variant that the discriminants don't select: the
+                // space its object has in the tail, which is its subtype's (see default_initialize); it has no value))
+                if (c.variant >= 0)
+                {
+                    variant_selected(base, c, aValue);
+                    begin_if(type::I64);
+                }
                 auto const component = temporary(type::I64);
                 component_address(base, c, aValue);
                 set(component);
                 record_size(c.type, component);
+                release(component);
+                if (c.variant >= 0)
+                {
+                    else_();
+                    iInstances.emplace_back(base, aValue);
+                    record_subtype_size(c.type);
+                    iInstances.pop_back();
+                    end();
+                }
                 i64(7);
                 op(opcode::I64Add);
                 i64(~std::int64_t{ 7 });
                 op(opcode::I64And);
                 op(opcode::I64Add);
-                release(component);
             }
             else if (c.dynamic && c.offset)
             {
@@ -303,6 +317,16 @@ namespace neos::compilers::ada
             range_check(c.type, value->type, value);
             store(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
         }
+        // (the parent's discriminants that are stored (see component_info::stored): the constraint's values (of the discriminants))
+        iInstances.emplace_back(base, aAddress);
+        for (auto const& c : base->components)
+            if (c.stored && c.offset && c.default_expression != nullptr)
+            {
+                get(aAddress);
+                expression(c.default_expression, c.type);
+                store(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
+            }
+        iInstances.pop_back();
     }
 
     void function_generator::dynamic_record(ada_type* aType, std::uint32_t aScratch, int aWhere)

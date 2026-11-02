@@ -36,6 +36,7 @@
 #include <neolib/neolib.hpp>
 #include <neolib/core/pair.hpp>
 #include <algorithm>
+#include <set>
 #include "program.hpp"
 
 namespace neos::compilers::ada
@@ -1608,15 +1609,55 @@ namespace neos::compilers::ada
                             }
                         }
                     }
+                // (the parent's discriminants: each as one of the new discriminants (the first that the constraint names it with; a
+                // tagged type's where the parent's objects have it (its view is the object): see program::layout), else stored (the
+                // constraint's value: e.g. for the parent's variant parts and views))
+                std::vector<component_info> stored;
+                {
+                    auto const& constraint = parentView->discriminant_constraint;
+                    std::set<std::string> named;
+                    std::size_t k = 0u;
+                    for (auto const& pc : parentView->base_type()->view()->components)
+                        if (pc.discriminant)
+                        {
+                            node* value = k < constraint.size() ? constraint[k] : nullptr;
+                            ++k;
+                            if (value != nullptr && value->is(construct::Association))
+                                value = value->children.back();
+                            if (value == nullptr)
+                                continue;
+                            if (value->is(construct::Identifier) && value->ent != nullptr && value->ent->kind == entity_kind::Discriminant &&
+                                named.insert(value->ent->name).second)
+                                continue;
+                            component_info s = pc;
+                            s.discriminant = false;
+                            s.stored = true;
+                            s.default_expression = value;
+                            s.variant = -1;
+                            s.offset.reset();
+                            stored.push_back(s);
+                        }
+                }
                 t->components.clear();
                 t->size.reset();
                 t->dynamic_size = false;
                 discriminant_part(aDiscriminants, t, r);
+                // (a new discriminant that the constraint names (it appears alone, 3.7(18)): this one (the constraint was resolved
+                // with an earlier entity of its name))
+                for (auto& c : stored)
+                {
+                    if (c.default_expression->is(construct::Identifier) && c.default_expression->ent != nullptr &&
+                        c.default_expression->ent->kind == entity_kind::Discriminant)
+                        for (auto const& o : t->components)
+                            if (o.discriminant && o.ent != nullptr && o.ent->name == c.default_expression->ent->name)
+                                c.default_expression->ent = o.ent;
+                    t->components.push_back(c);
+                }
                 for (auto const& c : inherited)
                     t->components.push_back(c);
             }
             for (auto const& c : t->components)
-                if (c.ent != nullptr)
+                if (c.ent != nullptr && !c.stored)
                     r->add(c.ent);
             if (aExtension != nullptr)
             {

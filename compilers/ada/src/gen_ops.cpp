@@ -1447,6 +1447,67 @@ namespace neos::compilers::ada
         check();
     }
 
+    bool program::inferable_discriminants(node* aExpression)
+    {
+        // (B.3.3(13/2): a name of an object, a qualified expression, a type conversion or a function call whose nominal subtype is
+        // constrained; an aggregate (its discriminants are given))
+        auto* e = aExpression;
+        while (e != nullptr && e->is(construct::Parenthesized))
+            e = e->child(0);
+        if (e == nullptr)
+            return false;
+        if (e->is(construct::Aggregate) || e->is(construct::AggregateExtension) || e->is(construct::AggregateDelta))
+            return true;
+        ada_type* nominal = e->type;
+        if (!e->is(construct::Qualified) && meaning_of(e) != meaning::Conversion && meaning_of(e) != meaning::Call && e->ent != nullptr &&
+            (e->ent->is_object() || e->ent->kind == entity_kind::Component) && e->ent->type != nullptr)
+            nominal = e->ent->type;
+        if (nominal == nullptr)
+            return false;
+        auto* v = nominal->view();
+        auto* base = v->base_type()->view();
+        bool const discriminated = std::any_of(base->components.begin(), base->components.end(), [](component_info const& c) { return c.discriminant; });
+        return !discriminated || !v->discriminant_constraint.empty();
+    }
+
+    bool program::unconstrained_union_part(ada_type* aType)
+    {
+        // (a subcomponent (of a record, or an array's components) of an unchecked union type whose nominal subtype is unconstrained)
+        std::function<bool(ada_type*, int)> part = [&](ada_type* aPart, int aDepth) -> bool
+        {
+            if (aPart == nullptr || aDepth > 16)
+                return false;
+            auto* v = aPart->view();
+            if (v->kind == type_kind::Array)
+            {
+                auto* c = v->base_type()->view()->component;
+                if (c == nullptr)
+                    return false;
+                auto* cv = c->view();
+                auto* cb = cv->base_type()->view();
+                if (cb->unchecked_union && cv->discriminant_constraint.empty())
+                    return true;
+                return part(c, aDepth + 1);
+            }
+            if (v->kind != type_kind::Record)
+                return false;
+            for (auto const& c : v->base_type()->view()->components)
+            {
+                if (c.discriminant || c.type == nullptr)
+                    continue;
+                auto* cv = c.type->view();
+                auto* cb = cv->base_type()->view();
+                if (cb->kind == type_kind::Record && cb->unchecked_union && cv->discriminant_constraint.empty() &&
+                    std::any_of(cb->components.begin(), cb->components.end(), [](component_info const& d) { return d.discriminant; }))
+                    return true;
+                if (part(c.type, aDepth + 1))
+                    return true;
+            }
+            return false;
+        };
+        return part(aType, 0);
+    }
+
     void function_generator::comparison(intrinsic aOp, ada_type* aType, std::vector<node*> const& aOperands)
     {
         // (an i32: two values compared (scalars directly; arrays and records by their components))
@@ -1461,6 +1522,16 @@ namespace neos::compilers::ada
             else
                 expression(aOperands[i], aType);
         }
+        // (an unchecked union's predefined equality: an operand that lacks inferable discriminants, Program_Error (B.3.3(23/2)))
+        if ((aOp == intrinsic::Eq || aOp == intrinsic::Ne) && base != nullptr && base->unchecked_union &&
+            (!iProgram.inferable_discriminants(aOperands[0]) || !iProgram.inferable_discriminants(aOperands[1])))
+        {
+            drop();
+            drop();
+            raise_check(1, aOperands[0], "unchecked union operand without inferable discriminants");
+            i32(0);
+            return;
+        }
         comparison_values(aOp, aType);
     }
 
@@ -1474,6 +1545,16 @@ namespace neos::compilers::ada
         {
             if (aOp == intrinsic::Eq || aOp == intrinsic::Ne)
             {
+                // (a type with a subcomponent of an unchecked union type whose nominal subtype is unconstrained: Program_Error
+                // (B.3.3(24/2)))
+                if (iProgram.unconstrained_union_part(base))
+                {
+                    drop();
+                    drop();
+                    raise_check(1, nullptr, "equality of a type with an unconstrained unchecked union part");
+                    i32(0);
+                    return;
+                }
                 equality_values(aType);
                 if (aOp == intrinsic::Ne)
                     op(opcode::I32Eqz);
@@ -1493,6 +1574,15 @@ namespace neos::compilers::ada
             case intrinsic::Gt: op(opcode::I32GtS); break;
             default: op(opcode::I32GeS); break;
             }
+            return;
+        }
+        // (access-to-protected-subprogram values: equal if both are null, or if they designate the same procedure of the same object
+        // (their descriptors may be different copies, 4.5.2(10.1/3)))
+        if (base != nullptr && base->kind == type_kind::AccessSubprogram && base->protected_access && (aOp == intrinsic::Eq || aOp == intrinsic::Ne))
+        {
+            runtime("protected_access_equal", { type::I64, type::I64 }, type::I32);
+            if (aOp == intrinsic::Ne)
+                op(opcode::I32Eqz);
             return;
         }
         auto const k = kind_of(aType);
@@ -3202,7 +3292,7 @@ namespace neos::compilers::ada
                             {
                                 if (k < ps->discriminant_values.size() && ps->discriminant_values[k].known() && pc.type != nullptr)
                                     for (auto const& c : base->components)
-                                        if (c.ent == pc.ent && c.offset && c.discriminant)
+                                        if (c.ent == pc.ent && c.offset && (c.discriminant || c.stored))
                                         {
                                             get(target);
                                             constant_value(ps->discriminant_values[k], pc.type);

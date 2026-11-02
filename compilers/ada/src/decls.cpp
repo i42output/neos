@@ -1306,6 +1306,51 @@ namespace neos::compilers::ada
                 return nullptr;
             return arguments[aIndex]->children.back();
         };
+        if ((name == "priority" || name == "interrupt_priority") && aRegion->owner != nullptr &&
+            (aRegion->owner->kind == entity_kind::Task || aRegion->owner->kind == entity_kind::Protected || aRegion->owner->sub != nullptr))
+        {
+            // (a task's or protected unit's priority (D.1, D.3), or the main subprogram's (the environment task's): evaluated where
+            // a task or protected object is created (its discriminants are the object's))
+            auto* owner = aRegion->owner;
+            owner->interrupt_priority = name == "interrupt_priority";
+            owner->priority = value(0);
+            if (owner->priority != nullptr)
+                resolve(owner->priority, integer(), aRegion);
+            return;
+        }
+        if ((name == "volatile" || name == "atomic" || name == "volatile_components" || name == "atomic_components") && value(0) != nullptr)
+        {
+            // (an object's: see volatile_actual (C.6(19/3)); a type's makes it a by-reference type (C.6(18/3)))
+            auto range = aRegion->names.equal_range(name_text(value(0)->source));
+            for (auto i = range.first; i != range.second; ++i)
+                if (i->second->is_object())
+                    (name == "volatile" || name == "atomic" ? i->second->volatile_object : i->second->volatile_components) = true;
+                else if (i->second->is_type() && i->second->type != nullptr)
+                    iTypeAspects[i->second->type->base_type()][name] = aPragma;
+        }
+        if ((name == "interrupt_handler" || name == "attach_handler") && aRegion->owner != nullptr && aRegion->owner->kind == entity_kind::Protected)
+        {
+            // (a protected object with an interrupt handler: its default ceiling is Interrupt_Priority'Last (D.3(10)))
+            if (aRegion->owner->priority == nullptr)
+                aRegion->owner->interrupt_priority = true;
+            // (the procedure: an interrupt handler; attached to the interrupt (its expression evaluated for each object) (C.3.1))
+            if (auto* procedureName = value(0))
+            {
+                auto range = aRegion->names.equal_range(name_text(procedureName->source));
+                for (auto i = range.first; i != range.second; ++i)
+                    if (i->second->kind == entity_kind::Procedure && i->second->sub != nullptr && i->second->sub->parameters.empty())
+                    {
+                        iInterruptHandlers.push_back(i->second);
+                        if (name == "attach_handler")
+                            if (auto* interrupt = value(1))
+                            {
+                                resolve(interrupt, nullptr, aRegion);   // (of Ada.Interrupts.Interrupt_Id)
+                                iAttachHandlers[aRegion->owner].emplace_back(i->second, interrupt);
+                            }
+                        break;
+                    }
+            }
+        }
         if (name == "import" || name == "interface")
         {
             // pragma Import (Convention, Entity [, External_Name [, Link_Name]])
@@ -1378,6 +1423,12 @@ namespace neos::compilers::ada
             if (auto* t = value(0))
                 if (auto* type = subtype_mark(t, aRegion))
                     type->packed = true;
+        }
+        else if (name == "unchecked_union")
+        {
+            if (auto* t = value(0))
+                if (auto* type = subtype_mark(t, aRegion))
+                    type->view()->base_type()->view()->unchecked_union = true;
         }
         else if (name == "elaborate_body" || name == "pure" || name == "preelaborate" || name == "elaborate" || name == "elaborate_all" ||
             name == "inline" || name == "optimize" || name == "suppress" || name == "unsuppress" || name == "list" || name == "page")

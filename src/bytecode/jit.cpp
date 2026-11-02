@@ -357,6 +357,7 @@ namespace neos
                         std::size_t resume = 0u;        ///< (the code's offset)
                         std::size_t returned = 0u;      ///< (the code's offset where its call returns to (0: none))
                         std::uint32_t arguments = 0u;
+                        std::int32_t argumentsAt = 0;   ///< (its arguments' offset in the outgoing area (an import's: after the shadow space))
                         std::vector<deopt_slot> stack;
                         std::uint32_t const* made = nullptr;    ///< (a call of a function with a frame of its own: set once the code has
                                                                 ///< made it (see callFlags))
@@ -475,6 +476,30 @@ namespace neos
                     bool fits_i32(std::int64_t aValue) { return aValue >= std::numeric_limits<std::int32_t>::min() && aValue <= std::numeric_limits<std::int32_t>::max(); }
 
                     struct unsupported : std::runtime_error { using std::runtime_error::runtime_error; };
+
+                    // (a runtime plugin function that optimized code calls directly, whose arguments and result need no conversion)
+                    bool plain_plugin(function_description const& aCallee)
+                    {
+                        if (aCallee.call != import_call::Plugin || !aCallee.plugin || aCallee.plugin->function == nullptr || aCallee.checked)
+                            return false;
+                        auto const plain = [](std::uint8_t aType)
+                        {
+                            return aType == NEOS_RT_I32 || aType == NEOS_RT_U32 || aType == NEOS_RT_I64 || aType == NEOS_RT_U64 || aType == NEOS_RT_SIZE ||
+                                aType == NEOS_RT_F32 || aType == NEOS_RT_F64;
+                        };
+                        for (auto p : aCallee.plugin->parameters)
+                            if (!plain(p))
+                                return false;
+                        return (aCallee.plugin->result == NEOS_RT_VOID || plain(aCallee.plugin->result)) && aCallee.plugin->parameters.size() <= NEOS_RT_MAX_PARAMETERS &&
+                            aCallee.parameters->size() == aCallee.plugin->parameters.size() && aCallee.results->size() <= 1u;
+                    }
+                    // (a runtime plugin function that optimized code does not call (see plain_plugin) and that is a slow path (not
+                    // NEOS_RT_COMMON): optimized code leaves for the baseline's at a call of it that has never been made (a deopt))
+                    bool slow_plugin(function_description const& aCallee)
+                    {
+                        return aCallee.imported && aCallee.call == import_call::Plugin && !aCallee.checked && !plain_plugin(aCallee) &&
+                            !(aCallee.plugin && aCallee.plugin->common);
+                    }
 
                     bool has_jcc_erratum();
 
@@ -4331,6 +4356,17 @@ namespace neos
                                 release(pop());
                                 return;
                             }
+                            if (callee.call == import_call::StackLow)
+                            {
+                                // (neos::stack_low: no call: less than StackLowMargin of the stack left above its limit)
+                                auto const r = alloc(false);
+                                a.lea(r, RSP, -static_cast<std::int32_t>(StackLowMargin));
+                                a.alu_rm(7, true, r, R15, ContextStackLimit);
+                                a.setcc(B, r);
+                                a.movzx8(r, r);
+                                push_reg(I32, r);
+                                return;
+                            }
                             std::int32_t const base = callee.imported ? ShadowSpace : 0;
                             std::size_t const n = parameters.size();
                             if (iStack.size() < iControl.back().base + n)
@@ -4340,14 +4376,16 @@ namespace neos
                             for (std::size_t i = 0u; i < n; ++i)
                                 release(pop());
                             spill_registers();
-                            if (iCounters != nullptr && iTier == nullptr && !callee.imported && callee.inlinable)
+                            if (iCounters != nullptr && iTier == nullptr && ((!callee.imported && callee.inlinable) || slow_plugin(callee)))
                             {
-                                // (where optimized code that inlined the call can leave for this code (see compiled_module::deopt_point))
+                                // (where optimized code that inlined the call (or that does not make it: see slow_plugin) can leave for this 
+                                // code (see compiled_module::deopt_point))
                                 pending_deopt_point d;
                                 d.position = aPosition;
                                 d.label = a.new_label();
                                 d.point.function = iFunctionIndex;
                                 d.point.arguments = static_cast<std::uint32_t>(n);
+                                d.point.argumentsAt = base;
                                 for (auto const& e : iStack)
                                     d.point.stack.push_back(compiled_module::deopt_slot{ e.k == kind::Slot, e.type, e.disp, e.k == kind::Local ? static_cast<std::int32_t>(e.local) : -1 });
                                 a.bind(d.label);
@@ -6015,7 +6053,7 @@ namespace neos
                                         auto const& c = iModule.functions[callee];
                                         if (c.results->size() > MaxResults)
                                             throw unsupported{ "results" };
-                                        if (c.imported && !plain_plugin(c))
+                                        if (c.imported && !plain_plugin(c) && c.call != import_call::StackLow)
                                         {
                                             std::string why = "import f" + std::to_string(callee) + ": call " + std::to_string(static_cast<int>(c.call)) + (c.checked ? " checked" : "");
                                             if (c.plugin)
@@ -6042,22 +6080,6 @@ namespace neos
                                 }
                             if (f.results.size() > MaxResults)
                                 throw unsupported{ "results" };
-                        }
-                        // (a runtime plugin function that is called directly, whose arguments and result need no conversion)
-                        static bool plain_plugin(function_description const& aCallee)
-                        {
-                            if (aCallee.call != import_call::Plugin || !aCallee.plugin || aCallee.plugin->function == nullptr || aCallee.checked)
-                                return false;
-                            auto const plain = [](std::uint8_t aType)
-                            {
-                                return aType == NEOS_RT_I32 || aType == NEOS_RT_U32 || aType == NEOS_RT_I64 || aType == NEOS_RT_U64 || aType == NEOS_RT_SIZE ||
-                                    aType == NEOS_RT_F32 || aType == NEOS_RT_F64;
-                            };
-                            for (auto p : aCallee.plugin->parameters)
-                                if (!plain(p))
-                                    return false;
-                            return (aCallee.plugin->result == NEOS_RT_VOID || plain(aCallee.plugin->result)) && aCallee.plugin->parameters.size() <= NEOS_RT_MAX_PARAMETERS &&
-                                aCallee.parameters->size() == aCallee.plugin->parameters.size() && aCallee.results->size() <= 1u;
                         }
                         // (an instruction that is a call of native code (a helper): its operands' types)
                         static void const* helper_of(std::uint16_t aOp)
@@ -6941,7 +6963,8 @@ namespace neos
                                     if (i.dead)
                                         continue;
                                     if (i.op == ssa::Deopt || i.op == ssa::Trap ||
-                                        (i.op == 0x10u && i.imm0 < iModule.functions.size() && iModule.functions[static_cast<std::size_t>(i.imm0)].imported) ||
+                                        (i.op == 0x10u && i.imm0 < iModule.functions.size() && iModule.functions[static_cast<std::size_t>(i.imm0)].imported &&
+                                            iModule.functions[static_cast<std::size_t>(i.imm0)].call != import_call::StackLow) ||
                                         ((i.op == 0x10u || i.op == 0x11u) && never_made(i.origin)))
                                     {
                                         cold[b] = true;
@@ -7199,7 +7222,7 @@ namespace neos
                             {
                                 auto const disp = 8 * static_cast<std::int32_t>(o++);
                                 a.load(true, RAX, RCX, disp);
-                                a.store(true, RSP, 8 * static_cast<std::int32_t>(arg), RAX);
+                                a.store(true, RSP, point.argumentsAt + 8 * static_cast<std::int32_t>(arg), RAX);
                             }
                             a.mov_ri(RAX, deopt_address(iTier, point, point.resume), true);
                             a.jmp_r(RAX);
@@ -8037,6 +8060,17 @@ namespace neos
                                 return;
                             }
                             auto const& c = iModule.functions[callee];
+                            if (c.imported && c.call == import_call::StackLow)
+                            {
+                                // (neos::stack_low: no call: less than StackLowMargin of the stack left above its limit)
+                                auto const r = target(v, RAX);
+                                a.lea(r, RSP, -static_cast<std::int32_t>(StackLowMargin));
+                                a.alu_rm(7, true, r, R15, ContextStackLimit);
+                                a.setcc(B, r);
+                                a.movzx8(r, r);
+                                defined(v, r);
+                                return;
+                            }
                             if (c.imported)
                             {
                                 plugin_call(v, callee, c);
@@ -9481,6 +9515,13 @@ namespace neos
                             // (the call's flag and the functions' counters and states are the program's (the optimizer may run while it 
                             // runs): words read as they are (a call made, or a function optimized, since: its code calls, or deopts once))
                             // (an optimization that the function's loops started: none (its code after its loops has not run yet))
+                            options.slowCall = [&m](std::uint32_t aCallee, std::size_t aPosition)
+                            {
+                                if (aCallee >= m.description.functions.size() || !slow_plugin(m.description.functions[aCallee]))
+                                    return false;
+                                auto const* const point = deopt_point_at(m, aPosition);
+                                return point != nullptr && point->made != nullptr && *point->made == 0u;
+                            };
                             if (!fromLoop)
                                 options.coldCall = [&m](std::size_t aPosition)
                                 {

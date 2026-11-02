@@ -29,29 +29,20 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos's tasks run in turn on one processor and a task is only switched at
---  the points where it blocks or yields (see Ada.Task_Identification), so a
---  held task can only be prevented from running when it holds itself: Hold
---  applied to the calling task blocks it until Continue is applied to it;
---  applied to another task, Hold makes it held (Is_Held) but does not stop it.
+--  A held task does not run until it is continued, unless it inherits a
+--  priority (a rendezvous: D.11(4/2)); the runtime's scheduler does this
+--  (see the Ada runtime's tasking).
 
-with Ada.Synchronous_Task_Control;
 
 package body Ada.Asynchronous_Task_Control is
 
    use Ada.Task_Identification;
 
-   type Node;
-   type Node_Access is access Node;
-   type Node is limited record
-      Id      : Task_Id;
-      Held    : Boolean := False;
-      Release : Ada.Synchronous_Task_Control.Suspension_Object;
-      Next    : Node_Access;
-   end record;
-
-   --  (the tasks that have been held)
-   List : Node_Access;
+   --  (a held task does not run until it is continued: the runtime's (see D.11))
+   procedure Set_Held (T : Task_Id; Held : Integer);
+   pragma Import (Neos, Set_Held, "ada::task_hold");
+   function Held (T : Task_Id) return Integer;
+   pragma Import (Neos, Held, "ada::task_held");
 
    procedure Check (T : Task_Id) is
    begin
@@ -63,56 +54,23 @@ package body Ada.Asynchronous_Task_Control is
       end if;
    end Check;
 
-   function Find (T : Task_Id) return Node_Access is
-      N : Node_Access := List;
-   begin
-      while N /= null loop
-         if N.Id = T then
-            return N;
-         end if;
-         N := N.Next;
-      end loop;
-      return null;
-   end Find;
-
    procedure Hold (T : in Ada.Task_Identification.Task_Id) is
-      N : Node_Access;
    begin
       Check (T);
-      N := Find (T);
-      if N = null then
-         N := new Node;
-         N.Id := T;
-         N.Next := List;
-         List := N;
-      end if;
-      if not N.Held then
-         N.Held := True;
-         Ada.Synchronous_Task_Control.Set_False (N.Release);
-         if T = Current_Task then
-            Ada.Synchronous_Task_Control.Suspend_Until_True (N.Release);
-         end if;
-      end if;
+      Set_Held (T, 1);
    end Hold;
 
    procedure Continue (T : in Ada.Task_Identification.Task_Id) is
-      N : Node_Access;
    begin
       Check (T);
-      N := Find (T);
-      if N /= null and then N.Held then
-         N.Held := False;
-         Ada.Synchronous_Task_Control.Set_True (N.Release);
-      end if;
+      Set_Held (T, 0);
    end Continue;
 
    function Is_Held (T : Ada.Task_Identification.Task_Id)
     return Boolean is
-      N : Node_Access;
    begin
       Check (T);
-      N := Find (T);
-      return N /= null and then N.Held;
+      return Held (T) /= 0;
    end Is_Held;
 
 end Ada.Asynchronous_Task_Control;

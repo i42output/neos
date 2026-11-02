@@ -625,7 +625,7 @@ namespace neos::compilers::ada
         // that has new ones are its own))
         std::vector<std::size_t> order;
         for (std::size_t c = 0u; c < record->components.size(); ++c)
-            if (ancestorComponents == 0u || !in_ancestor_part(record->components[c], c, ancestorType))
+            if (!record->components[c].stored && (ancestorComponents == 0u || !in_ancestor_part(record->components[c], c, ancestorType)))
                 order.push_back(c);
         std::size_t positional = 0u;
         // (discriminant values (static) choose the variant: the components of other variants are not in the aggregate)

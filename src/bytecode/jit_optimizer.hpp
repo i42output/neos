@@ -165,6 +165,9 @@ namespace neos
                         // (a call (its position: in a function with a frame of its own) that has never been made (its function's code 
                         // has run often enough): the code leaves there (a deopt), rather than inline (or make) it; if none, none are)
                         std::function<bool(std::size_t aPosition)> coldCall;
+                        // (a call (its position: in the function's own code) of an import that optimized code does not make (a slow path)
+                        // and that has never been made: the code leaves there (a deopt), rather than make it; if none, it makes it)
+                        std::function<bool(std::uint32_t aCallee, std::size_t aPosition)> slowCall;
                         // (the speculations (see result::useful) that an earlier optimization of the function found useful: only those are
                         // made (the optimizer then runs once, unless some of them are not useful now); if none, any are)
                         std::set<std::pair<std::uint64_t, std::uint64_t>> const* usefulHint = nullptr;

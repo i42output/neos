@@ -70,6 +70,9 @@ namespace neos::compilers::ada
         void set(std::uint32_t aLocal);
         void tee(std::uint32_t aLocal);
         void drop();
+        void unit_priority(entity* aUnit, ada_type* aType, std::uint32_t aAddress);
+        bool volatile_actual(node* aActual);
+        bool volatile_type(ada_type* aType, int aDepth = 0);
         std::uint32_t local(type aType);
         std::uint32_t temporary(type aType);
         void release(std::uint32_t aLocal);

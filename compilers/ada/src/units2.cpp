@@ -118,7 +118,36 @@ namespace neos::compilers::ada
             auto* value = aspect->size() > 1u ? aspect->children.back() : nullptr;
             if (value == aspect->child(0))
                 value = nullptr;
-            if (name == "import")
+            if ((name == "priority" || name == "interrupt_priority") && (aEntity->kind == entity_kind::Task ||
+                aEntity->kind == entity_kind::Protected || aEntity->sub != nullptr))
+            {
+                // (as the pragma: see pragma)
+                aEntity->interrupt_priority = name == "interrupt_priority";
+                aEntity->priority = value;
+                if (value != nullptr)
+                    resolve(value, integer(), aEntity->inner != nullptr ? aEntity->inner : aRegion);
+            }
+            else if ((name == "interrupt_handler" || name == "attach_handler") && aEntity->scope != nullptr && aEntity->scope->owner != nullptr &&
+                aEntity->scope->owner->kind == entity_kind::Protected && aEntity->kind == entity_kind::Procedure)
+            {
+                // (see pragma)
+                if (aEntity->scope->owner->priority == nullptr)
+                    aEntity->scope->owner->interrupt_priority = true;
+                if (name == "attach_handler" || value == nullptr || name_text(value->source) == "true")
+                    iInterruptHandlers.push_back(aEntity);
+                if (name == "attach_handler" && value != nullptr)
+                {
+                    resolve(value, nullptr, aRegion);   // (of Ada.Interrupts.Interrupt_Id)
+                    iAttachHandlers[aEntity->scope->owner].emplace_back(aEntity, value);
+                }
+            }
+            else if ((name == "volatile" || name == "atomic" || name == "volatile_components" || name == "atomic_components") && aEntity->is_object() &&
+                (value == nullptr || name_text(value->source) == "true"))
+                (name == "volatile" || name == "atomic" ? aEntity->volatile_object : aEntity->volatile_components) = true;   // (see pragma)
+            else if ((name == "volatile" || name == "atomic" || name == "volatile_components" || name == "atomic_components") && aEntity->is_type() &&
+                aEntity->type != nullptr && value == nullptr)
+                iTypeAspects[aEntity->type->base_type()][name] = aspect;    // (a by-reference type (C.6(18/3)): see volatile_type)
+            else if (name == "import")
                 import = value == nullptr || name_text(value->source) == "true";
             else if (name == "convention")
                 convention = value != nullptr ? name_text(value->source) : std::string{};
@@ -162,6 +191,11 @@ namespace neos::compilers::ada
             {
                 if (aEntity->is_type())
                     aEntity->type->packed = true;
+            }
+            else if (name == "unchecked_union")
+            {
+                if (aEntity->is_type())
+                    aEntity->type->view()->base_type()->view()->unchecked_union = true;
             }
             else if (name == "alignment" && (aEntity->is_type() || aEntity->is_object()) && value != nullptr && !is_static_resolvable(value, aRegion))
                 iDeferredAspects[aRegion].push_back({ aEntity->is_type() ? aEntity->type : nullptr, name, value, aEntity->is_object() ? aEntity : nullptr });

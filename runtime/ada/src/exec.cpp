@@ -542,6 +542,16 @@ namespace
         deallocate(aAddress);
     }
 
+    // (access-to-protected-subprogram values (their descriptors' addresses: procedure, static link, object): whether they are equal)
+    NEOS_ADA_PRIMITIVE std::int32_t neos_ada_protected_access_equal(std::int64_t aLeft, std::int64_t aRight)
+    {
+        if (aLeft == aRight)
+            return 1;
+        if (aLeft == 0 || aRight == 0)
+            return 0;
+        return *at<std::int64_t>(aLeft) == *at<std::int64_t>(aRight) && *at<std::int64_t>(aLeft + 16) == *at<std::int64_t>(aRight + 16) ? 1 : 0;
+    }
+
     NEOS_ADA_PRIMITIVE void neos_ada_copy(std::int64_t aTarget, std::int64_t aSource, std::int64_t aCount)
     {
         if (aCount > 0 && aTarget != aSource)
@@ -920,6 +930,7 @@ namespace
         { "raise_check", NEOS_RT_FUNCTION(neos_ada_raise_check), VOID, 4u, { I32, STR, I32, STR }, 0u },
         { "raise_at", NEOS_RT_FUNCTION(neos_ada_raise_at), VOID, 3u, { I64, STR, I32 }, 0u },
         { "save_occurrence", NEOS_RT_FUNCTION(neos_ada_save_occurrence), I64, 0u, {}, 0u },
+        { "protected_access_equal", NEOS_RT_FUNCTION(neos_ada_protected_access_equal), I32, 2u, { I64, I64 }, 0u },
         { "reraise", NEOS_RT_FUNCTION(neos_ada_reraise), VOID, 1u, { I64 }, 0u },
         { "release_occurrence", NEOS_RT_FUNCTION(neos_ada_release_occurrence), VOID, 1u, { I64 }, 0u },
         { "copy_occurrence", NEOS_RT_FUNCTION(neos_ada_copy_occurrence), I64, 1u, { I64 }, 0u },
@@ -959,4 +970,17 @@ namespace
         { "put_line", NEOS_RT_FUNCTION(neos_ada_put_line), VOID, 1u, { I64 }, 0u },
         { "put_int", NEOS_RT_FUNCTION(neos_ada_put_int), VOID, 1u, { I64 }, 0u },
     };
+}
+
+namespace neos::ada_runtime
+{
+    std::int64_t occurrence_keep(occurrence const& aOccurrence)
+    {
+        return keep_occurrence(aOccurrence);
+    }
+
+    void occurrence_release(std::int64_t aHandle)
+    {
+        neos_ada_release_occurrence(aHandle);
+    }
 }

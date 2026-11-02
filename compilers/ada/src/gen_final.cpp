@@ -193,10 +193,18 @@ namespace neos::compilers::ada
                 std::reverse(components.begin(), components.end());
             for (auto const* c : components)
             {
+                // (a component of a variant: if the discriminants select it)
+                if (c->variant >= 0)
+                {
+                    variant_selected(base, *c, aAddress);
+                    begin_if();
+                }
                 auto const a = local(type::I64);
                 component_address(base, *c, aAddress);
                 set(a);
                 controlled_parts(c->type, a, aReverse, aAction, aDefaulted);
+                if (c->variant >= 0)
+                    end();
             }
         }
         if (self && !aReverse)

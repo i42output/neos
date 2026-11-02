@@ -213,7 +213,7 @@ namespace neos::compilers::ada
                     parentSize = *pb->size;
                     parentBase = pb;
                 }
-                else if (pb->size && !pb->dynamic_size)
+                else if (pb->size)
                 {
                     // (an extension with discriminants of its own (declared first) of a parent without: its parent's components where
                     // they are in the parent's objects (as the inherited operations expect), its own after them)
@@ -229,8 +229,12 @@ namespace neos::compilers::ada
                         {
                             node const* value = k < constraint.size() ? constraint[k] : nullptr;
                             ++k;
-                            if (value != nullptr && value->is(construct::Identifier) && value->ent != nullptr && value->ent->kind == entity_kind::Discriminant &&
-                                std::count_if(constraint.begin(), constraint.end(), [&](node const* n) { return n != nullptr && n->ent == value->ent; }) == 1)
+                            if (value != nullptr && value->is(construct::Association))
+                                value = value->children.back();
+                            // (a new discriminant (the first that the constraint names it with), else stored (see component_info::stored))
+                            for (auto const& c : t->components)
+                                found = found || (c.stored && c.ent == pc.ent);
+                            if (value != nullptr && value->is(construct::Identifier) && value->ent != nullptr && value->ent->kind == entity_kind::Discriminant)
                                 for (auto const& c : t->components)
                                     found = found || (c.discriminant && (c.ent == value->ent || (c.ent != nullptr && c.ent->name == value->ent->name)));
                         }
@@ -304,6 +308,8 @@ namespace neos::compilers::ada
                     {
                         node const* value = k < constraint.size() ? constraint[k] : nullptr;
                         ++k;
+                        if (value != nullptr && value->is(construct::Association))
+                            value = value->children.back();
                         if (!at && value != nullptr && value->is(construct::Identifier) && value->ent != nullptr && c.ent != nullptr &&
                             (value->ent == c.ent || value->ent->name == c.ent->name))
                             at = pc.offset;
@@ -325,6 +331,8 @@ namespace neos::compilers::ada
                     c.offset = parental->offset;
                     c.depends = parental->depends;
                     c.dynamic = parental->dynamic;
+                    if (c.dynamic)
+                        t->dynamic_size = true;
                     continue;
                 }
             }
@@ -1992,7 +2000,15 @@ namespace neos::compilers::ada
                 (c->is(construct::Attribute) && (name_text(c->child(1)->source) == "range" || name_text(c->child(1)->source) == "base"))))
             {
                 auto* s = c->type->view();
-                if (s->is_scalar())
+                if (s->kind == type_kind::Record && s->base_type()->view()->unchecked_union)
+                {
+                    // (an unchecked union subtype: its discriminants are not checked; a constrained one, of a value that lacks
+                    // inferable discriminants: Program_Error (B.3.3(25/2)))
+                    if (!s->discriminant_constraint.empty() && !iProgram.inferable_discriminants(tested))
+                        raise_check(1, c, "membership of an unchecked union value without inferable discriminants");
+                    i32(1);
+                }
+                else if (s->is_scalar())
                 {
                     get(value);
                     scalar_low(s);
@@ -3173,7 +3189,7 @@ namespace neos::compilers::ada
                     if (value == nullptr)
                         value = c.default_expression;
                 }
-                else if (!iStructureOnly)
+                else if (!iStructureOnly || c.stored)
                     value = c.default_expression;
                 auto* ct = c.type != nullptr ? c.type->view() : nullptr;
                 if (ct == nullptr)
@@ -3453,6 +3469,13 @@ namespace neos::compilers::ada
                 aggregate(aOperand, aSource != nullptr ? aSource : aTarget);
             else
                 expression(aOperand, aSource);
+            // (from an unchecked union type to an unconstrained type that is not one, of a value that lacks inferable
+            // discriminants: Program_Error (B.3.3(26/2)))
+            if (s != nullptr && s->kind == type_kind::Record && d->kind == type_kind::Record && s->base_type()->view()->unchecked_union &&
+                !d->base_type()->view()->unchecked_union && d->discriminant_constraint.empty() &&
+                std::any_of(d->base_type()->view()->components.begin(), d->base_type()->view()->components.end(), [](component_info const& c) { return c.discriminant; }) &&
+                !iProgram.inferable_discriminants(aOperand))
+                raise_check(1, aWhere != nullptr ? aWhere : aOperand, "conversion of an unchecked union value without inferable discriminants");
             // (between untagged record types related by derivation whose representations differ: component by component
             // (13.6))
             if (s != nullptr && representations_differ(s, d))
@@ -3757,12 +3780,55 @@ namespace neos::compilers::ada
         f64(0.5);
         op(opcode::F64Ge);
         op(opcode::Select);
-        op(opcode::I64SConvertSatF64);
+        // (within the range of i64 (checked above): the plain conversion (it cannot trap))
+        op(opcode::I64SConvertF64);
         release(t);
         release(v);
     }
 
     // --- calls
+
+    bool function_generator::volatile_type(ada_type* aType, int aDepth)
+    {
+        // (a type specified (or with a subcomponent specified) Volatile or Atomic: a by-reference type (C.6(18/3)))
+        if (aType == nullptr || aDepth > 16)
+            return false;
+        for (auto const* aspect : { "volatile", "atomic", "volatile_components", "atomic_components" })
+            if (iProgram.type_aspect(aType, aspect) != nullptr)
+                return true;
+        auto* t = aType->view()->base_type()->view();
+        if (t->kind == type_kind::Array)
+            return volatile_type(t->component, aDepth + 1);
+        if (t->kind == type_kind::Record)
+            for (auto const& c : t->components)
+                if (volatile_type(c.type, aDepth + 1))
+                    return true;
+        return false;
+    }
+
+    bool function_generator::volatile_actual(node* aActual)
+    {
+        // (a part of a volatile object, or a component of an object with volatile components (C.6))
+        bool component = false;
+        for (auto* n = aActual; n != nullptr;)
+        {
+            if (n->ent != nullptr && n->ent->is_object() && n->ent->kind != entity_kind::Component)
+            {
+                auto* e = n->ent;
+                while (e->renamed != nullptr && e->renamed != e)
+                    e = e->renamed;
+                return e->volatile_object || n->ent->volatile_object || (component && (e->volatile_components || n->ent->volatile_components));
+            }
+            if ((n->is(construct::Apply) || n->is(construct::Selected)) && n->size() > 0u)
+            {
+                component = true;
+                n = n->child(0);
+                continue;
+            }
+            break;
+        }
+        return false;
+    }
 
     entity* function_generator::ultimate(entity* aSubprogram)
     {
@@ -3968,6 +4034,14 @@ namespace neos::compilers::ada
             std::uint32_t copy;
         };
         std::vector<representation_back> representationCopies;
+        // (volatile actuals passed by copy (C.6(19/3)): the actual's address, the copy's, the size; copied back after the call)
+        struct volatile_back
+        {
+            std::uint32_t actual;
+            std::uint32_t copy;
+            std::uint64_t size;
+        };
+        std::vector<volatile_back> volatileCopies;
         bool const indirect = (aCall->mark & 0x800u) != 0u;
         std::uint32_t target = 0u;
         if (indirect)
@@ -4385,6 +4459,27 @@ namespace neos::compilers::ada
                     if (f.mode != parameter_mode::In)
                         representationCopies.push_back({ actual->type, from, pt, to });
                 }
+            // (a volatile actual (a part of a volatile object, or a component of an object with volatile components) of a type that is
+            // not a by-reference type, for a formal that is not volatile: passed by copy (C.6(19/3)))
+            if (actual != nullptr && ft != nullptr && ft->kind == type_kind::Record && !ft->tagged && !limited_type(ft) &&
+                !iProgram.needs_finalization(ft) && !ft->base_type()->view()->dynamic_size && !volatile_type(ft) && volatile_actual(actual) &&
+                !(f.ent != nullptr && f.ent->volatile_object) && i != determinantIndex)
+                if (auto const size = iProgram.object_size(ft); size != 0u)
+                {
+                    auto const from = local(type::I64);
+                    set(from);
+                    auto const to = local(type::I64);
+                    i64(static_cast<std::int64_t>(size));
+                    runtime("ss_allocate", { type::I64 }, type::I64);
+                    set(to);
+                    get(to);
+                    get(from);
+                    i64(static_cast<std::int64_t>(size));
+                    runtime("copy", { type::I64, type::I64, type::I64 }, type::Void);
+                    get(to);
+                    if (f.mode != parameter_mode::In)
+                        volatileCopies.push_back({ from, to, size });
+                }
             // (an out or in out formal of a mutable record type: whether the actual is constrained (3.7.2(4)))
             if (actual != nullptr && !imported && f.mode != parameter_mode::In && mutable_record(f.type) && !is_aggregate_node(actual) &&
                 !(fromObject && (aCall->mark & 0x400u)) && i != determinantIndex)
@@ -4402,6 +4497,13 @@ namespace neos::compilers::ada
                 get(tag);
             }
             parameterTypes.push_back(type::I64);
+        }
+        // (an external call of a protected operation: its protected action begins (the caller's priority within its ceiling, D.3(13)))
+        if (externalSelf)
+        {
+            get(*externalSelf);
+            runtime("po_enter", { type::I64 }, type::Void);
+            check();
         }
         if (imported)
         {
@@ -4477,17 +4579,17 @@ namespace neos::compilers::ada
                 }
             call_function(callee);
         }
-        if (!imported || iProgram.raising_import(sub.import_name))
-            check();
-        // (an external call of a protected procedure: the object's queued entry calls whose barriers it opened, served)
-        if (externalSelf && sub.result == nullptr)
+        // (an external call of a protected operation: its protected action ends (even if it propagates an exception); a procedure's
+        // serves the object's queued entry calls whose barriers it opened)
+        if (externalSelf)
         {
             get(*externalSelf);
-            runtime("po_service", { type::I64 }, type::Void);
-            check();
+            runtime(sub.result == nullptr ? "po_service" : "po_leave", { type::I64 }, type::Void);
         }
+        if (!imported || iProgram.raising_import(sub.import_name))
+            check();
         // (the copies of out and in out actuals passed with a change of representation: converted back to the actuals)
-        if (!representationCopies.empty())
+        if (!representationCopies.empty() || !volatileCopies.empty())
         {
             std::optional<std::uint32_t> result;
             if (sub.result != nullptr)
@@ -4497,6 +4599,13 @@ namespace neos::compilers::ada
             }
             for (auto const& c : representationCopies)
                 representation_copy(c.formalType, c.copy, c.actualType, c.actual, false);
+            for (auto const& c : volatileCopies)
+            {
+                get(c.actual);
+                get(c.copy);
+                i64(static_cast<std::int64_t>(c.size));
+                runtime("copy", { type::I64, type::I64, type::I64 }, type::Void);
+            }
             if (result)
                 get(*result);
         }

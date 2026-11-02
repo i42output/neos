@@ -29,42 +29,24 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos's dispatching does not depend on priorities (its tasks run in turn:
---  see Ada.Task_Identification): a task's base priority is a value that this
---  package keeps. A task whose priority has not been set has the default
---  priority (System.Default_Priority).
+--  A task's base priority is the runtime's (its scheduler dispatches by
+--  priority: see the Ada runtime's tasking). Setting it is a dispatching
+--  point, and requeues the task's entry call (if it is blocked on one) by its
+--  new priority under Priority_Queuing (D.4(10)).
 
 package body Ada.Dynamic_Priorities is
 
    use Ada.Task_Identification;
 
-   type Node;
-   type Node_Access is access Node;
-   type Node is record
-      Id       : Task_Id;
-      Priority : System.Any_Priority;
-      Next     : Node_Access;
-   end record;
-
-   --  (the tasks whose priorities have been set)
-   List : Node_Access;
-
-   function Find (T : Task_Id) return Node_Access is
-      N : Node_Access := List;
-   begin
-      while N /= null loop
-         if N.Id = T then
-            return N;
-         end if;
-         N := N.Next;
-      end loop;
-      return null;
-   end Find;
+   --  (a task's base priority: the runtime's (see D.1, D.5.1))
+   procedure Set (T : Task_Id; Priority : System.Any_Priority);
+   pragma Import (Neos, Set, "ada::set_priority");
+   function Get (T : Task_Id) return System.Any_Priority;
+   pragma Import (Neos, Get, "ada::get_priority");
 
    procedure Set_Priority(Priority : in System.Any_Priority;
                           T : in Ada.Task_Identification.Task_Id :=
                           Ada.Task_Identification.Current_Task) is
-      N : Node_Access;
    begin
       if T = Null_Task_Id then
          raise Program_Error;
@@ -72,18 +54,12 @@ package body Ada.Dynamic_Priorities is
       if Is_Terminated (T) then
          return;
       end if;
-      N := Find (T);
-      if N = null then
-         List := new Node'(Id => T, Priority => Priority, Next => List);
-      else
-         N.Priority := Priority;
-      end if;
+      Set (T, Priority);
    end Set_Priority;
 
    function Get_Priority (T : Ada.Task_Identification.Task_Id :=
                           Ada.Task_Identification.Current_Task)
                           return System.Any_Priority is
-      N : Node_Access;
    begin
       if T = Null_Task_Id then
          raise Program_Error;
@@ -91,11 +67,7 @@ package body Ada.Dynamic_Priorities is
       if Is_Terminated (T) then
          raise Tasking_Error;
       end if;
-      N := Find (T);
-      if N = null then
-         return System.Default_Priority;
-      end if;
-      return N.Priority;
+      return Get (T);
    end Get_Priority;
 
 end Ada.Dynamic_Priorities;

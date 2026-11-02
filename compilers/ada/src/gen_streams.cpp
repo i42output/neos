@@ -238,6 +238,12 @@ namespace neos::compilers::ada
             stream_elementary(aRead, t, aStream, aAddress);
             return;
         }
+        // (an unchecked union type's default Read and Write: Program_Error (B.3.3(27/2)))
+        if (t->kind == type_kind::Record && tb->unchecked_union)
+        {
+            raise_check(1, nullptr, "default stream attribute of an unchecked union type");
+            return;
+        }
         if (t->kind == type_kind::Array)
         {
             auto* c = t->component;

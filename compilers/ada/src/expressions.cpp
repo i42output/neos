@@ -808,6 +808,12 @@ namespace neos::compilers::ada
                         discrete_range(c, t, aRegion);
                     else if (c->is(construct::Attribute) && (name_text(c->child(1)->source) == "range"))
                         c->type = range_of(c, aRegion);
+                    else if (c->is(construct::Attribute) && name_text(c->child(1)->source) == "class" && is_subtype_name(c->child(0), aRegion))
+                    {
+                        // (T'Class: a subtype mark (4.5.2(3/4)))
+                        resolve(c, nullptr, aRegion);
+                        set_meaning(c, meaning::Type);
+                    }
                     else
                         resolve(c, t != nullptr && t->view()->kind != type_kind::ClassWide ? t->base_type() : t, aRegion);
                 }

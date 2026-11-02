@@ -86,4 +86,6 @@ namespace neos::ada_runtime
     void finalize_to(std::size_t aMark);       ///< (the task's controlled objects registered after the mark finalized)
     void abort_defer();                        ///< (an abort-deferred operation begun (9.8(6-11)))
     void abort_undefer(bool aSignal);          ///< (... ended (aSignal: then the task's pending abort signalled, if no exception is propagating))
+    std::int64_t occurrence_keep(occurrence const& aOccurrence);    ///< (an occurrence kept (an Exception_Occurrence's handle))
+    void occurrence_release(std::int64_t aHandle);                  ///< (... no longer kept)
 }

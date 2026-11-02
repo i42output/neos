@@ -394,6 +394,33 @@ namespace neos::compilers::ada
             strconst(upper(full_name(e)));
             call("register_exception", { type::I64, type::String }, type::Void);
         }
+        // (the protected procedures that can be interrupt handlers (C.3.1): their functions)
+        for (auto* handler : iInterruptHandlers)
+            if (handler->sub != nullptr && handler->sub->defined)
+            {
+                put_op(code, opcode::I32Const);
+                statement.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), handler->sub->function_index });
+                code.resize(code.size() + 5u);
+                put_op(code, opcode::I64UConvertI32);
+                call("interrupt_handler_register", { type::I64 }, type::Void);
+            }
+        // (the partition's tasking policies (D.3, D.4), the environment task's priority (the main subprogram's, D.1(14)))
+        if (iCeilingLocking || iPriorityQueuing)
+        {
+            i64const(iCeilingLocking ? 1 : 0);
+            i64const(iPriorityQueuing ? 1 : 0);
+            call("tasking_policies", { type::I64, type::I64 }, type::Void);
+        }
+        if (iMain != nullptr && (iMain->priority != nullptr || iMain->interrupt_priority))
+        {
+            std::int64_t priority = 31;
+            if (iMain->priority != nullptr)
+                if (auto const v = evaluate(iMain->priority, iMain->inner != nullptr ? iMain->inner : iMain->scope); v.is_integer())
+                    priority = v.integer().to_int64();
+            i64const(1);
+            i64const(priority);
+            call("task_priority", { type::I64, type::I64 }, type::Void);
+        }
         // (dispatch tables and subprograms' addresses: their functions' (relocated) indexes)
         for (auto const& [address, function] : iFunctionSlots)
         {
@@ -417,7 +444,9 @@ namespace neos::compilers::ada
         {
             i64const(0);
             call_index(iMain->sub->function_index);
-            // (the library level's controlled objects finalized)
+            // (the environment task's main subprogram complete (the task no longer callable, C.7.1(17/3)); then the library level's
+            // tasks awaited and controlled objects finalized)
+            call("environment_completed", {}, type::Void);
             if (has_masters())
             {
                 i64const(0);
@@ -1086,19 +1115,18 @@ namespace neos::compilers::ada
             // (a protected subprogram implementing an interface's operation: called on the object (the first parameter), with the
             // others; a procedure's external call serves the entry calls whose barriers it opened)
             auto* target = sub.implementing_entry;
+            get(1u);
+            runtime("po_enter", { type::I64 }, type::Void);
+            check();
             static_link_for(target);
             for (std::size_t i = 0u; i < sub.parameters.size(); ++i)
                 get(static_cast<std::uint32_t>(i + 1u));
             call_function(target);
+            get(1u);
+            runtime(sub.result == nullptr ? "po_service" : "po_leave", { type::I64 }, type::Void);
             check();
             if (sub.result != nullptr)
                 return_value(sub.result, false);
-            else
-            {
-                get(1u);
-                runtime("po_service", { type::I64 }, type::Void);
-                check();
-            }
         }
         else if (sub.implementing_entry != nullptr)
         {
@@ -1403,12 +1431,15 @@ namespace neos::compilers::ada
 
     void function_generator::stack_check()
     {
-        // (the frame within the stack's limit, else Storage_Error propagated (the frame is not entered: checked at the start of the
-        // subprogram's handled part, so that its exit pops the frame))
+        // (the frame within the stack's limit and the call stack not near its end (neos::stack_low: a call from here could exhaust
+        // it), else Storage_Error propagated (the frame is not entered: checked at the start of the subprogram's handled part, so that
+        // its exit pops the frame))
         get(iStackTop);
         op(opcode::GlobalGet);
         u32(iProgram.limit_global());
         op(opcode::I64GtU);
+        call(iProgram.runtime("neos::stack_low", {}, type::I32));
+        op(opcode::I32Ior);
         begin_if();
         runtime("stack_overflow", {}, type::Void);
         branch(handler_target());
@@ -2884,11 +2915,24 @@ namespace neos::compilers::ada
 
     void function_generator::with_secondary_stack(std::function<void()> const& aGenerate)
     {
+        // (the statement's code, then (if it calls anything but raise_check: it may allocate on the secondary stack) its mark put
+        // before it, and its release after it)
+        auto const start = iCode.size();
+        auto const firstRelocation = iRelocations.size();
+        aGenerate();
+        release_temporaries();
+        auto const raiseCheck = iProgram.runtime("ada::raise_check", { type::I32, type::String, type::I32, type::String }, type::Void);
+        if (std::all_of(iRelocations.begin() + static_cast<std::ptrdiff_t>(firstRelocation), iRelocations.end(),
+            [&](auto const& aRelocation) { return aRelocation.second == raiseCheck; }))
+            return;
+        auto const end = iCode.size();
         auto const mark = local(type::I64);
         runtime("ss_mark", {}, type::I64);
         set(mark);
-        aGenerate();
-        release_temporaries();
+        auto const length = iCode.size() - end;
+        std::rotate(iCode.begin() + static_cast<std::ptrdiff_t>(start), iCode.begin() + static_cast<std::ptrdiff_t>(end), iCode.end());
+        for (auto r = firstRelocation; r < iRelocations.size(); ++r)
+            iRelocations[r].first = static_cast<std::uint32_t>(iRelocations[r].first >= end ? iRelocations[r].first - (end - start) : iRelocations[r].first + length);
         get(mark);
         runtime("ss_release", { type::I64 }, type::Void);
     }
@@ -3358,11 +3402,14 @@ namespace neos::compilers::ada
 
     void function_generator::block_statement(node* aStatement)
     {
-        // (its declarations' storage on the stack: released when it ends)
+        // (its declarations' storage on the stack and on the secondary stack: released when it ends)
         auto const savedSp = local(type::I64);
         op(opcode::GlobalGet);
         u32(iProgram.sp_global());
         set(savedSp);
+        auto const ssMark = local(type::I64);
+        runtime("ss_mark", {}, type::I64);
+        set(ssMark);
         // (a master of controlled objects: they are finalized when it ends, normally or by an exception (that then continues))
         std::uint32_t finMark = 0u;
         if (iProgram.has_masters())
@@ -3400,6 +3447,8 @@ namespace neos::compilers::ada
             get(finMark);
             runtime("fin_release", { type::I64 }, type::Void);
         }
+        get(ssMark);
+        runtime("ss_release", { type::I64 }, type::Void);
         get(savedSp);
         op(opcode::GlobalSet);
         u32(iProgram.sp_global());

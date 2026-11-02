@@ -805,7 +805,7 @@ namespace neos::compilers::ada
                 if (t->kind == type_kind::ClassWide)
                     t = t->specific->view();
                 for (auto const& c : t->base_type()->view()->components)
-                    if (c.ent != nullptr && c.ent->name == selector)
+                    if (c.ent != nullptr && !c.stored && c.ent->name == selector)
                         result.push_back(interpretation{ c.type, c.ent });
                 if (t->kind == type_kind::Task || t->kind == type_kind::Protected)
                     if (t->unit != nullptr && t->unit->inner != nullptr)
@@ -1118,7 +1118,7 @@ namespace neos::compilers::ada
             if (t->kind == type_kind::ClassWide)
                 t = t->specific->view();
             for (auto const& c : t->base_type()->view()->components)
-                if (c.ent != nullptr && c.ent->name == name)
+                if (c.ent != nullptr && !c.stored && c.ent->name == name)
                     return c.type;
             return nullptr;
         };
@@ -1183,7 +1183,7 @@ namespace neos::compilers::ada
             // (two of the name: the extension's (the ancestor's was not visible where the extension was declared, 7.3.1(4/3)))
             component_info const* named = nullptr;
             for (auto const& c : recordType->base_type()->view()->components)
-                if (c.ent != nullptr && c.ent->name == name && (c.discriminant || visibleComponent(recordType)))
+                if (c.ent != nullptr && !c.stored && c.ent->name == name && (c.discriminant || visibleComponent(recordType)))
                     named = &c;
             if (named != nullptr)
                 if (auto const& c = *named; true)
@@ -1747,7 +1747,7 @@ namespace neos::compilers::ada
                     t = designated_of(t) != nullptr ? designated_of(t)->view() : t;
                 auto* rt = t->kind == type_kind::ClassWide ? t->specific->view() : t;
                 for (auto const& c : rt->base_type()->view()->components)
-                    if (c.ent != nullptr && c.ent->name == name)
+                    if (c.ent != nullptr && !c.stored && c.ent->name == name)
                         component = true;
                 if (component)
                     break;
