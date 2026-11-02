@@ -727,6 +727,9 @@ namespace neos::language
                         throw std::runtime_error("bigint.promotion: expected true or false");
                     iMeta.bigintPromotion = (value == "true");
                 }
+                else if (meta.name() == "source.encoding.fallback")
+                    iMeta.sourceEncodingFallback = meta.type() == neolib::json_type::String ? std::string{ meta.as<neolib::rjson_string>() } :
+                        std::string{ meta.as<neolib::rjson_keyword>().text };
                 else if (meta.name() == "prelude")
                 {
                     for (auto const& package : meta)

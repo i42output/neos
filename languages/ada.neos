@@ -1,0 +1,656 @@
+(*
+  ada.neos
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*)
+
+(*
+  Ada (Ada 2022, ISO/IEC 8652:2023): the syntax of compilations. Each construct is a concept of the Ada concept library
+  (neos.ada) that the Ada compiler (ada.ncp) builds its syntax tree from (a construct's children are the constructs within its
+  source; a "postfix" construct, e.g. a name's suffix or a binary operator and its right operand, also takes the construct that
+  precedes it). The compiler resolves what the grammar does not: whether a name's parenthesized suffix is a call, an indexed
+  component, a slice or a type conversion; and all of Ada's static semantics.
+
+  Ada is not case sensitive: the compiler's own pass over a source (before it is parsed) folds its identifiers and reserved
+  words to lower case (string and character literals and comments are left as they are), so the grammar's reserved words are
+  lower case. A keyword marked $ ada.flag is a construct whose source the compiler reads (e.g. a parameter's mode).
+
+  The grammar follows the syntax summary of the Ada Reference Manual (Annex P).
+*)
+
+%{
+    meta: {
+        language: "ada"
+        description: "Ada"
+        source.file.extension: [ ".adb" ".ads" ".ada" ".a" ]
+        source.package.specification.file.extension: ".ads"
+        source.package.implementation.file.extension: ".adb"
+        copyright: "Copyright (C) 2026 Leigh Johnston"
+        version: "0.1.0"
+        prelude: [ Standard ]
+        source.encoding.fallback: "latin-1"
+    }
+
+    stages: {
+        parser : {
+            text : [ "#{" "}#" ]
+            root : compilation
+        }
+    }
+
+    pipeline: [
+        parser
+    ]
+
+    libraries: [
+        neos.core
+        neos.ada
+    ]
+
+    discard: [
+        WS
+        whitespace
+        comment
+    ]
+}%
+
+#{
+    (* --- whitespace and comments *)
+
+    WS ::= [ whitespace ] ;
+    whitespace ::= { U+0020 | U+0009 | U+000A | U+000D | U+000B | U+000C | comment } + ;
+    comment $ language.comment ::= "--" , { line character } ;
+    line character ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D ) ) | '\x00' ;
+
+    (* --- identifiers and reserved words *)
+
+    letter ::= 'a' .. 'z' | 'A' .. 'Z' | '\x80' .. '\xFF' ;
+    letter or digit ::= letter | '0' .. '9' ;
+    potential keyword ::= { letter or digit | '_' } + ;
+    word ::= letter , { letter or digit | '_' } ;
+    simple identifier ::= word - ( "abort" | "abs" | "abstract" | "accept" | "access" | "aliased" | "all" | "and" | "array" | "at" | "begin" |
+            "body" | "case" | "constant" | "declare" | "delay" | "delta" | "digits" | "do" | "else" | "elsif" | "end" | "entry" |
+            "exception" | "exit" | "for" | "function" | "generic" | "goto" | "if" | "in" | "interface" | "is" | "limited" | "loop" |
+            "mod" | "new" | "not" | "null" | "of" | "or" | "others" | "out" | "overriding" | "package" | "parallel" | "pragma" |
+            "private" | "procedure" | "protected" | "raise" | "range" | "record" | "rem" | "renames" | "requeue" | "return" |
+            "reverse" | "select" | "separate" | "some" | "subtype" | "synchronized" | "tagged" | "task" | "terminate" | "then" |
+            "type" | "until" | "use" | "when" | "while" | "with" | "xor" ) ;
+
+    identifier $ ada.identifier ::= simple identifier ;
+    defining identifier $ ada.defining ::= simple identifier ;
+    (* (a name that is not resolved as a name: e.g. a pragma's, an attribute's, an aspect's or a selector's) *)
+    designator name $ ada.word ::= potential keyword ;
+
+    abort $ language.keyword ::= potential keyword ::= "abort" ;
+    abs $ language.keyword ::= potential keyword ::= "abs" ;
+    abstract $ language.keyword ::= potential keyword ::= "abstract" ;
+    accept $ language.keyword ::= potential keyword ::= "accept" ;
+    access $ language.keyword ::= potential keyword ::= "access" ;
+    aliased $ language.keyword ::= potential keyword ::= "aliased" ;
+    all $ language.keyword ::= potential keyword ::= "all" ;
+    and $ language.keyword ::= potential keyword ::= "and" ;
+    array $ language.keyword ::= potential keyword ::= "array" ;
+    at $ language.keyword ::= potential keyword ::= "at" ;
+    begin $ language.keyword ::= potential keyword ::= "begin" ;
+    body $ language.keyword ::= potential keyword ::= "body" ;
+    case $ language.keyword ::= potential keyword ::= "case" ;
+    constant $ language.keyword ::= potential keyword ::= "constant" ;
+    declare $ language.keyword ::= potential keyword ::= "declare" ;
+    delay $ language.keyword ::= potential keyword ::= "delay" ;
+    delta $ language.keyword ::= potential keyword ::= "delta" ;
+    digits $ language.keyword ::= potential keyword ::= "digits" ;
+    do $ language.keyword ::= potential keyword ::= "do" ;
+    else $ language.keyword ::= potential keyword ::= "else" ;
+    elsif $ language.keyword ::= potential keyword ::= "elsif" ;
+    end $ language.keyword ::= potential keyword ::= "end" ;
+    entry $ language.keyword ::= potential keyword ::= "entry" ;
+    exception $ language.keyword ::= potential keyword ::= "exception" ;
+    exit $ language.keyword ::= potential keyword ::= "exit" ;
+    for $ language.keyword ::= potential keyword ::= "for" ;
+    function $ language.keyword ::= potential keyword ::= "function" ;
+    generic $ language.keyword ::= potential keyword ::= "generic" ;
+    goto $ language.keyword ::= potential keyword ::= "goto" ;
+    if $ language.keyword ::= potential keyword ::= "if" ;
+    in $ language.keyword ::= potential keyword ::= "in" ;
+    interface $ language.keyword ::= potential keyword ::= "interface" ;
+    is $ language.keyword ::= potential keyword ::= "is" ;
+    limited $ language.keyword ::= potential keyword ::= "limited" ;
+    loop $ language.keyword ::= potential keyword ::= "loop" ;
+    mod $ language.keyword ::= potential keyword ::= "mod" ;
+    new $ language.keyword ::= potential keyword ::= "new" ;
+    not $ language.keyword ::= potential keyword ::= "not" ;
+    null $ language.keyword ::= potential keyword ::= "null" ;
+    of $ language.keyword ::= potential keyword ::= "of" ;
+    or $ language.keyword ::= potential keyword ::= "or" ;
+    others $ language.keyword ::= potential keyword ::= "others" ;
+    out $ language.keyword ::= potential keyword ::= "out" ;
+    overriding $ language.keyword ::= potential keyword ::= "overriding" ;
+    package $ language.keyword ::= potential keyword ::= "package" ;
+    parallel $ language.keyword ::= potential keyword ::= "parallel" ;
+    pragma $ language.keyword ::= potential keyword ::= "pragma" ;
+    private $ language.keyword ::= potential keyword ::= "private" ;
+    procedure $ language.keyword ::= potential keyword ::= "procedure" ;
+    protected $ language.keyword ::= potential keyword ::= "protected" ;
+    raise $ language.keyword ::= potential keyword ::= "raise" ;
+    range $ language.keyword ::= potential keyword ::= "range" ;
+    record $ language.keyword ::= potential keyword ::= "record" ;
+    rem $ language.keyword ::= potential keyword ::= "rem" ;
+    renames $ language.keyword ::= potential keyword ::= "renames" ;
+    requeue $ language.keyword ::= potential keyword ::= "requeue" ;
+    return $ language.keyword ::= potential keyword ::= "return" ;
+    reverse $ language.keyword ::= potential keyword ::= "reverse" ;
+    select $ language.keyword ::= potential keyword ::= "select" ;
+    separate $ language.keyword ::= potential keyword ::= "separate" ;
+    some $ language.keyword ::= potential keyword ::= "some" ;
+    subtype $ language.keyword ::= potential keyword ::= "subtype" ;
+    synchronized $ language.keyword ::= potential keyword ::= "synchronized" ;
+    tagged $ language.keyword ::= potential keyword ::= "tagged" ;
+    task $ language.keyword ::= potential keyword ::= "task" ;
+    terminate $ language.keyword ::= potential keyword ::= "terminate" ;
+    then $ language.keyword ::= potential keyword ::= "then" ;
+    type $ language.keyword ::= potential keyword ::= "type" ;
+    until $ language.keyword ::= potential keyword ::= "until" ;
+    use $ language.keyword ::= potential keyword ::= "use" ;
+    when $ language.keyword ::= potential keyword ::= "when" ;
+    while $ language.keyword ::= potential keyword ::= "while" ;
+    with $ language.keyword ::= potential keyword ::= "with" ;
+    xor $ language.keyword ::= potential keyword ::= "xor" ;
+
+    (* (keywords whose presence the compiler reads: a construct whose source is the keyword(s)) *)
+    flag abstract $ ada.flag ::= abstract ;
+    flag aliased $ ada.flag ::= aliased ;
+    flag all $ ada.flag ::= all ;
+    flag constant $ ada.flag ::= constant ;
+    flag limited $ ada.flag ::= limited ;
+    flag private $ ada.flag ::= private ;
+    flag protected $ ada.flag ::= protected ;
+    flag reverse $ ada.flag ::= reverse ;
+    flag synchronized $ ada.flag ::= synchronized ;
+    flag tagged $ ada.flag ::= tagged ;
+    flag task $ ada.flag ::= task ;
+    flag in $ ada.flag ::= in ;
+    flag out $ ada.flag ::= out ;
+    flag access $ ada.flag ::= access ;
+    flag not null $ ada.flag ::= not , WS , null ;
+    flag not $ ada.flag ::= not ;
+    flag parallel $ ada.flag ::= parallel ;
+    flag until $ ada.flag ::= until ;
+    flag overriding $ ada.flag ::= overriding ;
+    flag not overriding $ ada.flag ::= not , WS , overriding ;
+    flag null $ ada.flag ::= null ;
+    flag box $ ada.box ::= "<>" ;
+
+    (* --- literals *)
+
+    digit ::= '0' .. '9' ;
+    numeral ::= digit , { [ '_' ] , digit } ;
+    exponent ::= ( 'e' | 'E' ) , [ '+' | '-' ] , numeral ;
+    extended digit ::= digit | 'a' .. 'f' | 'A' .. 'F' ;
+    based numeral ::= extended digit , { [ '_' ] , extended digit } ;
+    based literal ::= numeral , ( ( '#' , based numeral , [ '.' , based numeral ] , '#' ) | ( ':' , based numeral , [ '.' , based numeral ] , ':' ) ) , [ exponent ] ;
+    decimal literal ::= numeral , [ '.' , numeral ] , [ exponent ] ;
+    numeric literal $ ada.number ::= based literal / decimal literal ;
+
+    graphic character ::= U+0020 .. '\xFF' | U+0009 ;
+    string character ::= ( graphic character - '\"' ) | "\"\"" ;
+    character literal $ ada.character ::= '\'' , graphic character , '\'' ;
+    (* (a UTF-8 encoded character: its lead byte and its continuation bytes) *)
+    utf8 character literal $ ada.character ::= '\'' , '\xC2' .. '\xF4' , { '\x80' .. '\xBF' } + , '\'' ;
+    any character literal ::= utf8 character literal / character literal ;
+
+    (* --- names *)
+
+    (* (a name: a direct name, an operator symbol (a string literal used as a name) or a character literal, then its suffixes) *)
+    name ::= name start , { WS , name suffix } ;
+    name start ::= identifier | operator symbol | any character literal | target name ;
+    operator symbol $ ada.operator ::= ( '\"' , { string character } , '\"' ) | ( '%' , { ( graphic character - ( '%' | '\"' ) ) | "%%" } , '%' ) ;
+    target name $ ada.target ::= '@' ;
+    name suffix ::= explicit dereference / selected component / attribute reference / qualified suffix / argument suffix ;
+    explicit dereference $ ada.all ::= '.' , WS , all ;
+    selected component $ ada.selected ::= '.' , WS , selector name ;
+    selector name ::= identifier | any character literal | operator symbol ;
+    (* (a parenthesized suffix: actual parameters, index values, a slice's discrete range or a type conversion's operand) *)
+    argument suffix $ ada.apply ::= '(' , WS , argument , { WS , ',' , WS , argument } , WS , ')' ;
+    argument ::= named argument / flag box / argument value ;
+    named argument $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / expression ) ;
+    argument value ::= if expression / case expression / quantified expression / declare expression / discrete range / expression ;
+    (* (an attribute: its designator (a reserved word for 'Access, 'Delta, 'Digits, 'Mod and 'Range), then its arguments) *)
+    attribute reference $ ada.attribute ::= '\'' , WS , ( reduction attribute / ( attribute designator , [ WS , attribute arguments ] ) ) ;
+    attribute designator $ ada.word ::= potential keyword ;
+    attribute arguments $ ada.arguments ::= '(' , WS , argument , { WS , ',' , WS , argument } , WS , ')' ;
+    (* (a reduction ('Reduce, 'Parallel_Reduce): its reducer (a name or an operator symbol) and its initial value) *)
+    reduction attribute ::= reduction designator , WS , reduction arguments ;
+    reduction designator $ ada.word ::= potential keyword ::= "reduce" | "parallel_reduce" ;
+    reduction arguments $ ada.arguments ::= '(' , WS , reducer , WS , ',' , WS , expression , WS , ')' ;
+    reducer $ ada.reducer ::= operator symbol / name ;
+    qualified suffix $ ada.qualified ::= '\'' , WS , ( parenthesized primary | bracket aggregate ) ;
+    (* (a subtype mark: a name that denotes a subtype (it may have an attribute, e.g. T'Class or T'Base)) *)
+    subtype mark ::= name ;
+
+    (* --- expressions *)
+
+    expression ::= relation , [ WS , ( { WS , and then tail } + | { WS , or else tail } + | { WS , and tail } + | { WS , or tail } + | { WS , xor tail } + ) ] ;
+    and then tail $ ada.andthen ::= and , WS , then , WS , relation ;
+    or else tail $ ada.orelse ::= or , WS , else , WS , relation ;
+    and tail $ ada.and ::= and , WS , relation ;
+    or tail $ ada.or ::= or , WS , relation ;
+    xor tail $ ada.xor ::= xor , WS , relation ;
+
+    relation ::= raise expression / ( simple expression , [ WS , ( relational tail | membership tail ) ] ) ;
+    relational tail ::= equal tail | not equal tail | less equal tail | greater equal tail | less tail | greater tail ;
+    equal tail $ ada.eq ::= '=' , WS , simple expression ;
+    not equal tail $ ada.ne ::= "/=" , WS , simple expression ;
+    less equal tail $ ada.le ::= "<=" , WS , simple expression ;
+    greater equal tail $ ada.ge ::= ">=" , WS , simple expression ;
+    less tail $ ada.lt ::= ( '<' , [ '<' | '=' | '>' ] ) - ( "<<" | "<=" | "<>" ) , WS , simple expression ;
+    greater tail $ ada.gt ::= ( '>' , [ '>' | '=' ] ) - ( ">>" | ">=" ) , WS , simple expression ;
+    membership tail $ ada.in ::= [ flag not , WS ] , in , WS , membership choice , { WS , ( '|' | '!' ) , WS , membership choice } ;
+    membership choice ::= discrete range / simple expression ;
+
+    simple expression ::= ( unary plus / unary minus / term ) , { WS , ( add tail | subtract tail | concatenate tail ) } ;
+    unary plus $ ada.plus ::= '+' , WS , term ;
+    unary minus $ ada.negate ::= '-' , WS , term ;
+    add tail $ ada.add ::= '+' , WS , term ;
+    subtract tail $ ada.subtract ::= '-' , WS , term ;
+    concatenate tail $ ada.concat ::= '&' , WS , term ;
+    term ::= factor , { WS , ( multiply tail | divide tail | mod tail | rem tail ) } ;
+    multiply tail $ ada.multiply ::= ( '*' , [ '*' ] ) - "**" , WS , factor ;
+    divide tail $ ada.divide ::= ( '/' , [ '=' ] ) - "/=" , WS , factor ;
+    mod tail $ ada.mod ::= mod , WS , factor ;
+    rem tail $ ada.rem ::= rem , WS , factor ;
+    factor ::= abs factor / not factor / ( primary , [ WS , power tail ] ) ;
+    abs factor $ ada.abs ::= abs , WS , primary ;
+    not factor $ ada.not ::= not , WS , primary ;
+    power tail $ ada.power ::= "**" , WS , primary ;
+
+    (* (a string literal is a name: an operator symbol (the compiler finds which it is)) *)
+    primary ::= numeric literal / null literal / allocator / parenthesized primary / bracket aggregate / name ;
+    null literal $ ada.null ::= null ;
+    (* (an initialized allocator's subtype indication is a qualified expression) *)
+    allocator $ ada.allocator ::= new , WS , [ subpool specification , WS ] , subtype indication ;
+    subpool specification $ ada.subpool ::= '(' , WS , name , WS , ')' ;
+
+    (* (a parenthesized expression, a conditional, quantified or declare expression, or an aggregate) *)
+    parenthesized primary ::= ( '(' , WS , ( if expression | case expression | quantified expression | declare expression ) , WS , ')' ) /
+        parenthesized expression / aggregate ;
+    parenthesized expression $ ada.parenthesized ::= '(' , WS , expression , WS , ')' ;
+
+    if expression $ ada.if.expression ::= if , WS , expression , WS , then , WS , expression , { WS , elsif expression part } , [ WS , else expression part ] ;
+    elsif expression part $ ada.elsif ::= elsif , WS , expression , WS , then , WS , expression ;
+    else expression part $ ada.else ::= else , WS , expression ;
+    case expression $ ada.case.expression ::= case , WS , expression , WS , is , WS , case expression alternative , { WS , ',' , WS , case expression alternative } ;
+    case expression alternative $ ada.alternative ::= when , WS , choice list , WS , "=>" , WS , expression ;
+    quantified expression $ ada.quantified ::= for , WS , quantifier , WS , ( iterator specification / loop parameter specification ) , WS , "=>" , WS , expression ;
+    quantifier $ ada.flag ::= all | some ;
+    declare expression $ ada.declare.expression ::= declare , WS , { declare item , WS } , begin , WS , expression ;
+    declare item ::= object declaration | object renaming declaration | pragma ;
+    raise expression $ ada.raise.expression ::= raise , WS , name , [ WS , with , WS , simple expression ] ;
+
+    (* --- aggregates *)
+
+    aggregate ::= null record aggregate / extension aggregate / delta aggregate / positional aggregate / named aggregate ;
+    null record aggregate $ ada.aggregate.nullrecord ::= '(' , WS , null , WS , record , WS , ')' ;
+    extension aggregate $ ada.aggregate.extension ::= '(' , WS , ( expression / subtype mark ) , WS , with , WS ,
+        ( ( null , WS , record ) / ( component association , { WS , ',' , WS , component association } ) ) , WS , ')' ;
+    delta aggregate $ ada.aggregate.delta ::= '(' , WS , expression , WS , with , WS , delta , WS , component association , { WS , ',' , WS , component association } , WS , ')' ;
+    (* (positional: at least two components, or one and others) *)
+    positional aggregate $ ada.aggregate ::= '(' , WS , ( ( expression , { WS , ',' , WS , expression } + , [ WS , ',' , WS , others association ] ) / ( expression , WS , ',' , WS , others association ) ) , WS , ')' ;
+    named aggregate $ ada.aggregate ::= '(' , WS , component association , { WS , ',' , WS , component association } , WS , ')' ;
+    others association $ ada.association ::= others choice list , WS , "=>" , WS , ( flag box / expression ) ;
+    others choice list $ ada.choices ::= others choice ;
+    component association ::= iterated component association / named component association / expression ;
+    named component association $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / expression ) ;
+    iterated component association $ ada.iterated ::= for , WS , ( iterator specification / loop parameter specification ) , WS , "=>" , WS , expression ;
+    choice list $ ada.choices ::= choice , { WS , ( '|' | '!' ) , WS , choice } ;
+    choice ::= others choice | discrete range / expression ;
+    others choice $ ada.others ::= others ;
+    (* (Ada 2022's bracketed array and container aggregates) *)
+    bracket aggregate $ ada.aggregate.bracket ::= '[' , WS , [ ( component association , { WS , ',' , WS , component association } ) / ( expression , { WS , ',' , WS , expression } , [ WS , ',' , WS , others association ] ) ] , WS , ']' ;
+
+    (* --- ranges, constraints and subtype indications *)
+
+    range $ ada.range ::= simple expression , WS , ".." , WS , simple expression ;
+    range attribute reference ::= name ;
+    (* (a discrete range: a range, or a subtype indication (a subtype mark, with a constraint)) *)
+    discrete range ::= range / constrained subtype ;
+    constrained subtype $ ada.subtype.indication ::= subtype mark , WS , range constraint ;
+    range constraint $ ada.constraint.range ::= range , WS , ( range / range attribute reference ) ;
+    (* (a range: the range of a scalar subtype ('Range is an attribute of the name)) *)
+
+    subtype indication $ ada.subtype.indication ::= [ flag not null , WS ] , subtype mark , [ WS , constraint ] ;
+    constraint ::= range constraint | digits constraint | delta constraint | index or discriminant constraint ;
+    digits constraint $ ada.constraint.digits ::= digits , WS , simple expression , [ WS , range constraint ] ;
+    delta constraint $ ada.constraint.delta ::= delta , WS , simple expression , [ WS , range constraint ] ;
+    (* (an index constraint, or a discriminant constraint (named associations), as the compiler finds) *)
+    index or discriminant constraint $ ada.constraint.index ::= '(' , WS , constraint item , { WS , ',' , WS , constraint item } , WS , ')' ;
+    constraint item ::= named argument / discrete range / expression ;
+
+    (* --- declarations *)
+
+    basic declarative item ::= basic declaration | aspect clause | use clause | pragma ;
+    declarative item ::= body / basic declarative item ;
+    body ::= subprogram body / package body / task body / protected body / body stub ;
+    declarative part $ ada.declarations ::= { WS , declarative item } ;
+
+    basic declaration ::= type declaration / subtype declaration / object declaration / number declaration /
+        abstract subprogram declaration / null procedure declaration / expression function declaration / subprogram declaration /
+        package declaration / renaming declaration / exception declaration / generic declaration / generic instantiation /
+        single task declaration / single protected declaration ;
+
+    defining identifier list ::= defining identifier , { WS , ',' , WS , defining identifier } ;
+
+    (* aspects *)
+    aspect specification $ ada.aspects ::= with , WS , aspect association , { WS , ',' , WS , aspect association } ;
+    aspect association $ ada.aspect ::= aspect mark , [ WS , "=>" , WS , aspect definition ] ;
+    aspect mark ::= designator name , [ '\'' , designator name ] ;
+    aspect definition ::= expression / aggregate / name ;
+    aspects ::= [ WS , aspect specification ] ;
+
+    (* types *)
+    type declaration ::= full type declaration / incomplete type declaration / private type declaration / private extension declaration ;
+    full type declaration ::= ordinary type declaration / task type declaration / protected type declaration ;
+    ordinary type declaration $ ada.type ::= type , WS , defining identifier , [ WS , known discriminant part ] , WS , is , WS , type definition , aspects , WS , ';' ;
+    incomplete type declaration $ ada.type.incomplete ::= type , WS , defining identifier , [ WS , discriminant part ] , [ WS , is , WS , flag tagged ] , WS , ';' ;
+    private type declaration $ ada.type.private ::= type , WS , defining identifier , [ WS , discriminant part ] , WS , is , WS ,
+        [ ( flag abstract , WS , flag tagged , WS ) / ( flag tagged , WS ) ] , [ flag limited , WS ] , flag private , aspects , WS , ';' ;
+    private extension declaration $ ada.type.private.extension ::= type , WS , defining identifier , [ WS , discriminant part ] , WS , is , WS ,
+        [ flag abstract , WS ] , [ ( flag limited | flag synchronized ) , WS ] , new , WS , subtype indication , { WS , and , WS , subtype mark } , WS ,
+        with , WS , private , aspects , WS , ';' ;
+
+    type definition ::= enumeration type definition | integer type definition | real type definition | array type definition |
+        record type definition | access type definition | derived type definition | interface type definition ;
+
+    enumeration type definition $ ada.type.enumeration ::= '(' , WS , enumeration literal , { WS , ',' , WS , enumeration literal } , WS , ')' ;
+    enumeration literal ::= defining identifier | defining character literal ;
+    defining character literal $ ada.defining.character ::= any character literal ;
+    integer type definition ::= signed integer type definition | modular type definition ;
+    signed integer type definition $ ada.type.integer ::= range , WS , simple expression , WS , ".." , WS , simple expression ;
+    modular type definition $ ada.type.modular ::= mod , WS , expression ;
+    real type definition ::= floating point definition | decimal fixed point definition / ordinary fixed point definition ;
+    floating point definition $ ada.type.float ::= digits , WS , simple expression , [ WS , real range specification ] ;
+    real range specification $ ada.range ::= range , WS , simple expression , WS , ".." , WS , simple expression ;
+    ordinary fixed point definition $ ada.type.fixed ::= delta , WS , simple expression , WS , real range specification ;
+    decimal fixed point definition $ ada.type.decimal ::= delta , WS , simple expression , WS , digits , WS , simple expression , [ WS , real range specification ] ;
+
+    array type definition ::= unconstrained array definition / constrained array definition ;
+    unconstrained array definition $ ada.type.array.unconstrained ::= array , WS , '(' , WS , index subtype definition , { WS , ',' , WS , index subtype definition } , WS , ')' , WS , of , WS , component definition ;
+    index subtype definition $ ada.index.subtype ::= subtype mark , WS , range , WS , "<>" ;
+    constrained array definition $ ada.type.array ::= array , WS , '(' , WS , discrete subtype definition , { WS , ',' , WS , discrete subtype definition } , WS , ')' , WS , of , WS , component definition ;
+    discrete subtype definition ::= discrete range / subtype indication ;
+    component definition $ ada.component.definition ::= [ flag aliased , WS ] , ( access definition / subtype indication ) ;
+
+    known discriminant part $ ada.discriminants ::= '(' , WS , discriminant specification , { WS , ';' , WS , discriminant specification } , WS , ')' ;
+    unknown discriminant part $ ada.discriminants.unknown ::= '(' , WS , "<>" , WS , ')' ;
+    discriminant part ::= unknown discriminant part / known discriminant part ;
+    discriminant specification $ ada.discriminant ::= defining identifier list , WS , ':' , WS , ( access definition / ( [ flag not null , WS ] , subtype mark ) ) , [ WS , ":=" , WS , expression ] , aspects ;
+
+    record type definition $ ada.type.record ::= [ ( flag abstract , WS , flag tagged , WS ) / ( flag tagged , WS ) ] , [ flag limited , WS ] , record definition ;
+    record definition ::= ( record , WS , component list , WS , end , WS , record , [ WS , simple identifier ] ) / null record ;
+    null record $ ada.record.null ::= null , WS , record ;
+    component list $ ada.components ::= ( null , WS , ';' ) / ( { component item , WS } + , [ variant part ] ) / variant part ;
+    component item ::= component declaration | aspect clause | pragma ;
+    component declaration $ ada.component ::= defining identifier list , WS , ':' , WS , component definition , [ WS , ":=" , WS , expression ] , aspects , WS , ';' ;
+    variant part $ ada.variants ::= case , WS , direct name , WS , is , { WS , variant } + , WS , end , WS , case , WS , ';' ;
+    direct name $ ada.identifier ::= simple identifier ;
+    variant $ ada.variant ::= when , WS , choice list , WS , "=>" , WS , component list ;
+
+    derived type definition $ ada.type.derived ::= [ flag abstract , WS ] , [ flag limited , WS ] , new , WS , subtype indication ,
+        [ WS , interfaces ] , [ WS , record extension part ] ;
+    interfaces $ ada.interfaces ::= and , WS , subtype mark , { WS , and , WS , subtype mark } ;
+    record extension part $ ada.extension ::= with , WS , ( flag private / record definition ) ;
+
+    interface type definition $ ada.type.interface ::= [ ( flag limited | flag task | flag protected | flag synchronized ) , WS ] , interface , [ WS , interfaces ] ;
+
+    access type definition ::= [ flag not null , WS ] , ( access to subprogram definition | access to object definition ) ;
+    access to object definition $ ada.type.access ::= access , WS , [ ( flag all | flag constant ) , WS ] , subtype indication ;
+    access to subprogram definition $ ada.type.access.subprogram ::= access , WS , [ flag protected , WS ] , ( procedure profile / function profile ) ;
+    access definition $ ada.access.definition ::= [ flag not null , WS ] , access , WS , ( ( [ flag protected , WS ] , ( procedure profile / function profile ) ) / ( [ flag constant , WS ] , subtype mark ) ) ;
+
+    subtype declaration $ ada.subtype ::= subtype , WS , defining identifier , WS , is , WS , subtype indication , aspects , WS , ';' ;
+
+    object declaration $ ada.object ::= defining identifier list , WS , ':' , WS , [ flag aliased , WS ] , [ flag constant , WS ] ,
+        ( array type definition / access definition / subtype indication ) , [ WS , ":=" , WS , expression ] , aspects , WS , ';' ;
+    (* (single task and protected declarations are objects of anonymous types) *)
+    number declaration $ ada.number.declaration ::= defining identifier list , WS , ':' , WS , constant , WS , ":=" , WS , expression , WS , ';' ;
+    exception declaration $ ada.exception ::= defining identifier list , WS , ':' , WS , exception , aspects , WS , ';' ;
+
+    (* subprograms *)
+    overriding indicator ::= flag not overriding | flag overriding ;
+    subprogram specification ::= procedure specification | function specification ;
+    procedure specification $ ada.procedure.specification ::= procedure , WS , defining program unit name , [ WS , formal part ] ;
+    function specification $ ada.function.specification ::= function , WS , defining designator , [ WS , formal part ] , WS , result profile ;
+    defining designator ::= defining operator symbol / defining program unit name ;
+    defining operator symbol $ ada.defining.operator ::= '\"' , { string character } , '\"' ;
+    (* (a library unit's name: its parents' names and its own, e.g. Ada.Text_IO) *)
+    defining program unit name $ ada.defining ::= simple identifier , { WS , '.' , WS , simple identifier } ;
+    procedure profile $ ada.profile ::= procedure , [ WS , formal part ] ;
+    function profile $ ada.profile ::= function , [ WS , formal part ] , WS , result profile ;
+    result profile $ ada.result ::= return , WS , [ flag not null , WS ] , ( access definition / subtype mark ) ;
+    formal part ::= '(' , WS , parameter specification , { WS , ';' , WS , parameter specification } , WS , ')' ;
+    parameter specification $ ada.parameter ::= defining identifier list , WS , ':' , WS , [ flag aliased , WS ] ,
+        ( access definition / ( mode , [ flag not null , WS ] , subtype mark ) ) , [ WS , ":=" , WS , expression ] , aspects ;
+    mode ::= [ flag in , WS ] , [ flag out , WS ] ;
+
+    subprogram declaration $ ada.subprogram.declaration ::= [ overriding indicator , WS ] , subprogram specification , aspects , WS , ';' ;
+    abstract subprogram declaration $ ada.subprogram.abstract ::= [ overriding indicator , WS ] , subprogram specification , WS , is , WS , abstract , aspects , WS , ';' ;
+    null procedure declaration $ ada.subprogram.null ::= [ overriding indicator , WS ] , procedure specification , WS , is , WS , null , aspects , WS , ';' ;
+    expression function declaration $ ada.subprogram.expression ::= [ overriding indicator , WS ] , function specification , WS , is , WS ,
+        ( parenthesized primary / bracket aggregate ) , aspects , WS , ';' ;
+    subprogram body $ ada.subprogram.body ::= [ overriding indicator , WS ] , subprogram specification , aspects , WS , is , declarative part , WS ,
+        begin , handled statements , WS , end , [ WS , end designator ] , WS , ';' ;
+    end designator $ ada.end ::= ( simple identifier , { WS , '.' , WS , simple identifier } ) | ( '\"' , { string character } , '\"' ) ;
+
+    (* packages *)
+    package declaration $ ada.package ::= package , WS , defining program unit name , aspects , WS , is , package items ,
+        [ WS , private part ] , WS , end , [ WS , end designator ] , WS , ';' ;
+    package items $ ada.declarations ::= { WS , basic declarative item } ;
+    private part $ ada.private ::= private , { WS , basic declarative item } ;
+    package body $ ada.package.body ::= package , WS , body , WS , defining program unit name , aspects , WS , is , declarative part ,
+        [ WS , begin , handled statements ] , WS , end , [ WS , end designator ] , WS , ';' ;
+
+    (* renamings *)
+    renaming declaration ::= object renaming declaration / exception renaming declaration / package renaming declaration /
+        subprogram renaming declaration / generic renaming declaration ;
+    object renaming declaration $ ada.renaming.object ::= defining identifier , [ WS , ':' , WS , ( access definition / ( [ flag not null , WS ] , subtype mark ) ) ] , WS ,
+        renames , WS , name , aspects , WS , ';' ;
+    exception renaming declaration $ ada.renaming.exception ::= defining identifier , WS , ':' , WS , exception , WS , renames , WS , name , aspects , WS , ';' ;
+    package renaming declaration $ ada.renaming.package ::= package , WS , defining program unit name , WS , renames , WS , name , aspects , WS , ';' ;
+    subprogram renaming declaration $ ada.renaming.subprogram ::= [ overriding indicator , WS ] , subprogram specification , WS , renames , WS , name , aspects , WS , ';' ;
+    generic renaming declaration $ ada.renaming.generic ::= generic , WS , ( flag package | flag procedure | flag function ) , WS , defining program unit name , WS ,
+        renames , WS , name , aspects , WS , ';' ;
+    flag package $ ada.flag ::= package ;
+    flag procedure $ ada.flag ::= procedure ;
+    flag function $ ada.flag ::= function ;
+
+    (* --- tasks and protected units *)
+
+    task type declaration $ ada.task.type ::= task , WS , type , WS , defining identifier , [ WS , known discriminant part ] , aspects ,
+        [ WS , is , [ WS , new , WS , interface list , WS , with ] , task definition ] , WS , ';' ;
+    single task declaration $ ada.task.single ::= task , WS , defining identifier , aspects , [ WS , is , [ WS , new , WS , interface list , WS , with ] , task definition ] , WS , ';' ;
+    interface list $ ada.interfaces ::= subtype mark , { WS , and , WS , subtype mark } ;
+    task definition $ ada.task.definition ::= { WS , task item } , [ WS , private part task ] , WS , end , [ WS , simple identifier ] ;
+    private part task $ ada.private ::= private , { WS , task item } ;
+    task item ::= entry declaration | aspect clause | pragma ;
+    task body $ ada.task.body ::= task , WS , body , WS , defining identifier , aspects , WS , is , declarative part , WS , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+
+    protected type declaration $ ada.protected.type ::= protected , WS , type , WS , defining identifier , [ WS , known discriminant part ] , aspects , WS , is ,
+        [ WS , new , WS , interface list , WS , with ] , protected definition , WS , ';' ;
+    single protected declaration $ ada.protected.single ::= protected , WS , defining identifier , aspects , WS , is , [ WS , new , WS , interface list , WS , with ] , protected definition , WS , ';' ;
+    protected definition $ ada.protected.definition ::= { WS , protected operation declaration } , [ WS , private part protected ] , WS , end , [ WS , simple identifier ] ;
+    private part protected $ ada.private ::= private , { WS , ( protected operation declaration | component declaration ) } ;
+    protected operation declaration ::= subprogram declaration / entry declaration / aspect clause / pragma ;
+    protected body $ ada.protected.body ::= protected , WS , body , WS , defining identifier , aspects , WS , is , { WS , protected operation item } , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    protected operation item ::= subprogram declaration / subprogram body / null procedure declaration / expression function declaration / entry body / aspect clause / pragma ;
+
+    entry declaration $ ada.entry ::= [ overriding indicator , WS ] , entry , WS , defining identifier , [ WS , '(' , WS , entry family , WS , ')' ] , [ WS , formal part ] , aspects , WS , ';' ;
+    entry family $ ada.entry.family ::= discrete subtype definition ;
+    entry body $ ada.entry.body ::= entry , WS , defining identifier , [ WS , entry index specification ] , [ WS , formal part ] , aspects , WS ,
+        when , WS , barrier , WS , is , declarative part , WS , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    entry index specification $ ada.entry.index ::= '(' , WS , for , WS , defining identifier , WS , in , WS , discrete subtype definition , WS , ')' ;
+    barrier $ ada.barrier ::= expression ;
+
+    (* --- generics *)
+
+    generic declaration ::= generic subprogram declaration / generic package declaration ;
+    generic subprogram declaration $ ada.generic ::= generic formal part , WS , subprogram specification , aspects , WS , ';' ;
+    generic package declaration $ ada.generic ::= generic formal part , WS , package declaration ;
+    generic formal part $ ada.generic.formals ::= generic , { WS , ( generic formal parameter declaration | use clause | pragma ) } ;
+    generic formal parameter declaration ::= formal object declaration / formal type declaration / formal subprogram declaration / formal package declaration ;
+    formal object declaration $ ada.formal.object ::= defining identifier list , WS , ':' , WS , mode , ( access definition / ( [ flag not null , WS ] , subtype mark ) ) ,
+        [ WS , ":=" , WS , expression ] , aspects , WS , ';' ;
+    formal type declaration ::= formal complete type declaration / formal incomplete type declaration ;
+    formal complete type declaration $ ada.formal.type ::= type , WS , defining identifier , [ WS , discriminant part ] , WS , is , WS , formal type definition ,
+        [ WS , or , WS , use , WS , subtype mark ] , aspects , WS , ';' ;
+    formal incomplete type declaration $ ada.formal.type.incomplete ::= type , WS , defining identifier , [ WS , discriminant part ] , [ WS , is , WS , flag tagged ] ,
+        [ WS , or , WS , use , WS , subtype mark ] , aspects , WS , ';' ;
+    formal type definition ::= formal private type definition / formal derived type definition / formal discrete type definition /
+        formal signed integer type definition / formal modular type definition / formal floating point definition /
+        formal decimal fixed point definition / formal ordinary fixed point definition / array type definition / access type definition /
+        interface type definition ;
+    formal private type definition $ ada.formal.private ::= [ ( flag abstract , WS , flag tagged , WS ) / ( flag tagged , WS ) ] , [ flag limited , WS ] , flag private ;
+    formal derived type definition $ ada.formal.derived ::= [ flag abstract , WS ] , [ ( flag limited | flag synchronized ) , WS ] , new , WS , subtype mark ,
+        [ WS , interfaces ] , [ WS , with , WS , flag private ] ;
+    formal discrete type definition $ ada.formal.discrete ::= '(' , WS , "<>" , WS , ')' ;
+    formal signed integer type definition $ ada.formal.integer ::= range , WS , "<>" ;
+    formal modular type definition $ ada.formal.modular ::= mod , WS , "<>" ;
+    formal floating point definition $ ada.formal.float ::= digits , WS , "<>" ;
+    formal decimal fixed point definition $ ada.formal.decimal ::= delta , WS , "<>" , WS , digits , WS , "<>" ;
+    formal ordinary fixed point definition $ ada.formal.fixed ::= delta , WS , "<>" ;
+    formal subprogram declaration $ ada.formal.subprogram ::= with , WS , subprogram specification , [ WS , is , WS , ( ( abstract , [ WS , subprogram default ] ) / subprogram default ) ] , aspects , WS , ';' ;
+    subprogram default ::= flag box / flag null / name ;
+    (* (the actuals of a formal package are its name's arguments: (<>) is a box) *)
+    formal package declaration $ ada.formal.package ::= with , WS , package , WS , defining identifier , WS , is , WS , new , WS , name , aspects , WS , ';' ;
+
+    generic instantiation $ ada.instantiation ::= [ overriding indicator , WS ] , ( flag package | flag procedure | flag function ) , WS , defining designator , WS , is , WS , new , WS ,
+        name , aspects , WS , ';' ;
+
+    (* --- representation *)
+
+    (* (an enumeration representation clause first: its aggregate is also an expression; its name a direct name (13.4(2))) *)
+    aspect clause ::= enumeration representation clause / attribute definition clause / record representation clause / at clause ;
+    attribute definition clause $ ada.representation.attribute ::= for , WS , name , WS , use , WS , expression , WS , ';' ;
+    enumeration representation clause $ ada.representation.enumeration ::= for , WS , direct name , WS , use , WS , aggregate , WS , ';' ;
+    record representation clause $ ada.representation.record ::= for , WS , name , WS , use , WS , record , [ WS , mod clause ] , { WS , ( component clause | pragma ) } , WS , end , WS , record , [ WS , simple identifier ] , WS , ';' ;
+    mod clause $ ada.representation.mod ::= at , WS , mod , WS , expression , WS , ';' ;
+    component clause $ ada.representation.component ::= name , WS , at , WS , simple expression , WS , range , WS , range , WS , ';' ;
+    at clause $ ada.representation.at ::= for , WS , direct name , WS , use , WS , at , WS , expression , WS , ';' ;
+
+    (* --- pragmas and use clauses *)
+
+    pragma $ ada.pragma ::= pragma , WS , designator name , [ WS , '(' , WS , pragma argument , { WS , ',' , WS , pragma argument } , WS , ')' ] , WS , ';' ;
+    pragma argument $ ada.pragma.argument ::= [ designator name , [ '\'' , designator name ] , WS , "=>" , WS ] , expression ;
+
+    use clause ::= use type clause / use package clause ;
+    use package clause $ ada.use ::= use , WS , name , { WS , ',' , WS , name } , WS , ';' ;
+    use type clause $ ada.use.type ::= use , WS , [ flag all , WS ] , type , WS , subtype mark , { WS , ',' , WS , subtype mark } , WS , ';' ;
+
+    (* --- statements *)
+
+    handled statements $ ada.handled ::= statements , [ WS , exception , { WS , exception handler } + ] ;
+    statements $ ada.statements ::= { WS , ( label / pragma / statement ) } ;
+    label $ ada.label ::= "<<" , WS , simple identifier , WS , ">>" ;
+    statement ::= null statement / assignment statement / exit statement / goto statement / simple return statement /
+        extended return statement / raise statement / delay statement / abort statement / requeue statement / code statement /
+        if statement / case statement / loop statement / block statement / accept statement / select statement / parallel block statement /
+        procedure call statement ;
+
+    null statement $ ada.null.statement ::= null , WS , ';' ;
+    assignment statement $ ada.assignment ::= name , WS , ":=" , WS , expression , WS , ';' ;
+    exit statement $ ada.exit ::= exit , [ WS , loop name ] , [ WS , when , WS , expression ] , WS , ';' ;
+    loop name $ ada.word ::= simple identifier ;
+    goto statement $ ada.goto ::= goto , WS , name , WS , ';' ;
+    simple return statement $ ada.return ::= return , [ WS , expression ] , WS , ';' ;
+    extended return statement $ ada.return.extended ::= return , WS , defining identifier , WS , ':' , WS , [ flag aliased , WS ] , [ flag constant , WS ] ,
+        ( access definition / subtype indication ) , [ WS , ":=" , WS , expression ] , aspects , [ WS , do , handled statements , WS , end , WS , return ] , WS , ';' ;
+    raise statement $ ada.raise ::= raise , [ WS , name , [ WS , with , WS , expression ] ] , WS , ';' ;
+    delay statement $ ada.delay ::= delay , WS , [ flag until , WS ] , expression , WS , ';' ;
+    abort statement $ ada.abort ::= abort , WS , name , { WS , ',' , WS , name } , WS , ';' ;
+    requeue statement $ ada.requeue ::= requeue , WS , name , [ WS , with , WS , abort ] , WS , ';' ;
+    code statement $ ada.code ::= name , WS , qualified suffix , WS , ';' ;
+    procedure call statement $ ada.call ::= name , WS , ';' ;
+
+    if statement $ ada.if ::= if , WS , expression , WS , then , statements , { WS , elsif part } , [ WS , else part ] , WS , end , WS , if , WS , ';' ;
+    elsif part $ ada.elsif ::= elsif , WS , expression , WS , then , statements ;
+    else part $ ada.else ::= else , statements ;
+    case statement $ ada.case ::= case , WS , expression , WS , is , { WS , pragma } , { WS , case statement alternative } + , WS , end , WS , case , WS , ';' ;
+    case statement alternative $ ada.alternative ::= when , WS , choice list , WS , "=>" , statements ;
+
+    loop statement $ ada.loop ::= [ statement identifier , WS ] , [ iteration scheme , WS ] , loop , statements , WS , end , WS , loop , [ WS , simple identifier ] , WS , ';' ;
+    statement identifier $ ada.word ::= simple identifier , WS , ':' ;
+    iteration scheme ::= while condition / for scheme ;
+    while condition $ ada.while ::= while , WS , expression ;
+    for scheme $ ada.for ::= [ flag parallel , WS , [ '(' , WS , chunk specification , WS , ')' , WS ] ] , for , WS , ( iterator specification / loop parameter specification ) ;
+    chunk specification $ ada.chunk ::= ( defining identifier , WS , in , WS , discrete subtype definition ) / simple expression ;
+    loop parameter specification $ ada.for.range ::= defining identifier , WS , in , WS , [ flag reverse , WS ] , discrete subtype definition , [ WS , iterator filter ] ;
+    (* (for X of a container or an array; for C in an iterator is a loop parameter specification whose subtype indication the
+       compiler finds is an iterator) *)
+    iterator specification $ ada.for.iterator ::= defining identifier , [ WS , ':' , WS , ( access definition / subtype indication ) ] , WS ,
+        of , WS , [ flag reverse , WS ] , name , [ WS , iterator filter ] ;
+    iterator filter $ ada.filter ::= when , WS , expression ;
+
+    block statement $ ada.block ::= [ statement identifier , WS ] , [ declare , declarative part , WS ] , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    parallel block statement $ ada.parallel ::= parallel , WS , do , handled statements , { WS , and , handled statements } + , WS , end , WS , do , WS , ';' ;
+
+    exception handler $ ada.handler ::= when , WS , [ choice parameter , WS ] , exception choice , { WS , ( '|' | '!' ) , WS , exception choice } , WS , "=>" , statements ;
+    choice parameter $ ada.defining ::= simple identifier , WS , ':' ;
+    exception choice ::= others choice | name ;
+
+    (* tasking statements *)
+    accept statement $ ada.accept ::= accept , WS , direct name , [ WS , '(' , WS , expression , WS , ')' ] , [ WS , formal part ] ,
+        [ WS , do , handled statements , WS , end , [ WS , simple identifier ] ] , WS , ';' ;
+    select statement ::= selective accept / timed entry call / conditional entry call / asynchronous select ;
+    selective accept $ ada.select.accept ::= select , WS , select alternative , { WS , or , WS , select alternative } , [ WS , else , statements ] , WS , end , WS , select , WS , ';' ;
+    select alternative $ ada.select.alternative ::= [ guard , WS ] , ( accept alternative / delay alternative / terminate alternative ) ;
+    guard $ ada.guard ::= when , WS , expression , WS , "=>" ;
+    accept alternative ::= accept statement , statements ;
+    delay alternative ::= delay statement , statements ;
+    terminate alternative $ ada.terminate ::= terminate , WS , ';' ;
+    timed entry call $ ada.select.timed ::= select , WS , entry call alternative , WS , or , WS , delay alternative part , WS , end , WS , select , WS , ';' ;
+    entry call alternative $ ada.select.call ::= procedure call statement , statements ;
+    delay alternative part $ ada.select.delay ::= delay statement , statements ;
+    conditional entry call $ ada.select.conditional ::= select , WS , entry call alternative , WS , else , statements , WS , end , WS , select , WS , ';' ;
+    asynchronous select $ ada.select.asynchronous ::= select , WS , triggering alternative , WS , then , WS , abort , statements , WS , end , WS , select , WS , ';' ;
+    triggering alternative $ ada.select.trigger ::= ( delay statement / procedure call statement ) , statements ;
+
+    (* --- compilation units *)
+
+    compilation $ ada.compilation ::= { WS , compilation unit } , WS ;
+    compilation unit $ ada.unit ::= context clause , WS , ( subunit / library item ) ;
+    context clause $ ada.context ::= { WS , ( with clause / use clause / pragma ) } ;
+    with clause $ ada.with ::= [ flag limited , WS ] , [ flag private , WS ] , with , WS , name , { WS , ',' , WS , name } , WS , ';' ;
+    library item ::= [ flag private , WS ] , ( subprogram body / package body / package declaration / generic declaration / generic instantiation /
+        subprogram renaming declaration / package renaming declaration / generic renaming declaration / subprogram declaration ) ;
+    subunit $ ada.subunit ::= separate , WS , '(' , WS , name , WS , ')' , WS , proper body ;
+    proper body ::= subprogram body / package body / task body / protected body ;
+    body stub $ ada.stub ::= ( [ overriding indicator , WS ] , subprogram specification , WS , is , WS , separate , aspects , WS , ';' ) /
+        ( package , WS , body , WS , defining identifier , WS , is , WS , separate , aspects , WS , ';' ) /
+        ( task , WS , body , WS , defining identifier , WS , is , WS , separate , aspects , WS , ';' ) /
+        ( protected , WS , body , WS , defining identifier , WS , is , WS , separate , aspects , WS , ';' ) ;
+}#

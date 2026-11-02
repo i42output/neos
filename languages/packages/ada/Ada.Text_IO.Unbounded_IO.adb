@@ -1,0 +1,85 @@
+--  Ada.Text_IO.Unbounded_IO.adb
+--
+--  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+--
+--  Redistribution and use in source and binary forms, with or without
+--  modification, are permitted provided that the following conditions are
+--  met:
+--
+--     * Redistributions of source code must retain the above copyright
+--       notice, this list of conditions and the following disclaimer.
+--
+--     * Redistributions in binary form must reproduce the above copyright
+--       notice, this list of conditions and the following disclaimer in the
+--       documentation and/or other materials provided with the distribution.
+--
+--     * Neither the name of the copyright holder nor the names of its
+--       contributors may be used to endorse or promote products derived from
+--       this software without specific prior written permission.
+--
+--  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+--  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+--  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+--  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+--  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+--  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+--  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+--  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+--  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+--  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+--  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+package body Ada.Text_IO.Unbounded_IO is
+
+   procedure Put
+      (File : in File_Type;
+       Item : in Strings.Unbounded.Unbounded_String) is
+   begin
+      Put (File, Strings.Unbounded.To_String (Item));
+   end Put;
+
+   procedure Put
+      (Item : in Strings.Unbounded.Unbounded_String) is
+   begin
+      Put (Strings.Unbounded.To_String (Item));
+   end Put;
+
+   procedure Put_Line
+      (File : in File_Type;
+       Item : in Strings.Unbounded.Unbounded_String) is
+   begin
+      Put_Line (File, Strings.Unbounded.To_String (Item));
+   end Put_Line;
+
+   procedure Put_Line
+      (Item : in Strings.Unbounded.Unbounded_String) is
+   begin
+      Put_Line (Strings.Unbounded.To_String (Item));
+   end Put_Line;
+
+   function Get_Line
+      (File : in File_Type)
+      return Strings.Unbounded.Unbounded_String is
+   begin
+      return Strings.Unbounded.To_Unbounded_String (Get_Line (File));
+   end Get_Line;
+
+   function Get_Line
+      return Strings.Unbounded.Unbounded_String is
+   begin
+      return Strings.Unbounded.To_Unbounded_String (Get_Line);
+   end Get_Line;
+
+   procedure Get_Line
+      (File : in File_Type; Item : out Strings.Unbounded.Unbounded_String) is
+   begin
+      Item := Get_Line (File);
+   end Get_Line;
+
+   procedure Get_Line
+      (Item : out Strings.Unbounded.Unbounded_String) is
+   begin
+      Item := Get_Line;
+   end Get_Line;
+
+end Ada.Text_IO.Unbounded_IO;

@@ -229,6 +229,12 @@ add_neos_concept_library(lua.core
     concepts/src/lua/lua.cpp)
 target_include_directories(lua.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include")
 target_include_directories(lua.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/lua/include")
+add_neos_concept_library(ada.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/ada/plugin.cpp
+    concepts/src/ada/ada.cpp)
+target_include_directories(ada.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
+target_include_directories(ada.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
 
 # compiler plugins (plugins with the extension ".ncp"): the code generation of a language (i_language_compiler)
 function(add_neos_compiler_plugin TARGET LANGUAGE)
@@ -262,6 +268,28 @@ add_neos_compiler_plugin(compiler.lua lua
     compilers/lua/src/plugin.cpp
     compilers/lua/src/compiler.cpp
     compilers/lua/src/codegen.cpp)
+add_neos_compiler_plugin(compiler.ada ada
+    compilers/ada/src/plugin.cpp
+    compilers/ada/src/compiler.cpp
+    compilers/ada/src/syntax.cpp
+    compilers/ada/src/bignum.cpp
+    compilers/ada/src/units.cpp
+    compilers/ada/src/units2.cpp
+    compilers/ada/src/decls.cpp
+    compilers/ada/src/types.cpp
+    compilers/ada/src/names.cpp
+    compilers/ada/src/expressions.cpp
+    compilers/ada/src/attributes.cpp
+    compilers/ada/src/statements.cpp
+    compilers/ada/src/tasks.cpp
+    compilers/ada/src/codegen.cpp
+    compilers/ada/src/gen_expr.cpp
+    compilers/ada/src/gen_ops.cpp
+    compilers/ada/src/validate.cpp
+    compilers/ada/src/gen_final.cpp
+    compilers/ada/src/gen_tasks.cpp
+    compilers/ada/src/gen_records.cpp
+    compilers/ada/src/gen_streams.cpp)
 add_neos_compiler_plugin(compiler.python python
     compilers/python/src/plugin.cpp
     compilers/python/src/compiler.cpp
@@ -275,7 +303,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core lua.core compiler.javascript compiler.python compiler.neoscript compiler.lua)
+add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core lua.core ada.core compiler.javascript compiler.python compiler.neoscript compiler.lua compiler.ada)
 
 # runtime stub (neos.stub): an image (an executable made by the console's "img" command) is a copy of it followed by a
 # program (see neos/image.hpp); it is built beside the console, which finds it there
@@ -384,6 +412,20 @@ function(add_neos_runtime_plugin TARGET)
 endfunction()
 
 add_neos_runtime_plugin(c runtime/c/src/c.c)
+
+# Ada runtime: the Ada memory, exceptions, tasking and the native primitives of the Ada standard library
+add_neos_runtime_plugin(ada
+    runtime/ada/src/plugin.cpp
+    runtime/ada/src/core.cpp
+    runtime/ada/src/exec.cpp
+    runtime/ada/src/ops.cpp
+    runtime/ada/src/tasking.cpp
+    runtime/ada/src/lib_strings.cpp
+    runtime/ada/src/lib_numerics.cpp
+    runtime/ada/src/lib_os.cpp
+    runtime/ada/src/lib_io.cpp
+    runtime/ada/src/lib_annex.cpp)
+target_include_directories(ada PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
 
 # Lua runtime: Lua's values, tables, metatables, coroutines and standard library
 add_neos_runtime_plugin(lua

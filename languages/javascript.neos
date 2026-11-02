@@ -231,8 +231,12 @@
 
     (* --- expressions *)
 
+    (* (an identifier reference is tried first: none of the others can match where it does (they start with reserved words or are not names),
+       but an async function expression, which starts with async (not reserved)) *)
     primary expression ::=
-        this expression |
+        async function expression /
+        identifier reference /
+        ( this expression |
         null literal |
         true literal |
         false literal |
@@ -243,10 +247,8 @@
         array literal |
         object literal |
         function expression |
-        async function expression |
         class expression |
-        identifier reference |
-        parenthesized expression ;
+        parenthesized expression ) ;
 
     parenthesized expression $ javascript.parenthesized ::= '(' , WS , expression , WS , ')' ;
 
@@ -323,12 +325,13 @@
     empty class element ::= ';' ;
 
     member expression ::= member head , { WS , member suffix } ;
+    (* (a primary expression is tried first: the others start with super, new or import, where it cannot match) *)
     member head ::=
-        super property |
+        primary expression /
+        ( super property |
         new target |
         import meta |
-        new expression with arguments |
-        primary expression ;
+        new expression with arguments ) ;
     member suffix ::= dot access | index access | private access | tagged template ;
     dot access $ javascript.dot ::= '.' , WS , identifier name ;
     private access $ javascript.dot.private ::= '.' , WS , private identifier ;
@@ -340,13 +343,13 @@
     import meta $ javascript.import.meta ::= import , WS , '.' , WS , meta ;
     new expression with arguments $ javascript.new ::= new , WS , member expression , WS , new arguments ;
     new expression without arguments $ javascript.new ::= new , WS , new expression ;
-    new expression ::= member expression | new expression without arguments ;
+    new expression ::= member expression / new expression without arguments ; (* (where a member expression matches, one without arguments is shorter or does not match) *)
     new arguments $ javascript.arguments ::= arguments ;
     arguments ::= '(' , WS , [ argument list ] , WS , ')' ;
     argument list ::= ( spread element | assignment expression ) , { WS , ',' , WS , ( spread element | assignment expression ) } , [ WS , ',' ] ;
 
     call expression ::= call head , { WS , call suffix } ;
-    call head ::= super call | import call | ( member expression , WS , call arguments ) ;
+    call head ::= ( member expression , WS , call arguments ) / ( super call | import call ) ; (* (super( and import( are not member expressions) *)
     call suffix ::= call arguments | dot access | index access | private access | tagged template ;
     call arguments $ javascript.call ::= arguments ;
     super call $ javascript.super.call ::= super , WS , arguments ;

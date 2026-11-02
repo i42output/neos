@@ -570,7 +570,25 @@ namespace neos
             throw compiler_error("no source code");
 
         if (!neolib::check_utf8(aFragment.source()))
-            throw compiler_error("source file has invalid utf-8");
+        {
+            // (the language's fallback encoding (Latin-1): transcoded to UTF-8)
+            if (!iSchema || schema().meta().sourceEncodingFallback != "latin-1")
+                throw compiler_error("source file has invalid utf-8");
+            thread_local neolib::string transcoded;
+            transcoded.clear();
+            for (char const c : aFragment.source().to_std_string_view())
+            {
+                auto const byte = static_cast<unsigned char>(c);
+                if (byte < 0x80u)
+                    transcoded.append(&c, 1u);
+                else
+                {
+                    char const utf8[2] = { static_cast<char>(0xC0u | (byte >> 6u)), static_cast<char>(0x80u | (byte & 0x3Fu)) };
+                    transcoded.append(utf8, 2u);
+                }
+            }
+            aFragment.set_source(transcoded.to_string_view());
+        }
     }
 
     namespace

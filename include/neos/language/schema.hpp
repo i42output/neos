@@ -61,6 +61,8 @@ namespace neos::language
         std::vector<std::string> prelude; ///< packages implicitly imported by every (non-imported) source fragment
         bool bigintPromotion = false;   ///< (meta: bigint.promotion) the language's integers are of any size: a result that overflows 
                                         ///< is promoted to an arbitrary precision integer (e.g. Python's int); the compiler can override it
+        std::string sourceEncodingFallback; ///< (meta: source.encoding.fallback) a source that is not valid UTF-8 is read in this encoding
+                                            ///< instead (supported: "latin-1"; e.g. Ada's default source representation)
     };
 
     namespace code_parser
@@ -121,4 +123,4 @@ namespace neos::language
         const concept_libraries_t& iConceptLibraries;
         std::chrono::steady_clock::duration iParseTime = {};
     };
-}
+}

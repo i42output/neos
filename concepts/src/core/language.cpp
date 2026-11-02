@@ -624,7 +624,7 @@ namespace neos::concepts::core
             }
             else if (aRhs.is("language.function.parameter"_sv))
             {
-                aResult = language_function_parameters{}.instantiate(aContext, source());
+                aResult = aContext.find_concept(language_function_parameters::Name)->instantiate(aContext, source()); // (the library's: a semanteme refers to its concept)
                 aResult->data<neos::language::i_function_parameters>().push_back(data<neos::language::i_function_parameter>());
                 aResult->data<neos::language::i_function_parameters>().push_back(aRhs.data<neos::language::i_function_parameter>());
             }
