@@ -67,6 +67,14 @@ namespace neos::concepts::ada
                 return neolib::string_view{ "language.function.parameters" };
             case construct::Object:
                 return neolib::string_view{ "language.function.local" };
+            // (the parts of a script that contain its statements (a compilation's units, a unit's context clause, a body's declarations
+            // and statements): looked through by its outline, as blocks)
+            case construct::Compilation:
+            case construct::Unit:
+            case construct::Context:
+            case construct::Declarations:
+            case construct::Handled:
+            case construct::Statements:
             case construct::Package:
             case construct::PackageBody:
             case construct::Block:
@@ -74,6 +82,14 @@ namespace neos::concepts::ada
             case construct::If:
             case construct::Case:
                 return neolib::string_view{ "language.statement.if" };
+            // (an if's elsif and else parts, and a case's alternatives (and those of if and case expressions, which outlines do not 
+            // look into))
+            case construct::Elsif:
+                return neolib::string_view{ "language.statement.elseif" };
+            case construct::Else:
+                return neolib::string_view{ "language.statement.else" };
+            case construct::Alternative:
+                return neolib::string_view{ "language.statement.case" };
             case construct::Loop:
                 return neolib::string_view{ "language.statement.loop" };
             case construct::Return:
