@@ -43,6 +43,18 @@
 
 namespace neos::language
 {
+    namespace detail
+    {
+        // (the instance (a semanteme) that its concept (a concept library's definition, shared by its instances) is working for: set
+        // while a semanteme calls its concept (see semanteme::concept_scope); the concept's source(), data(), instance() ... are its)
+        struct concept_instance
+        {
+            i_semantic_concept const* definition = nullptr;
+            i_semantic_concept* instance = nullptr;
+        };
+        inline thread_local concept_instance tConceptInstance;
+    }
+
     template <typename Concept>
     class semanteme : public neolib::reference_counted<i_semantic_concept>
     {
@@ -51,7 +63,7 @@ namespace neos::language
         using data_type = typename concept_type::data_type;
     public:
         semanteme(i_semantic_concept const& aConcept, i_context& aContext, neolib::i_string_view const& aSource) :
-            iConcept{ aConcept.clone(*this) }, iSource{ aSource }
+            iConcept{ const_cast<i_semantic_concept*>(&aConcept) }, iSource{ aSource }
         {
         }
         ~semanteme()
@@ -132,10 +144,12 @@ namespace neos::language
         }
         bool can_fold() const final
         {
+            concept_scope const scope{ *this };
             return iConcept->can_fold();
         }
         bool can_fold(i_semantic_concept const& aRhs) const final
         {
+            concept_scope const scope{ *this };
             return iConcept->can_fold(aRhs);
         }
         // debug
@@ -167,14 +181,30 @@ namespace neos::language
     protected:
         void do_fold(i_context& aContext, neolib::i_ref_ptr<i_semantic_concept>& aResult) final
         {
+            concept_scope const scope{ *this };
             iConcept->do_fold(aContext, aResult);
         }
         void do_fold(i_context& aContext, i_semantic_concept const& aRhs, neolib::i_ref_ptr<i_semantic_concept>& aResult) final
         {
+            concept_scope const scope{ *this };
             iConcept->do_fold(aContext, aRhs, aResult);
         }
     private:
-        neolib::ref_ptr<i_semantic_concept> iConcept;
+        // (while it calls its concept: its concept's instance (see detail::tConceptInstance); the previous one again after (calls nest))
+        struct concept_scope
+        {
+            detail::concept_instance const previous;
+            concept_scope(semanteme const& aInstance) : previous{ detail::tConceptInstance }
+            {
+                detail::tConceptInstance = { &*aInstance.iConcept, const_cast<semanteme*>(&aInstance) };
+            }
+            ~concept_scope()
+            {
+                detail::tConceptInstance = previous;
+            }
+        };
+    private:
+        neolib::ref_ptr<i_semantic_concept> iConcept;   ///< (its concept: the concept library's (not a copy of it))
         neolib::string_view iSource;
         mutable std::any iData;
     };
@@ -236,28 +266,31 @@ namespace neos::language
     public:
         neolib::i_string_view const& source() const final
         {
-            if (iInstance)
-                return iInstance->source();
+            if (auto* const instance = current_instance())
+                return instance->source();
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         void update_source(neolib::i_string_view const& aSource) final
         {
-            if (iInstance)
-                return iInstance->update_source(aSource);
+            if (auto* const instance = current_instance())
+                return instance->update_source(aSource);
             throw std::logic_error("neos::language::semantic_concept: definitions have no source!");
         }
         bool holds_data() const final
         {
-            return iInstance && iInstance->holds_data();
+            auto* const instance = current_instance();
+            return instance && instance->holds_data();
         }
         using i_semantic_concept::data;
         void const* data() const final
         {
-            return iInstance ? iInstance->data() : nullptr;
+            auto* const instance = current_instance();
+            return instance ? instance->data() : nullptr;
         }
         void* data() final
         {
-            return iInstance ? iInstance->data() : nullptr;
+            auto* const instance = current_instance();
+            return instance ? instance->data() : nullptr;
         }
         // emit
     public:
@@ -285,8 +318,8 @@ namespace neos::language
     public:
         void trace(neolib::i_string& aResult) const override
         {
-            if (iInstance)
-                iInstance->trace(aResult);
+            if (auto* const instance = current_instance())
+                instance->trace(aResult);
             else
                 aResult = name();
         }
@@ -301,8 +334,8 @@ namespace neos::language
         using i_semantic_concept::instance;
         void instance(neolib::i_ref_ptr<i_semantic_concept>& aInstance) const final
         {
-            if (iInstance)
-                aInstance.reset(iInstance);
+            if (auto* const instance = current_instance())
+                aInstance.reset(instance);
             else
                 aInstance.reset();
         }
@@ -317,8 +350,14 @@ namespace neos::language
         neolib::string_view iName;
         neolib::string_view iBase;
         emit_type iEmitAs;
-        // (an instance's copy of its concept (see clone): its instance, which owns it (not a reference to it: they would refer to each
-        // other, and neither would be destroyed))
+        // (the instance that it is working for: the semanteme calling it (see detail::tConceptInstance), else a copy's (see clone): 
+        // its instance, which owns it (not a reference to it: they would refer to each other, and neither would be destroyed))
+        i_semantic_concept* current_instance() const
+        {
+            if (detail::tConceptInstance.definition == this)
+                return detail::tConceptInstance.instance;
+            return iInstance;
+        }
         i_semantic_concept* iInstance = nullptr;
     };
 

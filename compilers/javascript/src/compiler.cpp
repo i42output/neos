@@ -1635,6 +1635,75 @@ namespace neos::compilers::javascript
         return g;
     }
 
+    std::uint32_t compiler::source_literal()
+    {
+        if (!iSourceLiteral)
+        {
+            // (the script's source text as a literal (UTF-8, NUL as C0 80: see utf8_encoding))
+            std::string text;
+            text.reserve(iSourceText.size());
+            for (auto c : iSourceText)
+            {
+                if (c == '\0')
+                    text.append("\xC0\x80");
+                else
+                    text.push_back(c);
+            }
+            iSourceLiteral = literal_string(text);
+        }
+        return *iSourceLiteral;
+    }
+
+    std::optional<std::uint64_t> compiler::source_range(std::string_view aText)
+    {
+        if (iSourceText.empty() || aText.data() < iSourceText.data() || aText.data() + aText.size() > iSourceText.data() + iSourceText.size())
+            return std::nullopt;
+        if (!iSourceUnits)
+        {
+            // (the positions after the sequences of the source text whose code units (as the runtime decodes the literal: see the 
+            // runtime's utf16) are fewer than their bytes, with the difference so far)
+            iSourceUnits.emplace();
+            std::size_t fewer = 0u;
+            auto const* const text = reinterpret_cast<unsigned char const*>(iSourceText.data());
+            auto const size = iSourceText.size();
+            for (std::size_t i = 0u; i < size;)
+            {
+                auto const c = text[i];
+                std::size_t n = 1u;
+                std::size_t units = 1u;
+                if (c < 0x80u)
+                    ;
+                else if ((c & 0xE0u) == 0xC0u && i + 1u < size)
+                    n = 2u;
+                else if ((c & 0xF0u) == 0xE0u && i + 2u < size)
+                    n = 3u;
+                else if ((c & 0xF8u) == 0xF0u && i + 3u < size)
+                {
+                    n = 4u;
+                    char32_t const cp = ((c & 0x07u) << 18) | ((text[i + 1u] & 0x3Fu) << 12) | ((text[i + 2u] & 0x3Fu) << 6) | (text[i + 3u] & 0x3Fu);
+                    units = cp >= 0x10000u ? 2u : 1u;
+                }
+                i += n;
+                if (n != units)
+                {
+                    fewer += n - units;
+                    iSourceUnits->emplace_back(i, fewer);
+                }
+            }
+        }
+        auto const units = [&](std::size_t aByte) -> std::size_t
+        {
+            auto const after = std::upper_bound(iSourceUnits->begin(), iSourceUnits->end(), aByte, [](std::size_t aOffset, auto const& aEntry) { return aOffset < aEntry.first; });
+            return aByte - (after == iSourceUnits->begin() ? 0u : std::prev(after)->second);
+        };
+        auto const first = static_cast<std::size_t>(aText.data() - iSourceText.data());
+        auto const start = units(first);
+        auto const length = units(first + aText.size()) - start;
+        if (start > 0xFFFFFFFFu || length >= 0xFFFFFFFFu)
+            return std::nullopt;
+        return (static_cast<std::uint64_t>(start) << 32u) | length;
+    }
+
     std::optional<std::uint32_t> compiler::global_mirror(std::string const& aName)
     {
         // (a script that is the program (it runs once, in one realm): its global references read the bindings' mirrors (see the

@@ -798,12 +798,13 @@ namespace neos::javascript_runtime
 
         // --- functions
 
-        value closure(std::int32_t aNumber, std::int32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::int32_t aLength, value aSource)
+        value closure(std::int32_t aNumber, std::int32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::int32_t aLength, value aSource,
+            std::uint64_t aSourceRange)
         {
             return guard([&]() -> value
             {
                 return make_closure(static_cast<std::uint32_t>(aNumber), static_cast<std::uint32_t>(aIndex), aEnvironment, aFlags, aName,
-                    static_cast<std::uint32_t>(aLength), aSource);
+                    static_cast<std::uint32_t>(aLength), aSource, aSourceRange);
             });
         }
 
@@ -2500,9 +2501,10 @@ namespace neos::javascript_runtime
             return guard([&]() -> value { return class_prototype(aHeritage == Empty ? Empty : checked(aHeritage)); });
         }
 
-        value class_constructor_(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource)
+        value class_constructor_(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource, std::uint64_t aSourceRange)
         {
-            return guard([&]() -> value { return class_constructor(aConstructor, aPrototype, aHeritage == Empty ? Empty : checked(aHeritage), aName, aSource); });
+            return guard([&]() -> value { return class_constructor(aConstructor, aPrototype, aHeritage == Empty ? Empty : checked(aHeritage), aName, aSource,
+                aSourceRange); });
         }
 
         value class_method(value aConstructor, value aHome, value aName, value aFunction, std::int32_t aKind, std::int32_t aStatic)
@@ -2669,7 +2671,7 @@ namespace neos::javascript_runtime
             { "env_set_checked", NEOS_RT_FUNCTION(env_set_checked), I64, 5u, { I64, I32, I32, I64, I64 }, 0u },
             { "env_bind_this", NEOS_RT_FUNCTION(env_bind_this), I64, 4u, { I64, I32, I32, I64 }, 0u },
             { "with_has", NEOS_RT_FUNCTION(with_has), I64, 2u, { I64, I64 }, 0u },
-            { "closure", NEOS_RT_FUNCTION(closure), I64, 7u, { I32, I32, I64, I32, I64, I32, I64 }, 0u },
+            { "closure", NEOS_RT_FUNCTION(closure), I64, 8u, { I32, I32, I64, I32, I64, I32, I64, I64 }, 0u },
             { "function_env", NEOS_RT_FUNCTION(function_env), I64, 1u, { I64 }, 0u },
             { "function_home", NEOS_RT_FUNCTION(function_home), I64, 1u, { I64 }, 0u },
             { "set_home", NEOS_RT_FUNCTION(set_home), I64, 2u, { I64, I64 }, 0u },
@@ -2771,7 +2773,7 @@ namespace neos::javascript_runtime
             { "iterator_close", NEOS_RT_FUNCTION(iterator_close), I64, 1u, { I64 }, 0u },
             { "private_name", NEOS_RT_FUNCTION(private_name), I64, 1u, { I64 }, 0u },
             { "class_prototype", NEOS_RT_FUNCTION(class_prototype_), I64, 1u, { I64 }, 0u },
-            { "class_constructor", NEOS_RT_FUNCTION(class_constructor_), I64, 5u, { I64, I64, I64, I64, I64 }, 0u },
+            { "class_constructor", NEOS_RT_FUNCTION(class_constructor_), I64, 6u, { I64, I64, I64, I64, I64, I64 }, 0u },
             { "class_method", NEOS_RT_FUNCTION(class_method), I64, 6u, { I64, I64, I64, I64, I32, I32 }, 0u },
             { "class_field", NEOS_RT_FUNCTION(class_field_), I64, 5u, { I64, I64, I64, I64, I32 }, 0u },
             { "class_static_block", NEOS_RT_FUNCTION(class_static_block_), I64, 2u, { I64, I64 }, 0u },

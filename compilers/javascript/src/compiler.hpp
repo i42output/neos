@@ -461,6 +461,7 @@ namespace neos::compilers::javascript
         void prologue();
         void instantiate_parameters();
         void closure(function_info& aFunction);
+        void source_text(std::optional<std::string_view> aText);  ///< (a closure's (or class's) source text: its two arguments (see compiler::source_range))
         void set_home_object(std::uint32_t aFunction, std::uint32_t aHome);
         bool this_lexical() const;
         bool derived_eval_code() const;
@@ -578,6 +579,10 @@ namespace neos::compilers::javascript
         // code generation
         void generate(node* aScript);
         std::uint32_t literal_string(std::string const& aText);     ///< (the global (an i64) that holds the string's value)
+        // (a function's (or a class's) source text, for Function.prototype.toString: a range of the script's source text (one literal of
+        // it, made when it is first needed: see source_literal), as (its first code unit << 32) | its code units (none: not within it))
+        std::optional<std::uint64_t> source_range(std::string_view aText);
+        std::uint32_t source_literal();
         std::uint32_t global_index(std::string const& aName, type aType);
         std::optional<std::uint32_t> global_mirror(std::string const& aName);   ///< (the global (an i64) that mirrors a global binding's value)
         function_info* script_function(std::string const& aName);   ///< (the script's function declaration that defines a global function)
@@ -615,6 +620,9 @@ namespace neos::compilers::javascript
         std::vector<std::tuple<node*, scope*, function_info*>> iAnnexBFunctions;
         std::map<std::string, std::uint32_t> iLiterals;     ///< (string literals -> their globals)
         std::vector<std::pair<std::string, std::uint32_t>> iLiteralOrder;
+        std::string_view iSourceText;                       ///< (the script's source text (see source_range))
+        std::optional<std::uint32_t> iSourceLiteral;
+        std::optional<std::vector<std::pair<std::size_t, std::size_t>>> iSourceUnits;   ///< (see source_range)
         std::unordered_map<std::string, std::uint32_t> iGlobalIndex;   ///< (the generator's globals (global_index's), by name)
         std::size_t iGlobalIndexed = 0u;                                ///< (how many of the generator's globals iGlobalIndex has)
         std::map<std::string, std::uint32_t> iMirrors;      ///< (global binding names -> the globals that mirror their values)

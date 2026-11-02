@@ -1544,6 +1544,8 @@ namespace neos::javascript_runtime
         Accessor
     };
 
+    inline constexpr std::uint32_t WholeSourceText = ~std::uint32_t{};
+
     struct function_object : object
     {
         function_object(value aPrototype, function_kind aKind) : object{ aPrototype, object_class::Function }, kind{ aKind } {}
@@ -1569,11 +1571,13 @@ namespace neos::javascript_runtime
         void* program = nullptr;            ///< (the program (as neos_rt_host::thread_context) whose function it is)
         struct realm* functionRealm = nullptr;  ///< ([[Realm]])
         std::uint32_t index = 0u;           ///< (the function's index in its program)
+        std::uint32_t sourceStart = 0u;     ///< (its source text's first code unit in sourceText (see sourceLength))
         value environment = Undefined;      ///< (its closure: the environment that encloses it)
         std::uint64_t dispatch = ~std::uint64_t{};  ///< (its dispatch key: see layout::FunctionDispatch)
         value homeObject = Undefined;
         value fields = Undefined;           ///< (a class constructor: its fields' initializer (a function) or undefined)
-        value sourceText = Undefined;       ///< (its source text (a string), for Function.prototype.toString)
+        value sourceText = Undefined;       ///< (its source text (a string), for Function.prototype.toString: or the script's, of which its 
+                                            ///< is a range (see sourceStart, sourceLength))
         value lexicalThis = Undefined;      ///< (an arrow function: the this of its enclosing function)
         value lexicalNewTarget = Undefined;
         value lexicalHome = Undefined;
@@ -1587,6 +1591,7 @@ namespace neos::javascript_runtime
         // positions and attributes never change, so a table of that shape has the data property there))
         shape* prototypeShape = nullptr;
         std::uint32_t prototypePosition = 0u;
+        std::uint32_t sourceLength = WholeSourceText;   ///< (its source text's code units in sourceText (WholeSourceText: all of it))
         // bound
         value boundTarget = Undefined;
         value boundThis = Undefined;

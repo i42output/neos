@@ -215,7 +215,7 @@ namespace neos::javascript_runtime
         return make_object(parent);
     }
 
-    value class_constructor(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource)
+    value class_constructor(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource, std::uint64_t aSourceRange)
     {
         auto const& r = the_realm();
         bool const derived = aHeritage != Empty;
@@ -236,6 +236,13 @@ namespace neos::javascript_runtime
         fn.derived = derived;
         fn.homeObject = aPrototype;
         fn.sourceText = aSource;
+        fn.sourceStart = 0u;
+        fn.sourceLength = WholeSourceText;
+        if (aSourceRange != ~std::uint64_t{})
+        {
+            fn.sourceStart = static_cast<std::uint32_t>(aSourceRange >> 32u);
+            fn.sourceLength = static_cast<std::uint32_t>(aSourceRange);
+        }
         fn.fields = value_of(the_heap().make<class_definition>());
         obj(f).put(the_names().prototype, aPrototype, 0u);
         obj(aPrototype).put(the_names().constructor, f, AttributeWritable | AttributeConfigurable);

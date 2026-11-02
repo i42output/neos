@@ -57,7 +57,8 @@ namespace neos::javascript_runtime
         };
     }
 
-    value make_closure(std::uint32_t aNumber, std::uint32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::uint32_t aLength, value aSource)
+    value make_closure(std::uint32_t aNumber, std::uint32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::uint32_t aLength, value aSource,
+        std::uint64_t aSourceRange)
     {
         auto const& r = the_realm();
         bool const generator = (aFlags & ClosureGenerator) != 0;
@@ -80,6 +81,11 @@ namespace neos::javascript_runtime
         f.isConstructor = (aFlags & ClosureConstructor) != 0;
         f.derived = (aFlags & ClosureDerived) != 0;
         f.sourceText = aSource;
+        if (aSourceRange != ~std::uint64_t{})
+        {
+            f.sourceStart = static_cast<std::uint32_t>(aSourceRange >> 32u);
+            f.sourceLength = static_cast<std::uint32_t>(aSourceRange);
+        }
         if ((aFlags & ClosureClassConstructor) != 0)
             f.flavour = function_flavour::ClassConstructor;
         else if (generator && async)
@@ -330,7 +336,7 @@ namespace neos::javascript_runtime
             }
             // (a class's (its constructor may be a default one: a native function) has its source text too)
             if ((f->kind == function_kind::Compiled || f->flavour == function_flavour::ClassConstructor) && is_string(f->sourceText))
-                return f->sourceText;
+                return f->sourceLength == WholeSourceText ? f->sourceText : substring_of(f->sourceText, f->sourceStart, f->sourceLength);
             // (NativeFunction syntax: function [get|set] [PropertyName] (): a name that is not a property name (e.g. "bound f", "$&") is
             // left out)
             auto const name = f->own(the_names().name);

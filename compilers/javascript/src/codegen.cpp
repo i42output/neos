@@ -372,6 +372,9 @@ namespace neos::compilers::javascript
             analyse(aScript);
             iLiterals.clear();
             iLiteralOrder.clear();
+            iSourceText = aScript->source;
+            iSourceLiteral.reset();
+            iSourceUnits.reset();
             iGlobalIndex.clear();
             iGlobalIndexed = 0u;
             iMirrors.clear();
@@ -4075,6 +4078,27 @@ namespace neos::compilers::javascript
         }
     }
 
+    void function_generator::source_text(std::optional<std::string_view> aText)
+    {
+        // (a function's (or class's) source text: the script's source text (one literal) and the range of it (see compiler::source_range);
+        // a text that is not within it: a literal of its own (the whole of it: range ~0); none: undefined)
+        if (!aText)
+        {
+            undefined();
+            i64(-1);
+            return;
+        }
+        if (auto const range = iCompiler.source_range(*aText))
+        {
+            op(opcode::GlobalGet);
+            u32(iCompiler.source_literal());
+            i64(static_cast<std::int64_t>(*range));
+            return;
+        }
+        string_value(utf8_encoding(*aText));
+        i64(-1);
+    }
+
     void function_generator::closure(function_info& aFunction)
     {
         // (a function object for one of the program's functions, closed over the innermost environment)
@@ -4117,11 +4141,8 @@ namespace neos::compilers::javascript
         i32(flags);
         key(aFunction.name);
         i32(static_cast<std::int32_t>(aFunction.length));
-        if (aFunction.declaration != nullptr)
-            string_value(utf8_encoding(aFunction.declaration->source));
-        else
-            undefined();
-        runtime("closure", { I32, I32, I64, I32, I64, I32, I64 }, I64);
+        source_text(aFunction.declaration != nullptr ? std::optional<std::string_view>{ aFunction.declaration->source } : std::nullopt);
+        runtime("closure", { I32, I32, I64, I32, I64, I32, I64, I64 }, I64);
     }
 
     // --- statements
@@ -9399,8 +9420,8 @@ namespace neos::compilers::javascript
         get(prototype);
         get(parent);
         key(nameNode != nullptr ? name_of(nameNode) : aName ? *aName : std::string{});
-        string_value(utf8_encoding(aNode->source));
-        runtime("class_constructor", { I64, I64, I64, I64, I64 }, I64);
+        source_text(aNode->source);
+        runtime("class_constructor", { I64, I64, I64, I64, I64, I64 }, I64);
         check();
         auto const f = temporary();
         set(f);

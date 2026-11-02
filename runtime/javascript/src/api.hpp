@@ -69,7 +69,10 @@ namespace neos::javascript_runtime
     int link_global(char const* aName, neos_rt_type* aType, neos_rt_value* aValue);
 
     // (functions.cpp)
-    value make_closure(std::uint32_t aNumber, std::uint32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::uint32_t aLength, value aSource);
+    // (aSource: its source text, or the script's of which (aSourceRange: (first code unit << 32) | code units) its is a range; aSourceRange
+    // ~0: all of aSource)
+    value make_closure(std::uint32_t aNumber, std::uint32_t aIndex, value aEnvironment, std::int32_t aFlags, value aName, std::uint32_t aLength, value aSource,
+        std::uint64_t aSourceRange);
     value make_arguments_object(value aCallee, std::span<value const> aArguments, bool aMapped);
     value map_arguments(value aArguments, value aEnvironment, std::uint32_t aParameters, std::span<std::uint32_t const> aSlots);
 
@@ -107,7 +110,7 @@ namespace neos::javascript_runtime
     // (classes.cpp)
     value make_private_name(value aDescription);
     value class_prototype(value aHeritage);     ///< (aHeritage Empty: none)
-    value class_constructor(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource);   ///< (aConstructor undefined: the default)
+    value class_constructor(value aConstructor, value aPrototype, value aHeritage, value aName, value aSource, std::uint64_t aSourceRange);   ///< (aConstructor undefined: the default)
     void class_private_method(value aConstructor, value aHome, value aName, value aFunction, std::int32_t aKind, bool aStatic);
     void class_field(value aConstructor, value aHome, value aName, value aInitializer, bool aStatic);
     void class_static_block(value aConstructor, value aFunction);
