@@ -558,6 +558,64 @@ namespace
             std::memmove(memory() + aTarget, memory() + aSource, static_cast<std::size_t>(aCount));
     }
 
+    // (bit-packed arrays: their data at bit addresses (a storage unit's address times 8 plus the bit, from its least significant))
+    NEOS_ADA_PRIMITIVE void neos_ada_bits_copy(std::int64_t aTarget, std::int64_t aSource, std::int64_t aCount)
+    {
+        if (aCount <= 0 || aTarget == aSource)
+            return;
+        auto* const m = memory();
+        auto const bit = [m](std::int64_t aAddress) { return (m[aAddress >> 3] >> (aAddress & 7)) & 1u; };
+        auto const set = [m](std::int64_t aAddress, unsigned aValue)
+        {
+            auto& unit = m[aAddress >> 3];
+            unit = static_cast<std::uint8_t>((unit & ~(1u << (aAddress & 7))) | (aValue << (aAddress & 7)));
+        };
+        if ((aTarget & 7) == 0 && (aSource & 7) == 0 && (aCount & 7) == 0)
+        {
+            std::memmove(m + (aTarget >> 3), m + (aSource >> 3), static_cast<std::size_t>(aCount >> 3));
+            return;
+        }
+        // (overlapping: copied in the direction that reads each bit before it is written)
+        if (aTarget < aSource)
+            for (std::int64_t i = 0; i < aCount; ++i)
+                set(aTarget + i, bit(aSource + i));
+        else
+            for (std::int64_t i = aCount; i-- > 0;)
+                set(aTarget + i, bit(aSource + i));
+    }
+
+    NEOS_ADA_PRIMITIVE std::int32_t neos_ada_compare_bit_arrays(std::int64_t aLeft, std::int64_t aRight, std::int64_t aBits)
+    {
+        // (one-dimensional bit-packed arrays (their descriptors' data offsets are in bits): their elements (of aBits bits; negative:
+        // signed values of -aBits bits) compared in order, then their lengths)
+        bool const isSigned = aBits < 0;
+        if (isSigned)
+            aBits = -aBits;
+        auto const length = [](std::int64_t d) { auto const f = *at<std::int64_t>(d + 8); auto const l = *at<std::int64_t>(d + 16); return l < f ? std::int64_t{ 0 } : l - f + 1; };
+        auto const ln = length(aLeft);
+        auto const rn = length(aRight);
+        auto const* const m = memory();
+        auto const lp = aLeft * 8 + *at<std::int64_t>(aLeft);
+        auto const rp = aRight * 8 + *at<std::int64_t>(aRight);
+        auto const mask = (std::uint64_t{ 1 } << aBits) - 1u;
+        auto const element = [&](std::int64_t aAddress) -> std::int64_t
+        {
+            auto const v = static_cast<std::uint64_t>(m[aAddress >> 3] >> (aAddress & 7)) & mask;
+            if (!isSigned)
+                return static_cast<std::int64_t>(v);
+            auto const shift = static_cast<unsigned>(64 - aBits);
+            return static_cast<std::int64_t>(v << shift) >> shift;
+        };
+        for (std::int64_t i = 0; i < ln && i < rn; ++i)
+        {
+            auto const a = element(lp + i * aBits);
+            auto const b = element(rp + i * aBits);
+            if (a != b)
+                return a < b ? -1 : 1;
+        }
+        return ln < rn ? -1 : ln > rn ? 1 : 0;
+    }
+
     NEOS_ADA_PRIMITIVE void neos_ada_fill(std::int64_t aTarget, std::int64_t aByte, std::int64_t aCount)
     {
         if (aCount > 0)
@@ -954,6 +1012,8 @@ namespace
         { "fill", NEOS_RT_FUNCTION(neos_ada_fill), VOID, 3u, { I64, I64, I64 }, 0u },
         { "compare", NEOS_RT_FUNCTION(neos_ada_compare), I32, 3u, { I64, I64, I64 }, 0u },
         { "compare_arrays", NEOS_RT_FUNCTION(neos_ada_compare_arrays), I32, 3u, { I64, I64, I64 }, 0u },
+        { "bits_copy", NEOS_RT_FUNCTION(neos_ada_bits_copy), VOID, 3u, { I64, I64, I64 }, 0u },
+        { "compare_bit_arrays", NEOS_RT_FUNCTION(neos_ada_compare_bit_arrays), I32, 3u, { I64, I64, I64 }, 0u },
         { "compare_arrays_padded", NEOS_RT_FUNCTION(neos_ada_compare_arrays_padded), I32, 4u, { I64, I64, I64, I64 }, 0u },
         { "stack_overflow", NEOS_RT_FUNCTION(neos_ada_stack_overflow), VOID, 0u, {}, 0u },
         { "image_integer", NEOS_RT_FUNCTION(neos_ada_image_integer), I64, 1u, { I64 }, 0u },

@@ -241,12 +241,57 @@ namespace
         return descriptor;
     }
 
+    // (bit-packed arrays (a negative element size: their components' bits, negated): their descriptors' data offset is in bits (from
+    // the descriptor's address times 8), a component at a bit address)
+    std::int64_t bit_data_of(address aDescriptor) { return static_cast<std::int64_t>(aDescriptor) * 8 + *at<std::int64_t>(aDescriptor); }
+    std::uint64_t bits_at(std::int64_t aBitAddress, std::int64_t aBits)
+    {
+        return (static_cast<std::uint64_t>(*at<std::uint8_t>(static_cast<address>(aBitAddress >> 3))) >> (aBitAddress & 7)) & ((std::uint64_t{ 1 } << aBits) - 1u);
+    }
+    void set_bits(std::int64_t aBitAddress, std::int64_t aBits, std::uint64_t aValue)
+    {
+        auto& unit = *at<std::uint8_t>(static_cast<address>(aBitAddress >> 3));
+        auto const mask = ((1u << aBits) - 1u) << (aBitAddress & 7);
+        unit = static_cast<std::uint8_t>((unit & ~mask) | ((static_cast<unsigned>(aValue) << (aBitAddress & 7)) & mask));
+    }
+    address new_bit_array(std::int64_t aFirst, std::int64_t aLength, std::int64_t aBits)
+    {
+        auto const descriptor = ss_allocate(24u + static_cast<std::uint64_t>((aLength * aBits + 7) / 8));
+        *at<std::int64_t>(descriptor) = 24 * 8;
+        *at<std::int64_t>(descriptor + 8) = aFirst;
+        *at<std::int64_t>(descriptor + 16) = aFirst + aLength - 1;
+        return descriptor;
+    }
+    void copy_bits(std::int64_t aTarget, std::int64_t aSource, std::int64_t aCount)
+    {
+        for (std::int64_t i = 0; i < aCount; ++i)
+            set_bits(aTarget + i, 1, bits_at(aSource + i, 1));
+    }
+
     // (Left & Right: a new array (on the secondary stack); a null left operand: the right operand's bounds)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_concatenate(std::int64_t aElementSize, std::int64_t aLeft, std::int64_t aRight, std::int64_t aIndexFirst)
     {
         (void)aIndexFirst;
         auto const ln = length_of(aLeft);
         auto const rn = length_of(aRight);
+        if (aElementSize < 0)
+        {
+            // (bit-packed)
+            auto const bits = -aElementSize;
+            std::int64_t first = ln == 0 ? first_of(aRight) : first_of(aLeft);
+            std::int64_t last = 0;
+            if (ln != 0 && add_overflow(first, ln + rn - 1, &last))
+            {
+                raise_predefined(0, "range check failed");
+                return 0;
+            }
+            auto const result = new_bit_array(first, ln + rn, bits);
+            if (ln == 0)
+                *at<std::int64_t>(result + 16) = last_of(aRight);
+            copy_bits(bit_data_of(result), bit_data_of(aLeft), ln * bits);
+            copy_bits(bit_data_of(result) + ln * bits, bit_data_of(aRight), rn * bits);
+            return result;
+        }
         if (ln == 0)
         {
             auto const result = new_array(first_of(aRight), rn, aElementSize);
@@ -288,6 +333,20 @@ namespace
             raise_predefined(0, "length check failed");
             return 0;
         }
+        if (aElementSize < 0)
+        {
+            // (bit-packed: their components' bits)
+            auto const bits = -aElementSize;
+            auto const result = new_bit_array(first_of(aLeft), n, bits);
+            *at<std::int64_t>(result + 16) = last_of(aLeft);
+            auto const l = bit_data_of(aLeft), r = bit_data_of(aRight), d = bit_data_of(result);
+            for (std::int64_t i = 0; i < n; ++i)
+            {
+                auto const a = bits_at(l + i * bits, bits) != 0u, b = bits_at(r + i * bits, bits) != 0u;
+                set_bits(d + i * bits, bits, aOp == 0 ? (a && b) : aOp == 1 ? (a || b) : (a != b));
+            }
+            return result;
+        }
         auto const result = new_array(first_of(aLeft), n, aElementSize);
         *at<std::int64_t>(result + 16) = last_of(aLeft);
         auto const l = data_of(aLeft), r = data_of(aRight), d = data_of(result);
@@ -302,6 +361,17 @@ namespace
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_array_not(std::int64_t aArray, std::int64_t aElementSize)
     {
         auto const n = length_of(aArray);
+        if (aElementSize < 0)
+        {
+            // (bit-packed)
+            auto const bits = -aElementSize;
+            auto const result = new_bit_array(first_of(aArray), n, bits);
+            *at<std::int64_t>(result + 16) = last_of(aArray);
+            auto const s = bit_data_of(aArray), d = bit_data_of(result);
+            for (std::int64_t i = 0; i < n; ++i)
+                set_bits(d + i * bits, bits, bits_at(s + i * bits, bits) == 0u ? 1u : 0u);
+            return result;
+        }
         auto const result = new_array(first_of(aArray), n, aElementSize);
         *at<std::int64_t>(result + 16) = last_of(aArray);
         auto const s = data_of(aArray), d = data_of(result);
@@ -337,7 +407,8 @@ namespace
                 auto const n = *at<std::int64_t>(descriptor + 16 + 16 * d) - *at<std::int64_t>(descriptor + 8 + 16 * d) + 1;
                 length *= n > 0 ? n : 0;
             }
-            size += round(length * *at<std::int64_t>(entry + 24));
+            auto const element = *at<std::int64_t>(entry + 24);
+            size += round(element < 0 ? (length * -element + 7) / 8 : length * element);     // (bit-packed: its bits, negated)
         }
         return size;
     }

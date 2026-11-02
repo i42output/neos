@@ -559,7 +559,27 @@ namespace neos::compilers::ada
                     {
                         tee(original);
                     }
-                    if (!sv->is_composite())
+                    if (!sv->is_composite() && rv->kind == type_kind::Array && iProgram.packed_bits(rv) != 0u && kind_of(source) == vkind::I64)
+                    {
+                        // (to a bit-packed array: its value's bits (sign extended: all of a word's))
+                        enumeration_code(source);
+                        auto const value = temporary(type::I64);
+                        set(value);
+                        iFrameSize = (iFrameSize + 7u) & ~std::uint64_t{ 7u };
+                        auto const slot = iFrameSize;
+                        iFrameSize += 8u;
+                        get(iFrame);
+                        get(value);
+                        store64(static_cast<std::uint32_t>(slot));
+                        release(value);
+                        get(iFrame);
+                        i64(static_cast<std::int64_t>(slot));
+                        this->op(opcode::I64Add);
+                        set(from);
+                        i64(8);
+                        set(size);
+                    }
+                    else if (!sv->is_composite())
                     {
                         enumeration_code(source);
                         materialize(source);
@@ -571,11 +591,17 @@ namespace neos::compilers::ada
                     {
                         auto const descriptor = local(type::I64);
                         set(descriptor);
-                        data_address(descriptor);
+                        if (iProgram.packed_bits(sv) != 0u)
+                        {
+                            // (a bit-packed array: its storage units)
+                            data_bits(descriptor);
+                            i64(3);
+                            this->op(opcode::I64ShrU);
+                        }
+                        else
+                            data_address(descriptor);
                         set(from);
-                        array_length(descriptor, sv->base_type()->view()->indexes.size());
-                        element_size(sv);
-                        this->op(opcode::I64Mul);
+                        data_size(sv, descriptor);
                         set(size);
                     }
                     else
@@ -587,7 +613,8 @@ namespace neos::compilers::ada
                     if (!rv->is_composite())
                     {
                         if (auto* component = sv->kind == type_kind::Array ? sv->base_type()->view()->component : nullptr;
-                            component != nullptr && component->view()->base_type()->view()->boolean && sv->base_type()->view()->indexes.size() == 1u)
+                            component != nullptr && component->view()->base_type()->view()->boolean && sv->base_type()->view()->indexes.size() == 1u &&
+                            iProgram.packed_bits(sv) == 0u)
                         {
                             // (an array of Boolean: its components the bits, the first the least significant)
                             auto const esize = iProgram.component_size(sv->base_type()->view());
@@ -675,6 +702,61 @@ namespace neos::compilers::ada
                             enumeration_position(aResult);
                             return;
                         }
+                        if (auto const bits = sv->kind == type_kind::Array ? iProgram.packed_bits(sv) : 0u; bits != 0u && kind_of(aResult) == vkind::I64)
+                        {
+                            // (a bit-packed array: its bits (fewer than the target's: its value's, sign extended for a signed target))
+                            // (its bits, at most the target's size's)
+                            auto const targetBits = static_cast<std::int64_t>(8u * iProgram.scalar_size(aResult));
+                            auto const n = local(type::I64);
+                            array_length(original, sv->base_type()->view()->indexes.size());
+                            i64(static_cast<std::int64_t>(bits));
+                            this->op(opcode::I64Mul);
+                            set(n);
+                            get(n);
+                            i64(targetBits);
+                            get(n);
+                            i64(targetBits);
+                            this->op(opcode::I64LtS);
+                            this->op(opcode::Select);
+                            set(n);
+                            auto const value = local(type::I64);
+                            get(from);
+                            load(vkind::I64, 8u, 0u, false);
+                            set(value);
+                            get(n);
+                            i64(64);
+                            this->op(opcode::I64LtS);
+                            get(n);
+                            i64(0);
+                            this->op(opcode::I64GtS);
+                            this->op(opcode::I32And);
+                            begin_if();
+                            get(value);
+                            i64(1);
+                            get(n);
+                            this->op(opcode::I64Shl);
+                            i64(1);
+                            this->op(opcode::I64Sub);
+                            this->op(opcode::I64And);
+                            set(value);
+                            if (!is_unsigned(aResult))
+                            {
+                                get(value);
+                                i64(64);
+                                get(n);
+                                this->op(opcode::I64Sub);
+                                this->op(opcode::I64Shl);
+                                i64(64);
+                                get(n);
+                                this->op(opcode::I64Sub);
+                                this->op(opcode::I64ShrS);
+                                set(value);
+                            }
+                            end();
+                            get(value);
+                            enumeration_position(aResult);
+                            return;
+                        }
                         get(from);
                         load(kind_of(aResult), iProgram.scalar_size(aResult), 0u, !is_unsigned(aResult));
                         enumeration_position(aResult);
@@ -703,8 +785,21 @@ namespace neos::compilers::ada
                             release(n);
                             this->op(opcode::I64Mul);
                         }
-                        element_size(rv);
-                        this->op(opcode::I64Mul);
+                        if (auto const bits = iProgram.packed_bits(rv); bits != 0u)
+                        {
+                            // (a bit-packed array: its storage units)
+                            i64(static_cast<std::int64_t>(bits));
+                            this->op(opcode::I64Mul);
+                            i64(7);
+                            this->op(opcode::I64Add);
+                            i64(3);
+                            this->op(opcode::I64ShrU);
+                        }
+                        else
+                        {
+                            element_size(rv);
+                            this->op(opcode::I64Mul);
+                        }
                         set(dataSize);
                         auto const object = local(type::I64);
                         get(dataSize);
@@ -714,7 +809,7 @@ namespace neos::compilers::ada
                         set(object);
                         init_descriptor(rv, object);
                         if (auto* component = rv->base_type()->view()->component; !sv->is_composite() && component != nullptr &&
-                            component->view()->base_type()->view()->boolean && dimensions == 1u)
+                            component->view()->base_type()->view()->boolean && dimensions == 1u && iProgram.packed_bits(rv) == 0u)
                         {
                             // (an array of Boolean: the source's bits, the first component its least significant bit (its
                             // representation: an enumeration type's code))
@@ -794,6 +889,7 @@ namespace neos::compilers::ada
                         auto* sourceComponent = sv->kind == type_kind::Array ? coded(sv->base_type()->view()->component) : nullptr;
                         auto* targetComponent = coded(rv->base_type()->view()->component);
                         if ((sourceComponent != nullptr || targetComponent != nullptr) && sv->kind == type_kind::Array && dimensions == 1u &&
+                            iProgram.packed_bits(sv) == 0u && iProgram.packed_bits(rv) == 0u &&
                             sv->base_type()->view()->indexes.size() == 1u && sv->base_type()->view()->component != nullptr &&
                             sv->base_type()->view()->component->view()->is_discrete() && rv->base_type()->view()->component->view()->is_discrete())
                         {
@@ -1023,11 +1119,16 @@ namespace neos::compilers::ada
                         // (its data (from the pool; its descriptor from the heap, see allocate_array))
                         auto const dimensions = dv->base_type()->view()->indexes.size();
                         auto const data = local(type::I64);
-                        data_address(object);
+                        if (iProgram.packed_bits(dv) != 0u)
+                        {
+                            data_bits(object);
+                            i64(3);
+                            this->op(opcode::I64ShrU);
+                        }
+                        else
+                            data_address(object);
                         set(data);
-                        array_length(object, dimensions);
-                        element_size(dv);
-                        this->op(opcode::I64Mul);
+                        data_size(dv, object);
                         set(size);
                         pool_call("deallocate", poolAddress, data, size, storage_alignment(dv));
                         get(object);
@@ -1480,7 +1581,9 @@ namespace neos::compilers::ada
     void function_generator::boolean_array_operation(intrinsic aOp, ada_type* aType)
     {
         // (logical operators of Boolean arrays: element by element (runtime))
-        auto const element = static_cast<std::int64_t>(iProgram.component_size(aType->view()->base_type()->view()));
+        // (a bit-packed array's: its components' bits, negated)
+        auto const bits = iProgram.packed_bits(aType);
+        auto const element = bits != 0u ? -static_cast<std::int64_t>(bits) : static_cast<std::int64_t>(iProgram.component_size(aType->view()->base_type()->view()));
         if (aOp == intrinsic::Not)
         {
             i64(element);
@@ -1624,6 +1727,21 @@ namespace neos::compilers::ada
                 return;
             }
             // (lexicographic: discrete components (a signed type's: their size negated))
+            if (auto const bits = iProgram.packed_bits(base); bits != 0u)
+            {
+                i64(base->component != nullptr && !is_unsigned(base->component) && base->component->view()->low.is_integer() &&
+                    base->component->view()->low.integer().negative() ? -static_cast<std::int64_t>(bits) : static_cast<std::int64_t>(bits));
+                runtime("compare_bit_arrays", { type::I64, type::I64, type::I64 }, type::I32);
+                i32(0);
+                switch (aOp)
+                {
+                case intrinsic::Lt: op(opcode::I32LtS); break;
+                case intrinsic::Le: op(opcode::I32LeS); break;
+                case intrinsic::Gt: op(opcode::I32GtS); break;
+                default: op(opcode::I32GeS); break;
+                }
+                return;
+            }
             auto const elementSize = static_cast<std::int64_t>(iProgram.component_size(base));
             auto const valueSize = static_cast<std::int64_t>(base->component != nullptr ? iProgram.scalar_size(base->component) : elementSize);
             i64(elementSize);
@@ -1794,6 +1912,15 @@ namespace neos::compilers::ada
         {
             auto* c = t->component != nullptr ? t->component->view() : nullptr;
             auto const dimensions = t->base_type()->view()->indexes.size();
+            if (auto const bits = iProgram.packed_bits(t); bits != 0u && dimensions == 1u)
+            {
+                get(left);
+                get(right);
+                i64(static_cast<std::int64_t>(bits));
+                runtime("compare_bit_arrays", { type::I64, type::I64, type::I64 }, type::I32);
+                op(opcode::I32Eqz);
+                return;
+            }
             if (c != nullptr && (c->is_discrete() || c->is_access()) && dimensions == 1u && !t->base_type()->view()->component_size_clause)
             {
                 get(left);
@@ -1843,10 +1970,21 @@ namespace neos::compilers::ada
                 set(result);
                 auto const lp = local(type::I64);
                 auto const rp = local(type::I64);
-                data_address(left);
-                set(lp);
-                data_address(right);
-                set(rp);
+                auto const packedBits = iProgram.packed_bits(t);
+                if (packedBits != 0u)
+                {
+                    data_bits(left);
+                    set(lp);
+                    data_bits(right);
+                    set(rp);
+                }
+                else
+                {
+                    data_address(left);
+                    set(lp);
+                    data_address(right);
+                    set(rp);
+                }
                 begin(control_kind::Block);
                 auto const exit = iControls.size() - 1u;
                 begin(control_kind::Loop);
@@ -1859,6 +1997,14 @@ namespace neos::compilers::ada
                     get(lp);
                     get(rp);
                     component_equality(c);
+                }
+                else if (packedBits != 0u)
+                {
+                    get(lp);
+                    packed_load(c, packedBits);
+                    get(rp);
+                    packed_load(c, packedBits);
+                    op(opcode::I64Eq);
                 }
                 else
                 {
@@ -1875,11 +2021,17 @@ namespace neos::compilers::ada
                 branch(exit);
                 end();
                 get(lp);
-                element_size(t);
+                if (packedBits != 0u)
+                    i64(static_cast<std::int64_t>(packedBits));
+                else
+                    element_size(t);
                 op(opcode::I64Add);
                 set(lp);
                 get(rp);
-                element_size(t);
+                if (packedBits != 0u)
+                    i64(static_cast<std::int64_t>(packedBits));
+                else
+                    element_size(t);
                 op(opcode::I64Add);
                 set(rp);
                 get(n);
@@ -2000,7 +2152,8 @@ namespace neos::compilers::ada
         // left: the right itself), or the index subtype's first)
         auto* t = (aType != nullptr ? aType : aOperator->sub->result)->view();
         auto* arrayType = t->base_type()->view();
-        auto const elementSize = iProgram.component_size(arrayType);
+        auto const packedBits = iProgram.packed_bits(arrayType);
+        auto const elementSize = packedBits != 0u ? 1u : iProgram.component_size(arrayType);
         auto* index = arrayType->indexes.empty() ? nullptr : arrayType->indexes[0];
         std::uint32_t descriptors[2];
         for (std::size_t i = 0u; i < 2u; ++i)
@@ -2020,7 +2173,7 @@ namespace neos::compilers::ada
                 i64(static_cast<std::int64_t>(24u + elementSize + 8u));
                 runtime("ss_allocate", { type::I64 }, type::I64);
                 tee(descriptors[i]);
-                i64(24);
+                i64(packedBits != 0u ? 24 * 8 : 24);     // (bit-packed: in bits; its value in the first storage unit's low bits)
                 store64(0u);
                 get(descriptors[i]);
                 if (index != nullptr)
@@ -2057,7 +2210,7 @@ namespace neos::compilers::ada
                 set(descriptors[i]);
             }
         }
-        i64(static_cast<std::int64_t>(elementSize));
+        i64(packedBits != 0u ? -static_cast<std::int64_t>(packedBits) : static_cast<std::int64_t>(elementSize));
         get(descriptors[0]);
         get(descriptors[1]);
         if (index != nullptr)
@@ -2310,10 +2463,17 @@ namespace neos::compilers::ada
             }
             if (name == "address" && v != nullptr && v->kind == type_kind::Array && !typePrefix)
             {
-                // (an array's address: its data's (its first component's))
+                // (an array's address: its data's (its first component's; a bit-packed array's: its first storage unit's))
                 auto const descriptor = temporary(type::I64);
                 set(descriptor);
-                data_address(descriptor);
+                if (iProgram.packed_bits(v) != 0u)
+                {
+                    data_bits(descriptor);
+                    i64(3);
+                    op(opcode::I64ShrU);
+                }
+                else
+                    data_address(descriptor);
                 release(descriptor);
             }
             return;
@@ -2332,9 +2492,14 @@ namespace neos::compilers::ada
                 auto const descriptor = temporary(type::I64);
                 set(descriptor);
                 array_length(descriptor, v->base_type()->view()->indexes.size());
-                element_size(v);
-                op(opcode::I64Mul);
-                i64(8);
+                if (auto const bits = iProgram.packed_bits(v); bits != 0u)
+                    i64(static_cast<std::int64_t>(bits));
+                else
+                {
+                    element_size(v);
+                    i64(8);
+                    op(opcode::I64Mul);
+                }
                 op(opcode::I64Mul);
                 release(descriptor);
                 return;
@@ -2346,9 +2511,14 @@ namespace neos::compilers::ada
                 auto const descriptor = temporary(type::I64);
                 set(descriptor);
                 array_length(descriptor, v->base_type()->view()->indexes.size());
-                element_size(v);
-                op(opcode::I64Mul);
-                i64(8);
+                if (auto const bits = iProgram.packed_bits(v); bits != 0u)
+                    i64(static_cast<std::int64_t>(bits));
+                else
+                {
+                    element_size(v);
+                    i64(8);
+                    op(opcode::I64Mul);
+                }
                 op(opcode::I64Mul);
                 release(descriptor);
                 return;
@@ -2732,7 +2902,8 @@ namespace neos::compilers::ada
         }
         if (name == "component_size" && v != nullptr && v->kind == type_kind::Array)
         {
-            i64(static_cast<std::int64_t>(iProgram.component_size(v->base_type()->view()) * 8u));
+            auto const bits = iProgram.packed_bits(v);
+            i64(static_cast<std::int64_t>(bits != 0u ? bits : iProgram.component_size(v->base_type()->view()) * 8u));
             return;
         }
         if (name == "external_tag" && v != nullptr)
@@ -2820,11 +2991,16 @@ namespace neos::compilers::ada
                 {
                     auto const descriptor = temporary(type::I64);
                     set(descriptor);
-                    data_address(descriptor);
+                    if (iProgram.packed_bits(ot) != 0u)
+                    {
+                        data_bits(descriptor);
+                        i64(3);
+                        op(opcode::I64ShrU);
+                    }
+                    else
+                        data_address(descriptor);
                     set(aStart);
-                    array_length(descriptor, ot->base_type()->view()->indexes.size());
-                    element_size(ot);
-                    op(opcode::I64Mul);
+                    data_size(ot, descriptor);
                     set(aSize);
                     release(descriptor);
                 }
@@ -3866,8 +4042,18 @@ namespace neos::compilers::ada
                 set(slid);
                 length_check(slid, target, dimensions, aAggregate);
                 get(slid);
-                data_address(target);
-                get(slid);
+                if (iProgram.packed_bits(t) != 0u)
+                {
+                    data_bits(target);
+                    get(slid);
+                    i64(3);
+                    op(opcode::I64Shl);
+                }
+                else
+                {
+                    data_address(target);
+                    get(slid);
+                }
                 op(opcode::I64Sub);
                 store64(0u);
                 get(slid);
@@ -4112,14 +4298,24 @@ namespace neos::compilers::ada
                     array_aggregate_components(aValue, aType, aTarget, aDimension + 1u, aLows, aHighs, aElement);
                 return;
             }
-            // (the element's address: data + offset * size)
+            // (the element's address: data + offset * size (a bit-packed array's: its bit address))
             auto const a = temporary(type::I64);
-            data_address(aTarget);
-            get(offset);
-            if (aElement != 0u)
-                i64(static_cast<std::int64_t>(aElement));
+            auto const packedBits = iProgram.packed_bits(t);
+            if (packedBits != 0u)
+            {
+                data_bits(aTarget);
+                get(offset);
+                i64(static_cast<std::int64_t>(packedBits));
+            }
             else
-                element_size(aType);
+            {
+                data_address(aTarget);
+                get(offset);
+                if (aElement != 0u)
+                    i64(static_cast<std::int64_t>(aElement));
+                else
+                    element_size(aType);
+            }
             op(opcode::I64Mul);
             op(opcode::I64Add);
             set(a);
@@ -4147,7 +4343,10 @@ namespace neos::compilers::ada
                     // (the array type's Default_Component_Value, else the scalar's Default_Value)
                     get(a);
                     expression(defaultValue, ct);
-                    store(kind_of(ct), aElement);
+                    if (packedBits != 0u)
+                        packed_store(packedBits);
+                    else
+                        store(kind_of(ct), aElement);
                 }
             }
             else if (ct->view()->is_composite())
@@ -4190,7 +4389,10 @@ namespace neos::compilers::ada
                 get(a);
                 expression(aValue, ct);
                 range_check(ct, aValue->type, aValue);
-                store(kind_of(ct), aElement);
+                if (packedBits != 0u)
+                    packed_store(packedBits);
+                else
+                    store(kind_of(ct), aElement);
             }
             release(a);
         };
@@ -4760,13 +4962,26 @@ namespace neos::compilers::ada
             set(k);
         }
         auto const element = local(type::I64);
-        data_address(descriptor);
+        // (a bit-packed array's elements: at bit addresses (the parameter's, see entity::packed_bits))
+        auto const packedBits = iProgram.packed_bits(t);
+        parameter->packed_bits = static_cast<std::uint8_t>(packedBits);
+        auto const step = [&]()
+        {
+            if (packedBits != 0u)
+                i64(static_cast<std::int64_t>(packedBits));
+            else
+                element_size(t);
+        };
+        if (packedBits != 0u)
+            data_bits(descriptor);
+        else
+            data_address(descriptor);
         if (reverse)
         {
             get(n);
             i64(1);
             op(opcode::I64Sub);
-            element_size(t);
+            step();
             op(opcode::I64Mul);
             op(opcode::I64Add);
         }
@@ -4824,9 +5039,12 @@ namespace neos::compilers::ada
                 op(opcode::I64DivS);
                 set(rest);
             }
-            data_address(descriptor);
+            if (packedBits != 0u)
+                data_bits(descriptor);
+            else
+                data_address(descriptor);
             get(offset);
-            element_size(t);
+            step();
             op(opcode::I64Mul);
             op(opcode::I64Add);
             set(element);
@@ -4856,7 +5074,7 @@ namespace neos::compilers::ada
         else
         {
             get(element);
-            element_size(t);
+            step();
             op(reverse ? opcode::I64Sub : opcode::I64Add);
             set(element);
         }

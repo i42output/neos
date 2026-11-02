@@ -239,6 +239,7 @@ namespace neos::compilers::ada
         std::uint64_t scalar_size(ada_type* aType);
         std::uint64_t object_size(ada_type* aType);
         std::uint64_t component_size(ada_type* aArray);
+        std::uint64_t packed_bits(ada_type* aArray);          ///< (a bit-packed array type's components' bits (1, 2, 4 or 8); else 0)
         std::uint64_t maximum_size(ada_type* aType);
         std::uint32_t sp_global() const { return iSpGlobal; }
         std::uint32_t limit_global() const { return iLimitGlobal; }

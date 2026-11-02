@@ -175,6 +175,19 @@ namespace neos::compilers::ada
         void bit_field_load(component_info const& aComponent);     ///< ([its first storage unit's address] -> its value)
         void bit_field_store(component_info const& aComponent);    ///< ([its first storage unit's address, value] -> ())
         component_info const* bit_field_name(node* aName);         ///< (a name of a record component that is a bit field: it)
+        // (bit-packed arrays (see program::packed_bits): their descriptors' data offset is in bits (from the descriptor's address
+        // times 8), their components (that do not cross a storage unit) at a bit address)
+        std::uint64_t packed_element(node* aName);                 ///< (a name of a component of a bit-packed array: its bits; else 0)
+        void packed_load(ada_type* aComponent, std::uint64_t aBits);   ///< ([its bit address] -> its value)
+        void packed_store(std::uint64_t aBits);                    ///< ([its bit address, value] -> ())
+        void data_bits(std::uint32_t aDescriptor);                 ///< (an i64: a bit-packed array's data's bit address)
+        void data_size(ada_type* aArray, std::uint32_t aDescriptor);   ///< (an i64: an array's data's size in storage units)
+        void data_offset(ada_type* aArray, std::size_t aDimensions);   ///< (an i64: the data offset of a descriptor followed by its data)
+        void rebase_data(ada_type* aArray, std::uint32_t aNew, std::uint32_t aOld);   ///< (a new descriptor's data: the old one's)
+        void element_address(ada_type* aArray, std::uint32_t aDescriptor, std::uint32_t aIndex);  ///< (an i64: the address (bit-packed: bit
+                                                                                                    ///< address) of the element at an offset)
+        void copy_elements(ada_type* aSource, std::uint32_t aFrom, ada_type* aTarget, std::uint32_t aTo);  ///< (discrete elements, one by one
+                                                                                                             ///< (a change of packing))
         void component_load(component_info const& aComponent);     ///< ([a record's address] -> a scalar component's value (a bit field's too))
         void component_store(component_info const& aComponent);    ///< ([a record's address, value] -> ())
         void store_object(entity* aObject);                 ///< ([value] -> ())

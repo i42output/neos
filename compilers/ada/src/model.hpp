@@ -401,6 +401,8 @@ namespace neos::compilers::ada
         node* address_clause = nullptr;     ///< (an object whose address is specified (Address aspect or clause): its address's expression)
         std::uint64_t alignment_clause = 0u;    ///< (an object whose alignment is specified (Alignment aspect or clause): in storage elements)
         std::uint64_t size_clause = 0u;         ///< (an object whose size is specified (Size aspect or clause): in bits)
+        std::uint8_t packed_bits = 0u;          ///< (a renaming or loop parameter that denotes a component of a bit-packed array: its bits
+                                                ///< (its address is a bit address))
         node* initial = nullptr;            ///< (an object's initial value)
         node* priority = nullptr;           ///< (a task or protected unit's, or the main subprogram's: its Priority or Interrupt_Priority (D.1, D.3))
         bool interrupt_priority = false;    ///< (Interrupt_Priority (its default: Interrupt_Priority'Last))

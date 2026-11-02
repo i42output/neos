@@ -227,12 +227,7 @@ namespace neos::compilers::ada
                 i64(static_cast<std::int64_t>(*c.offset));
                 op(opcode::I64Add);
                 set(d);
-                array_length(d, c.type->view()->base_type()->view()->indexes.size());
-                if (auto const es = iProgram.component_size(c.type); es != 0u)
-                    i64(static_cast<std::int64_t>(es));
-                else
-                    element_size(c.type);     // (dynamically sized elements)
-                op(opcode::I64Mul);
+                data_size(c.type, d);
                 i64(7);
                 op(opcode::I64Add);
                 i64(~std::int64_t{ 7 });
@@ -270,22 +265,22 @@ namespace neos::compilers::ada
         iInstances.pop_back();
         get(aComponentAddress);
         if (!aComponent.dynamic)
-            i64(static_cast<std::int64_t>(8u + 16u * dimensions));
+            data_offset(ct, dimensions);
         else
         {
-            // (the tail: data offset = (record + tail) - descriptor)
+            // (the tail: data offset = (record + tail) - descriptor (a bit-packed array's: in bits))
             get(aRecordAddress);
             get(iTail);
             op(opcode::I64Add);
             get(aComponentAddress);
             op(opcode::I64Sub);
+            if (iProgram.packed_bits(ct) != 0u)
+            {
+                i64(3);
+                op(opcode::I64Shl);
+            }
             // (the tail's next free byte)
-            array_length(aComponentAddress, dimensions);
-            if (auto const es = iProgram.component_size(ct); es != 0u)
-                i64(static_cast<std::int64_t>(es));
-            else
-                element_size(ct);     // (dynamically sized elements)
-            op(opcode::I64Mul);
+            data_size(ct, aComponentAddress);
             i64(7);
             op(opcode::I64Add);
             i64(~std::int64_t{ 7 });
@@ -418,11 +413,24 @@ namespace neos::compilers::ada
                     op(opcode::I64Mul);
                     release(n);
                 }
-                if (auto const es = iProgram.component_size(ct); es != 0u)
-                    i64(static_cast<std::int64_t>(es));
+                if (auto const bits = iProgram.packed_bits(ct); bits != 0u)
+                {
+                    // (bit-packed: its storage units)
+                    i64(static_cast<std::int64_t>(bits));
+                    op(opcode::I64Mul);
+                    i64(7);
+                    op(opcode::I64Add);
+                    i64(3);
+                    op(opcode::I64ShrU);
+                }
                 else
-                    element_size(ct);     // (dynamically sized elements)
-                op(opcode::I64Mul);
+                {
+                    if (auto const es = iProgram.component_size(ct); es != 0u)
+                        i64(static_cast<std::int64_t>(es));
+                    else
+                        element_size(ct);     // (dynamically sized elements)
+                    op(opcode::I64Mul);
+                }
                 i64(7);
                 op(opcode::I64Add);
                 i64(~std::int64_t{ 7 });

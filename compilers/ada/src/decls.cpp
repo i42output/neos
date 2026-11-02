@@ -1422,7 +1422,7 @@ namespace neos::compilers::ada
         {
             if (auto* t = value(0))
                 if (auto* type = subtype_mark(t, aRegion))
-                    type->packed = true;
+                    type->packed = type->view()->base_type()->view()->packed = true;
         }
         else if (name == "unchecked_union")
         {
@@ -1487,6 +1487,8 @@ namespace neos::compilers::ada
                         auto const bits = v.integer().to_uint64();
                         if (bits % 8u == 0u && bits / 8u > component_size(base) && bits <= 64u * 8u)
                             base->component_size_clause = bits;
+                        else if ((bits == 1u || bits == 2u || bits == 4u) && base->component != nullptr && base->component->view()->is_discrete())
+                            base->component_size_clause = bits;     // (bit-packed: see packed_bits)
                     }
                 }
                 else if (attribute == "alignment")

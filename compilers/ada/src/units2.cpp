@@ -190,7 +190,7 @@ namespace neos::compilers::ada
             else if (name == "pack")
             {
                 if (aEntity->is_type())
-                    aEntity->type->packed = true;
+                    aEntity->type->packed = aEntity->type->view()->base_type()->view()->packed = true;
             }
             else if (name == "unchecked_union")
             {

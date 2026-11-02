@@ -185,7 +185,7 @@ namespace neos::compilers::ada
                     static_cast<std::int64_t>(size_descriptor(ct->base_type())) });
             else
                 words.insert(words.end(), { 0, static_cast<std::int64_t>(*c.offset), static_cast<std::int64_t>(ct->base_type()->view()->indexes.size()),
-                    static_cast<std::int64_t>(component_size(ct)) });
+                    packed_bits(ct) != 0u ? -static_cast<std::int64_t>(packed_bits(ct)) : static_cast<std::int64_t>(component_size(ct)) });
             ++words[1];
         }
         std::string bytes(words.size() * 8u, '\0');
@@ -1787,7 +1787,10 @@ namespace neos::compilers::ada
             return;
         }
         address_of(o);
-        load(kind_of(t), iProgram.scalar_size(t), 0u, !is_unsigned(t));
+        if (o->packed_bits != 0u)
+            packed_load(t, o->packed_bits);
+        else
+            load(kind_of(t), iProgram.scalar_size(t), 0u, !is_unsigned(t));
     }
 
     void function_generator::store_object(entity* aObject)
@@ -1835,7 +1838,10 @@ namespace neos::compilers::ada
         }
         get(value);
         release(value);
-        store(kind_of(t), iProgram.scalar_size(t));
+        if (o->packed_bits != 0u)
+            packed_store(o->packed_bits);
+        else
+            store(kind_of(t), iProgram.scalar_size(t));
     }
 
     bool function_generator::is_simple_name(node* aName)
@@ -2227,6 +2233,7 @@ namespace neos::compilers::ada
         auto const address = local(type::I64);
         this->address(e->renamed_name);
         set(address);
+        e->packed_bits = static_cast<std::uint8_t>(packed_element(e->renamed_name));
         // (the function results that it renames (or of which it renames a part): finalized with the renaming (by its master),
         // not as the declaration's temporaries (3.10.2(10/5), 7.6.1(3/2)))
         if (iTemporaries && iTemporaryMark != 0u)
@@ -3004,15 +3011,13 @@ namespace neos::compilers::ada
                 // applicable index constraint, 4.3.3(15)))
                 auto const dimensions = v->base_type()->view()->indexes.size();
                 auto const temp = local(type::I64);
-                array_length(targetAddress, dimensions);
-                element_size(v);
-                op(opcode::I64Mul);
+                data_size(v, targetAddress);
                 i64(static_cast<std::int64_t>(8u + 16u * dimensions));
                 op(opcode::I64Add);
                 runtime("ss_allocate", { type::I64 }, type::I64);
                 set(temp);
                 get(temp);
-                i64(static_cast<std::int64_t>(8u + 16u * dimensions));
+                data_offset(v, dimensions);
                 store64(0u);
                 for (std::size_t d = 0u; d < dimensions; ++d)
                 {
@@ -3117,7 +3122,12 @@ namespace neos::compilers::ada
         set(val);
         get(targetAddress);
         get(val);
-        store(kind_of(t), iProgram.scalar_size(t));
+        if (auto const* bitField = bit_field_name(target))
+            bit_field_store(*bitField);
+        else if (auto const bits = packed_element(target); bits != 0u)
+            packed_store(bits);
+        else
+            store(kind_of(t), iProgram.scalar_size(t));
         release(val);
     }
 

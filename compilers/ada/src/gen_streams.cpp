@@ -251,7 +251,11 @@ namespace neos::compilers::ada
             auto const p = local(type::I64);
             array_length(aAddress, t->base_type()->view()->indexes.size());
             set(n);
-            data_address(aAddress);
+            auto const packedBits = iProgram.packed_bits(t);
+            if (packedBits != 0u)
+                data_bits(aAddress);
+            else
+                data_address(aAddress);
             set(p);
             begin(control_kind::Block);
             auto const exit = iControls.size() - 1u;
@@ -261,9 +265,35 @@ namespace neos::compilers::ada
             i64(0);
             op(opcode::I64LeS);
             branch(exit, true);
-            stream_object(aRead, c, aStream, p);
+            if (packedBits != 0u)
+            {
+                // (a bit-packed array's component: its value (in a temporary), read or written, then stored in its bits)
+                auto const cell = local(type::I64);
+                if (aRead)
+                    i64(0);
+                else
+                {
+                    get(p);
+                    packed_load(c, packedBits);
+                }
+                materialize(c);
+                set(cell);
+                stream_object(aRead, c, aStream, cell);
+                if (aRead)
+                {
+                    get(p);
+                    get(cell);
+                    load(kind_of(c), iProgram.scalar_size(c), 0u, !is_unsigned(c));
+                    packed_store(packedBits);
+                }
+            }
+            else
+                stream_object(aRead, c, aStream, p);
             get(p);
-            element_size(t);
+            if (packedBits != 0u)
+                i64(static_cast<std::int64_t>(packedBits));
+            else
+                element_size(t);
             op(opcode::I64Add);
             set(p);
             get(n);
@@ -621,8 +651,20 @@ namespace neos::compilers::ada
                 op(opcode::I64Mul);
                 release(n);
             }
-            element_size(base);
-            op(opcode::I64Mul);
+            if (auto const bits = iProgram.packed_bits(base); bits != 0u)
+            {
+                i64(static_cast<std::int64_t>(bits));
+                op(opcode::I64Mul);
+                i64(7);
+                op(opcode::I64Add);
+                i64(3);
+                op(opcode::I64ShrU);
+            }
+            else
+            {
+                element_size(base);
+                op(opcode::I64Mul);
+            }
             i64(static_cast<std::int64_t>(8u + 16u * dimensions));
             op(opcode::I64Add);
             set(size);
@@ -630,7 +672,7 @@ namespace neos::compilers::ada
             runtime("ss_allocate", { type::I64 }, type::I64);
             set(object);
             get(object);
-            i64(static_cast<std::int64_t>(8u + 16u * dimensions));
+            data_offset(base, dimensions);
             store64(0u);
             for (std::size_t d = 0u; d < dimensions; ++d)
             {

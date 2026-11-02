@@ -1340,7 +1340,15 @@ namespace neos::compilers::ada
             }
         }
         if (chosen == nullptr && !options.empty())
+        {
             chosen = options.front().type;
+            // (a scalar operand of a record or array target, or a record or array operand of a scalar target: not convertible (4.6))
+            auto* t = chosen != nullptr ? chosen->view() : nullptr;
+            bool const composite = target->kind == type_kind::Record || target->kind == type_kind::Array;
+            if (t != nullptr && !t->is_universal() && ((composite && t->is_scalar()) ||
+                (target->is_scalar() && (t->kind == type_kind::Record || t->kind == type_kind::Array))))
+                error(aOperand, "operand of a type conversion not convertible to the target type");
+        }
         if (chosen != nullptr && (chosen->kind == type_kind::String || chosen->kind == type_kind::Aggregate))
             chosen = aTarget;
         resolve(aOperand, chosen != nullptr && !chosen->is_universal() ? chosen : nullptr, aRegion);
