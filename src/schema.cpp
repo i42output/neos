@@ -467,7 +467,7 @@ namespace neos::language
             }
             for (std::uint64_t child = 0u; child < children; ++child)
             {
-                auto& node = *aNode.children.emplace_back(std::make_shared<schema_ast_node>(&aNode, nullptr, nullptr, std::string_view{}));
+                auto& node = *aNode.children.emplace_back(schema_ast_node::make(&aNode, nullptr, nullptr, std::string_view{}));
                 if (!decode_ast(aReader, aGrammar, aConcepts, &aNode, node))
                     return false;
             }
