@@ -1,4 +1,6 @@
 with Ada.Text_IO;
+with Ada.Strings;
+with Ada.Strings.Fixed;
 procedure Collatz is
    type Value is range 0 .. 2 ** 63 - 1;
    function Steps (Start : Value) return Natural is
@@ -24,5 +26,5 @@ begin
          end if;
       end;
    end loop;
-   Ada.Text_IO.Put_Line (Value'Image (Arg) & Natural'Image (Best));
+   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Value'Image (Arg), Ada.Strings.Left) & Natural'Image (Best));
 end Collatz;

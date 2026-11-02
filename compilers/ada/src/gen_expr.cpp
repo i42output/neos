@@ -133,9 +133,9 @@ namespace neos::compilers::ada
 
     static bool bit_field_candidate(program& aProgram, component_info const& aComponent)
     {
-        // (a discrete or fixed point component (not a discriminant) that a component clause places at a bit offset, or in fewer bits
+        // (a discrete or fixed point component (or discriminant) that a component clause places at a bit offset, or in fewer bits
         // than its objects' size: stored in those bits (13.5.1), within 8 storage units)
-        if (!aComponent.bit_position || !aComponent.bit_size || aComponent.discriminant || aComponent.type == nullptr)
+        if (!aComponent.bit_position || !aComponent.bit_size || aComponent.type == nullptr)
             return false;
         auto* cv = aComponent.type->view();
         if (!cv->is_discrete() && !cv->is_fixed())
@@ -619,7 +619,7 @@ namespace neos::compilers::ada
                 auto const k = kind_of(c.type);
                 get(result);
                 get(aValue);
-                load(k, iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset), !is_unsigned(c.type));
+                component_load(c);
                 expression(value, c.type);
                 op(k == vkind::I64 ? opcode::I64Eq : k == vkind::F32 ? opcode::F32Eq : opcode::F64Eq);
                 op(opcode::I32And);
@@ -2135,7 +2135,7 @@ namespace neos::compilers::ada
                         if (constraint == nullptr)
                             continue;
                         get(value);
-                        load(kind_of(component.type), iProgram.scalar_size(component.type), static_cast<std::uint32_t>(*component.offset), !is_unsigned(component.type));
+                        component_load(component);
                         expression(constraint, component.type);
                         op(kind_of(component.type) == vkind::I64 ? opcode::I64Eq : kind_of(component.type) == vkind::F32 ? opcode::F32Eq : opcode::F64Eq);
                         op(opcode::I32And);
@@ -2976,7 +2976,7 @@ namespace neos::compilers::ada
                 if (c.ent == aDiscriminant && c.offset)
                 {
                     get(aRecord);
-                    load(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset), !is_unsigned(c.type));
+                    component_load(c);
                     return true;
                 }
             return false;
@@ -4907,7 +4907,7 @@ namespace neos::compilers::ada
                 iInstances.emplace_back(sb, aFrom);
                 load_object(dc.ent);
                 iInstances.pop_back();
-                store(kind_of(ct), ct->is_access() ? 8u : iProgram.scalar_size(ct), static_cast<std::uint32_t>(*dc.offset));
+                component_store(dc);
                 continue;
             }
             if (ct->is_composite())

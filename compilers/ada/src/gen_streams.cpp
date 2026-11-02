@@ -510,8 +510,17 @@ namespace neos::compilers::ada
                     {
                         auto const a = local(type::I64);
                         get(aItem);
-                        i64(static_cast<std::int64_t>(*c.offset));
-                        op(opcode::I64Add);
+                        if (iProgram.bit_field(c))
+                        {
+                            // (in a component clause's bits: its value (in a temporary))
+                            component_load(c);
+                            materialize(c.type);
+                        }
+                        else
+                        {
+                            i64(static_cast<std::int64_t>(*c.offset));
+                            op(opcode::I64Add);
+                        }
                         set(a);
                         stream_object(false, c.type, aStream, a);
                     }
@@ -649,6 +658,19 @@ namespace neos::compilers::ada
                 if (c.discriminant && c.offset)
                 {
                     auto const a = local(type::I64);
+                    if (iProgram.bit_field(c))
+                    {
+                        // (in a component clause's bits: read into a temporary, then stored in them)
+                        i64(0);
+                        materialize(c.type);
+                        set(a);
+                        stream_object(true, c.type, aStream, a);
+                        get(object);
+                        get(a);
+                        load(kind_of(c.type), iProgram.scalar_size(c.type), 0u, !is_unsigned(c.type));
+                        component_store(c);
+                        continue;
+                    }
                     get(object);
                     i64(static_cast<std::int64_t>(*c.offset));
                     op(opcode::I64Add);

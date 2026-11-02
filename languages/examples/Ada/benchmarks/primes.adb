@@ -1,4 +1,6 @@
 with Ada.Text_IO;
+with Ada.Strings;
+with Ada.Strings.Fixed;
 procedure Primes is
    function Is_Prime (N : Natural) return Boolean is
       D : Natural := 2;
@@ -21,5 +23,5 @@ begin
          Count := Count + 1;
       end if;
    end loop;
-   Ada.Text_IO.Put_Line (Natural'Image (Count));
+   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Natural'Image (Count), Ada.Strings.Left));
 end Primes;

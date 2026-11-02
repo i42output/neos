@@ -132,7 +132,8 @@ namespace neos::compilers::ada
         std::size_t depth_of(std::size_t aControl) const { return iControls.size() - 1u - aControl; }
         std::size_t handler_target() const;                 ///< (where a pending exception branches: the innermost handler, or the exit)
         void check();                                       ///< (a pending exception branches to the handler target)
-        void raise_check(int aKind, node const* aWhere, std::string const& aWhat);   ///< (Constraint_Error ... then the handler target)
+        void raise_check(int aKind, node const* aWhere, std::string const& aWhat);
+        void data_of_access();          ///< (an access-to-array value: its array's data's address)   ///< (Constraint_Error ... then the handler target)
         void failed_assertion(node const* aWhere, std::string const& aWhat);          ///< (Assertion_Error raised, then the handler target)
         void assertion(node* aCondition, std::string const& aWhat);                 ///< (Assertion_Error raised unless the condition holds)
         // --- values and types

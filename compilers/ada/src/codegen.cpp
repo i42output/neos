@@ -1742,6 +1742,19 @@ namespace neos::compilers::ada
                 }
         if (is_self_member(aObject) || (!iInstances.empty() && instance_member(aObject, instanceOffset, instance)))
         {
+            // (a bit field (see program::bit_field) of the record being initialized: its bits)
+            for (auto i = iInstances.size(); i-- > 0u && !is_self_member(aObject);)
+                if (iInstances[i].second == instance)
+                {
+                    for (auto const& c : iInstances[i].first->components)
+                        if (c.ent == aObject && c.offset && iProgram.bit_field(c))
+                        {
+                            get(instance);
+                            component_load(c);
+                            return;
+                        }
+                    break;
+                }
             address_of(aObject);
             if (aObject->type != nullptr && !aObject->type->view()->is_composite())
                 load(kind_of(aObject->type), iProgram.scalar_size(aObject->type), 0u, !is_unsigned(aObject->type));

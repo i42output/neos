@@ -454,6 +454,52 @@ namespace neos::compilers::ada
             {
                 auto* source = aOperands[0]->type;
                 expression(aOperands[0], source);
+                // (an access-to-array value (it designates the array's descriptor) and an address (of the array's data, 13.3(14)):
+                // its data's address; an address, an access-to-constrained-array value: a descriptor of its own (the subtype's
+                // bounds) for the data there)
+                auto const arrayAccess = [&](ada_type* aType)
+                {
+                    auto* v = aType != nullptr ? aType->view()->base_type()->view() : nullptr;
+                    return v != nullptr && v->kind == type_kind::Access && iProgram.designated_of(v) != nullptr &&
+                        iProgram.designated_of(v)->view()->kind == type_kind::Array;
+                };
+                if (aResult != nullptr && source != nullptr && arrayAccess(source) != arrayAccess(aResult) && !aResult->view()->is_composite() &&
+                    !source->view()->is_composite())
+                {
+                    if (arrayAccess(source))
+                    {
+                        data_of_access();
+                        return;
+                    }
+                    auto* designated = iProgram.designated_of(aResult->view()->base_type()->view())->view();
+                    if (auto* d = iProgram.designated_of(aResult->view()) != nullptr ? iProgram.designated_of(aResult->view())->view() : nullptr;
+                        d != nullptr && d->constrained)
+                        designated = d;
+                    if (designated->constrained)
+                    {
+                        auto const address = temporary(type::I64);
+                        set(address);
+                        get(address);
+                        this->op(opcode::I64Eqz);
+                        begin_if(type::I64);
+                        i64(0);
+                        else_();
+                        auto const descriptor = local(type::I64);
+                        i64(static_cast<std::int64_t>(DescriptorHeader(designated->indexes.size())));
+                        runtime("allocate", { type::I64 }, type::I64);
+                        set(descriptor);
+                        init_descriptor(designated, descriptor);
+                        get(descriptor);
+                        get(address);
+                        get(descriptor);
+                        this->op(opcode::I64Sub);
+                        store64(0u);
+                        get(descriptor);
+                        end();
+                        release(address);
+                        return;
+                    }
+                }
                 if (aResult != nullptr && source != nullptr && !aResult->view()->is_composite() && !source->view()->is_composite())
                 {
                     // (an enumeration type's values: their representation codes (13.9(10)))
@@ -1508,6 +1554,23 @@ namespace neos::compilers::ada
         return part(aType, 0);
     }
 
+    void function_generator::data_of_access()
+    {
+        // (an access-to-array value on the stack: the address of the array's data (null: null))
+        auto const p = temporary(type::I64);
+        tee(p);
+        op(opcode::I64Eqz);
+        begin_if(type::I64);
+        i64(0);
+        else_();
+        get(p);
+        get(p);
+        load64(0u);
+        op(opcode::I64Add);
+        end();
+        release(p);
+    }
+
     void function_generator::comparison(intrinsic aOp, ada_type* aType, std::vector<node*> const& aOperands)
     {
         // (an i32: two values compared (scalars directly; arrays and records by their components))
@@ -1583,6 +1646,20 @@ namespace neos::compilers::ada
             runtime("protected_access_equal", { type::I64, type::I64 }, type::I32);
             if (aOp == intrinsic::Ne)
                 op(opcode::I32Eqz);
+            return;
+        }
+        // (access-to-array values: equal if they designate the same array, its data (an access value made from an address has a
+        // descriptor of its own: see unchecked_conversion))
+        if (base != nullptr && base->kind == type_kind::Access && (aOp == intrinsic::Eq || aOp == intrinsic::Ne) && iProgram.designated_of(base) != nullptr &&
+            iProgram.designated_of(base)->view()->kind == type_kind::Array)
+        {
+            auto const right = temporary(type::I64);
+            set(right);
+            data_of_access();
+            get(right);
+            release(right);
+            data_of_access();
+            op(aOp == intrinsic::Eq ? opcode::I64Eq : opcode::I64Ne);
             return;
         }
         auto const k = kind_of(aType);
@@ -3296,7 +3373,7 @@ namespace neos::compilers::ada
                                         {
                                             get(target);
                                             constant_value(ps->discriminant_values[k], pc.type);
-                                            store(kind_of(pc.type), iProgram.scalar_size(pc.type), static_cast<std::uint32_t>(*c.offset));
+                                            component_store(c);
                                         }
                                 ++k;
                             }
@@ -3513,7 +3590,7 @@ namespace neos::compilers::ada
                     if (auto const* c = located(aDiscriminant) != nullptr ? located(aDiscriminant) : named(aDiscriminant))
                     {
                         get(target);
-                        load(vkind::I64, iProgram.scalar_size(c->type), static_cast<std::uint32_t>(*c->offset), !is_unsigned(c->type));
+                        component_load(*c);
                         return true;
                     }
                 for (auto* d = base; d != nullptr && d->parent != nullptr;)
@@ -3574,12 +3651,12 @@ namespace neos::compilers::ada
                 else if (stored != nullptr)
                 {
                     get(target);
-                    load(vkind::I64, iProgram.scalar_size(pc.type), static_cast<std::uint32_t>(*stored->offset), !is_unsigned(pc.type));
+                    component_load(*stored);
                 }
                 else
                 {
                     get(*ancestorSource);
-                    load(vkind::I64, iProgram.scalar_size(pc.type), static_cast<std::uint32_t>(*pc.offset), !is_unsigned(pc.type));
+                    component_load(pc);
                 }
                 op(opcode::I64Ne);
                 begin_if();

@@ -315,7 +315,7 @@ namespace neos::compilers::ada
             get(aAddress);
             expression(value, c.type);
             range_check(c.type, value->type, value);
-            store(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
+            component_store(c);
         }
         // (the parent's discriminants that are stored (see component_info::stored): the constraint's values (of the discriminants))
         iInstances.emplace_back(base, aAddress);
@@ -324,7 +324,7 @@ namespace neos::compilers::ada
             {
                 get(aAddress);
                 expression(c.default_expression, c.type);
-                store(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
+                component_store(c);
             }
         iInstances.pop_back();
     }
@@ -522,7 +522,7 @@ namespace neos::compilers::ada
                 continue;
             auto const k = kind_of(c.type);
             get(aValue);
-            load(k, iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset), !is_unsigned(c.type));
+            component_load(c);
             if (evaluated != 0u)
                 get(evaluated);
             else
@@ -554,9 +554,9 @@ namespace neos::compilers::ada
             if (c.discriminant && c.offset)
             {
                 get(aTarget);
-                load(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
+                component_load(c);
                 get(aSource);
-                load(kind_of(c.type), iProgram.scalar_size(c.type), static_cast<std::uint32_t>(*c.offset));
+                component_load(c);
                 op(kind_of(c.type) == vkind::I64 ? opcode::I64Ne : kind_of(c.type) == vkind::F32 ? opcode::F32Ne : opcode::F64Ne);
                 begin_if();
                 raise_check(0, aWhere, "discriminant check failed");
