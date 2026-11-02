@@ -1,6 +1,4 @@
 with Ada.Text_IO;
-with Ada.Strings;
-with Ada.Strings.Fixed;
 procedure Strings is
    Total : Natural := 0;
 begin
@@ -11,5 +9,5 @@ begin
          Total := Total + T'Length;
       end;
    end loop;
-   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Natural'Image (Total), Ada.Strings.Left));
+   Ada.Text_IO.Put_Line (Natural'Image (Total));
 end Strings;

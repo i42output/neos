@@ -1,6 +1,4 @@
 with Ada.Text_IO;
-with Ada.Strings;
-with Ada.Strings.Fixed;
 procedure Mandel is
    function Mandelbrot (Size, Limit : Natural) return Natural is
       Inside : Natural := 0;
@@ -28,5 +26,5 @@ procedure Mandel is
       return Inside;
    end Mandelbrot;
 begin
-   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Natural'Image (Mandelbrot (600, 200)), Ada.Strings.Left));
+   Ada.Text_IO.Put_Line (Natural'Image (Mandelbrot (600, 200)));
 end Mandel;

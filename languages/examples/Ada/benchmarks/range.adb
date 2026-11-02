@@ -1,6 +1,4 @@
 with Ada.Text_IO;
-with Ada.Strings;
-with Ada.Strings.Fixed;
 procedure Range_Benchmark is
    function F (L, M : Natural) return Long_Long_Integer is
       Count : Long_Long_Integer := 0;
@@ -13,5 +11,5 @@ procedure Range_Benchmark is
       return Count;
    end F;
 begin
-   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Long_Long_Integer'Image (F (99_999 + 1, 9_999 + 1)), Ada.Strings.Left));
+   Ada.Text_IO.Put_Line (Long_Long_Integer'Image (F (99_999 + 1, 9_999 + 1)));
 end Range_Benchmark;

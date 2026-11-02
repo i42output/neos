@@ -1,7 +1,5 @@
 --  integer hashing with 32-bit modular operations
 with Ada.Text_IO;
-with Ada.Strings;
-with Ada.Strings.Fixed;
 with Interfaces; use Interfaces;
 procedure Bits is
    function Hash (N : Natural) return Unsigned_32 is
@@ -15,5 +13,5 @@ procedure Bits is
       return H;
    end Hash;
 begin
-   Ada.Text_IO.Put_Line (Ada.Strings.Fixed.Trim (Unsigned_32'Image (Hash (20_000_000)), Ada.Strings.Left));
+   Ada.Text_IO.Put_Line (Unsigned_32'Image (Hash (20_000_000)));
 end Bits;

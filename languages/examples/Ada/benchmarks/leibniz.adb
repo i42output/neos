@@ -1,5 +1,4 @@
 with Ada.Text_IO;
-with Ada.Long_Float_Text_IO;
 procedure Leibniz is
    Total : Long_Float := 0.0;
    Sign : Long_Float := 1.0;
@@ -8,6 +7,5 @@ begin
       Total := Total + Sign / Long_Float (2 * K + 1);
       Sign := -Sign;
    end loop;
-   Ada.Long_Float_Text_IO.Put (4.0 * Total, Fore => 1, Aft => 13, Exp => 0);
-   Ada.Text_IO.New_Line;
+   Ada.Text_IO.Put_Line (Long_Float'Image (4.0 * Total));
 end Leibniz;
