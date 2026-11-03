@@ -80,6 +80,9 @@ namespace neos::language
         virtual void set_options(neolib::i_string const& aOptions) = 0; ///< (the language's options for the next compilation (e.g. a mode))
         virtual bool compiles_at_run_time() const = 0;          ///< (the program compiled last compiles source while it runs (e.g. Python's 
                                                                 ///< exec): an image of it needs the compiler)
+        virtual bool one_program() const = 0;                   ///< (a program whose translation units are all of the language is compiled as 
+                                                                ///< one program (its units linked by the language's own rules, e.g. C's), not 
+                                                                ///< as a linked program (see i_code_generator::linked))
         virtual void begin_compilation() = 0;                   ///< (a program: the facts inferred by previous passes are forgotten)
         virtual void begin_pass() = 0;                          ///< (a pass: the facts it finds are reset)
         virtual void end_pass() = 0;                            ///< (a pass that succeeded: the facts it found are those of the next 

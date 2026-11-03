@@ -82,6 +82,7 @@ namespace neos::language
         void attach(i_code_generator& aGenerator) override { iGenerator = &aGenerator; }
         void set_options(neolib::i_string const&) override {}
         bool compiles_at_run_time() const override { return false; }
+        bool one_program() const override { return false; }
         void parsed(i_source_fragment&) override {}
         void diagnose(i_source_fragment const&, std::uint32_t&, std::uint32_t&, std::uint32_t&, std::uint32_t&, neolib::i_string&, neolib::i_string&, 
             neolib::i_string&) override {}

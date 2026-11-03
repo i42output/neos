@@ -284,6 +284,9 @@ namespace neos::compilers::ada
                 aEntity->sub->op = intrinsic_operation(aEntity);
             aEntity->sub->external_name = external;
             aEntity->sub->body = aDecl;
+            // (a foreign subprogram (no neos program provides it): its body raises Program_Error when it is called)
+            if (convention != "neos" && convention != "intrinsic")
+                iSubprogramsToGenerate.push_back(aEntity);
         }
         else if (import)
             aEntity->imported = true;
@@ -1070,6 +1073,27 @@ namespace neos::compilers::ada
                         actualType = subtype_mark(def, formalRegion);
                     if (actualType == nullptr)
                         error(aInstantiation, "no actual for formal type \"" + formalName + "\"");
+                    // (a formal type specified Atomic, Atomic_Components, Volatile or Volatile_Components: the actual's aspect True too (an
+                    // atomic type's Volatile; its own or an ancestor's) (C.6(8/3, 12.1/5)))
+                    if (auto* aspects = f->first(construct::Aspects); aspects != nullptr && actualType != nullptr)
+                        for (auto* aspect : aspects->children)
+                        {
+                            auto const name = name_text(aspect->child(0)->source);
+                            auto* value = aspect->size() > 1u && aspect->children.back() != aspect->child(0) ? aspect->children.back() : nullptr;
+                            if ((name != "atomic" && name != "volatile" && name != "atomic_components" && name != "volatile_components") ||
+                                (value != nullptr && name_text(value->source) != "true"))
+                                continue;
+                            bool specified = false;
+                            for (auto* t = actualType->view()->base_type()->view(); t != nullptr && !specified;
+                                t = t->parent != nullptr && t->parent != t ? t->parent->view()->base_type()->view() : nullptr)
+                                specified = type_aspect(t, name) != nullptr ||
+                                    (name == "volatile" && type_aspect(t, "atomic") != nullptr) ||
+                                    (name == "volatile_components" && type_aspect(t, "atomic_components") != nullptr);
+                            if (!specified)
+                                error(aInstantiation, "the actual for formal type \"" + formalName + "\" must be " +
+                                    (name == "atomic" ? "atomic" : name == "volatile" ? "volatile" : name == "atomic_components" ?
+                                    "specified Atomic_Components" : "specified Volatile_Components") + " (C.6(12.1/5))");
+                        }
                     auto* e = declare(entity_kind::Subtype, d, formalRegion);
                     e->type = actualType;
                     // (an untagged formal type: its own subtype (of the actual), distinguishing the declarations whose profiles differ in

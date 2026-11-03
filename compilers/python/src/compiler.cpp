@@ -1553,11 +1553,34 @@ namespace neos::compilers::python
                     {
                         // (a bytes literal (and the bytes literals adjacent to it) is "__bytes('hexadecimal digits of its bytes')")
                         std::string data = bytes_literal(aText, i, end, prefix);
+                        std::size_t lineBreaks = 0u;
                         for (;;)
                         {
+                            // (as the string literals' below: within brackets, line breaks and comments are whitespace)
                             auto j = end;
-                            while (j < n && (aText[j] == ' ' || aText[j] == '\t' || (aText[j] == '\\' && j + 1u < n && (aText[j + 1u] == '\n' || aText[j + 1u] == '\r'))))
-                                j += aText[j] == '\\' ? (aText[j + 1u] == '\r' && j + 2u < n && aText[j + 2u] == '\n' ? 3u : 2u) : 1u;
+                            std::size_t breaks = 0u;
+                            while (j < n)
+                            {
+                                if (aText[j] == ' ' || aText[j] == '\t' || aText[j] == '\r')
+                                    ++j;
+                                else if (aText[j] == '\\' && j + 1u < n && (aText[j + 1u] == '\n' || aText[j + 1u] == '\r'))
+                                {
+                                    j += aText[j + 1u] == '\r' && j + 2u < n && aText[j + 2u] == '\n' ? 3u : 2u;
+                                    ++breaks;
+                                }
+                                else if (depth > 0 && aText[j] == '\n')
+                                {
+                                    ++j;
+                                    ++breaks;
+                                }
+                                else if (depth > 0 && aText[j] == '#')
+                                {
+                                    while (j < n && aText[j] != '\n')
+                                        ++j;
+                                }
+                                else
+                                    break;
+                            }
                             auto k = j;
                             while (k < n && std::isalpha(static_cast<unsigned char>(aText[k])) && k - j < 2u)
                                 ++k;
@@ -1571,6 +1594,7 @@ namespace neos::compilers::python
                             auto const nextEnd = string_end(aText, k);
                             data += bytes_literal(aText, k, nextEnd, nextPrefix);
                             end = nextEnd;
+                            lineBreaks += breaks;
                         }
                         static char const digits[] = "0123456789abcdef";
                         std::string hex;
@@ -1580,7 +1604,7 @@ namespace neos::compilers::python
                             hex += digits[static_cast<unsigned char>(b) & 15u];
                         }
                         result.erase(p);
-                        result += "__bytes('" + hex + "')";
+                        result += "__bytes('" + hex + "')" + std::string(lineBreaks, '\n');
                         i = end;
                         aChanged = true;
                         continue;

@@ -235,6 +235,12 @@ add_neos_concept_library(ada.core
     concepts/src/ada/ada.cpp)
 target_include_directories(ada.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
 target_include_directories(ada.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/ada/include")
+add_neos_concept_library(c.core
+    concepts/src/common/dllmain.cpp
+    concepts/src/c/plugin.cpp
+    concepts/src/c/c.cpp)
+target_include_directories(c.core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/c/include")
+target_include_directories(c.core.objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/c/include")
 
 # compiler plugins (plugins with the extension ".ncp"): the code generation of a language (i_language_compiler)
 function(add_neos_compiler_plugin TARGET LANGUAGE)
@@ -290,6 +296,19 @@ add_neos_compiler_plugin(compiler.ada ada
     compilers/ada/src/gen_tasks.cpp
     compilers/ada/src/gen_records.cpp
     compilers/ada/src/gen_streams.cpp)
+add_neos_compiler_plugin(compiler.c c
+    compilers/c/src/plugin.cpp
+    compilers/c/src/compiler.cpp
+    compilers/c/src/preprocessor.cpp
+    compilers/c/src/types.cpp
+    compilers/c/src/decls.cpp
+    compilers/c/src/exprs.cpp
+    compilers/c/src/stmts.cpp
+    compilers/c/src/init.cpp
+    compilers/c/src/codegen.cpp
+    compilers/c/src/gen_expr.cpp
+    compilers/c/src/gen_stmt.cpp
+    compilers/c/src/validate.cpp)
 add_neos_compiler_plugin(compiler.python python
     compilers/python/src/plugin.cpp
     compilers/python/src/compiler.cpp
@@ -303,7 +322,7 @@ target_link_libraries(neos_console PRIVATE neos Boost::program_options)
 set_target_properties(neos_console PROPERTIES OUTPUT_NAME neos
     RUNTIME_OUTPUT_DIRECTORY "${NEOS_OUTPUT_DIRECTORY}"
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core lua.core ada.core compiler.javascript compiler.python compiler.neoscript compiler.lua compiler.ada)
+add_dependencies(neos_console core core.math.universal python.core javascript.core neoscript.core lua.core ada.core c.core compiler.javascript compiler.python compiler.neoscript compiler.lua compiler.ada compiler.c)
 
 # runtime stub (neos.stub): an image (an executable made by the console's "img" command) is a copy of it followed by a
 # program (see neos/image.hpp); it is built beside the console, which finds it there
@@ -411,7 +430,19 @@ function(add_neos_runtime_plugin TARGET)
     install(TARGETS ${TARGET} LIBRARY DESTINATION "${CMAKE_INSTALL_BINDIR}/plugins")
 endfunction()
 
-add_neos_runtime_plugin(c runtime/c/src/c.c)
+# C runtime: the C library for neoscript (c.c), and the C language's runtime: its memory and the native parts of its standard library
+add_neos_runtime_plugin(c
+    runtime/c/src/c.c
+    runtime/c/src/plugin.cpp
+    runtime/c/src/memory.cpp
+    runtime/c/src/lib_stdio.cpp
+    runtime/c/src/lib_format.cpp
+    runtime/c/src/lib_stdlib.cpp
+    runtime/c/src/lib_string.cpp
+    runtime/c/src/lib_math.cpp
+    runtime/c/src/lib_time.cpp
+    runtime/c/src/lib_wchar.cpp)
+target_include_directories(c PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/c/include")
 
 # Ada runtime: the Ada memory, exceptions, tasking and the native primitives of the Ada standard library
 add_neos_runtime_plugin(ada

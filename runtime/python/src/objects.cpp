@@ -15278,7 +15278,20 @@ namespace neos::python_runtime
             { "bytes.fromhex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                 { std::vector<object*> a; return parse_arguments("bytes.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], false) : nullptr; } },
             { "bytearray.fromhex", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
-                { std::vector<object*> a; return parse_arguments("bytearray.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], true) : nullptr; } }
+                { std::vector<object*> a; return parse_arguments("bytearray.fromhex", aArgs, aKwargs, { "string" }, 1u, 1u, a) ? bytes_fromhex(a[0], true) : nullptr; } },
+            // (float.__getformat__('double' or 'float'): the format of C's double and float, as CPython's)
+            { "float.__getformat__", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                {
+                    std::vector<object*> a;
+                    if (!parse_arguments("float.__getformat__", aArgs, aKwargs, { "typestr" }, 1u, 1u, a))
+                        return nullptr;
+                    if (kind_of(a[0]) != NEOS_PY_STR)
+                        return error("TypeError", std::string{ "__getformat__() argument must be str, not " } + type_name(a[0]));
+                    auto const& typestr = as<str_object>(a[0])->value;
+                    if (typestr != "double" && typestr != "float")
+                        return error("ValueError", "__getformat__() argument 1 must be 'double' or 'float'");
+                    return make_str(std::endian::native == std::endian::little ? "IEEE, little-endian" : "IEEE, big-endian");
+                } }
         };
 
         // (object.__getattribute__(self, name), object.__setattr__(self, name, value) and object.__delattr__(self, name))

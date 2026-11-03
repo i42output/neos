@@ -2706,6 +2706,13 @@ namespace neos::compilers::ada
         {
             iProgram.error(aAttribute, "'Range is not a value");
         }
+        if (name == "partition_id")
+        {
+            // (the partition in which the prefix's declaration is elaborated: a neos program is one partition, whose Partition_Id is 0
+            // (E.1(9)))
+            i64(0);
+            return;
+        }
         if (name == "identity" && meaning_of(prefix) == meaning::Exception && prefix->ent != nullptr)
         {
             auto* x = prefix->ent;

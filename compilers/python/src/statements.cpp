@@ -161,7 +161,7 @@ namespace neos::compilers::python
                 for (auto t = aFrom; t < count(aLine); ++t)
                 {
                     auto const& k = tok(aLine, t);
-                    if (k.kind == token::Name && text(k) == "lambda")
+                    if (k.kind == token::Name && text(k) == "lambda" && depth == 0)
                         ++lambdas;
                     if (k.kind != token::Op)
                         continue;

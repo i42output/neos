@@ -37,6 +37,9 @@
   Functions of the C runtime are called directly (through libffi); a few small wrappers adapt functions whose
   signatures cannot be used as they are (pointer arguments, implementation defined types).
 
+  These are the functions for neoscript ("using c;"); the plugin also has the C language's runtime (plugin.cpp: the C
+  memory and the native parts of the C standard library, "c::rt.*" and "c::libc.*").
+
   Functions that can change the host environment (file I/O, removing and renaming files, running commands,
   setting environment variables) are flagged NEOS_RT_RESTRICTED: scripts running in restricted mode cannot call
   them.
@@ -88,7 +91,8 @@ static char const* c_getenv(char const* name)
 
 static neos_rt_host const* sHost = NULL;
 
-NEOS_RUNTIME_PLUGIN_SET_HOST
+/* (the plugin's entry points are plugin.cpp's: it adds the C language's runtime functions to these) */
+void neos_c_set_host(neos_rt_host const* aHost)
 {
     sHost = aHost;
 }
@@ -410,16 +414,9 @@ static neos_rt_function const sFunctions[] =
     R2("setenv", c_setenv, NEOS_RT_I32, NEOS_RT_STRING, NEOS_RT_STRING),
 };
 
-static neos_rt_plugin const sPlugin =
+/* (the functions for neoscript: plugin.cpp's description of the plugin has them, then the C language's runtime functions) */
+neos_rt_function const* neos_c_functions(unsigned* aCount)
 {
-    NEOS_RUNTIME_PLUGIN_VERSION,
-    "c",
-    "The C runtime",
-    sizeof(sFunctions) / sizeof(sFunctions[0]),
-    sFunctions
-};
-
-NEOS_RUNTIME_PLUGIN_ENTRY
-{
-    return &sPlugin;
+    *aCount = (unsigned)(sizeof(sFunctions) / sizeof(sFunctions[0]));
+    return sFunctions;
 }

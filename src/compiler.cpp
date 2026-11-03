@@ -173,8 +173,16 @@ namespace neos::language
         iPreparseTime = {};
         iParseTime = {};
         iSourceFiles.clear();
-        // (a linked program: it has more than one translation unit)
+        // (a linked program: it has more than one translation unit (unless they are all of a language that compiles them as one 
+        // program: see i_language_compiler::one_program))
         iLinked = aProgram.translationUnits.size() > 1u;
+        if (iLinked && aProgram.translationUnits.front().schema != nullptr)
+        {
+            auto const& first = aProgram.translationUnits.front().schema->meta().language;
+            if (auto const* l = language(first); l != nullptr && l->one_program() && std::all_of(aProgram.translationUnits.begin(), 
+                aProgram.translationUnits.end(), [&](auto const& aUnit) { return aUnit.schema != nullptr && aUnit.schema->meta().language == first; }))
+                iLinked = false;
+        }
         iLinkedProgram = iLinked ? &aProgram : nullptr;
         iLinkedUnits.clear();
         iLinkedModules.clear();

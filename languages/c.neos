@@ -1,0 +1,427 @@
+(*
+  c.neos
+
+  Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+     * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+     * Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+
+     * Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*)
+
+(*
+  C (C23, ISO/IEC 9899:2024): the syntax of translation units. Each construct is a concept of the C concept library (neos.c)
+  that the C compiler (c.ncp) builds its syntax tree from (a construct's children are the constructs within its source; a
+  "postfix" construct, e.g. a call's arguments or a binary operator and its right operand, also takes the construct that
+  precedes it).
+
+  A source is preprocessed (translation phases 1 to 4: the compiler's own pass over it, before it is parsed): what the grammar
+  parses is the preprocessor's output, its preprocessing tokens separated by white space (comments, directives and macros are
+  gone; digraphs are their punctuators). The output also marks the identifiers that are typedef names where they are used (the
+  identifier, its first character preceded by '@'), which the phrase structure grammar needs (and the scopes that declarations 
+  have decide); the compiler checks what the grammar does not (e.g. the constraints on declaration specifiers, lvalues and
+  constant expressions) and does all of C's semantic analysis.
+
+  The grammar follows the language syntax summary of the C standard (Annex A.2 and A.3).
+*)
+
+%{
+    meta: {
+        language: "c"
+        description: "C"
+        source.file.extension: [ ".c" ".h" ]
+        source.package.specification.file.extension: ".h"
+        source.package.implementation.file.extension: ".c"
+        copyright: "Copyright (C) 2026 Leigh Johnston"
+        version: "0.1.0"
+        prelude: [ libc ]
+    }
+
+    stages: {
+        parser : {
+            text : [ "#{" "}#" ]
+            root : program
+        }
+    }
+
+    pipeline: [
+        parser
+    ]
+
+    libraries: [
+        neos.core
+        neos.c
+    ]
+
+    discard: [
+        WS
+        whitespace
+    ]
+}%
+
+#{
+    (* --- white space (the preprocessor's output has no comments) *)
+
+    WS ::= [ whitespace ] ;
+    whitespace ::= { U+0020 | U+0009 | U+000A | U+000D | U+000B | U+000C } + ;
+
+    (* --- identifiers and keywords (A.2.1, A.2.2) *)
+
+    letter ::= 'a' .. 'z' | 'A' .. 'Z' | '_' | '$' | '\x80' .. '\xFF' ;
+    letter or digit ::= letter | '0' .. '9' ;
+    potential keyword ::= { letter or digit } + ;
+    word ::= letter , { letter or digit } ;
+    plain name ::= word - ( "alignas" | "alignof" | "auto" | "bool" | "break" | "case" | "char" | "const" | "constexpr" | "continue" |
+        "default" | "do" | "double" | "else" | "enum" | "extern" | "false" | "float" | "for" | "goto" | "if" | "inline" | "int" | "long" |
+        "nullptr" | "register" | "restrict" | "return" | "short" | "signed" | "sizeof" | "static" | "static_assert" | "struct" | "switch" |
+        "thread_local" | "true" | "typedef" | "typeof" | "typeof_unqual" | "union" | "unsigned" | "void" | "volatile" | "while" |
+        "_Alignas" | "_Alignof" | "_Atomic" | "_BitInt" | "_Bool" | "_Complex" | "_Decimal128" | "_Decimal32" | "_Decimal64" |
+        "_Generic" | "_Imaginary" | "_Noreturn" | "_Static_assert" | "_Thread_local" ) ;
+
+    (* (an identifier in an expression; a name that is not resolved as an ordinary identifier (a member's, a tag's, a label's); the 
+       identifier that a declarator declares; a typedef name (marked by the preprocessor's output)) *)
+    identifier $ c.identifier ::= plain name ;
+    member name $ c.name ::= plain name ;
+    declared name $ c.declname ::= plain name ;
+    typedef name $ c.typedefname ::= '@' , word ;
+
+    keyword alignas $ language.keyword ::= potential keyword ::= "alignas" ;
+    keyword alignas old $ language.keyword ::= potential keyword ::= "_Alignas" ;
+    alignas ::= keyword alignas | keyword alignas old ;
+    keyword alignof $ language.keyword ::= potential keyword ::= "alignof" ;
+    keyword alignof old $ language.keyword ::= potential keyword ::= "_Alignof" ;
+    alignof ::= keyword alignof | keyword alignof old ;
+    auto $ language.keyword ::= potential keyword ::= "auto" ;
+    keyword bool $ language.keyword ::= potential keyword ::= "bool" ;
+    keyword bool old $ language.keyword ::= potential keyword ::= "_Bool" ;
+    bool ::= keyword bool | keyword bool old ;
+    break $ language.keyword ::= potential keyword ::= "break" ;
+    case $ language.keyword ::= potential keyword ::= "case" ;
+    char $ language.keyword ::= potential keyword ::= "char" ;
+    const $ language.keyword ::= potential keyword ::= "const" ;
+    constexpr $ language.keyword ::= potential keyword ::= "constexpr" ;
+    continue $ language.keyword ::= potential keyword ::= "continue" ;
+    default $ language.keyword ::= potential keyword ::= "default" ;
+    do $ language.keyword ::= potential keyword ::= "do" ;
+    double $ language.keyword ::= potential keyword ::= "double" ;
+    else $ language.keyword ::= potential keyword ::= "else" ;
+    enum $ language.keyword ::= potential keyword ::= "enum" ;
+    extern $ language.keyword ::= potential keyword ::= "extern" ;
+    false $ language.keyword ::= potential keyword ::= "false" ;
+    float $ language.keyword ::= potential keyword ::= "float" ;
+    for $ language.keyword ::= potential keyword ::= "for" ;
+    goto $ language.keyword ::= potential keyword ::= "goto" ;
+    if $ language.keyword ::= potential keyword ::= "if" ;
+    inline $ language.keyword ::= potential keyword ::= "inline" ;
+    int $ language.keyword ::= potential keyword ::= "int" ;
+    long $ language.keyword ::= potential keyword ::= "long" ;
+    nullptr $ language.keyword ::= potential keyword ::= "nullptr" ;
+    register $ language.keyword ::= potential keyword ::= "register" ;
+    restrict $ language.keyword ::= potential keyword ::= "restrict" ;
+    return $ language.keyword ::= potential keyword ::= "return" ;
+    short $ language.keyword ::= potential keyword ::= "short" ;
+    signed $ language.keyword ::= potential keyword ::= "signed" ;
+    sizeof $ language.keyword ::= potential keyword ::= "sizeof" ;
+    static $ language.keyword ::= potential keyword ::= "static" ;
+    keyword static assert keyword $ language.keyword ::= potential keyword ::= "static_assert" ;
+    keyword static assert keyword old $ language.keyword ::= potential keyword ::= "_Static_assert" ;
+    static assert keyword ::= keyword static assert keyword | keyword static assert keyword old ;
+    struct $ language.keyword ::= potential keyword ::= "struct" ;
+    switch $ language.keyword ::= potential keyword ::= "switch" ;
+    keyword thread local keyword $ language.keyword ::= potential keyword ::= "thread_local" ;
+    keyword thread local keyword old $ language.keyword ::= potential keyword ::= "_Thread_local" ;
+    thread local keyword ::= keyword thread local keyword | keyword thread local keyword old ;
+    true $ language.keyword ::= potential keyword ::= "true" ;
+    typedef $ language.keyword ::= potential keyword ::= "typedef" ;
+    keyword typeof $ language.keyword ::= potential keyword ::= "typeof" ;
+    keyword typeof unqual $ language.keyword ::= potential keyword ::= "typeof_unqual" ;
+    typeof ::= keyword typeof | keyword typeof unqual ;
+    union $ language.keyword ::= potential keyword ::= "union" ;
+    unsigned $ language.keyword ::= potential keyword ::= "unsigned" ;
+    void $ language.keyword ::= potential keyword ::= "void" ;
+    volatile $ language.keyword ::= potential keyword ::= "volatile" ;
+    while $ language.keyword ::= potential keyword ::= "while" ;
+    atomic keyword $ language.keyword ::= potential keyword ::= "_Atomic" ;
+    bitint keyword $ language.keyword ::= potential keyword ::= "_BitInt" ;
+    complex keyword $ language.keyword ::= potential keyword ::= "_Complex" ;
+    keyword decimal32 old $ language.keyword ::= potential keyword ::= "_Decimal32" ;
+    keyword decimal64 old $ language.keyword ::= potential keyword ::= "_Decimal64" ;
+    keyword decimal128 old $ language.keyword ::= potential keyword ::= "_Decimal128" ;
+    decimal keyword ::= keyword decimal32 old | keyword decimal64 old | keyword decimal128 old ;
+    generic keyword $ language.keyword ::= potential keyword ::= "_Generic" ;
+    imaginary keyword $ language.keyword ::= potential keyword ::= "_Imaginary" ;
+    noreturn keyword $ language.keyword ::= potential keyword ::= "_Noreturn" ;
+
+    (* --- constants and string literals (A.2.3, A.2.4): the compiler reads their source (a preprocessing number is an integer
+       or a floating constant) *)
+
+    number $ c.number ::= ( '0' .. '9' | ( '.' , '0' .. '9' ) ) , { ( ( 'e' | 'E' | 'p' | 'P' ) , ( '+' | '-' ) ) | letter or digit | '.' |
+        ( '\'' , letter or digit ) } ;
+    encoding prefix ::= "u8" | 'u' | 'U' | 'L' ;
+    escape character ::= ( U+0001 .. '\xFF' - ( U+000A | U+000D ) ) | '\x00' ;
+    escape ::= '\\' , escape character ;
+    character constant $ c.character ::= [ encoding prefix ] , '\'' , { ( U+0001 .. '\xFF' - ( '\'' | '\\' | U+000A | U+000D ) ) | escape } + , '\'' ;
+    string literal $ c.string ::= [ encoding prefix ] , '\"' , { ( U+0001 .. '\xFF' - ( '\"' | '\\' | U+000A | U+000D ) ) | escape } , '\"' ;
+    (* (adjacent string literals are concatenated (translation phase 6)) *)
+    string literals $ c.strings ::= string literal , { WS , string literal } ;
+    true constant $ c.true ::= true ;
+    false constant $ c.false ::= false ;
+    nullptr constant $ c.nullptr ::= nullptr ;
+
+    (* --- punctuators (A.2.5): not the first characters of longer ones *)
+
+    plus ::= ( '+' , [ '+' | '=' ] ) - ( "++" | "+=" ) ;
+    minus ::= ( '-' , [ '-' | '=' | '>' ] ) - ( "--" | "-=" | "->" ) ;
+    star ::= ( '*' , [ '=' ] ) - "*=" ;
+    slash ::= ( '/' , [ '=' ] ) - "/=" ;
+    percent ::= ( '%' , [ '=' ] ) - "%=" ;
+    ampersand ::= ( '&' , [ '&' | '=' ] ) - ( "&&" | "&=" ) ;
+    bar ::= ( '|' , [ '|' | '=' ] ) - ( "||" | "|=" ) ;
+    caret ::= ( '^' , [ '=' ] ) - "^=" ;
+    less ::= ( '<' , [ '<' | '=' ] ) - ( "<<" | "<=" ) ;
+    greater ::= ( '>' , [ '>' | '=' ] ) - ( ">>" | ">=" ) ;
+    shift left ::= ( "<<" , [ '=' ] ) - "<<=" ;
+    shift right ::= ( ">>" , [ '=' ] ) - ">>=" ;
+    equals ::= ( '=' , [ '=' ] ) - "==" ;
+    bang ::= ( '!' , [ '=' ] ) - "!=" ;
+    colon ::= ( ':' , [ ':' ] ) - "::" ;
+    dot ::= ( '.' , [ '.' ] ) - ".." ;
+    ellipsis $ c.ellipsis ::= "..." ;
+
+    (* --- attributes (6.7.13): the compiler reads the attributes it knows (and ignores the others) *)
+
+    attribute specifiers ::= attribute specifier , { WS , attribute specifier } ;
+    attribute specifier $ c.attributes ::= '[' , WS , '[' , WS , [ attribute , { WS , ',' , WS , [ attribute ] } ] , WS , ']' , WS , ']' ;
+    attribute $ c.attribute ::= word , [ WS , "::" , WS , word ] , [ WS , '(' , { WS , balanced token } , WS , ')' ] ;
+    balanced token ::= ( '(' , { WS , balanced token } , WS , ')' ) | ( '[' , { WS , balanced token } , WS , ']' ) |
+        ( '{' , { WS , balanced token } , WS , '}' ) | string literal | character constant | number | word | typedef name | other token ;
+    other token ::= { '!' | '#' | '%' | '&' | '*' | '+' | ',' | '-' | '.' | '/' | ':' | ';' | '<' | '=' | '>' | '?' | '^' | '|' | '~' | '\\' | '`' } + ;
+
+    (* --- expressions (A.3.1) *)
+
+    primary expression ::= identifier | number | character constant | string literals | true constant | false constant | nullptr constant |
+        parenthesized expression | statement expression | generic selection ;
+    parenthesized expression $ c.paren ::= '(' , WS , expression , WS , ')' ;
+    statement expression $ c.statement.expression ::= '(' , WS , compound statement , WS , ')' ;
+
+    generic selection $ c.generic ::= generic keyword , WS , '(' , WS , assignment expression , WS , ',' , WS , generic association ,
+        { WS , ',' , WS , generic association } , WS , ')' ;
+    generic association ::= generic type association | generic default association ;
+    generic type association $ c.generic.type ::= type name , WS , colon , WS , assignment expression ;
+    generic default association $ c.generic.default ::= default , WS , colon , WS , assignment expression ;
+
+    postfix expression ::= ( primary expression | compound literal ) , { WS , postfix suffix } ;
+    postfix suffix ::= subscript | call | member access | pointer member access | post increment | post decrement ;
+    subscript $ c.subscript ::= '[' , WS , expression , WS , ']' ;
+    call $ c.call ::= '(' , WS , [ assignment expression , { WS , ',' , WS , assignment expression } ] , WS , ')' ;
+    member access $ c.member ::= dot , WS , member name ;
+    pointer member access $ c.arrow ::= "->" , WS , member name ;
+    post increment $ c.postincrement ::= "++" ;
+    post decrement $ c.postdecrement ::= "--" ;
+    compound literal $ c.compound.literal ::= '(' , WS , [ compound literal storage , WS ] , type name , WS , ')' , WS , braced initializer ;
+    compound literal storage ::= storage class specifier , { WS , storage class specifier } ;
+
+    unary expression ::= postfix expression | pre increment | pre decrement | address of | indirection | unary plus | unary minus |
+        complement | logical not | sizeof expression | sizeof type | alignof type | alignof expression ;
+    pre increment $ c.preincrement ::= "++" , WS , unary expression ;
+    pre decrement $ c.predecrement ::= "--" , WS , unary expression ;
+    address of $ c.address ::= ampersand , WS , cast expression ;
+    indirection $ c.indirection ::= star , WS , cast expression ;
+    unary plus $ c.plus ::= plus , WS , cast expression ;
+    unary minus $ c.minus ::= minus , WS , cast expression ;
+    complement $ c.complement ::= '~' , WS , cast expression ;
+    logical not $ c.not ::= bang , WS , cast expression ;
+    sizeof expression $ c.sizeof ::= sizeof , WS , unary expression ;
+    sizeof type $ c.sizeof.type ::= sizeof , WS , '(' , WS , type name , WS , ')' ;
+    alignof type $ c.alignof ::= alignof , WS , '(' , WS , type name , WS , ')' ;
+    alignof expression $ c.alignof ::= alignof , WS , unary expression ;
+
+    cast expression ::= unary expression | cast ;
+    cast $ c.cast ::= '(' , WS , type name , WS , ')' , WS , cast expression ;
+
+    multiplicative expression ::= cast expression , { WS , ( multiply tail | divide tail | modulo tail ) } ;
+    multiply tail $ c.multiply ::= star , WS , cast expression ;
+    divide tail $ c.divide ::= slash , WS , cast expression ;
+    modulo tail $ c.modulo ::= percent , WS , cast expression ;
+    additive expression ::= multiplicative expression , { WS , ( add tail | subtract tail ) } ;
+    add tail $ c.add ::= plus , WS , multiplicative expression ;
+    subtract tail $ c.subtract ::= minus , WS , multiplicative expression ;
+    shift expression ::= additive expression , { WS , ( shift left tail | shift right tail ) } ;
+    shift left tail $ c.shiftleft ::= shift left , WS , additive expression ;
+    shift right tail $ c.shiftright ::= shift right , WS , additive expression ;
+    relational expression ::= shift expression , { WS , ( less tail | greater tail | less equal tail | greater equal tail ) } ;
+    less tail $ c.less ::= less , WS , shift expression ;
+    greater tail $ c.greater ::= greater , WS , shift expression ;
+    less equal tail $ c.lessequal ::= "<=" , WS , shift expression ;
+    greater equal tail $ c.greaterequal ::= ">=" , WS , shift expression ;
+    equality expression ::= relational expression , { WS , ( equal tail | not equal tail ) } ;
+    equal tail $ c.equal ::= "==" , WS , relational expression ;
+    not equal tail $ c.notequal ::= "!=" , WS , relational expression ;
+    and expression ::= equality expression , { WS , and tail } ;
+    and tail $ c.bitand ::= ampersand , WS , equality expression ;
+    exclusive or expression ::= and expression , { WS , exclusive or tail } ;
+    exclusive or tail $ c.bitxor ::= caret , WS , and expression ;
+    inclusive or expression ::= exclusive or expression , { WS , inclusive or tail } ;
+    inclusive or tail $ c.bitor ::= bar , WS , exclusive or expression ;
+    logical and expression ::= inclusive or expression , { WS , logical and tail } ;
+    logical and tail $ c.and ::= "&&" , WS , inclusive or expression ;
+    logical or expression ::= logical and expression , { WS , logical or tail } ;
+    logical or tail $ c.or ::= "||" , WS , logical and expression ;
+    conditional expression ::= logical or expression , [ WS , conditional tail ] ;
+    conditional tail $ c.conditional ::= '?' , WS , expression , WS , colon , WS , conditional expression ;
+
+    assignment expression ::= conditional expression | ( unary expression , WS , assignment tail ) ;
+    assignment tail ::= assign tail | multiply assign tail | divide assign tail | modulo assign tail | add assign tail | subtract assign tail |
+        shift left assign tail | shift right assign tail | and assign tail | xor assign tail | or assign tail ;
+    assign tail $ c.assign ::= equals , WS , assignment expression ;
+    multiply assign tail $ c.assign.multiply ::= "*=" , WS , assignment expression ;
+    divide assign tail $ c.assign.divide ::= "/=" , WS , assignment expression ;
+    modulo assign tail $ c.assign.modulo ::= "%=" , WS , assignment expression ;
+    add assign tail $ c.assign.add ::= "+=" , WS , assignment expression ;
+    subtract assign tail $ c.assign.subtract ::= "-=" , WS , assignment expression ;
+    shift left assign tail $ c.assign.shiftleft ::= "<<=" , WS , assignment expression ;
+    shift right assign tail $ c.assign.shiftright ::= ">>=" , WS , assignment expression ;
+    and assign tail $ c.assign.bitand ::= "&=" , WS , assignment expression ;
+    xor assign tail $ c.assign.bitxor ::= "^=" , WS , assignment expression ;
+    or assign tail $ c.assign.bitor ::= "|=" , WS , assignment expression ;
+
+    expression ::= assignment expression , { WS , comma tail } ;
+    comma tail $ c.comma ::= ',' , WS , assignment expression ;
+    constant expression ::= conditional expression ;
+
+    (* --- declarations (A.3.2) *)
+
+    declaration $ c.declaration ::= ( [ attribute specifiers , WS ] , declaration specifiers , [ WS , init declarator list ] , WS , ';' ) |
+        static assert declaration | attribute declaration ;
+    attribute declaration ::= attribute specifiers , WS , ';' ;
+    declaration specifiers ::= declaration specifier , { WS , declaration specifier } , [ WS , attribute specifiers ] ;
+    declaration specifier ::= storage class specifier | type specifier qualifier | function specifier ;
+    init declarator list ::= init declarator , { WS , ',' , WS , init declarator } ;
+    init declarator $ c.init.declarator ::= declarator , [ WS , equals , WS , initializer ] ;
+
+    storage class specifier $ c.storage ::= auto | constexpr | extern | register | static | thread local keyword | typedef ;
+
+    type specifier ::= basic type specifier | bit precise integer | atomic type specifier | struct or union specifier | enum specifier |
+        typedef name | typeof specifier ;
+    basic type specifier $ c.type ::= void | char | short | int | long | float | double | signed | unsigned | bool | complex keyword | decimal keyword |
+        imaginary keyword ;
+    bit precise integer $ c.bitint ::= bitint keyword , WS , '(' , WS , constant expression , WS , ')' ;
+
+    struct or union specifier $ c.struct ::= ( struct | union ) , [ WS , attribute specifiers ] , ( ( [ WS , tag ] , WS , '{' , WS ,
+        { member declaration , WS } , '}' ) | ( WS , tag ) ) ;
+    tag $ c.tag ::= plain name ;
+    member declaration $ c.member.declaration ::= ( [ attribute specifiers , WS ] , specifier qualifier list , [ WS , member declarator ,
+        { WS , ',' , WS , member declarator } ] , WS , ';' ) | static assert declaration ;
+    specifier qualifier list ::= type specifier qualifier , { WS , type specifier qualifier } , [ WS , attribute specifiers ] ;
+    type specifier qualifier ::= type specifier | type qualifier | alignment specifier ;
+    member declarator $ c.member.declarator ::= declarator | ( [ declarator , WS ] , colon , WS , constant expression ) ;
+
+    enum specifier $ c.enum ::= enum , [ WS , attribute specifiers ] , ( ( [ WS , tag ] , [ WS , enum type ] , WS , '{' , WS , enumerator ,
+        { WS , ',' , WS , enumerator } , [ WS , ',' ] , WS , '}' ) | ( WS , tag , [ WS , enum type ] ) ) ;
+    enum type $ c.enum.type ::= colon , WS , specifier qualifier list ;
+    enumerator $ c.enumerator ::= member name , [ WS , attribute specifiers ] , [ WS , equals , WS , constant expression ] ;
+
+    atomic type specifier $ c.atomic ::= atomic keyword , WS , '(' , WS , type name , WS , ')' ;
+    typeof specifier $ c.typeof ::= typeof , WS , '(' , WS , ( type name | expression ) , WS , ')' ;
+
+    type qualifier $ c.qualifier ::= const | restrict | volatile | atomic keyword ;
+    function specifier $ c.function.specifier ::= inline | noreturn keyword ;
+    alignment specifier $ c.alignas ::= alignas , WS , '(' , WS , ( type name | constant expression ) , WS , ')' ;
+
+    (* (a declarator: its pointers, then its identifier (or a parenthesized declarator), then its array and function suffixes, as
+       its children in order) *)
+    declarator $ c.declarator ::= { pointer , WS } , direct declarator ;
+    direct declarator ::= ( declared name | parenthesized declarator ) , [ WS , attribute specifiers ] , { WS , declarator suffix } ;
+    parenthesized declarator ::= '(' , WS , declarator , WS , ')' ;
+    pointer $ c.pointer ::= star , [ WS , attribute specifiers ] , { WS , type qualifier } ;
+    declarator suffix ::= array suffix | function suffix ;
+    array suffix $ c.array ::= '[' , WS , [ array static , WS ] , { type qualifier , WS } , [ array static , WS ] , 
+        [ assignment expression | array star ] , WS , ']' , [ WS , attribute specifiers ] ;
+    array static $ c.array.static ::= static ;
+    array star $ c.array.star ::= star ;
+    function suffix $ c.function ::= '(' , WS , [ parameter list ] , WS , ')' , [ WS , attribute specifiers ] ;
+    parameter list ::= ( parameter , { WS , ',' , WS , parameter } , [ WS , ',' , WS , ellipsis ] ) | ellipsis ;
+    parameter $ c.parameter ::= [ attribute specifiers , WS ] , declaration specifiers , [ WS , ( declarator | abstract declarator ) ] ;
+
+    type name $ c.type.name ::= specifier qualifier list , [ WS , abstract declarator ] ;
+    abstract declarator $ c.abstract ::= ( { pointer , WS } + , [ direct abstract declarator ] ) | direct abstract declarator ;
+    direct abstract declarator ::= ( parenthesized abstract declarator , { WS , declarator suffix } ) | ( declarator suffix , { WS , declarator suffix } ) ;
+    parenthesized abstract declarator ::= '(' , WS , abstract declarator , WS , ')' ;
+
+    (* (initializers: a braced initializer's list's items, each its designation (if any) and its initializer) *)
+    initializer ::= assignment expression | braced initializer ;
+    braced initializer $ c.braced ::= '{' , WS , [ initializer item , { WS , ',' , WS , initializer item } , [ WS , ',' ] ] , WS , '}' ;
+    initializer item ::= designated initializer | initializer ;
+    designated initializer $ c.designated ::= designator , { WS , designator } , WS , equals , WS , initializer ;
+    designator ::= index designator | member designator ;
+    index designator $ c.designator.index ::= '[' , WS , constant expression , [ WS , "..." , WS , constant expression ] , WS , ']' ;
+    member designator $ c.designator.member ::= dot , WS , member name ;
+
+    static assert declaration $ c.static.assert ::= static assert keyword , WS , '(' , WS , constant expression , [ WS , ',' , WS , string literals ] ,
+        WS , ')' , WS , ';' ;
+
+    (* --- statements (A.3.3) *)
+
+    statement ::= labeled statement | unlabeled statement ;
+    unlabeled statement ::= ( [ attribute specifiers , WS ] , ( compound statement | selection statement | iteration statement |
+        jump statement ) ) | expression statement ;
+    labeled statement $ c.labeled ::= label , WS , statement ;
+    label ::= named label | case label | default label ;
+    named label $ c.label ::= [ attribute specifiers , WS ] , member name , WS , colon ;
+    case label $ c.case ::= [ attribute specifiers , WS ] , case , WS , constant expression , [ WS , "..." , WS , constant expression ] , WS , colon ;
+    default label $ c.default ::= [ attribute specifiers , WS ] , default , WS , colon ;
+
+    compound statement $ c.compound ::= '{' , WS , { block item , WS } , '}' ;
+    block item ::= declaration | statement | label ;
+
+    expression statement $ c.expression.statement ::= ( [ attribute specifiers , WS ] , expression , WS , ';' ) | 
+        ( [ attribute specifiers , WS ] , ';' ) ;
+
+    selection statement ::= if statement | switch statement ;
+    if statement $ c.if ::= if , WS , '(' , WS , expression , WS , ')' , WS , statement , [ WS , else clause ] ;
+    else clause $ c.else ::= else , WS , statement ;
+    switch statement $ c.switch ::= switch , WS , '(' , WS , expression , WS , ')' , WS , statement ;
+
+    iteration statement ::= while statement | do statement | for statement ;
+    while statement $ c.while ::= while , WS , '(' , WS , expression , WS , ')' , WS , statement ;
+    do statement $ c.do ::= do , WS , statement , WS , while , WS , '(' , WS , expression , WS , ')' , WS , ';' ;
+    for statement $ c.for ::= for , WS , '(' , WS , for init , WS , for condition , WS , for next , WS , statement ;
+    for init $ c.for.init ::= declaration | ( [ expression , WS ] , ';' ) ;
+    for condition $ c.for.condition ::= [ expression , WS ] , ';' ;
+    for next $ c.for.next ::= [ expression , WS ] , ')' ;
+
+    jump statement ::= goto statement | continue statement | break statement | return statement ;
+    goto statement $ c.goto ::= goto , WS , member name , WS , ';' ;
+    continue statement $ c.continue ::= continue , WS , ';' ;
+    break statement $ c.break ::= break , WS , ';' ;
+    return statement $ c.return ::= return , [ WS , expression ] , WS , ';' ;
+
+    (* --- external definitions (A.3.4) *)
+
+    program $ c.translation.unit ::= WS , { external declaration , WS } ;
+    external declaration ::= function definition | declaration ;
+    function definition $ c.function.definition ::= [ attribute specifiers , WS ] , declaration specifiers , WS , declarator , WS ,
+        compound statement ;
+}#

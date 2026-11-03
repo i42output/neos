@@ -82,6 +82,13 @@ namespace link
 
 Examples (and scripts that run them) are in `languages/examples/link`.
 
+## C
+C programs (`.c`, schema `languages/c.neos`) are C23. The standard library's headers are in `languages/packages/c/include`; most of the library is native (the C runtime plugin, `runtime/c`), and the rest (`languages/packages/c/libc.c`) is C, compiled with the program. A program of several translation units is one program, linked by C's rules (`neos main.c,list.c,util.c`). `#include <...>` also searches the folders listed in `NEOS_C_INCLUDE_PATH`, `C_INCLUDE_PATH` and `CPATH`.
+
+Objects are in the C runtime's memory (pointers are 64-bit: LP64); `long double` is `double`; `_BitInt` is at most 64 bits; there are no threads (`__STDC_NO_THREADS__`) and no complex types (`__STDC_NO_COMPLEX__`); signals are those that `raise` raises. Common GNU extensions are accepted: statement expressions, case ranges, `[a ... b]` designators, `typeof`/`__typeof__`, `__builtin_` functions, and `__attribute__` (ignored).
+
+Examples and benchmarks are in `languages/examples/C`.
+
 ## Console
 `-c` (`--console`) loads the program into the neos console instead of running it; `neos` with no program starts the console with nothing loaded. In the console, `c` compiles the program, `r` runs it and `h` lists the other commands.
 

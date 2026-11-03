@@ -4101,12 +4101,14 @@ namespace neos::compilers::ada
 
     bool function_generator::volatile_type(ada_type* aType, int aDepth)
     {
-        // (a type specified (or with a subcomponent specified) Volatile or Atomic: a by-reference type (C.6(18/3)))
+        // (a type specified (or with a subcomponent specified) Volatile or Atomic, or descended from one (13.1(15/3)): a by-reference type
+        // (C.6(18/3)))
         if (aType == nullptr || aDepth > 16)
             return false;
-        for (auto const* aspect : { "volatile", "atomic", "volatile_components", "atomic_components" })
-            if (iProgram.type_aspect(aType, aspect) != nullptr)
-                return true;
+        for (auto* a = aType->view()->base_type()->view(); a != nullptr; a = a->parent != nullptr && a->parent != a ? a->parent->view()->base_type()->view() : nullptr)
+            for (auto const* aspect : { "volatile", "atomic", "volatile_components", "atomic_components" })
+                if (iProgram.type_aspect(a, aspect) != nullptr)
+                    return true;
         auto* t = aType->view()->base_type()->view();
         if (t->kind == type_kind::Array)
             return volatile_type(t->component, aDepth + 1);

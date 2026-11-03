@@ -1174,6 +1174,12 @@ namespace neos::compilers::ada
         }
         else if (sub.body != nullptr && (sub.body->is(construct::RenamingSubprogram) || sub.prefixed_actual))
             renaming_body();
+        else if (sub.body != nullptr && iSubprogram->imported && sub.op == intrinsic::None && !sub.body->is(construct::SubprogramBody))
+        {
+            // (a foreign subprogram (pragma or aspect Import of a convention other than neos or Intrinsic): no program provides it
+            // (B.1(38)))
+            raise_check(1, sub.body, "imported subprogram " + (sub.external_name.empty() ? iSubprogram->name : sub.external_name) + " is not available");
+        }
         else if (sub.body != nullptr)
         {
             if (sub.body->is(construct::TaskBody))
@@ -3531,6 +3537,14 @@ namespace neos::compilers::ada
         if (aStatement->is(construct::ReturnExtended))
         {
             auto* e = aStatement->ent;
+            // (the return object's subtype indication's dynamic bounds and discriminant constraints: elaborated before the object
+            // (3.3.1(15)))
+            for (auto* c : aStatement->children)
+                if (!c->is(construct::Defining) && !c->is(construct::Flag) && !c->is(construct::Aspects) && !c->is(construct::Handled))
+                {
+                    elaborate_dynamic_bounds(c);
+                    break;
+                }
             // (a return object with tasks: they are the caller's to activate if it is returned; if the statement is left otherwise
             // (an exception, a goto), they are never activated (9.2(3/2)))
             if (e != nullptr && e->type != nullptr && iProgram.needs_tasks(e->type))

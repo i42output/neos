@@ -1386,6 +1386,9 @@ namespace neos::compilers::ada
                         e->sub->op = intrinsic_operation(e);
                     e->sub->external_name = external;
                     e->sub->body = aPragma;
+                    // (a foreign subprogram (no neos program provides it): its body raises Program_Error when it is called)
+                    if (convention != "neos" && convention != "intrinsic")
+                        iSubprogramsToGenerate.push_back(e);
                 }
             }
         }
