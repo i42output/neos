@@ -37,10 +37,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <map>
 #include <mutex>
 #include <string>
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <sys/mman.h>
@@ -509,12 +516,21 @@ namespace neos::c_runtime
         {
             std::vector<std::string> environment;
 #if defined(_WIN32)
-            if (auto* block = ::GetEnvironmentStringsA())
+            // (the environment's strings as UTF-8 (the execution character set); those that begin with '=' are the shell's
+            // per-drive current directories)
+            if (auto* block = ::GetEnvironmentStringsW())
             {
-                for (char* p = block; *p != '\0'; p += std::strlen(p) + 1u)
-                    if (*p != '=')
-                        environment.emplace_back(p);
-                ::FreeEnvironmentStringsA(block);
+                for (wchar_t const* p = block; *p != L'\0'; p += std::wcslen(p) + 1u)
+                {
+                    if (*p == L'=')
+                        continue;
+                    int const length = static_cast<int>(std::wcslen(p));
+                    int const size = ::WideCharToMultiByte(CP_UTF8, 0, p, length, nullptr, 0, nullptr, nullptr);
+                    std::string utf8(static_cast<std::size_t>(size), '\0');
+                    ::WideCharToMultiByte(CP_UTF8, 0, p, length, utf8.data(), size, nullptr, nullptr);
+                    environment.push_back(std::move(utf8));
+                }
+                ::FreeEnvironmentStringsW(block);
             }
 #else
             for (char** p = environ; p != nullptr && *p != nullptr; ++p)
