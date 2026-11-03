@@ -358,6 +358,8 @@ namespace neos::compilers::ada
         iVoid = new_type(type_kind::Void, "");
         iUniversalInteger = new_type(type_kind::UniversalInteger, "universal_integer");
         iUniversalReal = new_type(type_kind::UniversalReal, "universal_real");
+        iIntegerLiteral = new_type(type_kind::UniversalInteger, "universal_integer");
+        iRealLiteral = new_type(type_kind::UniversalReal, "universal_real");
         iUniversalFixed = new_type(type_kind::UniversalFixed, "universal_fixed");
         iUniversalAccess = new_type(type_kind::UniversalAccess, "universal_access");
         iStringLiteral = new_type(type_kind::String, "string literal");
@@ -441,6 +443,49 @@ namespace neos::compilers::ada
         return view;
     }
 
+    void program::private_child_with_check(node* aClause, node* aName, std::string const& aFull)
+    {
+        // (a with clause mentioning a private child of a library unit: only in a private descendant of that unit, a public
+        // descendant's body or subunit (not a subprogram body that is its own declaration), or a public descendant's declaration
+        // with "private with" (10.1.2(8/2-11/2)))
+        auto const& current = *iCurrentUnit;
+        auto const privateUnit = [&](std::string const& aUnit)
+        {
+            if (aUnit == current.name)
+                return current.unit->has_flag("private") || (current.body && find_unit(aUnit, false) != nullptr &&
+                    find_unit(aUnit, false)->unit->has_flag("private"));
+            auto* u = find_unit(aUnit, false);
+            return u != nullptr && u->unit != nullptr && u->unit->has_flag("private");
+        };
+        for (auto dot = aFull.find('.'); dot != std::string::npos; dot = aFull.find('.', dot + 1u))
+        {
+            auto const next = aFull.find('.', dot + 1u);
+            auto const child = aFull.substr(0u, next);
+            auto const parent = aFull.substr(0u, dot);
+            if (!privateUnit(child) || child == current.name)
+                continue;
+            bool allowed = false;
+            // (a descendant of the parent (itself included))
+            if (current.name == parent || current.name.starts_with(parent + "."))
+            {
+                // (a private descendant: a unit from the parent's child down to it that is private)
+                for (auto d = current.name.find('.', parent.size() + 1u); !allowed && current.name != parent; d = current.name.find('.', d + 1u))
+                {
+                    allowed = privateUnit(current.name.substr(0u, d));
+                    if (d == std::string::npos)
+                        break;
+                }
+                // (a public descendant's body or subunit (with a declaration of its own); its declaration, with private with)
+                if (!allowed && (current.subunit || (current.body && find_unit(current.name, false) != nullptr)))
+                    allowed = true;
+                if (!allowed && (!current.body || find_unit(current.name, false) == nullptr) && !current.subunit && aClause->has_flag("private"))
+                    allowed = true;
+            }
+            if (!allowed)
+                error(aName, "\"" + child + "\" is a private child: it cannot be named in this unit's with clause");
+        }
+    }
+
     void program::apply_context(node* aContext, region* aRegion)
     {
         if (aContext == nullptr)
@@ -454,6 +499,8 @@ namespace neos::compilers::ada
                     if (name->is(construct::Flag))
                         continue;
                     auto const full = dotted_name(name);
+                    if (iCurrentUnit != nullptr && aContext == iCurrentUnit->unit->first(construct::Context))
+                        recover([&]() { private_child_with_check(clause, name, full); });
                     // (a limited with of a package not analysed yet: its limited view (its types incomplete))
                     if (clause->has_flag("limited") && library_unit(full) == nullptr && full.find('.') == std::string::npos)
                     {
@@ -496,9 +543,12 @@ namespace neos::compilers::ada
                             aRegion->add(unit);
                     }
                     else
-                        error(name, "unit \"" + full + "\" not found");
+                    {
+                        recover([&]() { error(name, "unit \"" + full + "\" not found"); });
+                        continue;
+                    }
                     if (library_unit(full) == nullptr)
-                        error(name, "unit \"" + full + "\" not found");
+                        recover([&]() { error(name, "unit \"" + full + "\" not found"); });
                 }
             }
             else if (clause->is(construct::Use) || clause->is(construct::UseType))
@@ -515,6 +565,7 @@ namespace neos::compilers::ada
         aUnit.analysed = true;
         iCurrentUnit = &aUnit;
         auto* item = aUnit.item;
+        recover([&]() { end_name_check(item); });
         // (the region of the unit's declaration: its parent's (a child unit), else Standard's; its context clauses' names are 
         // visible in its own region's context)
         aUnit.context = new_region(nullptr, nullptr);
@@ -654,7 +705,24 @@ namespace neos::compilers::ada
         order_units();
         setup_standard();
         for (auto* u : iOrder)
-            analyse_unit(*u);
+            recover([&]() { analyse_unit(*u); });
+        // (legality checking: the generic units of the main file (and those declared within them))
+        if (std::getenv("NEOS_ADA_CHECK") != nullptr)
+        {
+            std::set<void const*> mainFiles;
+            for (auto* u : iOrder)
+                if (u->main_file && u->item != nullptr)
+                    mainFiles.insert(u->item->file);
+            for (std::size_t i = 0u; i < iGenerics.size(); ++i)
+                if (auto* g = iGenerics[i]; g->decl != nullptr && mainFiles.contains(g->decl->file))
+                    recover([&]() { check_generic(g); });
+        }
+        // (errors recovered from: the first thrown (the compiler reports the others before it))
+        if (!iDiagnostics.empty())
+            throw iDiagnostics.front();
+        // (legality checking only (NEOS_ADA_CHECK, e.g. for ACATS B tests): no code generated or run)
+        if (std::getenv("NEOS_ADA_CHECK") != nullptr)
+            std::exit(0);
         // (the main subprogram: the last library subprogram body of the main file)
         for (auto* u : iOrder)
             if (u->main_file && u->item->is(construct::SubprogramBody) && u->ent != nullptr)

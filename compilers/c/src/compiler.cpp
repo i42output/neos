@@ -39,6 +39,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iostream>
 #include "compiler.hpp"
 #include "program.hpp"
@@ -67,6 +69,7 @@ namespace neos::compilers::c
     void compiler::begin_compilation()
     {
         iProgramUnits = 0u;
+        iLibraryRead = false;
         begin_pass();
     }
 
@@ -79,6 +82,9 @@ namespace neos::compilers::c
         iUnits.clear();
         iParsed.clear();
         iUnitsParsed = 0u;
+        iImportedLibraries.clear();
+        iPendingLibraries.clear();
+        iGenerated = false;
         iProgram.reset();
     }
 
@@ -129,7 +135,9 @@ namespace neos::compilers::c
         auto& unit = iUnits.emplace_back();
         unit.path = path;
         unit.index = static_cast<std::uint32_t>(iUnits.size() - 1u);
-        unit.prelude = aFragment.imported() && iPackagesFolder && std::filesystem::path{ path }.parent_path().string() == *iPackagesFolder;
+        // (the prelude, and the library's files in C: in the packages folder)
+        unit.prelude = aFragment.imported() && iPackagesFolder && (std::filesystem::path{ path }.parent_path().string() == *iPackagesFolder ||
+            std::filesystem::path{ path }.parent_path() == std::filesystem::path{ *iPackagesFolder } / "lib");
         iFragments.push_back(fragment_state{ aFragment.source().to_std_string_view(), &unit });
         // (the program's first fragment begins before the prelude is compiled (within it): it is preprocessed when the prelude ends, 
         // before it is parsed)
@@ -180,6 +188,48 @@ namespace neos::compilers::c
         aFragment.set_source(neolib::string_view{ unit.text });
         aState.base = aFragment.source().to_std_string_view();
         aState.pending = nullptr;
+        import_libraries(unit.output.identifiers);
+    }
+
+    void compiler::import_libraries(std::vector<std::string> const& aIdentifiers)
+    {
+        // (the library's files that provide the functions that a unit names: imported (each once a pass), parsed after it)
+        if (!iPackagesFolder)
+            return;
+        if (!iLibraryRead)
+        {
+            iLibraryRead = true;
+            iLibraryProvides.clear();
+            std::error_code ec;
+            for (auto const& entry : std::filesystem::directory_iterator{ std::filesystem::path{ *iPackagesFolder } / "lib", ec })
+            {
+                if (entry.path().extension() != ".c")
+                    continue;
+                std::ifstream file{ entry.path(), std::ios::binary };
+                std::ostringstream text;
+                text << file.rdbuf();
+                auto const contents = text.str();
+                auto const begin = contents.find("/* provides:");
+                if (begin == std::string::npos)
+                    continue;
+                auto const end = contents.find("*/", begin);
+                std::istringstream names{ contents.substr(begin + 12u, end - begin - 12u) };
+                for (std::string name; names >> name;)
+                    iLibraryProvides[name] = entry.path().generic_string();
+            }
+        }
+        for (auto const& identifier : aIdentifiers)
+        {
+            auto const provider = iLibraryProvides.find(identifier);
+            if (provider == iLibraryProvides.end() || iImportedLibraries.contains(provider->second))
+                continue;
+            std::ifstream file{ provider->second, std::ios::binary };
+            std::ostringstream text;
+            text << file.rdbuf();
+            iImportedLibraries.insert(provider->second);
+            iPendingLibraries.insert(provider->second);
+            generator().import_fragment(neolib::string{ provider->second }, neolib::string{ text.str() });
+        }
     }
 
     void compiler::end_fragment()
@@ -364,9 +414,23 @@ namespace neos::compilers::c
         if (unit == nullptr)
             return;
         unit->root = aUnit;
-        // (the prelude: imported by each of the program's translation units, compiled with the program once)
+        iPendingLibraries.erase(unit->path);
+        // (the program generated as a whole: when its last translation unit, and the library's files that they use, have been parsed)
+        auto const generate_if_complete = [&]()
+        {
+            if (!declaration_pass() && !iGenerated && iProgramUnits != 0u && iUnitsParsed >= iProgramUnits && iPendingLibraries.empty())
+            {
+                iGenerated = true;
+                generate();
+            }
+        };
+        // (the prelude and the library's files: imported by each of the program's translation units that use them, compiled with the 
+        // program once)
         if (unit->prelude && std::any_of(iParsed.begin(), iParsed.end(), [&](translation_unit const* aParsed) { return aParsed->prelude && aParsed->path == unit->path; }))
+        {
+            generate_if_complete();
             return;
+        }
         iParsed.push_back(unit);
         if (std::getenv("NEOS_C_AST") != nullptr && (!unit->prelude || std::getenv("NEOS_C_AST")[0] == '2'))
             dump(aUnit);
@@ -378,8 +442,9 @@ namespace neos::compilers::c
                 ++iProgramUnits;
             return;
         }
-        if (!unit->prelude && ++iUnitsParsed >= iProgramUnits)
-            generate();
+        if (!unit->prelude)
+            ++iUnitsParsed;
+        generate_if_complete();
     }
 
     void compiler::generate()

@@ -186,6 +186,25 @@ namespace neos::compilers::python
                         aDefined.insert(s->name);
                 std::vector<std::pair<std::size_t, std::size_t>> renamed;    // (text positions)
                 std::map<std::string, std::size_t> firstModule, firstAny;    // (the names' first positions: in the module's statements, and anywhere)
+                // (a class's body: its function, _aN_name (see statements.cpp), when this runs)
+                auto const class_body = [](scope const& aScope)
+                {
+                    auto const& n = aScope.name;
+                    if (aScope.classBody)
+                        return true;
+                    if (aScope.kind != scope::Function || n.size() < 4u || !n.starts_with("_a") || !std::isdigit(static_cast<unsigned char>(n[2])))
+                        return false;
+                    auto const underscore = n.find('_', 2u);
+                    return underscore != std::string::npos && std::all_of(n.begin() + 2, n.begin() + static_cast<std::ptrdiff_t>(underscore),
+                        [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; });
+                };
+                // (the line of a class body's first binding of a name: a read of the name in the class body before it (or on its line:
+                // "x = x + 1") is the module's (CPython's class bodies look a name up in the class's namespace, then the globals))
+                std::map<std::pair<scope const*, std::string>, std::size_t> classBindings;
+                for (std::size_t l = 0u; l < iLines.size(); ++l)
+                    for (std::size_t t = 0u; t < iLines[l].tokens.size(); ++t)
+                        if (iBinding[l][t] && class_body(*iOwners[l][t]) && iLines[l].tokens[t].kind == token::Name)
+                            classBindings.emplace(std::pair{ iOwners[l][t], std::string{ text(iLines[l].tokens[t]) } }, l);
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                 {
                     auto const& line = iLines[l];
@@ -212,6 +231,9 @@ namespace neos::compilers::python
                                     break;
                                 if (s->local(name))
                                 {
+                                    if (class_body(*s) && s == iOwners[l][t] && !iBinding[l][t])
+                                        if (auto const b = classBindings.find(std::pair{ static_cast<scope const*>(s), name }); b != classBindings.end() && l <= b->second)
+                                            break;
                                     module = false;
                                     break;
                                 }

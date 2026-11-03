@@ -40,7 +40,8 @@
 // - A with statement of several items: "with A as a, B as b, C:" is "with __with_items('110', lambda: (A),
 //   lambda a: (B), lambda a, b: (C)) as (a, b):" (each item's manager is evaluated once the items before it have been
 //   entered (their targets are its lambda's parameters); __with_items enters and exits them as nested with statements
-//   would); "with (A as a, B):" is "with A as a, B:".
+//   would); "with (A as a, B):" is "with A as a, B:". A target that is not a name ("with A as self.x, B:") is bound when
+//   all of the items have been entered ("as (self.x,)"; its lambda parameter is _wN_).
 // - await E is __await(E) (E: a primary expression); "async for x in it:" is "for x in __async_iter(it):" (also in
 //   comprehensions) and "async with A as a:" is "with __async_with(A) as a:" (the runtime's: their __next__, __enter__
 //   and __exit__ await the asynchronous iterator's and context manager's methods: a coroutine's body runs on a coroutine 
@@ -376,7 +377,7 @@ namespace neos::compilers::python
                     std::string mask;
                     std::string managers;
                     std::vector<std::string> names;
-                    bool simple = true;
+                    std::vector<std::string> parameterNames;    // (a target that is not a name (e.g. self.x): _wN_)
                     for (auto const& item : items)
                     {
                         std::optional<std::size_t> as;
@@ -385,21 +386,19 @@ namespace neos::compilers::python
                                 as = t;
                         auto const expressionEnd = as ? *as : item.second;
                         std::string parameters;
-                        for (std::size_t n = 0u; n < names.size(); ++n)
-                            parameters += (n == 0u ? " " : ", ") + names[n];
+                        for (std::size_t n = 0u; n < parameterNames.size(); ++n)
+                            parameters += (n == 0u ? " " : ", ") + parameterNames[n];
                         managers += ", lambda" + parameters + ": (" + source(l, item.first, expressionEnd) + ")";
                         if (as)
                         {
-                            if (*as + 2u != item.second || tok(l, *as + 1u).kind != token::Name)
-                                simple = false;
                             mask += '1';
                             names.push_back(source(l, *as + 1u, item.second));
+                            parameterNames.push_back(*as + 2u == item.second && tok(l, *as + 1u).kind == token::Name ? 
+                                names.back() : "_w" + std::to_string(++iFlags) + "_");
                         }
                         else
                             mask += '0';
                     }
-                    if (!simple)
-                        continue;
                     std::string replacement = "__with_items('" + mask + "'" + managers + ")";
                     if (!names.empty())
                     {

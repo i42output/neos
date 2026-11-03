@@ -45,6 +45,27 @@
 
 namespace neos::compilers::ada
 {
+    // (an array aggregate's others choices: its own, and its subaggregates' (of the further dimensions))
+    static void others_choices(node* aAggregate, std::size_t aDimensions, std::vector<node*>& aResult)
+    {
+        while (aAggregate != nullptr && aAggregate->is(construct::Parenthesized))
+            aAggregate = aAggregate->child(0);
+        if (aAggregate == nullptr || !aAggregate->is(construct::Aggregate) || aDimensions == 0u)
+            return;
+        for (auto* a : aAggregate->children)
+        {
+            if (a->is(construct::Association) && !a->children.empty())
+            {
+                if (auto* o = a->child(0)->first(construct::Others))
+                    aResult.push_back(o);
+                if (aDimensions > 1u)
+                    others_choices(a->children.back(), aDimensions - 1u, aResult);
+            }
+            else if (aDimensions > 1u)
+                others_choices(a, aDimensions - 1u, aResult);
+        }
+    }
+
     bool is_operator_symbol(node const* aNode)
     {
         // (a string literal that is an operator symbol: "and", "+" ... (case insensitive: the source is folded))
@@ -195,7 +216,7 @@ namespace neos::compilers::ada
         switch (aExpression->kind)
         {
         case construct::Number:
-            return { interpretation{ is_real_literal(aExpression->source) ? iUniversalReal : iUniversalInteger, nullptr } };
+            return { interpretation{ is_real_literal(aExpression->source) ? iRealLiteral : iIntegerLiteral, nullptr } };
         case construct::Null:
             return { interpretation{ iUniversalAccess, nullptr } };
         case construct::Identifier:
@@ -203,12 +224,21 @@ namespace neos::compilers::ada
         case construct::Operator:
         case construct::Character:
             {
+                // (an expanded name of a character literal (P.'A'): the literal's)
+                if (aExpression->is(construct::Selected) && aExpression->child(1)->is(construct::Character) && [&]()
+                    {
+                        auto const prefixes = prefix_entities(aExpression->child(0), aRegion);
+                        return prefixes.size() == 1u && prefixes.front()->is_package() &&
+                            selected(prefixes.front(), name_text(aExpression->child(1)->source), aRegion).empty();
+                    }())
+                    return interpretations(aExpression->child(1), aRegion);
                 std::vector<interpretation> result;
                 // (a string literal that is not an operator symbol: only a string)
                 bool const operatorSymbol = !aExpression->is(construct::Operator) || is_operator_symbol(aExpression);
                 if (operatorSymbol)
                     try
                     {
+                        speculation guard{ *this };
                         result = name_interpretations(aExpression, aRegion);
                     }
                     catch (compile_error const&)
@@ -232,6 +262,7 @@ namespace neos::compilers::ada
             {
                 try
                 {
+                    speculation guard{ *this };
                     auto* t = subtype_mark(aExpression->child(0), aRegion);
                     return { interpretation{ t, nullptr } };
                 }
@@ -259,6 +290,7 @@ namespace neos::compilers::ada
                 t->size = 8u;
                 try
                 {
+                    speculation guard{ *this };
                     auto* indication = aExpression->children.back();
                     if (indication->is(construct::SubtypeIndication) && indication->size() == 1u && indication->child(0)->is(construct::Qualified))
                         t->designated = subtype_mark(indication->child(0)->child(0), aRegion);
@@ -281,7 +313,7 @@ namespace neos::compilers::ada
                 auto const right = interpretations(aExpression->child(1), aRegion);
                 std::vector<interpretation> result;
                 for (auto const& l : left)
-                    if (l.type != nullptr && l.type->view()->base_type()->boolean)
+                    if (l.type != nullptr && l.type->view()->base_type()->boolean && !partial_view_here(l.type, aRegion))
                     {
                         bool both = false;
                         for (auto const& r : right)
@@ -368,6 +400,7 @@ namespace neos::compilers::ada
                     return interpretations(aExpression, aRegion);
                 try
                 {
+                    speculation guard{ *this };
                     if (auto* t = attribute_type(aExpression, aRegion))
                         return { interpretation{ t, nullptr } };
                 }
@@ -384,6 +417,7 @@ namespace neos::compilers::ada
                 std::vector<entity*> entities;
                 try
                 {
+                    speculation guard{ *this };
                     if (prefix->is(construct::Identifier) || prefix->is(construct::Selected) || prefix->is(construct::Operator))
                         entities = prefix_entities(prefix, aRegion);
                 }
@@ -587,7 +621,7 @@ namespace neos::compilers::ada
         // (a condition is of any boolean type (RM 4.5.7(4)): the boolean type of its interpretations if unique)
         ada_type* t = nullptr;
         for (auto const& o : interpretations(aCondition, aRegion))
-            if (o.type != nullptr && o.type->view()->boolean)
+            if (o.type != nullptr && o.type->view()->boolean && !partial_view_here(o.type, aRegion))
             {
                 if (t != nullptr && t->base_type() != o.type->base_type())
                 {
@@ -597,6 +631,48 @@ namespace neos::compilers::ada
                 t = o.type;
             }
         return resolve(aCondition, t != nullptr ? t->base_type() : iBoolean, aRegion);
+    }
+
+    void program::parenthesis_check(node* aExpression)
+    {
+        // (a conditional, quantified or declare expression: parenthesized, unless it is the sole argument of a call (or attribute)
+        // (4.5.7(7/3), 4.5.8, 4.5.9))
+        auto* list = aExpression->parent;
+        if (list == nullptr || iSpeculation != 0 || iInstanceBodies != 0 || list->source.empty())
+            return;
+        // (an instance's actuals: checked at the instantiation (see program::instantiation))
+        if (!iInstantiationSites.empty() && (list->is(construct::Apply) || list->is(construct::Association)) &&
+            list->parent != nullptr && (list->parent->is(construct::Instantiation) || (list->parent->parent != nullptr && list->parent->parent->is(construct::Instantiation))))
+            return;
+        // (an argument (named, or one of several); a conditional expression's dependent expression)
+        if (list->is(construct::Apply) || list->is(construct::Arguments))
+        {
+            std::size_t const arguments = list->size() - (list->is(construct::Apply) ? 1u : 0u);
+            if (arguments <= 1u)
+                return;
+        }
+        else if (list->is(construct::PragmaArgument))
+        {
+            // (a pragma's: its only argument (not named))
+            if (list->size() == 1u && list->parent != nullptr && list->parent->all(construct::PragmaArgument).size() == 1u)
+                return;
+        }
+        else if (!list->is(construct::Association) && !list->is(construct::Aggregate) && !list->is(construct::IfExpression) && !list->is(construct::Elsif) && !list->is(construct::Else))
+            return;
+        // (its own parentheses: '(' before it and ')' after it (in the list's source))
+        char const* const first = list->source.data();
+        char const* const last = first + list->source.size();
+        char const* before = aExpression->source.data();
+        char const* after = before + aExpression->source.size();
+        if (before < first || after > last)
+            return;
+        while (before > first && std::isspace(static_cast<unsigned char>(before[-1])))
+            --before;
+        while (after < last && std::isspace(static_cast<unsigned char>(*after)))
+            ++after;
+        if (before > first && before[-1] == '(' && after < last && *after == ')')
+            return;
+        recover([&]() { error(aExpression, "a conditional, quantified or declare expression must be parenthesized here"); });
     }
 
     ada_type* program::resolve_in_class(node* aExpression, region* aRegion, bool (*aInClass)(ada_type const*))
@@ -622,8 +698,52 @@ namespace neos::compilers::ada
         case construct::Number:
             {
                 auto* universal = is_real_literal(aExpression->source) ? iUniversalReal : iUniversalInteger;
-                if (aExpected != nullptr && !covers(aExpected, universal))
+                if (aExpected != nullptr && !covers(aExpected, universal == iUniversalReal ? iRealLiteral : iIntegerLiteral))
                     error(aExpression, "numeric literal is not of the expected type");
+                // (a literal of a type with the Integer_Literal or Real_Literal aspect: a call of its function with the literal's text
+                // (4.2.1(6/5)))
+                if (aExpected != nullptr && !aExpected->view()->is_numeric() && !aExpected->is_universal())
+                    if (auto* aspect = type_aspect(aExpected, universal == iUniversalReal ? "real_literal" : "integer_literal"))
+                    {
+                        auto* declaredIn = aExpected->base_type()->declared_in != nullptr ? aExpected->base_type()->declared_in : aRegion;
+                        entity* function = nullptr;
+                        {
+                            speculation guard{ *this };
+                            try
+                            {
+                                for (auto* f : prefix_entities(aspect, declaredIn))
+                                    if (f->kind == entity_kind::Function && f->sub != nullptr && f->sub->parameters.size() == 1u && f->sub->result != nullptr &&
+                                        covers(f->sub->result, aExpected))
+                                        function = f;
+                            }
+                            catch (compile_error const&)
+                            {
+                            }
+                        }
+                        if (function == nullptr)
+                            error(aExpression, "the literal function of the type is not found");
+                        auto* text = &iClones.emplace_back();
+                        text->kind = construct::Operator;
+                        text->source = iSyntheticSources.emplace_back("\"" + std::string{ aExpression->file != nullptr ? aExpression->file->original_of(aExpression->source) :
+                            aExpression->source } + "\"");
+                        text->parent = aExpression;
+                        resolve(text, function->sub->parameters[0].type, aRegion);
+                        auto* callee = &iClones.emplace_back();
+                        callee->kind = construct::Identifier;
+                        callee->source = aExpression->source;
+                        callee->file = aExpression->file;
+                        callee->parent = aExpression;
+                        callee->ent = function;
+                        set_meaning(callee, meaning::Subprogram);
+                        aExpression->kind = construct::Apply;
+                        aExpression->children = { callee, text };
+                        auto& call = iCalls[aExpression];
+                        call.callee = function;
+                        call.actuals = { text };
+                        set_meaning(aExpression, meaning::Call);
+                        result = function->sub->result;
+                        break;
+                    }
                 result = aExpected != nullptr && !aExpected->is_universal() ? aExpected : universal;
                 set_meaning(aExpression, meaning::Value);
                 break;
@@ -639,12 +759,28 @@ namespace neos::compilers::ada
         case construct::Operator:
         case construct::Character:
             result = resolve_name(aExpression, aExpected, aRegion);
+            // (a string literal: of a string type, its component type a character type (not a partial view here, 4.2(4), 7.3(4)))
+            if (aExpression->is(construct::Operator) && !is_operator_symbol(aExpression) && iSpeculation == 0 && iInstanceBodies == 0 &&
+                aExpected != nullptr && aExpected->view()->kind == type_kind::Array && aExpected->view()->component != nullptr &&
+                partial_view_here(aExpected->view()->component, aRegion))
+                error(aExpression, "a string literal requires a string type (its component type is not a character type here)");
             break;
         case construct::Apply:
             result = resolve_apply(aExpression, aExpected, aRegion);
+            // (an indexed component: of the expected type (a scalar one: else not covered))
+            if (meaning_of(aExpression) == meaning::Index && aExpected != nullptr && result != nullptr && iSpeculation == 0 && iInstanceBodies == 0 &&
+                aExpected->view()->is_scalar() && result->view()->is_scalar() && !aExpected->is_universal() && !result->is_universal() &&
+                !aExpected->view()->is_formal && !result->view()->is_formal && !covers(aExpected, result))
+                error(aExpression, "the component is not of the expected type");
             break;
         case construct::Attribute:
             result = resolve_attribute(aExpression, aExpected, aRegion);
+            // ('First, 'Last of an array: of its index type)
+            if (aExpected != nullptr && result != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && aExpression->size() >= 2u &&
+                (name_text(aExpression->child(1)->source) == "first" || name_text(aExpression->child(1)->source) == "last") &&
+                aExpected->view()->is_scalar() && result->view()->is_scalar() && !aExpected->is_universal() && !result->is_universal() &&
+                !aExpected->view()->is_formal && !result->view()->is_formal && !covers(aExpected, result))
+                error(aExpression, "the attribute is not of the expected type");
             break;
         case construct::Parenthesized:
             result = resolve(aExpression->child(0), aExpected, aRegion);
@@ -656,6 +792,13 @@ namespace neos::compilers::ada
                 resolve(aExpression->child(1), t, aRegion);
                 set_meaning(aExpression, meaning::Value);
                 result = t;
+                // (others in an aggregate: only with an applicable index constraint (4.3.3(13)): a constrained subtype)
+                if (iSpeculation == 0)
+                    others_check(aExpression->child(1), t);
+                // (of the expected type)
+                if (aExpected != nullptr && aExpected != iVoid && !aExpected->is_universal() && t != nullptr && iSpeculation == 0 &&
+                    !covers(aExpected, t))
+                    error(aExpression, "the qualified expression is not of the expected type");
                 break;
             }
         case construct::All:
@@ -702,11 +845,12 @@ namespace neos::compilers::ada
         case construct::AndThen:
         case construct::OrElse:
             {
-                ada_type* t = aExpected != nullptr && aExpected->view()->base_type()->boolean ? aExpected : nullptr;
+                // (a boolean type (not a partial view of one))
+                ada_type* t = aExpected != nullptr && aExpected->view()->base_type()->boolean && !partial_view_here(aExpected, aRegion) ? aExpected : nullptr;
                 if (t == nullptr)
                 {
                     for (auto const& l : interpretations(aExpression, aRegion))
-                        if (l.type != nullptr && l.type->view()->base_type()->boolean)
+                        if (l.type != nullptr && l.type->view()->base_type()->boolean && !partial_view_here(l.type, aRegion))
                         {
                             t = l.type->base_type();
                             break;
@@ -727,13 +871,63 @@ namespace neos::compilers::ada
                 std::vector<node*> choices;
                 for (std::size_t i = 1u; i < aExpression->size(); ++i)
                     if (!aExpression->child(i)->is(construct::Flag))
+                    {
                         choices.push_back(aExpression->child(i));
+                        // (a membership choice: an expression, a range or a subtype mark (no constraint) (4.5.2(3.1/4)))
+                        if (auto* c = aExpression->child(i); c->is(construct::SubtypeIndication) && iSpeculation == 0)
+                            for (auto* x : c->children)
+                                if (x->is(construct::ConstraintRange) || x->is(construct::ConstraintIndex) || x->is(construct::ConstraintDigits) ||
+                                    x->is(construct::ConstraintDelta))
+                                    recover([&]() { error(x, "a membership choice cannot have a constraint (a subtype mark or a range)"); });
+                        // (an index constraint: parsed as a name)
+                        if (auto* c = aExpression->child(i); c->is(construct::Apply) && iSpeculation == 0 && !c->children.empty() &&
+                            is_subtype_name(c->child(0), aRegion) && [&]()
+                            {
+                                // (ranges, or (for a composite type: an index or discriminant constraint, not a conversion) scalar values)
+                                ada_type* ct = nullptr;
+                                {
+                                    speculation guard{ *this };
+                                    try { ct = subtype_mark(c->child(0), aRegion); } catch (compile_error const&) {}
+                                }
+                                bool const composite = ct != nullptr && (ct->view()->kind == type_kind::Array || ct->view()->kind == type_kind::Record);
+                                bool constraint = true;
+                                for (auto a = c->children.begin() + 1; a != c->children.end() && constraint; ++a)
+                                {
+                                    if ((*a)->is(construct::Range) || ((*a)->is(construct::Attribute) && (*a)->size() >= 2u && name_text((*a)->child(1)->source) == "range"))
+                                        continue;
+                                    if (!composite || (*a)->is(construct::Association))
+                                    {
+                                        constraint = composite;
+                                        continue;
+                                    }
+                                    for (auto const& o : interpretations(*a, aRegion))
+                                        if (o.type != nullptr && !o.type->view()->is_scalar() && !o.type->is_universal())
+                                            constraint = false;
+                                }
+                                return constraint;
+                            }())
+                            recover([&]() { error(c, "a membership choice cannot have a constraint (a subtype mark or a range)"); });
+                    }
                 ada_type* t = nullptr;
                 auto const options = interpretations(tested, aRegion);
                 // (a choice that can be of the type)
                 auto const choice_fits = [&](ada_type* aType, node* aChoice)
                 {
-                    if (aChoice->is(construct::SubtypeIndication) || aChoice->is(construct::Attribute) || is_subtype_name(aChoice, aRegion))
+                    if (aChoice->is(construct::SubtypeIndication) || is_subtype_name(aChoice, aRegion))
+                    {
+                        // (an untagged subtype's type: the tested type (4.5.2(3/3)))
+                        ada_type* ct = nullptr;
+                        {
+                            speculation guard{ *this };
+                            try { ct = subtype_mark(aChoice->is(construct::SubtypeIndication) ? aChoice->child(0) : aChoice, aRegion); } catch (compile_error const&) {}
+                        }
+                        if (ct == nullptr || ct->view()->kind == type_kind::ClassWide || ct->view()->base_type()->view()->tagged || aType->is_universal() ||
+                            aType->view()->kind == type_kind::ClassWide || aType->view()->base_type()->view()->tagged || ct->view()->anonymous_access ||
+                            aType->view()->anonymous_access)
+                            return true;
+                        return covers(ct, aType);
+                    }
+                    if (aChoice->is(construct::Attribute))
                         return true;
                     for (auto* value : aChoice->is(construct::Range) ? std::vector<node*>{ aChoice->child(0), aChoice->child(1) } : std::vector<node*>{ aChoice })
                     {
@@ -797,6 +991,14 @@ namespace neos::compilers::ada
                 if (t == nullptr && !options.empty())
                     t = options.front().type;
                 resolve(tested, t != nullptr ? (t->view()->kind == type_kind::ClassWide ? nullptr : t->base_type()) : nullptr, aRegion);
+                // (the tested expression: no applicable index constraint (an array aggregate there has no others, 4.3.3(15)))
+                if (iSpeculation == 0 && iInstanceBodies == 0 && t != nullptr && t->view()->kind == type_kind::Array)
+                {
+                    std::vector<node*> others;
+                    others_choices(tested, t->view()->indexes.size(), others);
+                    for (auto* o : others)
+                        recover([&]() { error(o, "others is not allowed in the tested expression of a membership test (no applicable index constraint)"); });
+                }
                 if (t == nullptr)
                     t = tested->type;
                 for (auto* c : choices)
@@ -805,7 +1007,14 @@ namespace neos::compilers::ada
                         resolve_range_bounds(c, t != nullptr ? t->base_type() : nullptr, aRegion);
                     else if (c->is(construct::SubtypeIndication) || is_subtype_name(c, aRegion) ||
                         (c->is(construct::Attribute) && name_text(c->child(1)->source) == "base" && is_subtype_name(c->child(0), aRegion)))
-                        discrete_range(c, t, aRegion);
+                    {
+                        auto* ct = discrete_range(c, t, aRegion);
+                        // (an untagged tested type: the tested expression's expected type (4.5.2(3/3)))
+                        if (ct != nullptr && t != nullptr && iSpeculation == 0 && !t->is_universal() && !ct->view()->base_type()->view()->tagged &&
+                            ct->view()->kind != type_kind::ClassWide && t->view()->kind != type_kind::ClassWide && !t->view()->base_type()->view()->tagged &&
+                            !ct->view()->anonymous_access && !t->view()->anonymous_access && !covers(ct, t))
+                            recover([&]() { error(c, "the membership's subtype must be of the type of the tested expression"); });
+                    }
                     else if (c->is(construct::Attribute) && (name_text(c->child(1)->source) == "range"))
                         c->type = range_of(c, aRegion);
                     else if (c->is(construct::Attribute) && name_text(c->child(1)->source) == "class" && is_subtype_name(c->child(0), aRegion))
@@ -815,7 +1024,26 @@ namespace neos::compilers::ada
                         set_meaning(c, meaning::Type);
                     }
                     else
+                    {
                         resolve(c, t != nullptr && t->view()->kind != type_kind::ClassWide ? t->base_type() : t, aRegion);
+                        // (an expression choice of a limited tested type: its primitive equality (visible here) is used (4.5.2(28.1/4),
+                        // 4.5.2(4.1/4)))
+                        if (t != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && limited_type(t, aRegion))
+                        {
+                            bool equality = false;
+                            auto* b = t->view()->kind == type_kind::ClassWide && t->view()->specific != nullptr ? t->view()->specific->base_type() : t->base_type();
+                            for (auto* list : { &b->primitives, b->partial != nullptr ? &b->partial->primitives : nullptr,
+                                b->full != nullptr ? &b->full->base_type()->primitives : nullptr })
+                                if (list != nullptr)
+                                    for (auto* op : *list)
+                                        if (op != nullptr && op->name == "=" && op->sub != nullptr && op->sub->op == intrinsic::None && !op->sub->is_abstract &&
+                                            (!op->is_private || op->scope == nullptr || op->scope->owner == nullptr ||
+                                                private_part_visible(op->scope->owner, aRegion)))
+                                            equality = true;
+                            if (!equality)
+                                recover([&]() { error(c, "a membership choice of a limited type needs a visible primitive equality operator"); });
+                        }
+                    }
                 }
                 set_meaning(aExpression, meaning::Value);
                 result = iBoolean;
@@ -827,6 +1055,11 @@ namespace neos::compilers::ada
         case construct::AggregateDelta:
         case construct::AggregateNullRecord:
             result = resolve_aggregate(aExpression, aExpected, aRegion);
+            // (a null record aggregate: of a record type without components (4.3.1(15/3)))
+            if (aExpression->is(construct::AggregateNullRecord) && result != nullptr && iSpeculation == 0 && iInstanceBodies == 0)
+                if (auto* v = result->view()->base_type()->view(); v->kind == type_kind::Record && !v->is_formal &&
+                    std::any_of(v->components.begin(), v->components.end(), [](component_info const& c) { return c.ent != nullptr && !c.stored; }))
+                    error(aExpression, "a null record aggregate is only for a record type without components");
             break;
         case construct::Allocator:
             {
@@ -848,7 +1081,12 @@ namespace neos::compilers::ada
                 else
                 {
                     auto* t = subtype_indication(indication, aRegion);
-                    (void)t;
+                    // (an object of an abstract type (3.9.3(8/3)))
+                    if (abstract_type(t, aRegion))
+                        error(indication, "an allocator cannot create an object of an abstract type");
+                    // (an uninitialized allocator's subtype: definite (4.8(4)))
+                    if (indefinite_subtype(t, indication, aRegion))
+                        error(indication, "an uninitialized allocator's subtype must be definite");
                 }
                 if (auto* subpool = aExpression->first(construct::Subpool))
                     resolve(subpool->child(0), nullptr, aRegion);
@@ -859,6 +1097,7 @@ namespace neos::compilers::ada
             }
         case construct::IfExpression:
             {
+                parenthesis_check(aExpression);
                 ada_type* t = aExpected;
                 if (t == nullptr)
                 {
@@ -883,10 +1122,14 @@ namespace neos::compilers::ada
                 result = t != nullptr ? t : aExpression->child(1)->type;
                 if (result == nullptr)
                     result = iBoolean;
+                // (without an else part: of a boolean type (4.5.7(9/3)))
+                if (aExpression->first(construct::Else) == nullptr && iSpeculation == 0 && !result->view()->base_type()->view()->boolean)
+                    recover([&]() { error(aExpression, "an if expression without an else part must be of a boolean type"); });
                 break;
             }
         case construct::CaseExpression:
             {
+                parenthesis_check(aExpression);
                 ada_type* t = aExpected;
                 if (t == nullptr)
                 {
@@ -901,12 +1144,16 @@ namespace neos::compilers::ada
                     if (o.type != nullptr && o.type->view()->is_discrete() && !o.type->is_universal())
                         discrete = o.type;
                 auto* selectorType = resolve(selector, discrete, aRegion);
+                // (its choices: as a case statement's (4.5.7(16/3)))
+                if (iSpeculation == 0)
+                    case_choices_check(aExpression, selector, selectorType, std::vector<node*>(aExpression->children.begin() + 1, aExpression->children.end()), aRegion);
                 for (std::size_t i = 1u; i < aExpression->size(); ++i)
                 {
                     auto* alternative = aExpression->child(i);
-                    for (auto* choice : alternative->child(0)->children)
-                        if (!choice->is(construct::Others))
-                            choice_range(choice, selectorType != nullptr ? selectorType->base_type() : nullptr, aRegion);
+                    if (iSpeculation != 0)
+                        for (auto* choice : alternative->child(0)->children)
+                            if (!choice->is(construct::Others))
+                                choice_range(choice, selectorType != nullptr ? selectorType->base_type() : nullptr, aRegion);
                     resolve(alternative->children.back(), t, aRegion);
                 }
                 set_meaning(aExpression, meaning::Value);
@@ -915,6 +1162,7 @@ namespace neos::compilers::ada
             }
         case construct::Quantified:
             {
+                parenthesis_check(aExpression);
                 auto* r = new_region(nullptr, aRegion);
                 iterator_specification(aExpression->child(1), r);
                 condition(aExpression->children.back(), r);
@@ -924,6 +1172,7 @@ namespace neos::compilers::ada
             }
         case construct::DeclareExpression:
             {
+                parenthesis_check(aExpression);
                 auto* r = new_region(nullptr, aRegion);
                 for (std::size_t i = 0u; i + 1u < aExpression->size(); ++i)
                     declaration(aExpression->child(i), r);
@@ -977,6 +1226,7 @@ namespace neos::compilers::ada
             return result;
         try
         {
+            speculation guard{ *this };
             for (auto* p : prefix_entities(aPrefix->child(0), aRegion))
             {
                 while (p->renamed != nullptr)
@@ -1000,12 +1250,25 @@ namespace neos::compilers::ada
                 result.push_back(e);
         // (operators declared with the operands' types (visible by use type or by selection: permitted here))
         std::vector<ada_type*> types;
+        // (a partial view whose full view is not visible here: the partial view (its operators are only "=" and "/=", if it is not
+        // limited, 7.3(4)))
+        auto const seen = [&](ada_type* aType) -> ada_type*
+        {
+            auto* partial = aType->kind == type_kind::Private ? aType : aType->base != nullptr && aType->base->kind == type_kind::Private ? aType->base : nullptr;
+            // (a formal type's actual within the instance: the formal's operators (12.3(15)))
+            if (partial != nullptr && partial->full != nullptr && !partial->is_formal && formal_actual_instance(partial, aRegion) == nullptr &&
+                formal_actual_instance(aType->view()->base_type()->view(), aRegion) == nullptr)
+                if (auto* package = partial->declared_in != nullptr ? partial->declared_in->owner : nullptr;
+                    package != nullptr && package->is_package() && !private_part_visible(package, aRegion))
+                    return partial;
+            return aType->view()->base_type()->view();
+        };
         for (auto* operand : aOperands)
             for (auto const& i : interpretations(operand, aRegion))
                 if (i.type != nullptr)
                     for (auto* it : { i.type, implicit_dereference(i.type), i.type->view()->kind == type_kind::ClassWide ? i.type->view()->specific : nullptr })
-                        if (it != nullptr && std::find(types.begin(), types.end(), it->view()->base_type()->view()) == types.end())
-                            types.push_back(it->view()->base_type()->view());
+                        if (it != nullptr && std::find(types.begin(), types.end(), seen(it)) == types.end())
+                            types.push_back(seen(it));
         // (within an instance, an untagged formal type's operators are the predefined ones: not the user-defined ones of its actual
         // declared outside the instance (12.3(15), 12.5(8)))
         for (auto* t : types)
@@ -1055,8 +1318,30 @@ namespace neos::compilers::ada
                 continue;
             if (t->kind == type_kind::UniversalAccess)
                 continue;
+            // (a private type outside the scope of its full view: only equality (if not limited) is predefined for it (7.3(4)))
+            bool partialView = false;
+            bool partialLimited = false;
+            if (t->kind == type_kind::Private && t->full != nullptr)
+            {
+                auto* package = t->base_type()->declared_in != nullptr ? t->base_type()->declared_in->owner : nullptr;
+                partialView = package != nullptr && package->is_package() && !private_part_visible(package, aRegion);
+                partialLimited = t->limited || t->base_type()->limited;
+            }
+            // (a type derived from a partial view: its characteristics, where the full view is not visible)
+            else if (t->derived_partial != nullptr && iInstanceBodies == 0 && partial_view_here(t, aRegion))
+            {
+                partialView = true;
+                partialLimited = t->derived_partial->limited;
+            }
+            // (a limited type: no predefined equality (4.5.2(9/3), 7.5))
+            bool const limited = (aDesignator == "=" || aDesignator == "/=") && formal_actual_instance(t, aRegion) == nullptr && limited_type(t, aRegion);
+            // (an array type whose component type is a partial view here: no ordering or logical operators (7.3.1(5/1)))
+            bool const partialComponent = t->kind == type_kind::Array && t->component != nullptr && partial_view_here(t->component, aRegion);
             for (auto* op : operators_of(t))
-                if (op->name == aDesignator && op->sub->parameters.size() == aOperands.size())
+                if (op->name == aDesignator && op->sub->parameters.size() == aOperands.size() &&
+                    (!partialView || (!partialLimited && (aDesignator == "=" || aDesignator == "/="))) &&
+                    !(partialComponent && aDesignator != "=" && aDesignator != "/=" && aDesignator != "&") &&
+                    !(limited && (op->sub->op == intrinsic::Eq || op->sub->op == intrinsic::Ne || op->sub->op == intrinsic::NotEqual)))
                     add(op);
             // (user-defined operators of the type, declared where the type is (visible by selection); not those of a formal type's
             // actual within the instance (12.3(15)))
@@ -1138,8 +1423,13 @@ namespace neos::compilers::ada
         // (the expected type's operators, for operands that are literals or aggregates)
         if (aExpected != nullptr && !aExpected->is_universal())
         {
+            // (a partial view outside the scope of its full view: only its equality (7.3(4)), as for the operands' types)
+            bool const partialView = partial_view_here(aExpected, aRegion);
+            bool const partialComponent = aExpected->view()->kind == type_kind::Array && aExpected->view()->component != nullptr &&
+                partial_view_here(aExpected->view()->component, aRegion);
             for (auto* op : operators_of(aExpected))
-                if (op->name == designator && op->sub->parameters.size() == operands.size() && std::find(candidates.begin(), candidates.end(), op) == candidates.end())
+                if (op->name == designator && op->sub->parameters.size() == operands.size() && std::find(candidates.begin(), candidates.end(), op) == candidates.end() &&
+                    !(partialView && designator != "=" && designator != "/=") && !(partialComponent && designator != "=" && designator != "/=" && designator != "&"))
                     candidates.push_back(op);
             // (user-defined operators whose result is of the expected type, declared where it is (visible by use type or by
             // selection: permitted here, as for the operands' types))
@@ -1160,7 +1450,8 @@ namespace neos::compilers::ada
         {
             for (auto* operand : operands)
                 for (auto const& i : interpretations(operand, aRegion))
-                    if (i.type != nullptr && i.type->view()->is_access())
+                    if (i.type != nullptr && i.type->view()->is_access() && !(iInstanceBodies == 0 && partial_view_here(i.type, aRegion) &&
+                        limited_type(i.type, aRegion)))
                         for (auto* op : operators_of(i.type))
                             if (op->name == designator && std::find(candidates.begin(), candidates.end(), op) == candidates.end())
                                 candidates.push_back(op);
@@ -1294,6 +1585,16 @@ namespace neos::compilers::ada
                         same_type(in.type->view()->specific, pt))
                         expected = in.type;
             resolve(operands[i], expected, aRegion);
+            // (an operand of a predefined operator: no applicable index constraint, so an array aggregate there has no others
+            // (4.3.3(10/5)-(15.1/3)))
+            if (op->sub->op != intrinsic::None && op->sub->op != intrinsic::NotEqual && expected != nullptr && iSpeculation == 0 &&
+                iInstanceBodies == 0 && expected->view()->kind == type_kind::Array)
+            {
+                std::vector<node*> others;
+                others_choices(operands[i], expected->view()->indexes.size(), others);
+                for (auto* c : others)
+                    recover([&]() { error(c, "others is not allowed in an operand of a predefined operator (no applicable index constraint)"); });
+            }
         }
         aOperator->ent = op;
         set_meaning(aOperator, meaning::Call);
@@ -1318,14 +1619,66 @@ namespace neos::compilers::ada
                 continue;
             auto* t = o.type->view();
             bool convertible = false;
-            if (target->is_numeric() && t->is_numeric())
+            // (a partial view here (its full view not visible): its own characteristics (not numeric, not an array); related only by
+            // derivation from it)
+            bool const partial = iSpeculation == 0 && iInstanceBodies == 0 && (partial_view_here(aTarget, aRegion) || partial_view_here(o.type, aRegion));
+            if (partial)
+            {
+                // (the types it is derived from (through partial views whose full views are not visible here): related by
+                // derivation when they have a common ancestor)
+                auto const ancestors = [&](ada_type* x)
+                {
+                    std::set<ada_type*> result;
+                    for (int depth = 0; x != nullptr && depth < 64; ++depth)
+                    {
+                        if (x->kind == type_kind::Private && partial_view_here(x, aRegion))
+                        {
+                            // (a subtype of the partial view: its type's)
+                            result.insert(x);
+                            if (x->base != nullptr && x->base != x)
+                                result.insert(x = x->base);
+                            x = x->parent;
+                            continue;
+                        }
+                        x = x->base != nullptr && x->kind != type_kind::Private ? x->base : x;
+                        result.insert(x);
+                        auto* v = x->view();
+                        result.insert(v);
+                        x = v->derived_partial != nullptr ? v->derived_partial : v->parent;
+                    }
+                    return result;
+                };
+                auto const at = ancestors(aTarget);
+                auto const ao = ancestors(o.type);
+                convertible = same_type(aTarget, o.type) || covers(aTarget, o.type) || covers(o.type, aTarget) ||
+                    std::any_of(at.begin(), at.end(), [&](ada_type* x) { return ao.contains(x); }) ||
+                    ((target->tagged || target->kind == type_kind::ClassWide) && (t->tagged || t->kind == type_kind::ClassWide));
+            }
+            else if (target->is_numeric() && t->is_numeric())
                 convertible = true;
             else if (same_type(target, t) || covers(target, t) || covers(t, target))
                 convertible = true;
             else if (target->kind == type_kind::Array && t->kind == type_kind::Array)
-                convertible = true;
+            {
+                // (array types of the same dimensionality, with convertible index types and the same component type (4.6(24.2-24.7)))
+                convertible = target->indexes.size() == t->indexes.size() && target->component != nullptr && t->component != nullptr &&
+                    same_type(target->component, t->component);
+                for (std::size_t k = 0u; convertible && k < target->indexes.size(); ++k)
+                {
+                    auto* a = target->indexes[k]->view()->base_type()->view();
+                    auto* b = t->indexes[k]->view()->base_type()->view();
+                    convertible = (a->is_numeric() && b->is_numeric()) || same_type(a, b) || a->root == b->root;
+                }
+            }
             else if (target->is_access() && t->is_access())
-                convertible = true;
+            {
+                // (to a pool-specific access-to-object type: only from a type related by derivation (4.6(24.11/2), Ada 83 4.6(5)))
+                auto* tb = target->base_type()->view();
+                auto* ob = t->base_type()->view();
+                convertible = !(tb->kind == type_kind::Access && ob->kind == type_kind::Access && !tb->access_all && !tb->access_constant &&
+                    !tb->anonymous_access && !ob->anonymous_access && !tb->is_formal && !ob->is_formal && iInstanceBodies == 0 &&
+                    (tb->root != nullptr ? tb->root : tb)->view() != (ob->root != nullptr ? ob->root : ob)->view());
+            }
             else if (target->root == t->root || (target->base_type()->root != nullptr && target->base_type()->root == t->base_type()->root))
                 convertible = true;
             else if ((target->tagged || target->kind == type_kind::ClassWide) && (t->tagged || t->kind == type_kind::ClassWide))
@@ -1342,11 +1695,12 @@ namespace neos::compilers::ada
         if (chosen == nullptr && !options.empty())
         {
             chosen = options.front().type;
-            // (a scalar operand of a record or array target, or a record or array operand of a scalar target: not convertible (4.6))
+            // (an operand of a type that is not convertible to the target (4.6(8-24)); a formal type's: not checked here)
             auto* t = chosen != nullptr ? chosen->view() : nullptr;
-            bool const composite = target->kind == type_kind::Record || target->kind == type_kind::Array;
-            if (t != nullptr && !t->is_universal() && ((composite && t->is_scalar()) ||
-                (target->is_scalar() && (t->kind == type_kind::Record || t->kind == type_kind::Array))))
+            if (t != nullptr && !t->is_universal() && t->kind != type_kind::String && t->kind != type_kind::Aggregate &&
+                t->kind != type_kind::CharacterLiteral && t->kind != type_kind::Void && !t->is_formal && !target->is_formal &&
+                !t->base_type()->view()->is_formal && !target->base_type()->view()->is_formal && t->kind != type_kind::Private &&
+                target->kind != type_kind::Private)
                 error(aOperand, "operand of a type conversion not convertible to the target type");
         }
         if (chosen != nullptr && (chosen->kind == type_kind::String || chosen->kind == type_kind::Aggregate))
@@ -1371,6 +1725,234 @@ namespace neos::compilers::ada
     bool program::is_static(node* aExpression)
     {
         return evaluate(aExpression, nullptr).known();
+    }
+
+    bool program::static_subtype(ada_type* aType)
+    {
+        // (a static subtype (4.9(26-28)): a scalar subtype with static bounds, or a constrained array subtype with static index
+        // subtypes (and component subtype); not a generic formal type)
+        if (aType == nullptr)
+            return false;
+        auto* v = aType->view();
+        if (v->is_formal || v->base_type()->view()->is_formal)
+            return false;
+        if (v->is_scalar())
+        {
+            if (!v->low.known() || !v->high.known() || v->nonstatic || aType->nonstatic)
+                return false;
+            // (not a subtype with a dynamic predicate (3.2.4(15/5)))
+            for (auto* p = aType->predicate != nullptr ? aType->predicate : v->predicate; p != nullptr; p = p->parent)
+                if (!p->is_static)
+                    return false;
+            return true;
+        }
+        // (a static string subtype: unconstrained, or with a static constraint, of a string type whose index and component subtypes are
+        // static)
+        if (v->kind == type_kind::Array && v->indexes.size() == 1u && v->component != nullptr && v->component->view()->kind == type_kind::Enumeration)
+            return static_subtype(v->indexes[0]) && static_subtype(v->component);
+        return false;
+    }
+
+    bool program::static_expression(node* aExpression)
+    {
+        // (a static expression (4.9(2-13)): its form, its names' and its subtypes' staticness; its value known (static_value))
+        if (aExpression == nullptr)
+            return false;
+        auto const all_static = [&](std::size_t aFrom)
+        {
+            for (std::size_t i = aFrom; i < aExpression->size(); ++i)
+                if (!aExpression->child(i)->is(construct::Flag) && !static_expression(aExpression->child(i)))
+                    return false;
+            return true;
+        };
+        switch (aExpression->kind)
+        {
+        case construct::Number:
+        case construct::Character:
+            return true;
+        case construct::Operator:
+            return meaning_of(aExpression) == meaning::StringLiteral || aExpression->ent == nullptr;
+        case construct::Identifier:
+        case construct::Selected:
+            {
+                auto* e = aExpression->ent;
+                if (e == nullptr)
+                    return false;
+                if (e->kind == entity_kind::NamedNumber || e->kind == entity_kind::EnumerationLiteral)
+                    return true;
+                if (e->kind == entity_kind::Function && meaning_of(aExpression) == meaning::Call && e->sub != nullptr && e->sub->renames != nullptr &&
+                    e->sub->renames->kind == entity_kind::EnumerationLiteral)
+                    return true;
+                // (a static constant (4.9(5)): a constant (or a renaming of one) of a static subtype whose value is a static
+                // expression; a deferred constant where its full declaration is visible)
+                for (int depth = 0; e != nullptr && depth < 16; ++depth)
+                {
+                    if (e->kind == entity_kind::Constant && e->value.known() && static_subtype(e->type) &&
+                        (e->initial == nullptr || static_expression(e->initial)))
+                        return true;
+                    if (e->kind == entity_kind::Constant && e->completion != nullptr && e->completion != e)
+                        e = e->completion;
+                    else if ((e->kind == entity_kind::Constant || e->kind == entity_kind::Variable) && e->renamed != nullptr)
+                        e = e->renamed;
+                    else
+                        break;
+                }
+                return false;
+            }
+        case construct::Parenthesized:
+            return static_expression(aExpression->child(0));
+        case construct::Qualified:
+            return static_subtype(aExpression->child(0)->type != nullptr ? aExpression->child(0)->type : aExpression->type) &&
+                static_expression(aExpression->child(1));
+        case construct::Apply:
+            if (meaning_of(aExpression) == meaning::Conversion)
+                return aExpression->type != nullptr && aExpression->type->view()->is_scalar() && static_subtype(aExpression->type) &&
+                    static_expression(aExpression->child(1));
+            if (meaning_of(aExpression) == meaning::Call)
+            {
+                // (a call of a static function (a predefined operator, or a function attribute of a static subtype) with static actuals)
+                if (aExpression->child(0)->is(construct::Attribute))
+                    return static_expression(aExpression->child(0)) && [&]()
+                    {
+                        auto const* call = call_of(aExpression);
+                        if (call != nullptr)
+                            for (auto* a : call->actuals)
+                                if (!static_expression(a))
+                                    return false;
+                        return true;
+                    }();
+                auto const* call = call_of(aExpression);
+                if (call == nullptr || call->callee == nullptr || call->callee->sub == nullptr)
+                    return false;
+                auto const op = call->callee->sub->op;
+                if (op == intrinsic::None || op == intrinsic::Import || op == intrinsic::Attribute)
+                    return call->callee->sub->renames != nullptr && call->callee->sub->renames->kind == entity_kind::EnumerationLiteral;
+                for (auto* a : call->actuals)
+                    if (!static_expression(a))
+                        return false;
+                return true;
+            }
+            return false;
+        case construct::Attribute:
+            {
+                // (4.9(7-9): an attribute of a static scalar subtype, or First, Last or Length of a statically constrained array
+                // object or subtype; its arguments static)
+                auto* prefix = aExpression->child(0);
+                auto const name = name_text(aExpression->child(1)->source);
+                if (auto* arguments = aExpression->first(construct::Arguments))
+                    for (auto* a : arguments->children)
+                        if (!static_expression(a))
+                            return false;
+                if (name == "storage_unit" || name == "word_size" || name == "address_size" || name == "max_integer_size" ||
+                    name == "maximum_alignment" || name == "system_allocator_alignment")
+                    return true;
+                bool const typePrefix = meaning_of(prefix) == meaning::Type ||
+                    (prefix->is(construct::Attribute) && name_text(prefix->child(1)->source) == "base");
+                auto* t = prefix->type;
+                if (t == nullptr)
+                    return false;
+                if (prefix->is(construct::Attribute) && name_text(prefix->child(1)->source) == "base")
+                    t = t->base_type();
+                auto* v = t->view();
+                if (v->kind == type_kind::Array)
+                {
+                    if (name != "first" && name != "last" && name != "length")
+                        return false;
+                    // (a statically constrained array subtype: constrained, its index subtypes static)
+                    auto const statically_constrained = [&](ada_type* aArray)
+                    {
+                        auto* a = aArray->view();
+                        if (!a->constrained)
+                            return false;
+                        for (auto* i : a->indexes)
+                            if (!static_subtype(i))
+                                return false;
+                        return true;
+                    };
+                    if (typePrefix)
+                        return statically_constrained(t);
+                    // (a statically constrained object (4.9(32.4/3)): its nominal subtype; a static string constant)
+                    return (prefix->ent != nullptr && (prefix->ent->kind == entity_kind::Constant || prefix->ent->kind == entity_kind::Variable) &&
+                        prefix->ent->type != nullptr && statically_constrained(prefix->ent->type)) || (prefix->ent != nullptr && static_expression(prefix));
+                }
+                if (!typePrefix || !v->is_scalar())
+                    return false;
+                if (!static_subtype(t))
+                    return false;
+                return evaluate_attribute(aExpression, nullptr).known() || name == "size" || name == "pos" || name == "val" ||
+                    name == "succ" || name == "pred" || name == "min" || name == "max";
+            }
+        case construct::AndThen:
+        case construct::OrElse:
+            return all_static(0u);
+        case construct::In:
+            {
+                if (!static_expression(aExpression->child(0)))
+                    return false;
+                for (std::size_t i = 1u; i < aExpression->size(); ++i)
+                {
+                    auto* c = aExpression->child(i);
+                    if (c->is(construct::Flag))
+                        continue;
+                    if (c->is(construct::Range))
+                    {
+                        if (!static_expression(c->child(0)) || !static_expression(c->child(1)))
+                            return false;
+                    }
+                    else if (c->type != nullptr && (c->is(construct::SubtypeIndication) || meaning_of(c) == meaning::Type))
+                    {
+                        if (!static_subtype(c->type))
+                            return false;
+                    }
+                    else if (!static_expression(c))
+                        return false;
+                }
+                return true;
+            }
+        case construct::CaseExpression:
+            {
+                if (!static_expression(aExpression->child(0)))
+                    return false;
+                for (std::size_t i = 1u; i < aExpression->size(); ++i)
+                    if (auto* alternative = aExpression->child(i); alternative->is(construct::Alternative))
+                    {
+                        for (auto* choice : alternative->child(0)->children)
+                            if (!choice->is(construct::Others) && !(choice->is(construct::Range) ? static_expression(choice->child(0)) &&
+                                static_expression(choice->child(1)) : choice->type != nullptr && meaning_of(choice) == meaning::Type ?
+                                static_subtype(choice->type) : static_expression(choice)))
+                                return false;
+                        if (!static_expression(alternative->children.back()))
+                            return false;
+                    }
+                return true;
+            }
+        case construct::IfExpression:
+            {
+                if (!static_expression(aExpression->child(0)) || !static_expression(aExpression->child(1)))
+                    return false;
+                for (std::size_t i = 2u; i < aExpression->size(); ++i)
+                {
+                    auto* part = aExpression->child(i);
+                    for (auto* c : part->children)
+                        if (!static_expression(c))
+                            return false;
+                }
+                return true;
+            }
+        default:
+            break;
+        }
+        if (is_operator(aExpression->kind))
+        {
+            auto const* call = call_of(aExpression);
+            if (call == nullptr || call->callee == nullptr || call->callee->sub == nullptr)
+                return false;
+            auto const op = call->callee->sub->op;
+            if (op == intrinsic::None || op == intrinsic::Import)
+                return false;
+            return all_static(0u);
+        }
+        return false;
     }
 
     static_value program::fold(intrinsic aOp, ada_type* aType, std::vector<static_value> const& aOperands)
@@ -1587,7 +2169,25 @@ namespace neos::compilers::ada
         case construct::Parenthesized:
             return evaluate(aExpression->child(0), aRegion);
         case construct::Qualified:
-            return evaluate(aExpression->child(1), aRegion);
+            {
+                // (a value that fails the subtype's constraint: Constraint_Error when evaluated, so not static)
+                auto v = evaluate(aExpression->child(1), aRegion);
+                auto* q = aExpression->child(0)->type != nullptr ? aExpression->child(0)->type->view() : nullptr;
+                if (v.known() && q != nullptr)
+                {
+                    if (q->is_discrete() && v.is_integer() && q->low.is_integer() && q->high.is_integer() &&
+                        (v.integer() < q->low.integer() || v.integer() > q->high.integer()))
+                        return {};
+                    if (q->kind == type_kind::Array && q->constrained && v.is_string() && q->indexes.size() == 1u)
+                        if (auto* i = q->indexes[0]->view(); i->low.is_integer() && i->high.is_integer())
+                        {
+                            auto const length = i->high.integer() - i->low.integer() + bigint{ 1 };
+                            if (bigint{ static_cast<std::int64_t>(v.string().size()) } != (length.negative() ? bigint{ 0 } : length))
+                                return {};
+                        }
+                }
+                return v;
+            }
         case construct::Apply:
             {
                 if (meaning_of(aExpression) == meaning::Conversion)
@@ -1627,6 +2227,9 @@ namespace neos::compilers::ada
         case construct::OrElse:
             {
                 auto a = evaluate(aExpression->child(0), aRegion);
+                // (the right operand statically unevaluated (4.9(32.2/3)))
+                if (a.is_integer() && (aExpression->is(construct::AndThen) ? a.integer().is_zero() : !a.integer().is_zero()))
+                    return a;
                 auto b = evaluate(aExpression->child(1), aRegion);
                 return fold(aExpression->is(construct::AndThen) ? intrinsic::AndThen : intrinsic::OrElse, iBoolean, { a, b });
             }
@@ -1636,8 +2239,9 @@ namespace neos::compilers::ada
                 if (!v.known())
                     return {};
                 bool result = false;
-                for (std::size_t i = 1u; i < aExpression->size(); ++i)
+                for (std::size_t i = 1u; i < aExpression->size() && !result; ++i)
                 {
+                    // (the choices after one whose test yields True: statically unevaluated (4.9(32.6/3)))
                     auto* c = aExpression->child(i);
                     if (c->is(construct::Flag))
                         continue;
@@ -1651,6 +2255,19 @@ namespace neos::compilers::ada
                             result = result || (v.integer() >= l.integer() && v.integer() <= h.integer());
                         else
                             result = result || (v.real() >= l.real() && v.real() <= h.real());
+                    }
+                    else if (c->type != nullptr && (c->is(construct::SubtypeIndication) || meaning_of(c) == meaning::Type) && v.is_string() &&
+                        c->type->view()->kind == type_kind::Array)
+                    {
+                        // (a string in a constrained string subtype: its length (bounds from 1) the subtype's)
+                        auto* t = c->type->view();
+                        if (!t->constrained || t->indexes.size() != 1u)
+                            return {};
+                        auto* i = t->indexes[0]->view();
+                        if (!i->low.is_integer() || !i->high.is_integer())
+                            return {};
+                        auto const length = i->high.integer() - i->low.integer() + bigint{ 1 };
+                        result = result || (i->low.integer() == bigint{ 1 } && bigint{ static_cast<std::int64_t>(v.string().size()) } == length);
                     }
                     else if (c->type != nullptr && (c->is(construct::SubtypeIndication) || meaning_of(c) == meaning::Type || c->is(construct::Attribute)))
                     {
@@ -1694,6 +2311,49 @@ namespace neos::compilers::ada
                     }
                     else if (part->is(construct::Else))
                         return evaluate(part->child(0), aRegion);
+                }
+                return {};
+            }
+        case construct::CaseExpression:
+            {
+                // (the dependent expression of the alternative whose choices cover the selector's value; the others statically
+                // unevaluated (4.9(32.4/3)))
+                auto v = evaluate(aExpression->child(0), aRegion);
+                if (!v.is_integer())
+                    return {};
+                for (std::size_t i = 1u; i < aExpression->size(); ++i)
+                {
+                    auto* alternative = aExpression->child(i);
+                    if (!alternative->is(construct::Alternative))
+                        continue;
+                    for (auto* choice : alternative->child(0)->children)
+                    {
+                        bool covers = choice->is(construct::Others);
+                        if (choice->is(construct::Range))
+                        {
+                            auto l = evaluate(choice->child(0), aRegion);
+                            auto h = evaluate(choice->child(1), aRegion);
+                            if (!l.is_integer() || !h.is_integer())
+                                return {};
+                            covers = v.integer() >= l.integer() && v.integer() <= h.integer();
+                        }
+                        else if (!covers && choice->type != nullptr && (choice->is(construct::SubtypeIndication) || meaning_of(choice) == meaning::Type))
+                        {
+                            auto* t = choice->type->view();
+                            if (!t->low.is_integer() || !t->high.is_integer())
+                                return {};
+                            covers = v.integer() >= t->low.integer() && v.integer() <= t->high.integer();
+                        }
+                        else if (!covers)
+                        {
+                            auto c = evaluate(choice, aRegion);
+                            if (!c.is_integer())
+                                return {};
+                            covers = c.integer() == v.integer();
+                        }
+                        if (covers)
+                            return evaluate(alternative->children.back(), aRegion);
+                    }
                 }
                 return {};
             }

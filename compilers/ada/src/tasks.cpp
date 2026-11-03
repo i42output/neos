@@ -36,6 +36,7 @@
 #include <neolib/neolib.hpp>
 #include <neolib/core/pair.hpp>
 #include <algorithm>
+#include <functional>
 #include "program.hpp"
 
 namespace neos::compilers::ada
@@ -48,6 +49,29 @@ namespace neos::compilers::ada
                 if (c->is(construct::ProcedureSpecification) || c->is(construct::FunctionSpecification))
                     return c;
             return nullptr;
+        }
+    }
+
+    void program::complete_partial_view(entity* aEntity, ada_type* aType, node* aDecl, region* aRegion)
+    {
+        // (the completion of a partial or incomplete view declared earlier in the region, or (an incomplete one) in the private part of
+        // the package whose body the region is (3.10.1(3)))
+        for (auto* r = aRegion; r != nullptr; r = r->package_body ? r->parent : nullptr)
+        {
+            auto range = r->names.equal_range(aEntity->name);
+            for (auto i = range.first; i != range.second; ++i)
+                if (i->second != aEntity && i->second->is_type() && i->second->type != nullptr && i->second->type->kind == type_kind::Private &&
+                    i->second->type->full == nullptr && (r == aRegion || i->second->type->incomplete))
+                {
+                    // (a tagged incomplete type: completed by a tagged type (3.10.1(2.1/2)))
+                    if (i->second->type->incomplete && i->second->type->tagged && aType->interfaces.empty())
+                        error(aDecl, "the completion of a tagged incomplete type must be a tagged type");
+                    i->second->type->full = aType;
+                    i->second->completed = true;
+                    aType->partial = i->second->type;
+                }
+            if (!r->package_body)
+                break;
         }
     }
 
@@ -66,14 +90,39 @@ namespace neos::compilers::ada
         subprogram_specification(&spec, e, parameters);
         e->sub->spec = aEntry;
         e->sub->level = parameters->level;
+        // (a task's entry: no access parameter (9.5.2(13/2)))
+        if (aRegion->owner != nullptr && (aRegion->owner->kind == entity_kind::Task || (aRegion->owner->type != nullptr &&
+            aRegion->owner->type->view()->kind == type_kind::Task)) && iInstanceBodies == 0)
+            for (auto* c : spec.children)
+                if (auto* access = c->first(construct::AccessDefinition))
+                    recover([&]() { error(access, "an entry of a task cannot have an access parameter"); });
+        // (Pre'Class and Post'Class: not of an entry (6.1.1(5/3)))
+        if (auto* aspects = aEntry->first(construct::Aspects); aspects != nullptr && iInstanceBodies == 0)
+            for (auto* aspect : aspects->children)
+                if (auto const n = name_text(aspect->child(0)->source); (n == "pre" || n == "post") && aspect->size() > 2u &&
+                    aspect->child(1)->is(construct::Word) && name_text(aspect->child(1)->source) == "class")
+                    recover([&]() { error(aspect, "aspect " + n + "'Class cannot be specified for an entry"); });
+        // (an entry family: not overloadable (a homograph of any declaration of its name in the region))
+        if (iInstanceBodies == 0)
+            for (auto [i, end] = aRegion->names.equal_range(e->name); i != end; ++i)
+                if (auto* other = i->second; other != e && other->kind == entity_kind::Entry && other->sub != nullptr &&
+                    (aEntry->first(construct::EntryFamily) != nullptr || other->sub->family_type != nullptr))
+                {
+                    recover([&]() { error(d, "\"" + e->name + "\" is already declared in this declarative region (an entry family)"); });
+                    break;
+                }
         if (auto* family = aEntry->first(construct::EntryFamily))
+        {
             e->sub->family_type = discrete_range(family->child(0), nullptr, aRegion);
+            predicate_check(e->sub->family_type, family->child(0));
+        }
     }
 
     void program::task_declaration(node* aDecl, region* aRegion)
     {
         auto* d = aDecl->first(construct::Defining);
         bool const single = aDecl->is(construct::TaskSingle);
+        redeclaration_check(name_text(d->source), entity_kind::Task, d, aRegion);
         auto* unit = new_entity(entity_kind::Task, name_text(d->source), d, aRegion);
         auto* t = new_type(type_kind::Task, single ? std::string{} : unit->name);
         t->limited = true;
@@ -87,20 +136,23 @@ namespace neos::compilers::ada
             discriminant_part(discriminants, t, r);
         if (auto* interfaces = aDecl->first(construct::Interfaces))
             for (auto* i : interfaces->children)
-                t->interfaces.push_back(subtype_mark(i, aRegion)->base_type());
+            {
+                t->interfaces.push_back(progenitor(i, aRegion));
+                progenitor_check(t->interfaces.back(), i, true, true, type_kind::Task);
+            }
         if (auto* definition = aDecl->first(construct::TaskDefinition))
             for (auto* item : definition->children)
             {
                 if (item->is(construct::Entry))
-                    entry_declaration(item, r);
+                    recover([&]() { entry_declaration(item, r); });
                 else if (item->is(construct::Private))
                     for (auto* p : item->children)
                         if (p->is(construct::Entry))
-                            entry_declaration(p, r);
+                            recover([&]() { entry_declaration(p, r); });
                         else
-                            declaration(p, r);
+                            recover([&]() { declaration(p, r); });
                 else
-                    declaration(item, r);
+                    recover([&]() { declaration(item, r); });
             }
         if (single)
         {
@@ -119,22 +171,24 @@ namespace neos::compilers::ada
             t->first_subtype = true;
             aDecl->ent = e;
             // (the completion of a partial view)
-            auto range = aRegion->names.equal_range(e->name);
-            for (auto i = range.first; i != range.second; ++i)
-                if (i->second != e && i->second->is_type() && i->second->type->kind == type_kind::Private && i->second->type->full == nullptr)
-                {
-                    i->second->type->full = t;
-                    t->partial = i->second->type;
-                }
+            complete_partial_view(e, t, aDecl, aRegion);
         }
         iTaskUnits[unit->name + "@" + std::to_string(reinterpret_cast<std::uintptr_t>(aRegion))] = unit;
         aspects(aDecl, unit, aRegion);
+        // (its operations' aspects: resolved with the enclosing declarative part's (at its end))
+        if (auto deferred = iDeferredAspects.find(r); deferred != iDeferredAspects.end())
+        {
+            auto& outer = iDeferredAspects[aRegion];
+            outer.insert(outer.end(), deferred->second.begin(), deferred->second.end());
+            iDeferredAspects.erase(r);
+        }
     }
 
     void program::protected_declaration(node* aDecl, region* aRegion)
     {
         auto* d = aDecl->first(construct::Defining);
         bool const single = aDecl->is(construct::ProtectedSingle);
+        redeclaration_check(name_text(d->source), entity_kind::Protected, d, aRegion);
         auto* unit = new_entity(entity_kind::Protected, name_text(d->source), d, aRegion);
         auto* t = new_type(type_kind::Protected, single ? std::string{} : unit->name);
         t->limited = true;
@@ -148,11 +202,14 @@ namespace neos::compilers::ada
             discriminant_part(discriminants, t, r);
         if (auto* interfaces = aDecl->first(construct::Interfaces))
             for (auto* i : interfaces->children)
-                t->interfaces.push_back(subtype_mark(i, aRegion)->base_type());
+            {
+                t->interfaces.push_back(progenitor(i, aRegion));
+                progenitor_check(t->interfaces.back(), i, true, true, type_kind::Protected);
+            }
         auto const item = [&](node* aItem)
         {
             if (aItem->is(construct::Entry))
-                entry_declaration(aItem, r);
+                recover([&]() { entry_declaration(aItem, r); });
             else if (aItem->is(construct::Component))
             {
                 // (a private component)
@@ -188,9 +245,9 @@ namespace neos::compilers::ada
             {
                 if (i->is(construct::Private))
                     for (auto* p : i->children)
-                        item(p);
+                        recover([&]() { item(p); });
                 else
-                    item(i);
+                    recover([&]() { item(i); });
             }
         if (single)
         {
@@ -205,16 +262,17 @@ namespace neos::compilers::ada
             t->decl = e;
             t->first_subtype = true;
             aDecl->ent = e;
-            auto range = aRegion->names.equal_range(e->name);
-            for (auto i = range.first; i != range.second; ++i)
-                if (i->second != e && i->second->is_type() && i->second->type->kind == type_kind::Private && i->second->type->full == nullptr)
-                {
-                    i->second->type->full = t;
-                    t->partial = i->second->type;
-                }
+            complete_partial_view(e, t, aDecl, aRegion);
         }
         iTaskUnits[unit->name + "@" + std::to_string(reinterpret_cast<std::uintptr_t>(aRegion))] = unit;
         aspects(aDecl, unit, aRegion);
+        // (its operations' aspects: resolved with the enclosing declarative part's (at its end))
+        if (auto deferred = iDeferredAspects.find(r); deferred != iDeferredAspects.end())
+        {
+            auto& outer = iDeferredAspects[aRegion];
+            outer.insert(outer.end(), deferred->second.begin(), deferred->second.end());
+            iDeferredAspects.erase(r);
+        }
     }
 
     entity* program::unit_named(std::string const& aName, region* aRegion, entity_kind aKind)
@@ -279,10 +337,17 @@ namespace neos::compilers::ada
         r->private_visible = true;
         r->level = aRegion->level;
         iBodyRegions[aDecl] = r;
+        // (the subprograms of a protected body: no overriding indicators (they are not protected operations' declarations,
+        // 9.4))
+        for (auto* item : aDecl->children)
+            if (item->has_flag("overriding") || item->has_flag("not overriding"))
+                recover([&]() { error(item, "an overriding indicator is not allowed in a protected body"); });
         for (auto* item : aDecl->children)
         {
             if (item->is(construct::EntryBody))
             {
+                if (iInstanceBodies == 0)
+                    recover([&]() { end_name_check(item); });
                 auto* ed = item->first(construct::Defining);
                 auto const name = name_text(ed->source);
                 entity* entry = nullptr;
@@ -299,6 +364,7 @@ namespace neos::compilers::ada
                 er->level = aRegion->level + 1;
                 // (the body's parameters are the entry's (their entities are the body's own))
                 node spec{ construct::ProcedureSpecification, item->source };
+                spec.parent = item;
                 for (auto* c : item->children)
                     if (c->is(construct::Parameter))
                         spec.children.push_back(c);
@@ -313,12 +379,31 @@ namespace neos::compilers::ada
                 {
                     auto* ie = declare(entity_kind::LoopParameter, index->first(construct::Defining), er);
                     ie->type = discrete_range(index->children.back(), nullptr, er);
+                    predicate_check(ie->type, index->children.back());
                     entry->sub->family_index = ie;
                 }
+                // (an entry body: its barrier (9.5.2(5)))
+                if (item->first(construct::Barrier) == nullptr && iInstanceBodies == 0)
+                    recover([&]() { error(ed, "an entry body must have a barrier"); });
                 if (auto* barrier = item->first(construct::Barrier))
                 {
                     condition(barrier->child(0), er);
                     entry->sub->barrier = barrier->child(0);
+                    // (not naming the entry's parameters (9.5.2(23/5)... a barrier cannot depend on the call's parameters))
+                    if (iInstanceBodies == 0)
+                    {
+                        std::function<node*(node*)> parameter = [&](node* n) -> node*
+                        {
+                            if (n->ent != nullptr && n->ent->kind == entity_kind::Parameter && n->ent->scope == er)
+                                return n;
+                            for (auto* c : n->children)
+                                if (auto* x = parameter(c))
+                                    return x;
+                            return nullptr;
+                        };
+                        if (auto* x = parameter(barrier->child(0)))
+                            recover([&]() { error(x, "an entry barrier cannot name a formal parameter of the entry"); });
+                    }
                     // (its function: called by the runtime (static link, the object, the family index))
                     auto* b = new_entity(entity_kind::Function, entry->name + "%barrier", ed, er);
                     b->sub->barrier_of = entry;

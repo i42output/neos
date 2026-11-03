@@ -63,8 +63,9 @@ namespace neos::compilers::ada
     // a compile error: the node (its position) and the message
     struct compile_error : std::runtime_error
     {
-        compile_error(node const* aNode, std::string const& aMessage) : std::runtime_error{ aMessage }, where{ aNode } {}
+        compile_error(node const* aNode, std::string const& aMessage, bool aPrivatePartToo = false) : std::runtime_error{ aMessage }, where{ aNode }, private_part_too{ aPrivatePartToo } {}
         node const* where;
+        bool private_part_too;      ///< (a rule that applies in the private part of an instance too (e.g. 3.4(5.1/3)))
     };
 
     class compiler : public language_compiler

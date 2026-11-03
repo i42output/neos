@@ -223,7 +223,9 @@ ${
     try header $ python.try ::= try , [ S ] , colon , [ [ S ] , simple statements ] ;
     except header $ python.except ::= except , [ S , expression , [ S , as , S , as name ] ] , [ S ] , colon , [ [ S ] , simple statements ] ;
     finally header $ python.finally ::= finally , [ S ] , colon , [ [ S ] , simple statements ] ;
-    with header $ python.with ::= with , S , expression , [ S , as , S , as name ] , [ S ] , colon , [ [ S ] , simple statements ] ;
+    with header $ python.with ::= with , S , expression , 
+        ( ( S , as , S , as name , [ S ] , colon ) | ( S , as , S , with targets , [ S ] , colon ) | ( [ S ] , colon ) ) , [ [ S ] , simple statements ] ;
+    with targets $ python.with.targets ::= target list ;
     as name $ python.as.name ::= identifier | ( open paren , [ S ] , identifier , { [ S ] , comma , [ S ] , identifier } , [ [ S ] , comma ] , [ S ] , close paren ) ;
 
     import statement $ python.import ::= import , S , dotted name , [ S , as , S , identifier ] ;

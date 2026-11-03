@@ -87,6 +87,110 @@ namespace neos::compilers::python::tokens
         return aText.size();
     }
 
+    inline std::size_t literal_end(std::string const& aText, std::size_t aQuote);
+
+    // (whether the string literal whose quote is at aQuote is raw: its prefix (before the quote) has an r)
+    inline bool raw_literal(std::string const& aText, std::size_t aQuote)
+    {
+        for (std::size_t p = aQuote; p > 0u && aQuote - p < 2u && std::isalpha(static_cast<unsigned char>(aText[p - 1u])); --p)
+            if (aText[p - 1u] == 'r' || aText[p - 1u] == 'R')
+                return true;
+        return false;
+    }
+
+    // (the end of a \N{name} escape whose backslash is at aStart (after its '}'), or aStart if there is none there (its braces are
+    // not a replacement field's in an f-string that isn't raw))
+    inline std::size_t named_escape_end(std::string const& aText, std::size_t aStart)
+    {
+        if (aStart + 2u < aText.size() && aText[aStart] == '\\' && aText[aStart + 1u] == 'N' && aText[aStart + 2u] == '{')
+            if (auto const close = aText.find_first_of("}\n", aStart + 3u); close != std::string::npos && aText[close] == '}')
+                return close + 1u;
+        return aStart;
+    }
+
+    // (the end of a replacement field of an f-string (aStart: after its '{'): after its '}'; its expression can contain strings
+    // with the f-string's own quote, line breaks and comments (PEP 701), and its format specification replacement fields)
+    inline std::size_t fstring_field_end(std::string const& aText, std::size_t aStart)
+    {
+        int depth = 0;
+        for (std::size_t j = aStart; j < aText.size(); ++j)
+        {
+            char const c = aText[j];
+            if (c == '\'' || c == '\"')
+                j = literal_end(aText, j) - 1u;
+            else if (c == '\\')
+                ++j;
+            else if (c == '#')
+            {
+                while (j + 1u < aText.size() && aText[j + 1u] != '\n')
+                    ++j;
+            }
+            else if (c == '(' || c == '[' || c == '{')
+                ++depth;
+            else if ((c == ')' || c == ']' || c == '}') && depth > 0)
+                --depth;
+            else if (c == '}')
+                return j + 1u;
+            else if (c == ':' && depth == 0)
+            {
+                // (the format specification: literal text and replacement fields, up to the field's '}')
+                for (++j; j < aText.size(); ++j)
+                {
+                    if (aText[j] == '\\')
+                        ++j;
+                    else if (aText[j] == '{')
+                        j = fstring_field_end(aText, j + 1u) - 1u;
+                    else if (aText[j] == '}')
+                        return j + 1u;
+                }
+                return aText.size();
+            }
+        }
+        return aText.size();
+    }
+
+    // (the end of an f-string literal that starts at aStart (its quote): its replacement fields are skipped (PEP 701: they can
+    // contain the f-string's own quote))
+    inline std::size_t fstring_end(std::string const& aText, std::size_t aStart)
+    {
+        char const q = aText[aStart];
+        bool const triple = aStart + 2u < aText.size() && aText[aStart + 1u] == q && aText[aStart + 2u] == q;
+        bool const raw = raw_literal(aText, aStart);
+        std::size_t j = aStart + (triple ? 3u : 1u);
+        for (; j < aText.size(); ++j)
+        {
+            // (a backslash escapes a quote, not a brace; \N{name} is an escape)
+            if (auto const named = raw ? j : named_escape_end(aText, j); named != j)
+                j = named - 1u;
+            else if (aText[j] == '\\' && j + 1u < aText.size() && aText[j + 1u] != '{' && aText[j + 1u] != '}')
+                ++j;
+            else if (aText[j] == '{')
+            {
+                if (j + 1u < aText.size() && aText[j + 1u] == '{')
+                    ++j;
+                else
+                    j = fstring_field_end(aText, j + 1u) - 1u;
+            }
+            else if (aText[j] == q && (!triple || (j + 2u < aText.size() && aText[j + 1u] == q && aText[j + 2u] == q)))
+                return triple ? j + 3u : j + 1u;
+            else if (!triple && aText[j] == '\n')
+                return j;
+        }
+        return aText.size();
+    }
+
+    // (the end of the string literal whose quote is at aQuote: an f-string's (its prefix, before the quote, has an f) or another's)
+    inline std::size_t literal_end(std::string const& aText, std::size_t aQuote)
+    {
+        std::size_t p = aQuote;
+        while (p > 0u && aQuote - p < 2u && std::isalpha(static_cast<unsigned char>(aText[p - 1u])))
+            --p;
+        auto const prefix = std::string_view{ aText }.substr(p, aQuote - p);
+        bool const isPrefix = (p == 0u || !(std::isalnum(static_cast<unsigned char>(aText[p - 1u])) || aText[p - 1u] == '_')) &&
+            prefix.find_first_not_of("fFrRbBuU") == std::string_view::npos;
+        return isPrefix && prefix.find_first_of("fF") != std::string_view::npos ? fstring_end(aText, aQuote) : string_end(aText, aQuote);
+    }
+
     inline std::vector<logical_line> tokenize(std::string const& aText)
     {
         std::vector<logical_line> lines;

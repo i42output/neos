@@ -134,6 +134,7 @@ namespace neos::language
         virtual std::size_t indented_count() const = 0;
         virtual indented_construct indented_kind(std::size_t aIndex) const = 0;
         virtual bool indented_try_else(std::size_t aIndex) const = 0;
+        virtual std::uint32_t indented_arm(std::size_t aIndex) const = 0;  ///< (the number of the arm (if, elif, else, try, except, finally, a loop's body, ...) being compiled, each its own; 0: its body has ended (an elif, else, except or finally may follow))
         virtual void set_loop_epilogue(i_fragment const& aEpilogue) = 0; ///< (the innermost (a while loop): code that follows the loop)
         virtual void finalize_suspended(std::size_t aIndent) = 0;       ///< (constructs (e.g. if statements) that an indentation ends)
         // global variables (found by the previous pass)

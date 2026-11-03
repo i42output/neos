@@ -1480,6 +1480,13 @@ namespace neos::compilers::ada
 
     void function_generator::expression(node* aExpression, ada_type* aType)
     {
+        // (an expanded name of a character literal: the literal)
+        if (aExpression->is(construct::Selected) && aExpression->child(1)->is(construct::Character) && aExpression->ent == aExpression->child(1)->ent &&
+            meaning_of(aExpression) == meaning_of(aExpression->child(1)) && aExpression->child(1)->type != nullptr)
+        {
+            expression(aExpression->child(1), aType);
+            return;
+        }
         if (implicitly_dereferenced(aExpression, true))
             return;
         // (a universal_fixed value (a product or quotient of fixed point values) where a fixed point type is expected: converted

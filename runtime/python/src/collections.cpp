@@ -30,14 +30,15 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/collections/__init__.py and Modules/_collectionsmodule.c (the
-  reductions of deque and defaultdict)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are
+  Portions of this file are derived from CPython 3.13 (Lib/collections/__init__.py (including UserDict, UserList and
+  UserString) and Modules/_collectionsmodule.c (the reductions of deque and defaultdict)), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are
   used under the Python Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from
   Python and C to C++ for the neos Python runtime plugin and adapted to
   its object model (see runtime/python/NOTICE).
 */
 
-// The module collections (CPython 3.13's behaviour): namedtuple, deque, defaultdict, OrderedDict, Counter and ChainMap
+// The module collections (CPython 3.13's behaviour): namedtuple, deque, defaultdict, OrderedDict, Counter, ChainMap, and UserDict,
+// UserList and UserString (classes of collections.abc's MutableMapping, MutableSequence and Sequence, made by type())
 
 #include <algorithm>
 #include <cstring>
@@ -47,6 +48,7 @@
 #include <string>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -1880,6 +1882,451 @@ namespace neos::python_runtime
                 return cls;
             }
 
+            // --- UserDict, UserList and UserString (Lib/collections/__init__.py's: classes of collections.abc's MutableMapping,
+            // MutableSequence and Sequence whose instances wrap a dict, list or str (their data))
+
+            // (a native method of one of the classes: aQualname is "Class.method")
+            py user_method(std::string const& aQualname, native_body aBody)
+            {
+                auto const name = aQualname.substr(aQualname.find('.') + 1u);
+                return make_native_function(name, aQualname, "", "collections", std::move(aBody));
+            }
+
+            // (self.data.<aName>(*args, **kwargs): the arguments after self, as given)
+            py data_call(char const* aName, std::vector<py> const& aArgs, object* aKwargs)
+            {
+                std::vector<object*> args;
+                for (std::size_t i = 1u; i < aArgs.size(); ++i)
+                    args.push_back(aArgs[i].reference());
+                ref const tuple{ make_tuple(std::move(args)) };
+                py const method = aArgs.at(0).attr("data").attr(aName);
+                return py{ call(method.get(), tuple.get(), aKwargs) };
+            }
+
+            // (self.__class__(aValue))
+            py same_class(py const& aSelf, py const& aValue)
+            {
+                return aSelf.attr("__class__")(aValue);
+            }
+
+            // (the object's data if it is an instance of the class (UserList's __cast), else the object)
+            py data_if(py const& aObject, py const& aClass)
+            {
+                return builtin("isinstance")(aObject, aClass).truthy() ? aObject.attr("data") : aObject;
+            }
+
+            // (the class's namespace's (self.data.<name>(...)) methods that return their result as it is or, aWrap, as an instance
+            // of self's class; aUnwrap: the arguments (positions after self) that are the data of a UserString)
+            void add_delegates(py const& aNamespace, char const* aClass, std::initializer_list<char const*> aNames, bool aWrap,
+                std::initializer_list<std::size_t> aUnwrap = {})
+            {
+                std::vector<std::size_t> const unwrap{ aUnwrap };
+                for (auto name : aNames)
+                {
+                    std::string const method{ name };
+                    aNamespace.set_item(py{ method }, user_method(std::string{ aClass } + "." + method,
+                        [method, aWrap, unwrap](std::vector<py> const& aArgs, object* aKwargs) -> py
+                    {
+                        std::vector<py> args{ aArgs };
+                        if (!unwrap.empty())
+                        {
+                            py const userString = import_attribute("collections", "UserString");
+                            for (auto u : unwrap)
+                                if (u < args.size())
+                                    args[u] = data_if(args[u], userString);
+                        }
+                        py const result = data_call(method.c_str(), args, aKwargs);
+                        return aWrap ? same_class(args[0], result) : result;
+                    }));
+                }
+            }
+
+            py make_class(char const* aName, char const* aBase, py const& aNamespace)
+            {
+                aNamespace.set_item(py{ "__module__" }, py{ "collections" });
+                aNamespace.set_item(py{ "__qualname__" }, py{ aName });
+                return builtin("type")(py{ aName }, py_tuple({ import_attribute("collections.abc", aBase) }), aNamespace);
+            }
+
+            py user_dict_class()
+            {
+                py const ns = py_dict();
+                ns.set_item(py{ "__doc__" }, py::none());
+                ns.set_item(py{ "__init__" }, user_method("UserDict.__init__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    py extra;
+                    auto const a = py_bind("UserDict.__init__", { py_positional_only("self"), py_positional_only("dict", py::none()) }, aArgs, aKwargs, nullptr, &extra);
+                    a[0].set_attr("data", py_dict());
+                    if (!a[1].is_none())
+                        a[0].method("update", { a[1] });
+                    if (extra.truthy())
+                        a[0].method("update", { extra });
+                    return py::none();
+                }));
+                ns.set_item(py{ "__len__" }, user_method("UserDict.__len__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__len__", { py_positional("self") }, aArgs, aKwargs);
+                    return builtin("len")(a[0].attr("data"));
+                }));
+                ns.set_item(py{ "__getitem__" }, user_method("UserDict.__getitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__getitem__", { py_positional("self"), py_positional("key") }, aArgs, aKwargs);
+                    py const data = a[0].attr("data");
+                    if (data.contains(a[1]))
+                        return data[a[1]];
+                    py const cls = a[0].attr("__class__");
+                    if (builtin("hasattr")(cls, py{ "__missing__" }).truthy())
+                        return cls.attr("__missing__")(a[0], a[1]);
+                    py_raise(builtin("KeyError")(a[1]));
+                }));
+                ns.set_item(py{ "__setitem__" }, user_method("UserDict.__setitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__setitem__", { py_positional("self"), py_positional("key"), py_positional("item") }, aArgs, aKwargs);
+                    a[0].attr("data").set_item(a[1], a[2]);
+                    return py::none();
+                }));
+                ns.set_item(py{ "__delitem__" }, user_method("UserDict.__delitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__delitem__", { py_positional("self"), py_positional("key") }, aArgs, aKwargs);
+                    py_checked(setitem(a[0].attr("data").get(), a[1].get(), nullptr) == 0);
+                    return py::none();
+                }));
+                ns.set_item(py{ "__iter__" }, user_method("UserDict.__iter__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__iter__", { py_positional("self") }, aArgs, aKwargs);
+                    return builtin("iter")(a[0].attr("data"));
+                }));
+                ns.set_item(py{ "__contains__" }, user_method("UserDict.__contains__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__contains__", { py_positional("self"), py_positional("key") }, aArgs, aKwargs);
+                    return py::boolean(a[0].attr("data").contains(a[1]));
+                }));
+                ns.set_item(py{ "get" }, user_method("UserDict.get", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.get", { py_positional("self"), py_positional("key"), py_positional("default", py::none()) }, aArgs, aKwargs);
+                    if (a[0].contains(a[1]))
+                        return a[0][a[1]];
+                    return a[2];
+                }));
+                ns.set_item(py{ "__repr__" }, user_method("UserDict.__repr__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__repr__", { py_positional("self") }, aArgs, aKwargs);
+                    return builtin("repr")(a[0].attr("data"));
+                }));
+                // (__or__, __ror__ and __ior__: with a UserDict's data or a dict)
+                auto const merge = [](char const* aQualname, bool aReflected)
+                {
+                    return user_method(aQualname, [aQualname, aReflected](std::vector<py> const& aArgs, object* aKwargs) -> py
+                    {
+                        auto const a = py_bind(aQualname, { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                        py other;
+                        if (builtin("isinstance")(a[1], import_attribute("collections", "UserDict")).truthy())
+                            other = a[1].attr("data");
+                        else if (builtin("isinstance")(a[1], builtin("dict")).truthy())
+                            other = a[1];
+                        else
+                            return py{ new_reference(not_implemented()) };
+                        py const data = a[0].attr("data");
+                        py const merged{ aReflected ? binary(NEOS_PY_OR, other.get(), data.get(), false) : binary(NEOS_PY_OR, data.get(), other.get(), false) };
+                        return same_class(a[0], merged);
+                    });
+                };
+                ns.set_item(py{ "__or__" }, merge("UserDict.__or__", false));
+                ns.set_item(py{ "__ror__" }, merge("UserDict.__ror__", true));
+                ns.set_item(py{ "__ior__" }, user_method("UserDict.__ior__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__ior__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py const other = builtin("isinstance")(a[1], import_attribute("collections", "UserDict")).truthy() ? a[1].attr("data") : a[1];
+                    a[0].set_attr("data", py{ binary(NEOS_PY_OR, a[0].attr("data").get(), other.get(), true) });
+                    return a[0];
+                }));
+                ns.set_item(py{ "__copy__" }, user_method("UserDict.__copy__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.__copy__", { py_positional("self") }, aArgs, aKwargs);
+                    py const cls = a[0].attr("__class__");
+                    py const inst = cls.attr("__new__")(cls);
+                    inst.attr("__dict__").method("update", { a[0].attr("__dict__") });
+                    // (a copy of the data, without triggering descriptors)
+                    inst.attr("__dict__").set_item(py{ "data" }, a[0].attr("__dict__")[py{ "data" }].method("copy"));
+                    return inst;
+                }));
+                ns.set_item(py{ "copy" }, user_method("UserDict.copy", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.copy", { py_positional("self") }, aArgs, aKwargs);
+                    py const userDict = import_attribute("collections", "UserDict");
+                    if (a[0].attr("__class__").is(userDict))
+                        return userDict(a[0].attr("data").method("copy"));
+                    py const data = a[0].attr("data");
+                    py c;
+                    a[0].set_attr("data", py_dict());
+                    try
+                    {
+                        c = import_attribute("copy", "copy")(a[0]);
+                    }
+                    catch (...)
+                    {
+                        a[0].set_attr("data", data);
+                        throw;
+                    }
+                    a[0].set_attr("data", data);
+                    c.method("update", { a[0] });
+                    return c;
+                }));
+                ns.set_item(py{ "fromkeys" }, builtin("classmethod")(user_method("UserDict.fromkeys", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserDict.fromkeys", { py_positional("cls"), py_positional("iterable"), py_positional("value", py::none()) }, aArgs, aKwargs);
+                    py const d = a[0]();
+                    for (py const& key : a[1].items())
+                        d.set_item(key, a[2]);
+                    return d;
+                })));
+                return make_class("UserDict", "MutableMapping", ns);
+            }
+
+            py user_list_class()
+            {
+                py const ns = py_dict();
+                ns.set_item(py{ "__doc__" }, py{ "A more or less complete user-defined wrapper around list objects." });
+                ns.set_item(py{ "__init__" }, user_method("UserList.__init__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__init__", { py_positional("self"), py_positional("initlist", py::none()) }, aArgs, aKwargs);
+                    py const data = py_list();
+                    a[0].set_attr("data", data);
+                    if (!a[1].is_none())
+                    {
+                        // (data[:] = initlist (a list) or initlist.data[:] (a UserList); else list(initlist))
+                        py const all = builtin("slice")(py::none());
+                        if (builtin("type")(a[1]).is(builtin("type")(data)))
+                            data.set_item(all, a[1]);
+                        else if (builtin("isinstance")(a[1], import_attribute("collections", "UserList")).truthy())
+                            data.set_item(all, a[1].attr("data")[all]);
+                        else
+                            a[0].set_attr("data", builtin("list")(a[1]));
+                    }
+                    return py::none();
+                }));
+                ns.set_item(py{ "__repr__" }, user_method("UserList.__repr__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__repr__", { py_positional("self") }, aArgs, aKwargs);
+                    return builtin("repr")(a[0].attr("data"));
+                }));
+                for (auto const& [name, op] : { std::pair{ "__lt__", NEOS_PY_LT }, std::pair{ "__le__", NEOS_PY_LE }, std::pair{ "__eq__", NEOS_PY_EQ },
+                    std::pair{ "__gt__", NEOS_PY_GT }, std::pair{ "__ge__", NEOS_PY_GE } })
+                {
+                    std::string const qualname = std::string{ "UserList." } + name;
+                    int const comparison = op;
+                    ns.set_item(py{ name }, user_method(qualname, [qualname, comparison](std::vector<py> const& aArgs, object* aKwargs) -> py
+                    {
+                        auto const a = py_bind(qualname, { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                        py const other = data_if(a[1], import_attribute("collections", "UserList"));
+                        return py{ compare(comparison, a[0].attr("data").get(), other.get()) };
+                    }));
+                }
+                ns.set_item(py{ "__hash__" }, py::none());
+                ns.set_item(py{ "__contains__" }, user_method("UserList.__contains__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__contains__", { py_positional("self"), py_positional("item") }, aArgs, aKwargs);
+                    return py::boolean(a[0].attr("data").contains(a[1]));
+                }));
+                ns.set_item(py{ "__len__" }, user_method("UserList.__len__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__len__", { py_positional("self") }, aArgs, aKwargs);
+                    return builtin("len")(a[0].attr("data"));
+                }));
+                ns.set_item(py{ "__getitem__" }, user_method("UserList.__getitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__getitem__", { py_positional("self"), py_positional("i") }, aArgs, aKwargs);
+                    py const item = a[0].attr("data")[a[1]];
+                    return builtin("isinstance")(a[1], builtin("slice")).truthy() ? same_class(a[0], item) : item;
+                }));
+                ns.set_item(py{ "__setitem__" }, user_method("UserList.__setitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__setitem__", { py_positional("self"), py_positional("i"), py_positional("item") }, aArgs, aKwargs);
+                    a[0].attr("data").set_item(a[1], a[2]);
+                    return py::none();
+                }));
+                ns.set_item(py{ "__delitem__" }, user_method("UserList.__delitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__delitem__", { py_positional("self"), py_positional("i") }, aArgs, aKwargs);
+                    py_checked(setitem(a[0].attr("data").get(), a[1].get(), nullptr) == 0);
+                    return py::none();
+                }));
+                // (__add__, __radd__ and __iadd__: with a UserList's data, a list, or list(other))
+                auto const operand = [](py const& aSelf, py const& aOther) -> py
+                {
+                    if (builtin("isinstance")(aOther, import_attribute("collections", "UserList")).truthy())
+                        return aOther.attr("data");
+                    if (builtin("isinstance")(aOther, builtin("type")(aSelf.attr("data"))).truthy())
+                        return aOther;
+                    return builtin("list")(aOther);
+                };
+                ns.set_item(py{ "__add__" }, user_method("UserList.__add__", [operand](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__add__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py const other = operand(a[0], a[1]);
+                    return same_class(a[0], py{ binary(NEOS_PY_ADD, a[0].attr("data").get(), other.get(), false) });
+                }));
+                ns.set_item(py{ "__radd__" }, user_method("UserList.__radd__", [operand](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__radd__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py const other = operand(a[0], a[1]);
+                    return same_class(a[0], py{ binary(NEOS_PY_ADD, other.get(), a[0].attr("data").get(), false) });
+                }));
+                ns.set_item(py{ "__iadd__" }, user_method("UserList.__iadd__", [operand](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__iadd__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py const other = operand(a[0], a[1]);
+                    a[0].set_attr("data", py{ binary(NEOS_PY_ADD, a[0].attr("data").get(), other.get(), true) });
+                    return a[0];
+                }));
+                py const mul = user_method("UserList.__mul__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__mul__", { py_positional("self"), py_positional("n") }, aArgs, aKwargs);
+                    return same_class(a[0], py{ binary(NEOS_PY_MULTIPLY, a[0].attr("data").get(), a[1].get(), false) });
+                });
+                ns.set_item(py{ "__mul__" }, mul);
+                ns.set_item(py{ "__rmul__" }, mul);
+                ns.set_item(py{ "__imul__" }, user_method("UserList.__imul__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__imul__", { py_positional("self"), py_positional("n") }, aArgs, aKwargs);
+                    a[0].set_attr("data", py{ binary(NEOS_PY_MULTIPLY, a[0].attr("data").get(), a[1].get(), true) });
+                    return a[0];
+                }));
+                ns.set_item(py{ "__copy__" }, user_method("UserList.__copy__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.__copy__", { py_positional("self") }, aArgs, aKwargs);
+                    py const cls = a[0].attr("__class__");
+                    py const inst = cls.attr("__new__")(cls);
+                    inst.attr("__dict__").method("update", { a[0].attr("__dict__") });
+                    // (a copy of the data, without triggering descriptors)
+                    inst.attr("__dict__").set_item(py{ "data" }, a[0].attr("__dict__")[py{ "data" }][builtin("slice")(py::none())]);
+                    return inst;
+                }));
+                add_delegates(ns, "UserList", { "append", "insert", "pop", "remove", "clear", "count", "index", "reverse", "sort" }, false);
+                ns.set_item(py{ "copy" }, user_method("UserList.copy", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.copy", { py_positional("self") }, aArgs, aKwargs);
+                    return same_class(a[0], a[0]);
+                }));
+                ns.set_item(py{ "extend" }, user_method("UserList.extend", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserList.extend", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    a[0].attr("data").method("extend", { data_if(a[1], import_attribute("collections", "UserList")) });
+                    return py::none();
+                }));
+                return make_class("UserList", "MutableSequence", ns);
+            }
+
+            py user_string_class()
+            {
+                py const ns = py_dict();
+                ns.set_item(py{ "__doc__" }, py::none());
+                ns.set_item(py{ "__init__" }, user_method("UserString.__init__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__init__", { py_positional("self"), py_positional("seq") }, aArgs, aKwargs);
+                    if (builtin("isinstance")(a[1], builtin("str")).truthy())
+                        a[0].set_attr("data", a[1]);
+                    else if (builtin("isinstance")(a[1], import_attribute("collections", "UserString")).truthy())
+                        a[0].set_attr("data", a[1].attr("data")[builtin("slice")(py::none())]);
+                    else
+                        a[0].set_attr("data", builtin("str")(a[1]));
+                    return py::none();
+                }));
+                // (conversions of the data)
+                for (auto const& [name, function] : { std::pair{ "__str__", "str" }, std::pair{ "__repr__", "repr" }, std::pair{ "__int__", "int" },
+                    std::pair{ "__float__", "float" }, std::pair{ "__complex__", "complex" }, std::pair{ "__hash__", "hash" }, std::pair{ "__len__", "len" } })
+                {
+                    std::string const qualname = std::string{ "UserString." } + name;
+                    char const* const convert = function;
+                    ns.set_item(py{ name }, user_method(qualname, [qualname, convert](std::vector<py> const& aArgs, object* aKwargs) -> py
+                    {
+                        auto const a = py_bind(qualname, { py_positional("self") }, aArgs, aKwargs);
+                        return builtin(convert)(a[0].attr("data"));
+                    }));
+                }
+                ns.set_item(py{ "__getnewargs__" }, user_method("UserString.__getnewargs__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__getnewargs__", { py_positional("self") }, aArgs, aKwargs);
+                    return py_tuple({ a[0].attr("data")[builtin("slice")(py::none())] });
+                }));
+                for (auto const& [name, op] : { std::pair{ "__eq__", NEOS_PY_EQ }, std::pair{ "__lt__", NEOS_PY_LT }, std::pair{ "__le__", NEOS_PY_LE },
+                    std::pair{ "__gt__", NEOS_PY_GT }, std::pair{ "__ge__", NEOS_PY_GE } })
+                {
+                    std::string const qualname = std::string{ "UserString." } + name;
+                    int const comparison = op;
+                    ns.set_item(py{ name }, user_method(qualname, [qualname, comparison](std::vector<py> const& aArgs, object* aKwargs) -> py
+                    {
+                        auto const a = py_bind(qualname, { py_positional("self"), py_positional("string") }, aArgs, aKwargs);
+                        py const other = data_if(a[1], import_attribute("collections", "UserString"));
+                        return py{ compare(comparison, a[0].attr("data").get(), other.get()) };
+                    }));
+                }
+                ns.set_item(py{ "__contains__" }, user_method("UserString.__contains__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__contains__", { py_positional("self"), py_positional("char") }, aArgs, aKwargs);
+                    return py::boolean(a[0].attr("data").contains(data_if(a[1], import_attribute("collections", "UserString"))));
+                }));
+                ns.set_item(py{ "__getitem__" }, user_method("UserString.__getitem__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__getitem__", { py_positional("self"), py_positional("index") }, aArgs, aKwargs);
+                    return same_class(a[0], a[0].attr("data")[a[1]]);
+                }));
+                ns.set_item(py{ "__add__" }, user_method("UserString.__add__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__add__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py other = a[1];
+                    if (builtin("isinstance")(other, import_attribute("collections", "UserString")).truthy())
+                        other = other.attr("data");
+                    else if (!builtin("isinstance")(other, builtin("str")).truthy())
+                        other = builtin("str")(other);
+                    return same_class(a[0], py{ binary(NEOS_PY_ADD, a[0].attr("data").get(), other.get(), false) });
+                }));
+                ns.set_item(py{ "__radd__" }, user_method("UserString.__radd__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__radd__", { py_positional("self"), py_positional("other") }, aArgs, aKwargs);
+                    py const other = builtin("isinstance")(a[1], builtin("str")).truthy() ? a[1] : builtin("str")(a[1]);
+                    return same_class(a[0], py{ binary(NEOS_PY_ADD, other.get(), a[0].attr("data").get(), false) });
+                }));
+                py const mul = user_method("UserString.__mul__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__mul__", { py_positional("self"), py_positional("n") }, aArgs, aKwargs);
+                    return same_class(a[0], py{ binary(NEOS_PY_MULTIPLY, a[0].attr("data").get(), a[1].get(), false) });
+                });
+                ns.set_item(py{ "__mul__" }, mul);
+                ns.set_item(py{ "__rmul__" }, mul);
+                ns.set_item(py{ "__mod__" }, user_method("UserString.__mod__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__mod__", { py_positional("self"), py_positional("args") }, aArgs, aKwargs);
+                    return same_class(a[0], py{ binary(NEOS_PY_REMAINDER, a[0].attr("data").get(), a[1].get(), false) });
+                }));
+                ns.set_item(py{ "__rmod__" }, user_method("UserString.__rmod__", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.__rmod__", { py_positional("self"), py_positional("template") }, aArgs, aKwargs);
+                    py const text = builtin("str")(a[1]);
+                    return same_class(a[0], py{ binary(NEOS_PY_REMAINDER, text.get(), a[0].get(), false) });
+                }));
+                ns.set_item(py{ "encode" }, user_method("UserString.encode", [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("UserString.encode", { py_positional("self"), py_positional("encoding", py{ "utf-8" }), py_positional("errors", py{ "strict" }) }, aArgs, aKwargs);
+                    py const encoding = a[1].is_none() ? py{ "utf-8" } : a[1];
+                    py const errors = a[2].is_none() ? py{ "strict" } : a[2];
+                    return a[0].attr("data").method("encode", { encoding, errors });
+                }));
+                // (the methods that return str's results as instances of the class, and those that return them as they are; count,
+                // find, rfind, removeprefix, removesuffix and replace take a UserString's data)
+                add_delegates(ns, "UserString", { "capitalize", "casefold", "center", "expandtabs", "ljust", "lower", "lstrip", "rjust", "rstrip",
+                    "strip", "swapcase", "title", "translate", "upper", "zfill" }, true);
+                add_delegates(ns, "UserString", { "removeprefix", "removesuffix" }, true, { 1u });
+                add_delegates(ns, "UserString", { "replace" }, true, { 1u, 2u });
+                add_delegates(ns, "UserString", { "count", "find", "rfind" }, false, { 1u });
+                add_delegates(ns, "UserString", { "endswith", "format", "format_map", "index", "isalpha", "isalnum", "isascii", "isdecimal",
+                    "isdigit", "isidentifier", "islower", "isnumeric", "isprintable", "isspace", "istitle", "isupper", "join", "partition",
+                    "rindex", "rpartition", "split", "rsplit", "splitlines", "startswith" }, false);
+                // (maketrans = str.maketrans: a static method)
+                ns.set_item(py{ "maketrans" }, builtin("staticmethod")(builtin("str").attr("maketrans")));
+                return make_class("UserString", "Sequence", ns);
+            }
+
             builtin_entry const sCollectionsFunctions[] =
             {
                 { "namedtuple", b_namedtuple }
@@ -1939,7 +2386,19 @@ namespace neos::python_runtime
                     std::vector<std::pair<std::string, object*>> extra{ { "parents", b_property({ getter.get() }, nullptr) }, { "__hash__", (retain(none()), none()) } };
                     aAttributes.emplace_back("ChainMap", class_with("ChainMap", sChainMapMethods, std::size(sChainMapMethods), nullptr, std::move(extra)));
                 }
-                return true;
+                auto const result = py_guarded([&]()
+                {
+                    aAttributes.emplace_back("UserDict", user_dict_class().reference());
+                    aAttributes.emplace_back("UserList", user_list_class().reference());
+                    aAttributes.emplace_back("UserString", user_string_class().reference());
+                    std::vector<py> all;
+                    for (auto name : { "ChainMap", "Counter", "OrderedDict", "UserDict", "UserList", "UserString", "defaultdict", "deque", "namedtuple" })
+                        all.emplace_back(name);
+                    aAttributes.emplace_back("__all__", py_list(all).reference());
+                    return py::none();
+                });
+                release(result);
+                return result != nullptr;
             }
 
             inline bool const sCollections = register_module("collections", collections_module);

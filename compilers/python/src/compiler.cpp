@@ -1079,23 +1079,10 @@ namespace neos::compilers::python
         // (literal parts keep their escapes; {{ and }} are braces)
         std::string rewrite_fstrings(std::string const& aText, bool& aChanged);
 
-        // (the end of a string literal that starts at aStart (its quote))
-        std::size_t string_end(std::string const& aText, std::size_t aStart)
-        {
-            char const q = aText[aStart];
-            bool const triple = aStart + 2u < aText.size() && aText[aStart + 1u] == q && aText[aStart + 2u] == q;
-            std::size_t j = aStart + (triple ? 3u : 1u);
-            for (; j < aText.size(); ++j)
-            {
-                if (aText[j] == '\\')
-                    ++j;
-                else if (aText[j] == q && (!triple || (j + 2u < aText.size() && aText[j + 1u] == q && aText[j + 2u] == q)))
-                    return triple ? j + 3u : j + 1u;
-                else if (!triple && aText[j] == '\n')
-                    return j;
-            }
-            return aText.size();
-        }
+        using tokens::string_end;
+        using tokens::fstring_field_end;
+        using tokens::fstring_end;
+        using tokens::literal_end;
 
         void append_utf8(std::string& aText, std::uint32_t aCodePoint)
         {
@@ -1309,6 +1296,25 @@ namespace neos::compilers::python
         }
 
         // (the expression for an f-string's content (between its quotes))
+        // (a str literal whose value is aText as it is written (a replacement field's text, before its '=' (debugging)): its backslashes,
+        // quotes and line breaks escaped)
+        std::string verbatim_literal(std::string const& aText)
+        {
+            std::string result = "'";
+            for (char const c : aText)
+            {
+                if (c == '\\' || c == '\'')
+                    result += '\\';
+                if (c == '\n')
+                    result += "\\n";
+                else if (c == '\r')
+                    result += "\\r";
+                else
+                    result += c;
+            }
+            return result + "'";
+        }
+
         std::string fstring_expression(std::string const& aContent, std::string const& aPrefix, std::string const& aQuote)
         {
             std::vector<std::string> parts;
@@ -1324,8 +1330,16 @@ namespace neos::compilers::python
             while (i < n)
             {
                 char const c = aContent[i];
-                if (c == '\\' && i + 1u < n && aPrefix.find_first_of("rR") == std::string::npos)
+                if (auto const named = aPrefix.find_first_of("rR") == std::string::npos ? tokens::named_escape_end(aContent, i) : i; named != i)
                 {
+                    // (\N{name}: an escape, not a replacement field)
+                    literal += aContent.substr(i, named - i);
+                    i = named;
+                    continue;
+                }
+                if (c == '\\' && i + 1u < n && aPrefix.find_first_of("rR") == std::string::npos && aContent[i + 1u] != '{' && aContent[i + 1u] != '}')
+                {
+                    // (an escape: a backslash before a brace is a backslash; the brace is a replacement field's, or an escaped brace)
                     literal += aContent.substr(i, 2u);
                     i += 2u;
                     continue;
@@ -1358,7 +1372,7 @@ namespace neos::compilers::python
                     char const d = aContent[j];
                     if (d == '\'' || d == '\"')
                     {
-                        j = string_end(aContent, j) - 1u;
+                        j = literal_end(aContent, j) - 1u;
                         continue;
                     }
                     if (d == '(' || d == '[' || d == '{')
@@ -1380,11 +1394,17 @@ namespace neos::compilers::python
                 std::size_t debugEnd = j;
                 if (aContent[j] == '=')
                 {
-                    // (the expression's text, with the spaces after '=', is the field's prefix)
+                    // (the expression's text, with the whitespace after '=', is the field's prefix (without comments))
                     debug = true;
                     ++j;
-                    while (j < n && (aContent[j] == ' ' || aContent[j] == '\t'))
+                    while (j < n && (aContent[j] == ' ' || aContent[j] == '\t' || aContent[j] == '\n' || aContent[j] == '\r' || aContent[j] == '\f' ||
+                        aContent[j] == '#'))
+                    {
+                        if (aContent[j] == '#')
+                            while (j + 1u < n && aContent[j + 1u] != '\n')
+                                ++j;
                         ++j;
+                    }
                     debugEnd = j;
                 }
                 char conversion = 0;
@@ -1396,23 +1416,22 @@ namespace neos::compilers::python
                     if (conversion != 'r' && conversion != 's' && conversion != 'a')
                         throw std::runtime_error(std::string{ "f-string: invalid conversion character '" } + conversion + "': expected 's', 'r', or 'a'");
                     j += 2u;
+                    // (whitespace can follow it)
+                    while (j < n && (aContent[j] == ' ' || aContent[j] == '\t' || aContent[j] == '\n' || aContent[j] == '\r' || aContent[j] == '\f'))
+                        ++j;
                 }
                 std::string spec;
-                if (j < n && aContent[j] == ':')
+                bool const hasSpec = j < n && aContent[j] == ':';
+                if (hasSpec)
                 {
                     // (the format specification: up to the matching '}'; it can contain replacement fields)
                     std::size_t k = j + 1u;
-                    int braces = 0;
                     for (; k < n; ++k)
                     {
                         if (aContent[k] == '{')
-                            ++braces;
+                            k = fstring_field_end(aContent, k + 1u) - 1u;   // (a nested field: its strings can contain braces)
                         else if (aContent[k] == '}')
-                        {
-                            if (braces == 0)
-                                break;
-                            --braces;
-                        }
+                            break;
                     }
                     spec = aContent.substr(j + 1u, k - j - 1u);
                     j = k;
@@ -1421,8 +1440,27 @@ namespace neos::compilers::python
                     throw std::runtime_error("f-string: expecting '}'");
                 if (debug)
                 {
-                    parts.push_back(literal_part(aPrefix, aQuote, aContent.substr(i + 1u, debugEnd - i - 1u)));
-                    if (conversion == 0 && spec.empty())
+                    // (its text: comments are left out)
+                    std::string text;
+                    for (std::size_t t = i + 1u; t < debugEnd; ++t)
+                    {
+                        if (aContent[t] == '\'' || aContent[t] == '\"')
+                        {
+                            auto const end = std::min(literal_end(aContent, t), debugEnd);
+                            text += aContent.substr(t, end - t);
+                            t = end - 1u;
+                        }
+                        else if (aContent[t] == '#')
+                        {
+                            while (t + 1u < debugEnd && aContent[t + 1u] != '\n')
+                                ++t;
+                        }
+                        else
+                            text += aContent[t];
+                    }
+                    parts.push_back(verbatim_literal(text));
+                    // (repr() unless there's a conversion or a format specification (even an empty one))
+                    if (conversion == 0 && !hasSpec)
                         conversion = 'r';
                 }
                 auto const specExpression = spec.empty() ? std::string{ "\"\"" } : fstring_expression(spec, aPrefix, aQuote);
@@ -1548,7 +1586,7 @@ namespace neos::compilers::python
                     auto const prefix = result.substr(p);
                     bool const isPrefix = (p == 0u || !name_character(result[p - 1u])) && !prefix.empty() && prefix.size() <= 2u &&
                         prefix.find_first_not_of("fFrRbBuU") == std::string::npos;
-                    auto end = string_end(aText, i);
+                    auto end = isPrefix && prefix.find_first_of("fF") != std::string::npos ? fstring_end(aText, i) : string_end(aText, i);
                     if (isPrefix && prefix.find_first_of("bB") != std::string::npos)
                     {
                         // (a bytes literal (and the bytes literals adjacent to it) is "__bytes('hexadecimal digits of its bytes')")
@@ -1651,7 +1689,7 @@ namespace neos::compilers::python
                                 break;
                             if (nextPrefix.find_first_of("bB") != std::string::npos)
                                 break;
-                            k = string_end(aText, q);
+                            k = nextPrefix.find_first_of("fF") != std::string::npos ? fstring_end(aText, q) : string_end(aText, q);
                             run.push_back(literal{ nextPrefix, q, k });
                             lineBreaks += breaks;
                         }
@@ -1709,14 +1747,21 @@ namespace neos::compilers::python
                         for (; j < n; ++j)
                         {
                             char const d = aText[j];
-                            if (d == '\\' && depth == 0)
+                            if (auto const named = depth == 0 && prefix.find_first_of("rR") == std::string::npos ? tokens::named_escape_end(aText, j) : j; named != j)
                             {
+                                // (\N{name}: an escape)
+                                j = named - 1u;
+                                continue;
+                            }
+                            if (d == '\\' && depth == 0 && j + 1u < n && aText[j + 1u] != '{' && aText[j + 1u] != '}')
+                            {
+                                // (a backslash escapes a quote, not a brace)
                                 ++j;
                                 continue;
                             }
                             if (depth > 0 && (d == '\'' || d == '\"'))
                             {
-                                j = string_end(aText, j) - 1u;
+                                j = literal_end(aText, j) - 1u;
                                 continue;
                             }
                             if (d == '{')
@@ -1730,8 +1775,8 @@ namespace neos::compilers::python
                                 --depth;
                             else if (depth == 0 && aText.compare(j, quote.size(), quote) == 0)
                                 break;
-                            else if (!triple && d == '\n')
-                                break;
+                            else if (!triple && d == '\n' && depth == 0)
+                                break;   // (a replacement field can span lines (PEP 701); the literal part can't)
                         }
                         if (j >= n || aText.compare(j, quote.size(), quote) != 0)
                             throw std::runtime_error("unterminated f-string literal");
@@ -2944,6 +2989,9 @@ namespace neos::compilers::python
     {
         // a local that code uses only between its own instructions (no other code that uses the role runs between them): one
         // for each role in a function (fewer locals: the JIT keeps the most used locals in registers)
+        // (a top-level statement's: the implicit entry function's, which the module's first statement's expressions can need before
+        // the statement starts it, e.g. print(str(1)))
+        ensure_function();
         auto& scratch = py_function().pyScratch;
         auto const existing = scratch.find(aRole);
         if (existing != scratch.end())
@@ -4387,8 +4435,8 @@ namespace neos::compilers::python
                         return fragment{ *checked };
                     return value;
                 }
-        // (the module's name and file)
-        if (symbol == nullptr && (aName == "__name__" || aName == "__file__") && !py_exec_mode())
+        // (the module's name and file: also a source module's that exec's code imports (exec's own code reads its globals'))
+        if (symbol == nullptr && (aName == "__name__" || aName == "__file__") && (!py_exec_mode() || py_current_module()))
         {
             std::string value = py_module_name();
             if (aName == "__file__")
@@ -4702,6 +4750,136 @@ namespace neos::compilers::python
             existing->second = std::nullopt;
     }
 
+    std::vector<std::pair<std::uint32_t, indented_construct>> compiler::py_arms() const
+    {
+        // the arms of the indented constructs (of the function) whose bodies are being compiled (outermost first): an if statement's 
+        // arm (if, elif or else), a try statement's (try, except, else or finally), a loop's or a with statement's body (not those 
+        // whose bodies have ended (an elif, else, except or finally may follow: see i_code_generator::indented_arm))
+        auto& g = const_cast<compiler&>(*this).generator();
+        std::size_t begin = 0u;
+        for (auto i = g.indented_count(); i-- > 0u;)
+            if (g.indented_kind(i) == indented_construct::Function)
+            {
+                begin = i + 1u;
+                break;
+            }
+        std::vector<std::pair<std::uint32_t, indented_construct>> result;
+        for (auto i = begin; i < g.indented_count(); ++i)
+            if (auto const arm = g.indented_arm(i); arm != 0u)
+                result.emplace_back(arm, g.indented_kind(i));
+        return result;
+    }
+
+    void compiler::py_record_binding(std::string const& aName)
+    {
+        // a binding of a name by the statement being compiled: unless it is conditional (its statement's arm may not bind it), a read 
+        // within that arm (or one within it) that follows it is of a bound name (see variable_value); conditional: a binding within 
+        // an expression (name := value), on the line of a compound statement's header (its condition: an elif's or an except's; a 
+        // body that follows its colon: "if x: y = 1"), a for loop's targets (bound in its body's arm (which begins once its 
+        // header has been compiled): see py_resolve_loop_targets), a with statement's (bound once its body has been compiled), ...
+        if (iPyConstructSource == nullptr || iPyConstruct == construct::Walrus)
+            return;
+        auto const text = generator().current_fragment().source().to_std_string_view();
+        if (iPyConstructSource < text.data() || iPyConstructSource > text.data() + text.size())
+            return;
+        auto const offset = static_cast<std::size_t>(iPyConstructSource - text.data());
+        auto const lineStart = offset == 0u ? 0u : (text.rfind('\n', offset - 1u) == std::string_view::npos ? 0u : text.rfind('\n', offset - 1u) + 1u);
+        auto const before = text.substr(lineStart, offset - lineStart);
+        auto line = text.substr(lineStart);
+        line = line.substr(0u, line.find('\n'));
+        // (the first word of the line)
+        auto first = line.substr(std::min(line.find_first_not_of(" \t"), line.size()));
+        first = first.substr(0u, std::min(first.find_first_of(" \t:(["), first.size()));
+        static std::set<std::string_view> const sCompound = { "if", "elif", "else", "while", "for", "try", "except", "finally", "with", "async",
+            "def", "class", "match", "case" };
+        if (sCompound.contains(first))
+        {
+            // (the text before the binding's construct: a colon at the top level (not within brackets) ends the header)
+            int depth = 0;
+            bool inBody = false;
+            bool inIterable = false;
+            for (std::size_t i = 0u; i < before.size(); ++i)
+            {
+                auto const c = before[i];
+                if (c == '(' || c == '[' || c == '{') ++depth;
+                else if (c == ')' || c == ']' || c == '}') --depth;
+                else if (c == ':' && depth == 0) inBody = true;
+                else if (depth == 0 && before.substr(i, 4u) == " in ") inIterable = true;
+                else if (c == '\'' || c == '"')
+                {
+                    // (a string: skipped)
+                    auto const end = before.find(c, i + 1u);
+                    if (end == std::string_view::npos)
+                        break;
+                    i = end;
+                }
+            }
+            if (inBody)
+                return;
+            if (first == "for" && !inIterable)
+            {
+                // (a for loop's targets)
+                auto& targets = py_function().pyLoopTargets;
+                if (!targets)
+                {
+                    targets.emplace();
+                    for (auto const& arm : py_arms())
+                        targets->second.push_back(arm.first);
+                }
+                targets->first.push_back(aName);
+                return;
+            }
+            // (the condition of an if, while or with statement is evaluated (that of an elif or except, and a case, may not be))
+            if (first != "if" && first != "while" && first != "with" && first != "for")
+                return;
+        }
+        py_resolve_loop_targets();
+        std::vector<std::uint32_t> arms;
+        for (auto const& arm : py_arms())
+            arms.push_back(arm.first);
+        auto& bound = py_function().pyBoundIn[aName];
+        if (std::find(bound.begin(), bound.end(), arms) == bound.end())
+            bound.push_back(std::move(arms));
+    }
+
+    void compiler::py_resolve_loop_targets()
+    {
+        // (a for loop's targets: bound in its body's arm, which follows the arms of its header (if its body has begun))
+        auto& pending = py_function().pyLoopTargets;
+        if (!pending)
+            return;
+        auto const arms = py_arms();
+        auto const& header = pending->second;
+        if (arms.size() > header.size() && arms[header.size()].second == indented_construct::For &&
+            std::equal(header.begin(), header.end(), arms.begin(), [](std::uint32_t a, auto const& b) { return a == b.first; }))
+        {
+            std::vector<std::uint32_t> body{ header };
+            body.push_back(arms[header.size()].first);
+            for (auto const& name : pending->first)
+            {
+                auto& bound = py_function().pyBoundIn[name];
+                if (std::find(bound.begin(), bound.end(), body) == bound.end())
+                    bound.push_back(body);
+            }
+        }
+        pending.reset();
+    }
+
+    bool compiler::py_bound_here(std::string const& aName)
+    {
+        // (a name that a statement compiled before binds unconditionally, in the arm being compiled or one that contains it)
+        py_resolve_loop_targets();
+        auto const& function = py_function();
+        auto const bound = function.pyBoundIn.find(aName);
+        if (bound == function.pyBoundIn.end())
+            return false;
+        auto const arms = py_arms();
+        for (auto const& b : bound->second)
+            if (b.size() <= arms.size() && std::equal(b.begin(), b.end(), arms.begin(), [](std::uint32_t a, auto const& c) { return a == c.first; }))
+                return true;
+        return false;
+    }
+
     void compiler::py_update_counters()
     {
         // the int variables that only for loops over ranges bind (if they are not those of the previous pass, another pass)
@@ -4755,6 +4933,7 @@ namespace neos::compilers::python
             if (auto& order = py_function().pyBindingOrder; std::find(order.begin(), order.end(), aName) == order.end())
                 order.push_back(aName);
             iInference.pyBound[current_function_name()].insert(aName);
+            py_record_binding(aName);
         }
         auto const valueType = kind_of(py_type(aValue), py_big_integers());
         auto& variable = py_variable(aName, valueType);
@@ -8518,8 +8697,8 @@ namespace neos::compilers::python
 
     i_fragment const* compiler::variable_value(i_fragment const& aValue, neolib::i_string_view const& aName, i_symbol_table_entry const& aVariable)
     {
-        // a variable that may be unbound (it is deleted, or it is read before (in the order of the source) a binding of it): checked 
-        // (NameError, or UnboundLocalError)
+        // a variable that may be unbound (it is deleted, or no statement compiled before it binds it in its arm or one that contains it
+        // (see py_record_binding): e.g. "if c: x = 1" before it): checked (NameError, or UnboundLocalError)
         if (declaration_pass() || aVariable.type() != type::Object || !in_function())
             return nullptr;
         auto const name = aName.to_std_string();
@@ -8537,8 +8716,7 @@ namespace neos::compilers::python
             return result(py_owned(py_runtime_call("python::exec_read", { type::String, type::Object }, type::Object, { py_string(name), fragment{ aValue } })));
         bool const deleted = module ? iInference.pyDeletedGlobals.contains(name) :
             (iInference.pyDeleted.contains(current_function_name()) && iInference.pyDeleted.at(current_function_name()).contains(name));
-        auto const& order = py_function().pyBindingOrder;
-        bool boundBefore = std::find(order.begin(), order.end(), name) != order.end();
+        bool boundBefore = py_bound_here(name);
         // (a parameter: bound when the function is called)
         if (!boundBefore && !global && !module)
             if (auto const& signature = generator().signature_of(current_function()); signature.parameters().has_value())
@@ -8657,6 +8835,31 @@ namespace neos::compilers::python
 
     namespace
     {
+        // (the "as name" of except and with statements (the grammar's python.as.name): a name or a parenthesized list of names; other
+        // targets of a with statement (e.g. "as self.x" or "as (a, *b)") are its python.with.targets)
+        bool as_names(std::string_view aText)
+        {
+            auto const identifier = [](std::string_view aName)
+            {
+                if (aName.empty() || (aName[0] >= '0' && aName[0] <= '9'))
+                    return false;
+                for (auto const c : aName)
+                    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || static_cast<unsigned char>(c) >= 0x80u))
+                        return false;
+                return true;
+            };
+            auto text = trimmed(aText);
+            if (identifier(text))
+                return true;
+            if (text.size() < 2u || text.front() != '(' || text.back() != ')')
+                return false;
+            auto const parts = split(text.substr(1u, text.size() - 2u), ',');
+            for (std::size_t i = 0u; i < parts.size(); ++i)
+                if (!identifier(trimmed(parts[i])) && !(i + 1u == parts.size() && i > 0u && trimmed(parts[i]).empty()))
+                    return false;
+            return !parts.empty();
+        }
+
         // ("(a)": a)
         std::string target_name(std::string_view aText)
         {
@@ -8669,6 +8872,9 @@ namespace neos::compilers::python
 
     bool compiler::bind_name(neolib::i_string_view const& aName, type aType)
     {
+        // (with ... as targets: python.with.targets declares their names)
+        if (!as_names(aName.to_std_string_view()))
+            return true;
         if (auto const names = target_names(aName.to_std_string_view()))
         {
             for (auto const& name : *names)
@@ -8685,8 +8891,19 @@ namespace neos::compilers::python
     bool compiler::declare_loop_variable(neolib::i_string_view const& aName, i_symbol_table_entry const* aSymbol)
     {
         if (in_function() && !declaration_pass())
+        {
             if (auto& order = py_function().pyBindingOrder; std::find(order.begin(), order.end(), aName.to_std_string()) == order.end())
                 order.push_back(aName.to_std_string());
+            // (a for loop's variable: bound in its body (see py_record_binding))
+            auto& targets = py_function().pyLoopTargets;
+            if (!targets)
+            {
+                targets.emplace();
+                for (auto const& arm : py_arms())
+                    targets->second.push_back(arm.first);
+            }
+            targets->first.push_back(aName.to_std_string());
+        }
         if (aSymbol == nullptr)
         {
             if (declaration_pass())
@@ -8720,6 +8937,16 @@ namespace neos::compilers::python
 
     void compiler::emit_python(construct aConstruct, neolib::i_string_view const& aSource)
     {
+        // (the construct whose bindings py_record_binding records)
+        struct construct_source
+        {
+            compiler& c;
+            char const* source;
+            construct kind;
+            ~construct_source() { c.iPyConstructSource = source; c.iPyConstruct = kind; }
+        } const restore{ *this, iPyConstructSource, iPyConstruct };
+        iPyConstructSource = aSource.to_std_string_view().data();
+        iPyConstruct = aConstruct;
         auto stack = operands();
         auto const dummy = [&](type aType)
         {
@@ -8897,6 +9124,24 @@ namespace neos::compilers::python
             break;
         case construct::ForIn:
             py_for_in(aSource);
+            break;
+        case construct::WithTargets:
+            {
+                // (with ... as targets that are not names (e.g. "as self.x"): their names are objects; py_with binds them once the 
+                // manager has been entered)
+                auto const text = aSource.to_std_string_view();
+                std::vector<fragment_state::py_target> targets;
+                auto& pending = state().pyTargets;
+                while (!pending.empty() && pending.back().position >= text.data() && pending.back().position < text.data() + text.size())
+                {
+                    targets.insert(targets.begin(), pending.back());
+                    pending.pop_back();
+                }
+                if (declaration_pass())
+                    break;
+                py_declare_targets(targets);
+                state().pyWithTargets.push_back(std::move(targets));
+            }
             break;
         case construct::AsName:
             {
@@ -10140,7 +10385,19 @@ namespace neos::compilers::python
             emit_call_to(aStatement, runtime_function("neos::object_retain", { type::Object }, type::Void));
         }
         auto entered = py_owned(py_runtime_call("python::with_enter", { type::Object }, type::Object, { local_value(manager, type::Object) }));
-        if (aConstruct.handlerNames[0] && target_names(*aConstruct.handlerNames[0]))
+        if (aConstruct.handlerNames[0] && !as_names(*aConstruct.handlerNames[0]))
+        {
+            // (with manager as targets (e.g. "as self.x" or "as (a, *b)": see construct::WithTargets): bound as an assignment's)
+            if (state().pyWithTargets.empty())
+                throw std::runtime_error("with statement targets expected");
+            auto const targets = std::move(state().pyWithTargets.back());
+            state().pyWithTargets.pop_back();
+            if (targets.size() == 1u && !targets[0].starred)
+                py_bind(targets[0], operand_type{ entered }, aStatement);
+            else
+                py_bind_targets(targets, operand_type{ entered }, aStatement);
+        }
+        else if (aConstruct.handlerNames[0] && target_names(*aConstruct.handlerNames[0]))
         {
             // (with manager as (a, b): the value unpacked)
             auto const names = *target_names(*aConstruct.handlerNames[0]);

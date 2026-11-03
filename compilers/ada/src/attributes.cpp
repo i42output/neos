@@ -37,6 +37,7 @@
 #include <neolib/core/pair.hpp>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include "program.hpp"
 
 namespace neos::compilers::ada
@@ -71,24 +72,46 @@ namespace neos::compilers::ada
             auto v = evaluate(arguments[0], aRegion);
             if (v.is_integer())
                 dimension = static_cast<std::size_t>(v.integer().to_int64() - 1);
+            // (the dimension: static (3.6.2(3)))
+            else if (iSpeculation == 0 && iInstanceBodies == 0 && !static_expression(arguments[0]))
+                recover([&]() { error(arguments[0], "the dimension of 'Range must be static"); });
         }
         ada_type* t = nullptr;
+        bool typePrefix = false;
         // (a subtype, T'Base or T'Class; another attribute (e.g. X'Image (Y)) is a value)
         if (is_subtype_name(prefix, aRegion) || (prefix->is(construct::Attribute) && arguments_of(prefix).empty() &&
             (name_text(prefix->child(1)->source) == "base" || name_text(prefix->child(1)->source) == "class")))
+        {
             t = subtype_mark(prefix, aRegion);
+            typePrefix = true;
+            // (not of a scalar subtype with a predicate (3.2.4(29.2/4)))
+            if (t != nullptr && t->view()->is_scalar())
+                predicate_check(t, prefix);
+            // (not of a partial view (its full view not visible here), nor a type derived from one)
+            if (t != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && !t->view()->is_formal && partial_view_here(t, aRegion))
+                error(prefix, "the prefix of 'Range must be a scalar or array subtype (the full view of the private type is not visible)");
+        }
         else
         {
             t = resolve(prefix, nullptr, aRegion);
+            ada_type* seen = t;
             if (t != nullptr && t->view()->kind == type_kind::Access)
             {
+                seen = t->view()->designated;
                 t = designated_of(t);
                 prefix->mark |= 0x2000u;
             }
+            // (an object of a partial view (its full view not visible here): not an array (7.3(4)))
+            if (seen != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && partial_view_here(seen, aRegion))
+                error(prefix, "the prefix of 'Range must be an array (the full view of the private type is not visible)");
         }
         if (t == nullptr)
             error(aRangeAttribute, "prefix of 'Range has no range");
         auto* v = t->view();
+        // (an array (object or subtype) or a scalar subtype; a dimension for an array only (3.5(14), 3.6.2(7)))
+        if (iSpeculation == 0 && !v->is_formal && v->kind != type_kind::Private &&
+            ((v->kind != type_kind::Array && (!typePrefix || !arguments.empty() || !v->is_scalar()))))
+            error(aRangeAttribute, "the prefix of 'Range must be an array or a scalar subtype");
         aRangeAttribute->type = nullptr;
         set_meaning(aRangeAttribute, meaning::Value);
         if (v->kind == type_kind::Array)
@@ -209,7 +232,7 @@ namespace neos::compilers::ada
             if (prefix->is(construct::Identifier) || prefix->is(construct::Selected) || prefix->is(construct::Operator))
             {
                 std::vector<entity*> entities;
-                try { entities = prefix_entities(prefix, aRegion); } catch (compile_error const&) {}
+                try { speculation guard{ *this }; entities = prefix_entities(prefix, aRegion); } catch (compile_error const&) {}
                 if (!entities.empty() && std::all_of(entities.begin(), entities.end(), [](entity* e) { return e->is_subprogram() || e->kind == entity_kind::Entry; }))
                     return iUniversalAccess;
                 // (a protected object's subprogram: Object.Operation'Access)
@@ -425,6 +448,87 @@ namespace neos::compilers::ada
             }
             else
                 prefixType = resolve(prefix, aExpected != nullptr && (name == "old" || name == "loop_entry") ? aExpected : nullptr, aRegion);
+            // (E'Count: within the body of E's task or protected unit; a task's: not within a program unit inner to it (9.9(5)))
+            if (name == "count" && iSpeculation == 0 && iInstanceBodies == 0)
+            {
+                // (of an entry)
+                if (prefix->ent != nullptr && prefix->ent->kind != entity_kind::Entry && !prefix->is(construct::Apply))
+                    error(prefix, "the prefix of 'Count must denote an entry");
+                auto* entry = prefix->ent != nullptr && prefix->ent->kind == entity_kind::Entry ? prefix->ent :
+                    prefix->is(construct::Apply) && !prefix->children.empty() && prefix->child(0)->ent != nullptr &&
+                    prefix->child(0)->ent->kind == entity_kind::Entry ? prefix->child(0)->ent : nullptr;
+                auto* unit = entry != nullptr && entry->scope != nullptr ? entry->scope->owner : nullptr;
+                if (unit != nullptr)
+                {
+                    bool const task = unit->kind == entity_kind::Task || (unit->type != nullptr && unit->type->view()->kind == type_kind::Task);
+                    bool within = false;
+                    for (region* jump = nullptr, *r = aRegion; r != nullptr && !within; r = outward(r, jump))
+                    {
+                        auto* o = r->owner != nullptr && r->owner->owner != nullptr ? r->owner->owner : r->owner;
+                        if (o == unit || (o != nullptr && unit->type != nullptr && o->type == unit->type && o->kind == unit->kind))
+                            within = true;
+                        else if (task && (r->is_subprogram || r->is_package || (r->owner != nullptr && (r->owner->kind == entity_kind::Task ||
+                            r->owner->kind == entity_kind::Protected))))
+                            break;
+                    }
+                    // (of the current instance: not an entry of another object of the type)
+                    auto* name = prefix->is(construct::Apply) ? prefix->child(0) : prefix;
+                    if (within && name->is(construct::Selected) && !name->children.empty() && name->child(0)->ent != nullptr &&
+                        ((name->child(0)->ent->is_object() && name->child(0)->ent != unit) || name->child(0)->ent->kind == entity_kind::Subtype))
+                        within = false;
+                    // (a family: one of its members)
+                    if (entry->sub != nullptr && entry->sub->family_type != nullptr && !prefix->is(construct::Apply))
+                        recover([&]() { error(aAttribute, "the prefix of 'Count must denote a member of the entry family (an index is required)"); });
+                    if (!within)
+                        recover([&]() { error(aAttribute, "'Count can be used only within the body of the entry's task or protected unit"); });
+                }
+            }
+            // (X'Old: only in a postcondition; its prefix: no 'Result or 'Old (6.1.1(24/3)-(26/4)))
+            if (name == "old" && iSpeculation == 0 && iInstanceBodies == 0)
+            {
+                if (iPostconditionOf == nullptr)
+                    recover([&]() { error(aAttribute, "'Old can be used only in a postcondition"); });
+                std::function<bool(node*)> contains = [&](node* n)
+                {
+                    if (n->is(construct::Attribute) && n->size() >= 2u)
+                        if (auto const a = name_text(n->child(1)->source); a == "result" || a == "old")
+                            return true;
+                    for (auto* c : n->children)
+                        if (contains(c))
+                            return true;
+                    return false;
+                };
+                if (contains(prefix))
+                    recover([&]() { error(aAttribute, "the prefix of 'Old cannot contain 'Result or 'Old"); });
+                if (prefixType != nullptr && limited_type(prefixType, aRegion))
+                    recover([&]() { error(aAttribute, "the prefix of 'Old cannot be of a limited type"); });
+                // (in a potentially unevaluated expression: its prefix statically names an object (6.1.1(27/5)))
+                bool unevaluated = false;
+                for (node* c = aAttribute, *p = aAttribute->parent; p != nullptr && !unevaluated; c = p, p = p->parent)
+                {
+                    if (p->is(construct::IfExpression) || p->is(construct::CaseExpression))
+                        unevaluated = c != p->child(0);
+                    else if ((p->is(construct::AndThen) || p->is(construct::OrElse)) && p->size() == 2u)
+                        unevaluated = c == p->child(1);
+                    else if (p->is(construct::Quantified))
+                        unevaluated = c == p->children.back();
+                    else if (p->is(construct::In) && c != p->child(0))
+                    {
+                        // (a membership choice other than the first)
+                        node* first = nullptr;
+                        for (std::size_t i = 1u; i < p->size() && first == nullptr; ++i)
+                            if (!p->child(i)->is(construct::Flag))
+                                first = p->child(i);
+                        unevaluated = c != first;
+                    }
+                    else if (p->is(construct::Aspect) || p->is(construct::Aspects) || p->is(construct::PragmaArgument))
+                        break;
+                }
+                bool const statically = prefix->is(construct::Identifier) ||
+                    (prefix->is(construct::Selected) && prefix->child(0)->ent != nullptr && prefix->child(0)->ent->is_package());
+                if (unevaluated && !statically)
+                    recover([&]() { error(aAttribute, "the prefix of 'Old in a potentially unevaluated expression must statically name an object"); });
+            }
             if (name == "address" && prefix->ent != nullptr && prefix->ent->is_object())
                 prefix->ent->aliased = true;    // ('Address: the object is in memory)
             if (prefixType != nullptr && prefixType->view()->kind == type_kind::Access && (name == "first" || name == "last" || name == "length" || name == "range"))
@@ -440,6 +544,17 @@ namespace neos::compilers::ada
             if (iCurrentSubprogram == nullptr || iCurrentSubprogram->name != name_text(prefix->source))
                 if (auto* e = resolve_entity(prefix, aRegion); e != nullptr && e->sub != nullptr && e->sub->result != nullptr)
                     prefixType = e->sub->result;
+            // (only in a postcondition of the function (6.1.1(29/3)))
+            if (iSpeculation == 0 && iInstanceBodies == 0)
+            {
+                std::string prefixName{ name_text(prefix->source) };
+                if (auto const dot = prefixName.rfind('.'); dot != std::string::npos)
+                    prefixName = prefixName.substr(dot + 1);
+                if (prefixName.size() >= 2u && prefixName.front() == '"' && prefixName.back() == '"')
+                    prefixName = prefixName.substr(1, prefixName.size() - 2u);
+                if (iPostconditionOf == nullptr || prefixName != iPostconditionOf->name)
+                    error(aAttribute, "'Result can be used only in a postcondition of the function");
+            }
         }
         else if (name == "reduce")
         {
@@ -458,6 +573,126 @@ namespace neos::compilers::ada
             if (prefix->type == nullptr)
                 prefix->type = prefixType;
         auto* t = prefixType != nullptr ? prefixType->view() : nullptr;
+        // (a partial view whose full view is not visible here: not a scalar type (7.3(4)))
+        if (prefixType != nullptr && typePrefix && iSpeculation == 0 &&
+            (name == "pos" || name == "val" || name == "succ" || name == "pred" || name == "digits" || name == "delta" || name == "small" ||
+             name == "modulus" || name == "aft" || name == "fore" || name == "scale" || name == "min" || name == "max" || name == "value" ||
+             name == "width" || name == "wide_value" || name == "wide_width" || name == "first" || name == "last" || name == "range" ||
+             name == "base" || name == "wide_wide_value" ||
+             name == "wide_wide_width"))
+        {
+            if (auto* partial = prefixType->kind == type_kind::Private ? prefixType : prefixType->base != nullptr && prefixType->base->kind == type_kind::Private ? prefixType->base : nullptr;
+                partial != nullptr && !partial->is_formal)
+            {
+                if (auto* package = partial->declared_in != nullptr ? partial->declared_in->owner : nullptr;
+                    package != nullptr && !private_part_visible(package, aRegion) && formal_actual_instance(partial, aRegion) == nullptr)
+                    error(prefix, "the prefix of '" + name + " must be a scalar subtype (the full view of the private type is not visible)");
+            }
+            // (a type derived from a partial view)
+            else if (iInstanceBodies == 0 && prefixType->kind != type_kind::Private && partial_view_here(prefixType, aRegion))
+                error(prefix, "the prefix of '" + name + " must be a scalar subtype (the full view of the private type is not visible)");
+        }
+        // (an object of a partial view (its full view not visible here): not an array (7.3(4)))
+        if (prefixType != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 &&
+            (name == "first" || name == "last" || name == "length" || name == "range") &&
+            [&]()
+            {
+                // (as the prefix is seen: through an access value, its designated type's view)
+                auto* seen = prefix->type != nullptr ? prefix->type : prefixType;
+                if (seen->view()->kind == type_kind::Access && seen->view()->designated != nullptr)
+                    seen = seen->view()->designated;
+                return partial_view_here(seen, aRegion);
+            }())
+            error(prefix, "the prefix of '" + name + " must be an array (the full view of the private type is not visible)");
+        // (the prefix's kind for the attribute (K.2))
+        if (t != nullptr && !t->is_formal && !t->base_type()->view()->is_formal && t->kind != type_kind::Private)
+        {
+            auto* b = t->base_type()->view();
+            auto const require = [&](bool aOk, char const* aWhat)
+            {
+                if (!aOk)
+                    error(prefix, "the prefix of '" + name + " must be " + aWhat);
+            };
+            if (name == "aft" || name == "fore" || name == "small" || name == "delta")
+                require(b->kind == type_kind::Fixed || b->kind == type_kind::Decimal, "a fixed point subtype");
+            else if (name == "scale")
+                require(b->kind == type_kind::Decimal, "a decimal fixed point subtype");
+            else if (name == "digits")
+                require(b->kind == type_kind::Float || b->kind == type_kind::Decimal, "a floating point or decimal fixed point subtype");
+            else if (name == "modulus")
+                require(b->kind == type_kind::Modular, "a modular subtype");
+            else if (name == "pos" || name == "val")
+                require(typePrefix && b->is_discrete(), "a discrete subtype");
+            else if (name == "succ" || name == "pred")
+                require(typePrefix && b->is_scalar(), "a scalar subtype");
+            else if (name == "callable" || name == "terminated")
+            {
+                require(b->kind == type_kind::Task || b->kind == type_kind::ClassWide || b->kind == type_kind::Interface ||
+                    (prefixType->view()->kind == type_kind::Access && designated_of(prefixType) != nullptr), "a task");
+                // (a task object (9.9(1-2)); a task type's name: only as its current instance, within its body)
+                if (typePrefix && iInstanceBodies == 0 && iSpeculation == 0)
+                {
+                    auto* e = resolve_entity(prefix, aRegion);
+                    bool current = false;
+                    for (region* jump = nullptr, *r = aRegion; r != nullptr && e != nullptr && !current; r = outward(r, jump))
+                    {
+                        // (a task body's region: of its body procedure, whose owner is the task unit)
+                        auto* o = r->owner != nullptr && r->owner->owner != nullptr ? r->owner->owner : r->owner;
+                        current = o == e || (o != nullptr && e->kind == entity_kind::Type && e->type != nullptr && o->type == e->type);
+                    }
+                    if (!current)
+                        error(prefix, "the prefix of '" + name + " must denote a task object");
+                }
+            }
+            else if (name == "constrained")
+            {
+                // (an object of a discriminated type (3.7.2(3/3)); a private subtype (J.4))
+                bool discriminated = false;
+                for (auto const& c : b->components)
+                    discriminated = discriminated || (c.discriminant && !c.stored);
+                // (a private subtype (or one derived from a partial view): any (J.4))
+                auto const privateView = [](ada_type const* x)
+                {
+                    return x != nullptr && (x->kind == type_kind::Private || (x->base != nullptr && x->base->kind == type_kind::Private));
+                };
+                bool const privateSubtype = privateView(prefixType) || privateView(prefixType->base_type()->parent) || privateView(b->parent);
+                require(typePrefix ? (privateSubtype || (!b->is_scalar() && b->kind != type_kind::Array && b->kind != type_kind::Access)) :
+                    (discriminated || b->kind == type_kind::Private || b->kind == type_kind::ClassWide), "an object of a discriminated type");
+            }
+            else if (name == "first" || name == "last" || name == "length" || name == "range")
+            {
+                // (an array (object or subtype), or a scalar subtype (3.5(10), 3.6.2(3)); a dimension for an array only)
+                bool const array = b->kind == type_kind::Array || (b->kind == type_kind::Access && designated_of(prefixType) != nullptr &&
+                    designated_of(prefixType)->view()->kind == type_kind::Array);
+                if (!arguments.empty())
+                    require(array, "an array");
+                else if (typePrefix)
+                {
+                    require(array || b->is_scalar(), "a scalar or array subtype");
+                    // (not of a scalar subtype with a predicate (3.2.4(29.2/4)))
+                    if (b->is_scalar() && name != "length")
+                        predicate_check(prefixType, prefix);
+                }
+                else
+                    require(array, "an array");
+            }
+            else if (name == "first_bit" || name == "last_bit" || name == "position")
+                require(!typePrefix && prefix->is(construct::Selected) && prefix->size() >= 2u && prefix->child(1)->ent != nullptr &&
+                    (prefix->child(1)->ent->kind == entity_kind::Component || prefix->child(1)->ent->kind == entity_kind::Discriminant), "a component");
+            else if (name == "machine_emax" || name == "machine_emin" || name == "machine_mantissa" || name == "model_emin" || name == "model_mantissa" ||
+                name == "safe_first" || name == "safe_last" || name == "model_epsilon" || name == "denorm" || name == "signed_zeros")
+                require(b->kind == type_kind::Float, "a floating point subtype");
+            else if (name == "machine_radix" || name == "machine_rounds" || name == "machine_overflows")
+                require(b->is_real(), "a real subtype");
+            else if (name == "emax" || name == "epsilon" || name == "large" || name == "mantissa" || name == "safe_emax" || name == "safe_large" ||
+                name == "safe_small")
+                require(b->is_real(), "a real subtype");
+            else if (name == "value" || name == "wide_value" || name == "wide_wide_value" || name == "width" || name == "wide_width" ||
+                name == "wide_wide_width")
+                require(typePrefix && b->is_scalar(), "a scalar subtype");
+            else if (name == "storage_size")
+                require(b->kind == type_kind::Access || b->kind == type_kind::Task, "an access or task subtype or a task object");
+        }
         ada_type* result = nullptr;
         // (the arguments)
         if (name == "first" || name == "last" || name == "length" || name == "range")
@@ -514,6 +749,10 @@ namespace neos::compilers::ada
                 for (auto const& o : options)
                     if (o.type != nullptr && o.type->is_integer() && (at == nullptr || o.type->is_universal()))
                         at = o.type;
+                // (of an integer type (3.5.5(5)))
+                if (at == nullptr && name == "val" && iSpeculation == 0 && !options.empty() &&
+                    std::none_of(options.begin(), options.end(), [](auto const& o) { return o.type == nullptr || o.type->view()->is_integer() || o.type->view()->is_formal; }))
+                    error(arguments[0], "the argument of 'Val must be of an integer type");
                 resolve(arguments[0], at != nullptr && !at->is_universal() ? at : nullptr, aRegion);
             }
             result = prefixType->base_type();
@@ -825,6 +1064,13 @@ namespace neos::compilers::ada
                 auto high = v->high.integer();
                 if (high < low)
                     return static_value{ bigint{ 0 } };
+                // (an enumeration type with a representation: its codes (increasing with the positions, 13.4(11/3)))
+                if (auto const& codes = base->view()->representation; !codes.empty() && !low.negative() &&
+                    high < bigint{ static_cast<std::int64_t>(codes.size()) })
+                {
+                    low = codes[static_cast<std::size_t>(low.to_int64())];
+                    high = codes[static_cast<std::size_t>(high.to_int64())];
+                }
                 std::int64_t bits = 0;
                 if (low.negative())
                 {

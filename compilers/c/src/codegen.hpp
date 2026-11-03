@@ -102,6 +102,7 @@ namespace neos::compilers::c
         void else_();
         void end();
         void branch_to(std::size_t aControl, bool aConditional = false);
+        void branch_table(std::vector<std::size_t> const& aControls, std::size_t aDefault);   ///< ([i32 index] -> ())
         std::size_t find_break(node const* aStatement) const;
         std::size_t find_continue(node const* aStatement) const;
         std::size_t find_label(node const* aLabel) const;

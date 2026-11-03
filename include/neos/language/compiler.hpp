@@ -221,6 +221,7 @@ namespace neos::language
                 std::size_t bodyBase;
                 bool suspended = false;
                 bool implicit = false;
+                std::uint32_t arm = 0u;     ///< (the number of the arm being compiled (if, elif, else, try, except, finally, a loop's body, ...): each its own)
                 std::optional<std::size_t> bodyIndent;
                 std::vector<language::fragment> conditions;
                 std::vector<language::fragment> arms;
@@ -453,6 +454,7 @@ namespace neos::language
         std::size_t indented_count() const final;
         indented_construct indented_kind(std::size_t aIndex) const final;
         bool indented_try_else(std::size_t aIndex) const final;
+        std::uint32_t indented_arm(std::size_t aIndex) const final;
         void set_loop_epilogue(i_fragment const& aEpilogue) final;
         void finalize_suspended(std::size_t aIndent) final;
         std::size_t global_count() const final;
@@ -526,6 +528,7 @@ namespace neos::language
         std::unordered_map<i_symbol_table_entry const*, symbol_info> iSymbolInfo;
         std::uint64_t iSymbolSequence = 0u;
         bool iDeclarationPass = false;
+        std::uint32_t iIndentedArms = 0u;   ///< (the arms of indented constructs numbered so far (see indented_arm))
         std::vector<forward_declaration> iForwardDeclarations;
         std::vector<forward_declaration> iDeclaredFunctions;    ///< (as found by the declaration pass)
         inference iInference;

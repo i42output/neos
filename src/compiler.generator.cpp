@@ -389,6 +389,12 @@ namespace neos::language
         return state().indentStack.at(aIndex).tryElse;
     }
 
+    std::uint32_t compiler::indented_arm(std::size_t aIndex) const
+    {
+        auto const& construct = state().indentStack.at(aIndex);
+        return construct.suspended ? 0u : construct.arm;
+    }
+
     void compiler::set_loop_epilogue(i_fragment const& aEpilogue)
     {
         state().indentStack.back().epilogue = fragment{ aEpilogue };

@@ -320,6 +320,8 @@ namespace neos::compilers::c
             address(e->selected);
             return;
         case construct::Identifier:
+            if (e->ent == nullptr)
+                throw compile_error{ e, "builtin function '" + name_of(e) + "' must be directly called" };
             if (e->ent->kind == entity_kind::Function)
             {
                 i64(static_cast<std::int64_t>(iProgram.descriptor_of(e->ent)));
@@ -637,6 +639,8 @@ namespace neos::compilers::c
                 constant_value(*e->value, e->type);
                 return;
             }
+            if (e->ent == nullptr)
+                throw compile_error{ e, "builtin function '" + name_of(e) + "' must be directly called" };
             auto* ent = e->ent->self();
             if (ent->kind == entity_kind::Function)
             {

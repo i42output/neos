@@ -168,6 +168,8 @@ namespace neos::compilers::ada
         bool is_subtype = false;            ///< (a subtype (not a type): its constraints are its own)
         bool limited = false;
         bool tagged = false;
+        bool untagged_partial = false;
+        bool completing = false;            ///< (an incomplete view whose completion is being declared)      ///< (a partial view declared untagged (its full view may be tagged))
         bool abstract = false;
         bool is_formal = false;             ///< (a generic formal type)
         bool character_type = false;        ///< (an enumeration type with character literals)
@@ -176,6 +178,8 @@ namespace neos::compilers::ada
         bool anonymous_access = false;
         bool controlled = false;            ///< (it has controlled parts (needs finalization))
         bool synchronized_interface = false;
+        bool task_interface = false;
+        bool protected_interface = false;
         bool packed = false;
         bool unchecked_union = false;       ///< (aspect Unchecked_Union (B.3.3): its discriminants are not checked; Program_Error where
                                             ///< they would be needed and a view lacks inferable discriminants)
@@ -220,6 +224,8 @@ namespace neos::compilers::ada
         std::vector<dispatch_slot> slots;   ///< (a tagged type's dispatch table)
         std::vector<ada_type*> interfaces;  ///< (the interfaces it implements)
         predicate_info* predicate = nullptr;    ///< (a subtype with a predicate (its own, or of the subtype it is of))
+        bool nonstatic = false;                 ///< (a scalar subtype with a nonstatic constraint, or a subtype of one (4.9(26/3)))
+        ada_type* derived_partial = nullptr;    ///< (a type derived from a partial view whose full view is not visible where it is declared: that partial view (its characteristics are the partial view's where that full view is not visible, 7.3.1(5/1)))
         std::vector<std::pair<entity*, bool>> invariants;   ///< (its type invariants' functions (of the current instance); class-wide: inherited)
         ada_type* class_wide = nullptr;     ///< (a tagged type's T'Class)
         ada_type* specific = nullptr;       ///< (a class-wide type's T)
@@ -418,6 +424,7 @@ namespace neos::compilers::ada
         bool completed = false;             ///< (a declaration that has been completed (e.g. a deferred constant))
         bool imported = false;
         bool visible_in_body = true;
+        bool declaring = false;             ///< (hidden from all visibility: within its own declaration (8.3(16)))
         entity* completion = nullptr;       ///< (a deferred constant's full declaration; an incomplete type's full declaration)
         entity* generic = nullptr;          ///< (an instance: its generic unit)
         entity* parent = nullptr;           ///< (a child unit's parent unit; an inherited operation's parent type's operation)
@@ -498,6 +505,8 @@ namespace neos::compilers::ada
         std::size_t private_start = static_cast<std::size_t>(-1);  ///< (a package: the first declaration of its private part)
         bool private_visible = false;       ///< (a package's private part is visible (its body, its private part, or a private child))
         bool is_package = false;
+        bool package_body = false;          ///< (a package body's declarations (its parent: the package's))
+        node* private_part = nullptr;       ///< (a package: its private part)
         bool is_subprogram = false;
         bool master = false;                ///< (a block statement's (a master, 7.6.1(3/2)); subprograms' (is_subprogram) are too)
         bool generic_formals = false;

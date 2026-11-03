@@ -565,7 +565,44 @@ namespace neos::compilers::c
             end();
             dispatch(middle, aHigh);
         };
-        dispatch(0u, sorted.size());
+        // (dense cases: a table (br_table) of the values from the least to the greatest; else the binary search)
+        std::uint64_t entries = 0u;
+        for (auto const& c : sorted)
+            entries += static_cast<std::uint64_t>(c.high) - static_cast<std::uint64_t>(c.low) + 1u;
+        auto const span = sorted.empty() ? 0u : static_cast<std::uint64_t>(sorted.back().high) - static_cast<std::uint64_t>(sorted.front().low) + 1u;
+        bool const dense = sorted.size() >= 4u && span != 0u && span <= 4096u && span <= 4u * entries + 8u &&
+            std::all_of(sorted.begin(), sorted.end(), [&](auto const& c) { return !less(sorted.back().high, c.high); });
+        if (dense)
+        {
+            auto const low = sorted.front().low;
+            std::vector<std::size_t> table(static_cast<std::size_t>(span), targetOf(defaultSegment));
+            for (auto const& c : sorted)
+                for (auto v = static_cast<std::uint64_t>(c.low) - static_cast<std::uint64_t>(low); v <= static_cast<std::uint64_t>(c.high) - static_cast<std::uint64_t>(low); ++v)
+                    table[static_cast<std::size_t>(v)] = segmentControls[c.segment];
+            get(value);
+            if (k == vkind::I64)
+            {
+                // (the value's offset from the least: beyond the table (unsigned) is the default's)
+                auto const offset = temporary(type::I64);
+                i64(low);
+                op(opcode::I64Sub);
+                tee(offset);
+                i64(static_cast<std::int64_t>(span));
+                op(opcode::I64GeU);
+                branch_to(targetOf(defaultSegment), true);
+                get(offset);
+                op(opcode::I32ConvertI64);
+                release(offset);
+            }
+            else
+            {
+                i32(static_cast<std::int32_t>(low));
+                op(opcode::I32Sub);
+            }
+            branch_table(table, targetOf(defaultSegment));
+        }
+        else
+            dispatch(0u, sorted.size());
         release(value);
         // (the items before the first case label: reached by no case (only by a goto into the switch, which is not supported))
         for (auto* item : before)
@@ -872,7 +909,17 @@ namespace neos::compilers::c
             end();
             dispatch(middle, aHigh);
         };
-        dispatch(0u, entered.size());
+        // (the dispatch: a table (br_table) of the block numbers, if not too large; else a binary search of those that it enters)
+        if (!entered.empty() && entered.back() >= 0 && entered.back() < 4096)
+        {
+            std::vector<std::size_t> table(static_cast<std::size_t>(entered.back()) + 1u, context.blocks[0]);
+            for (auto const n : entered)
+                table[static_cast<std::size_t>(n)] = context.blocks[context.positions.at(n)];
+            get(context.state);
+            branch_table(table, context.blocks[0]);
+        }
+        else
+            dispatch(0u, entered.size());
         open_block(first);
     }
 

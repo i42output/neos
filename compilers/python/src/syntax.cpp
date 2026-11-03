@@ -331,7 +331,24 @@ namespace neos::compilers::python
                     bool const formatted = std::string_view{ aSource }.substr(prefix, quote - prefix).find_first_of("fF") != std::string_view::npos;
                     std::size_t j = quote + (triple ? 3u : 1u);
                     bool closed = false;
-                    for (; j < n; ++j)
+                    if (formatted)
+                    {
+                        // (an f-string's replacement fields can contain its own quote, line breaks and comments (PEP 701))
+                        auto const end = tokens::fstring_end(aSource, quote);
+                        auto const quoteSize = triple ? 3u : 1u;
+                        closed = end >= quote + 2u * quoteSize && end <= n && aSource.compare(end - quoteSize, quoteSize, std::string(quoteSize, q)) == 0;
+                        if (closed)
+                        {
+                            // (fstring_end stops before a line break or at the end of the text if it's unterminated: its last
+                            // character is then an escaped quote, not a closing one)
+                            std::size_t backslashes = 0u;
+                            for (auto b = end - quoteSize; b > quote + quoteSize && aSource[b - 1u] == '\\'; --b)
+                                ++backslashes;
+                            closed = backslashes % 2u == 0u;
+                        }
+                        j = closed ? end : n;
+                    }
+                    for (; !formatted && j < n; ++j)
                     {
                         if (aSource[j] == '\\')
                         {

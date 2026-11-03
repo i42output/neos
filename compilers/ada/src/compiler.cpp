@@ -439,6 +439,17 @@ namespace neos::compilers::ada
         }
         catch (compile_error const& e)
         {
+            // (errors recovered from (NEOS_ADA_ALL_ERRORS): the others, then the first)
+            if (iProgram != nullptr)
+                for (auto const& d : iProgram->diagnostics())
+                    if (d.where != e.where || std::string{ d.what() } != e.what())
+                    {
+                        std::string location;
+                        if (d.where != nullptr && d.where->file != nullptr)
+                            location = d.where->file->path + "(" + std::to_string(d.where->file->line_of(d.where->source)) + "," +
+                                std::to_string(d.where->file->column_of(d.where->source)) + "): ";
+                        std::cerr << location << "error: " << d.what() << std::endl;
+                    }
             report(e);
         }
     }

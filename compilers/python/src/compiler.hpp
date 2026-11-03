@@ -122,6 +122,7 @@ namespace neos::compilers::python
                 std::vector<py_target> children;            ///< (Group: its targets ("(a, b), c = ..."))
             };
             std::vector<py_target> pyTargets;               ///< assignment targets (the assignment that follows them pops them)
+            std::vector<std::vector<py_target>> pyWithTargets; ///< the targets of the with statements being compiled whose targets are not names (py_with pops them)
             struct py_access
             {
                 language::fragment receiver;
@@ -199,6 +200,10 @@ namespace neos::compilers::python
             std::map<std::uint32_t, std::pair<std::int64_t, std::int64_t>> pyCounters; ///< int variables that only for loops over 
                                                         ///< ranges bind (small integers): their values' range
             std::vector<std::string> pyBindingOrder;    ///< the names that the function binds (in the order of their first bindings)
+            std::map<std::string, std::vector<std::vector<std::uint32_t>>> pyBoundIn; ///< the arms (py_arms) in which the statements compiled
+                                                        ///< so far bind each name unconditionally (a read within one of them is of a bound name)
+            std::optional<std::pair<std::vector<std::string>, std::vector<std::uint32_t>>> pyLoopTargets; ///< a for loop's targets and the 
+                                                        ///< arms of its header: bound in its body's arm (once that has begun: see py_bound_here)
             std::vector<std::uint32_t> pendingIntegers; ///< integer temporaries of the statement being compiled
             std::vector<std::uint32_t> freeIntegers;    ///< integer temporaries that can be reused
         };
@@ -307,6 +312,10 @@ namespace neos::compilers::python
         std::uint32_t py_scratch(std::uint32_t aRole, type aType);
         bool py_big_integers() const;
         void py_bound(std::string const& aName, std::optional<interval> const& aCounter = {});
+        std::vector<std::pair<std::uint32_t, indented_construct>> py_arms() const;
+        void py_record_binding(std::string const& aName);
+        void py_resolve_loop_targets();
+        bool py_bound_here(std::string const& aName);
         void py_update_counters();
         std::optional<std::pair<std::int64_t, std::int64_t>> py_counter(std::uint32_t aLocal);
         void py_coerce_integer(fragment& aValue, type aTarget);
@@ -365,6 +374,8 @@ namespace neos::compilers::python
         } iPyLineCache;                                     ///< (source_line's: of the source it was last asked about)
         std::map<std::string, std::string> iPySourceTexts;  ///< (a source as rewritten -> the source as written)
         neolib::i_string_view const* iPyOperationSource = nullptr; ///< (the source of the operation being emitted (see py_operation))
+        char const* iPyConstructSource = nullptr;   ///< (the source of the construct being emitted (emit_python): see py_record_binding)
+        construct iPyConstruct = {};                ///< (the construct being emitted)
         std::set<std::string> iPyPackageFunctions;           ///< (the functions of the language's packages (builtins.py): as values, the builtins)
         std::map<std::string, char> iPyFlavours;             ///< (function -> G: a generator function, C: a coroutine function, A: an async generator function)
         std::map<std::string, std::vector<std::pair<std::string, std::string>>> iPyAnnotations; ///< (a function of a module -> the sources of its annotations)

@@ -1,5 +1,5 @@
 /*
-  socketserver.cpp
+  importlib.cpp
 
   Copyright (c) 2026 Leigh Johnston.  All Rights Reserved.
 
@@ -30,9 +30,10 @@
   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-  Portions of this file are derived from CPython 3.13 (Lib/importlib/__init__.py, Lib/importlib/util.py and
-  Lib/importlib/_bootstrap.py: import_module, _gcd_import, _sanity_check, _resolve_name, reload's checks, find_spec and
-  ModuleSpec), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python
+  Portions of this file are derived from CPython 3.13 (Lib/importlib/__init__.py, Lib/importlib/util.py,
+  Lib/importlib/_bootstrap.py and Lib/importlib/_bootstrap_external.py: import_module, _gcd_import, _sanity_check,
+  _resolve_name, reload's checks, find_spec, ModuleSpec, cache_from_source, source_from_cache, _path_split and
+  _path_join), Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved. They are used under the Python
   Software Foundation License Version 2 (see runtime/python/LICENSE.PSF). Changes: translated from Python to C++ for the
   neos Python runtime plugin and adapted to its object model (see runtime/python/NOTICE).
 */
@@ -41,8 +42,10 @@
 // relative name's in its package), invalidate_caches and reload (the runtime has no finders' caches, and a module is not run again:
 // reload returns it); importlib.util's find_spec (a module's spec: its own if it has been imported, else a ModuleSpec of the module 
 // that the runtime implements (built-in) or of its source file on sys.path (or its package's __path__)) and resolve_name; and 
-// importlib.machinery's ModuleSpec and suffixes.
+// importlib.util's cache_from_source and source_from_cache (PEP 3147/488 paths: NotImplementedError while sys.implementation.cache_tag
+// is None, as the runtime's is: it has no bytecode files); importlib.machinery's ModuleSpec and suffixes.
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -112,6 +115,133 @@ namespace neos::python_runtime::detail
             if (level > 0 && !aPackage.truthy())
                 py_raise("TypeError", std::string{ aWhat } + aName.repr());
             return { text.substr(static_cast<std::size_t>(level)), level };
+        }
+
+        // (_bootstrap_external's path_separators, _path_split and _path_join (its POSIX form, with the platform's separators))
+#ifdef _WIN32
+        constexpr std::string_view sPathSeparators = "\\/";
+#else
+        constexpr std::string_view sPathSeparators = "/";
+#endif
+        std::pair<std::string, std::string> path_split(std::string const& aPath)
+        {
+            auto const i = aPath.find_last_of(sPathSeparators);
+            if (i == std::string::npos)
+                return { {}, aPath };
+            return { aPath.substr(0u, i), aPath.substr(i + 1u) };
+        }
+
+        std::string path_join(std::initializer_list<std::string> aParts)
+        {
+            std::string result;
+            for (auto const& part : aParts)
+            {
+                if (part.empty())
+                    continue;
+                auto const end = part.find_last_not_of(sPathSeparators);
+                if (!result.empty())
+                    result += sPathSeparators[0];
+                result += end == std::string::npos ? std::string{} : part.substr(0u, end + 1u);
+            }
+            return result;
+        }
+
+        bool is_alnum(std::string const& aText)
+        {
+            return builtin("str").attr("isalnum")(py{ aText }).truthy();
+        }
+
+        // (_bootstrap_external.cache_from_source: the .pyc path of a source file (PEP 3147/488))
+        py cache_from_source(py const& aPath, py const& aDebugOverride, py aOptimization)
+        {
+            if (!aDebugOverride.is_none())
+            {
+                import_attribute("warnings", "warn").call({ S("the debug_override parameter is deprecated; use 'optimization' instead"), builtin("DeprecationWarning") });
+                if (!aOptimization.is_none())
+                    py_raise("TypeError", "debug_override or optimization must be set to None");
+                aOptimization = aDebugOverride.truthy() ? S("") : py{ 1 };
+            }
+            auto const path = import_attribute("os", "fspath")(aPath).str();
+            auto const [head, tail] = path_split(path);
+            auto const dot = tail.rfind('.');
+            auto const base = dot == std::string::npos ? std::string{} : tail.substr(0u, dot);
+            auto const rest = dot == std::string::npos ? tail : tail.substr(dot + 1u);
+            py const tag = import_attribute("sys", "implementation").attr("cache_tag");
+            if (tag.is_none())
+                py_raise("NotImplementedError", "sys.implementation.cache_tag is None");
+            std::string almostFilename = (!base.empty() ? base : rest) + (dot == std::string::npos ? "" : ".") + tag.str();
+            if (aOptimization.is_none())
+            {
+                py const optimize = import_attribute("sys", "flags").attr("optimize");
+                aOptimization = optimize.truthy() ? optimize : S("");
+            }
+            auto const optimization = builtin("str")(aOptimization).str();
+            if (!optimization.empty())
+            {
+                if (!is_alnum(optimization))
+                    py_raise("ValueError", py{ optimization }.repr() + " is not alphanumeric");
+                almostFilename += ".opt-" + optimization;
+            }
+            auto const filename = almostFilename + ".pyc";
+            py const prefix = import_attribute("sys", "pycache_prefix");
+            if (!prefix.is_none())
+            {
+                // (the prefix's tree mirrors the source's: head made absolute, without its drive's root)
+                std::string absolute = head;
+                if (!import_attribute("os", "path").attr("isabs")(py{ head }).truthy())
+                    absolute = path_join({ import_attribute("os", "getcwd")().str(), head });
+                auto const start = absolute.find_first_not_of(sPathSeparators);
+                return py{ path_join({ prefix.str(), start == std::string::npos ? std::string{} : absolute.substr(start), filename }) };
+            }
+            return py{ path_join({ head, "__pycache__", filename }) };
+        }
+
+        // (_bootstrap_external.source_from_cache: the source path of a .pyc path)
+        py source_from_cache(py const& aPath)
+        {
+            if (import_attribute("sys", "implementation").attr("cache_tag").is_none())
+                py_raise("NotImplementedError", "sys.implementation.cache_tag is None");
+            auto const path = import_attribute("os", "fspath")(aPath).str();
+            auto [head, pycacheFilename] = path_split(path);
+            bool foundInPycachePrefix = false;
+            py const prefix = import_attribute("sys", "pycache_prefix");
+            if (!prefix.is_none())
+            {
+                auto stripped = prefix.str();
+                if (auto const end = stripped.find_last_not_of(sPathSeparators); end != std::string::npos)
+                    stripped.erase(end + 1u);
+                else
+                    stripped.clear();
+                if (head.starts_with(stripped + sPathSeparators[0]))
+                {
+                    head = head.substr(stripped.size());
+                    foundInPycachePrefix = true;
+                }
+            }
+            if (!foundInPycachePrefix)
+            {
+                auto [parent, pycache] = path_split(head);
+                if (pycache != "__pycache__")
+                    py_raise("ValueError", "__pycache__ not bottom-level directory in " + py{ path }.repr());
+                head = parent;
+            }
+            auto const dotCount = std::count(pycacheFilename.begin(), pycacheFilename.end(), '.');
+            if (dotCount != 2 && dotCount != 3)
+                py_raise("ValueError", "expected only 2 or 3 dots in " + py{ pycacheFilename }.repr());
+            if (dotCount == 3)
+            {
+                // (pycache_filename.rsplit('.', 2)[-2])
+                auto const last = pycacheFilename.rfind('.');
+                auto const before = pycacheFilename.rfind('.', last - 1u);
+                auto const optimization = pycacheFilename.substr(before + 1u, last - before - 1u);
+                if (!optimization.starts_with("opt-"))
+                    py_raise("ValueError", "optimization portion of filename does not start with 'opt-'");
+                auto const level = optimization.substr(4u);
+                if (!is_alnum(level))
+                    py_raise("ValueError", "optimization level " + py{ optimization }.repr() + " is not an alphanumeric value");
+            }
+            auto const baseFilename = pycacheFilename.substr(0u, pycacheFilename.find('.'));
+            return py{ path_join({ head, baseFilename + ".py" }) };
         }
 
         struct importlib_state
@@ -330,6 +460,18 @@ namespace neos::python_runtime::detail
                     while (level < text.size() && text[level] == '.')
                         ++level;
                     return py{ resolve_name(text.substr(level), a[1].str(), static_cast<long long>(level)) };
+                }));
+                add("cache_from_source", native("cache_from_source", "importlib.util", "Given the path to a .py file, return the path to its .pyc file.\n\n    The .py file does not need to exist; this simply returns the path to the\n    .pyc file calculated as if the .py file were imported.\n\n    The 'optimization' parameter controls the presumed optimization level of\n    the bytecode file. If 'optimization' is not None, the string representation\n    of the argument is taken and verified to be alphanumeric (else ValueError\n    is raised).\n\n    The debug_override parameter is deprecated. If debug_override is not None,\n    a True value is the same as setting 'optimization' to the empty string\n    while a False value is equivalent to setting 'optimization' to '1'.\n\n    If sys.implementation.cache_tag is None then NotImplementedError is raised.\n\n    ",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("cache_from_source", { py_positional("path"), py_positional("debug_override", py::none()), py_keyword("optimization", py::none()) }, aArgs, aKwargs);
+                    return cache_from_source(a[0], a[1], a[2]);
+                }));
+                add("source_from_cache", native("source_from_cache", "importlib.util", "Given the path to a .pyc. file, return the path to its .py file.\n\n    The .pyc file does not need to exist; this simply returns the path to\n    the .py file calculated to correspond to the .pyc file.  If path does\n    not conform to PEP 3147/488 format, ValueError will be raised. If\n    sys.implementation.cache_tag is None then NotImplementedError is raised.\n\n    ",
+                    [](std::vector<py> const& aArgs, object* aKwargs) -> py
+                {
+                    auto const a = py_bind("source_from_cache", { py_positional("path") }, aArgs, aKwargs);
+                    return source_from_cache(a[0]);
                 }));
                 add("find_spec", native("find_spec", "importlib.util", "Return the spec for the specified module.\n\nFirst, sys.modules is checked to see if the module was already imported. If\nso, then sys.modules[name].__spec__ is returned. If that happens to be\nset to None, then ValueError is raised. If the module is not in\nsys.modules, then sys.meta_path is searched for a suitable spec with the\nvalue of 'path' given to the finders. None is returned if no spec could\nbe found.\n\nIf the name is for submodule (contains a dot), the parent module is\nautomatically imported.\n\nThe name and package arguments work the same as importlib.import_module().\nIn other words, relative module names (with leading dots) work.\n\n",
                     [](std::vector<py> const& aArgs, object* aKwargs) -> py

@@ -1138,6 +1138,15 @@ namespace neos::compilers::c
         u32(static_cast<std::uint32_t>(iControls.size() - 1u - aControl));
     }
 
+    void function_generator::branch_table(std::vector<std::size_t> const& aControls, std::size_t aDefault)
+    {
+        op(opcode::BrTable);
+        u32(static_cast<std::uint32_t>(aControls.size()));
+        for (auto const c : aControls)
+            u32(static_cast<std::uint32_t>(iControls.size() - 1u - c));
+        u32(static_cast<std::uint32_t>(iControls.size() - 1u - aDefault));
+    }
+
     std::size_t function_generator::find_break(node const* aStatement) const
     {
         for (std::size_t i = iControls.size(); i-- > 0u;)

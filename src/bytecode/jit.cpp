@@ -1200,6 +1200,29 @@ namespace neos
                             emit8(0xFFu);
                             emit8(static_cast<std::uint8_t>(0xE0u | (aReg & 7)));
                         }
+                        // (a jump table: aIndex (32 bits, below the table's size) selects an entry (8 bytes: jmp rel32, then int3s) that 
+                        // jumps to its label; aTemp: a register it uses; aIndex is changed)
+                        void jump_table(int aIndex, int aTemp, std::vector<std::size_t> const& aLabels)
+                        {
+                            auto const table = new_label();
+                            lea_label(aTemp, table);
+                            shift_ri(4, false, aIndex, 3u);     // (shl: the entry's offset)
+                            alu_rr(0, true, aTemp, aIndex);
+                            jmp_r(aTemp);
+                            barrier();
+                            if (!iInCold)
+                                align(8u);
+                            bind(table);
+                            for (auto const l : aLabels)
+                            {
+                                emit8(0xE9u);
+                                fixup(l);
+                                emit8(0xCCu);
+                                emit8(0xCCu);
+                                emit8(0xCCu);
+                            }
+                            barrier();
+                        }
                         void jmp(std::size_t aLabel)
                         {
                             auto const at = offset();
@@ -1885,7 +1908,7 @@ namespace neos
                     // (an instruction that the baseline's code generator has (see code_generator::instruction))
                     bool baseline_instruction(std::uint8_t aOp)
                     {
-                        if (aOp <= 0x05u || (aOp >= 0x0Bu && aOp <= 0x0Du) || aOp == 0x0Fu || aOp == 0x10u || aOp == 0x11u || aOp == 0x1Au || aOp == 0x1Bu)
+                        if (aOp <= 0x05u || (aOp >= 0x0Bu && aOp <= 0x0Eu) || aOp == 0x0Fu || aOp == 0x10u || aOp == 0x11u || aOp == 0x1Au || aOp == 0x1Bu)
                             return true;
                         return (aOp >= 0x20u && aOp <= 0x24u) || (aOp >= 0x28u && aOp <= 0x3Eu) || (aOp >= 0x41u && aOp <= 0xC1u);
                     }
@@ -3641,6 +3664,78 @@ namespace neos
                             if (target.kind != control::Loop)
                                 transfer_block_result(target, true);
                             a.jmp(target.label);
+                        }
+                        // br_table: the index compared (a binary search) to reach a stub for each of the depths that it branches to
+                        // (each stub the branch from the state before the instruction)
+                        template <typename Immediate>
+                        void br_table(std::size_t aCount, Immediate const& aImmediate)
+                        {
+                            materialize_cond();
+                            auto const index = pop();
+                            int const r = alloc(false);
+                            load_gpr(index, r);
+                            release(index);
+                            std::vector<std::size_t> depths;
+                            for (std::size_t i = 0u; i <= aCount; ++i)
+                                depths.push_back(static_cast<std::size_t>(aImmediate(1u + i)));
+                            std::map<std::size_t, std::size_t> stubs;
+                            for (auto const d : depths)
+                                if (!stubs.contains(d))
+                                    stubs[d] = a.new_label();
+                            // (an index beyond the table (unsigned): the default)
+                            a.alu_ri(7, false, r, static_cast<std::int32_t>(aCount));
+                            a.jcc(AE, stubs[depths[aCount]]);
+                            std::function<void(std::size_t, std::size_t)> search = [&](std::size_t aBegin, std::size_t aEnd)
+                            {
+                                if (aEnd - aBegin <= 4u)
+                                {
+                                    for (auto t = aBegin; t + 1u < aEnd; ++t)
+                                    {
+                                        a.alu_ri(7, false, r, static_cast<std::int32_t>(t));
+                                        a.jcc(E, stubs[depths[t]]);
+                                    }
+                                    a.jmp(stubs[depths[aEnd - 1u]]);
+                                    return;
+                                }
+                                auto const middle = (aBegin + aEnd) / 2u;
+                                auto const upper = a.new_label();
+                                a.alu_ri(7, false, r, static_cast<std::int32_t>(middle));
+                                a.jcc(AE, upper);
+                                search(aBegin, middle);
+                                a.bind(upper);
+                                search(middle, aEnd);
+                            };
+                            if (aCount >= 8u)
+                            {
+                                // (a jump table of the stubs (the index is below the table's size))
+                                std::vector<std::size_t> entries;
+                                for (std::size_t t = 0u; t < aCount; ++t)
+                                    entries.push_back(stubs[depths[t]]);
+                                int const t = alloc(false);
+                                a.jump_table(r, t, entries);
+                                release_reg(false, t);
+                            }
+                            else if (aCount > 0u)
+                                search(0u, aCount);
+                            release_reg(false, r);
+                            auto const saved = iStack;
+                            int savedGpr[16], savedXmm[16];
+                            std::copy(std::begin(iGprOwner), std::end(iGprOwner), savedGpr);
+                            std::copy(std::begin(iXmmOwner), std::end(iXmmOwner), savedXmm);
+                            for (auto const& [depth, label] : stubs)
+                            {
+                                iStack = saved;
+                                std::copy(std::begin(savedGpr), std::end(savedGpr), iGprOwner);
+                                std::copy(std::begin(savedXmm), std::end(savedXmm), iXmmOwner);
+                                a.bind(label);
+                                branch(depth);
+                                release_temps();
+                            }
+                            iStack = saved;
+                            std::copy(std::begin(savedGpr), std::end(savedGpr), iGprOwner);
+                            std::copy(std::begin(savedXmm), std::end(savedXmm), iXmmOwner);
+                            unwind(iControl.back().base);
+                            iReachable = false;
                         }
                         void conditional_branch(std::size_t aDepth)
                         {
@@ -5502,6 +5597,9 @@ namespace neos
                                 branch(static_cast<std::size_t>(aImmediate(0)));
                                 unwind(iControl.back().base);
                                 iReachable = false;
+                                break;
+                            case 0x0E:
+                                br_table(static_cast<std::size_t>(aImmediate(0)), aImmediate);
                                 break;
                             case 0x0D:
                                 conditional_branch(static_cast<std::size_t>(aImmediate(0)));
@@ -7953,8 +8051,13 @@ namespace neos
                             auto const targets = successors.size() - 1u;
                             if (targets >= 8u)
                             {
-                                // (a binary search of the targets' indices)
-                                switch_search(0u, targets, successors);
+                                // (a jump table of the targets (an index beyond it: the default); rax and rcx are not allocated)
+                                a.alu_ri(7, false, RAX, static_cast<std::int32_t>(targets));
+                                a.jcc(AE, iBlockLabels[successors.back()]);
+                                std::vector<std::size_t> entries;
+                                for (std::size_t t = 0u; t < targets; ++t)
+                                    entries.push_back(iBlockLabels[successors[t]]);
+                                a.jump_table(RAX, RCX, entries);
                                 return;
                             }
                             for (std::size_t t = 0u; t < targets; ++t)
@@ -7964,26 +8067,6 @@ namespace neos
                             }
                             if (forwarded(successors.back()) != iNext)
                                 a.jmp(iBlockLabels[successors.back()]);
-                        }
-                        void switch_search(std::size_t aBegin, std::size_t aEnd, decltype(ssa::block::successors) const& aSuccessors)
-                        {
-                            if (aEnd - aBegin <= 4u)
-                            {
-                                for (auto t = aBegin; t < aEnd; ++t)
-                                {
-                                    a.alu_ri(7, false, RAX, static_cast<std::int32_t>(t));
-                                    a.jcc(E, iBlockLabels[aSuccessors[t]]);
-                                }
-                                a.jmp(iBlockLabels[aSuccessors.back()]);
-                                return;
-                            }
-                            auto const middle = (aBegin + aEnd) / 2u;
-                            auto const upper = a.new_label();
-                            a.alu_ri(7, false, RAX, static_cast<std::int32_t>(middle));
-                            a.jcc(AE, upper);
-                            switch_search(aBegin, middle, aSuccessors);
-                            a.bind(upper);
-                            switch_search(middle, aEnd, aSuccessors);
                         }
                         void return_(value v)
                         {

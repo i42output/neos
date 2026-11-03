@@ -128,10 +128,10 @@ namespace neos::compilers::c
 
     bool function_generator::validate(std::string const& aName)
     {
-        static bool const sEnabled = std::getenv("NEOS_C_VALIDATE") != nullptr || std::getenv("NEOS_ADA_DUMP") != nullptr;
+        static bool const sEnabled = std::getenv("NEOS_C_VALIDATE") != nullptr || std::getenv("NEOS_C_DUMP") != nullptr;
         if (!sEnabled)
             return true;
-        static char const* const sDump = std::getenv("NEOS_ADA_DUMP");
+        static char const* const sDump = std::getenv("NEOS_C_DUMP");
         bool const dump = sDump != nullptr && aName == sDump;
         std::string locals;
         for (auto t : iParameters)

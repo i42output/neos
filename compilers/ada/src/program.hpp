@@ -46,6 +46,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <functional>
 #include <list>
 #include <set>
@@ -96,6 +97,62 @@ namespace neos::compilers::ada
         compiler& comp() { return iCompiler; }
         i_code_generator& gen() { return iCompiler.gen(); }
         [[noreturn]] void error(node const* aNode, std::string const& aMessage);
+        [[noreturn]] void error_in_private_part_too(node const* aNode, std::string const& aMessage) { throw compile_error{ aNode, aMessage, true }; }
+        /// (error recovery (NEOS_ADA_ALL_ERRORS): an error in aWork (a declaration, a statement, a unit) recorded and analysis continued,
+        /// unless the error is part of a speculative resolution (`speculation`))
+        template <typename Work>
+        void recover(Work&& aWork)
+        {
+            if (!iRecovery || iSpeculation > 0)
+            {
+                aWork();
+                return;
+            }
+            auto const entities = iEntities.size();
+            try
+            {
+                aWork();
+            }
+            catch (compile_error const& error)
+            {
+                // (legality checking: an error within an instance's body is the generic body's (reported by check_generic, 12.3(11)))
+                if (iInstanceBodies > 0 && iCheckOnly && !(error.private_part_too && iInstanceBodies == iInstancePrivateParts))
+                    return;
+                // (an error within an instance: reported at the (outermost) instantiation (12.3(11)))
+                compile_error const e = iInstantiationSites.empty() || error.where == nullptr ? error : compile_error{ iInstantiationSites.front(),
+                    std::string{ error.what() } + " (in an instance)" };
+                // (the entities that the failed work declared without completing them: hidden, typed (no cascade of crashes))
+                for (auto i = entities; i < iEntities.size(); ++i)
+                    if (iEntities[i].type == nullptr && (iEntities[i].is_type() || iEntities[i].is_object() || iEntities[i].kind == entity_kind::NamedNumber))
+                    {
+                        iEntities[i].type = iUniversalInteger;
+                        iEntities[i].visible_in_body = false;
+                    }
+                // (once: an instance's copy of the node reports the same error at the same place)
+                for (auto const& d : iDiagnostics)
+                    if ((d.where == e.where || (d.where != nullptr && e.where != nullptr && d.where->source.data() == e.where->source.data())) &&
+                        std::string{ d.what() } == e.what())
+                        return;
+                iDiagnostics.push_back(e);
+            }
+        }
+        std::vector<compile_error> const& diagnostics() const { return iDiagnostics; }
+        struct speculation      ///< (errors within its lifetime are speculative: caught by the resolution that tries something)
+        {
+            program& p;
+            explicit speculation(program& aProgram) : p{ aProgram } { ++p.iSpeculation; }
+            ~speculation() { --p.iSpeculation; }
+        };
+        // (where the name of an incomplete view can be used (3.10.1(5/3)-(9.4/3)): nowhere, anywhere such names are allowed (an
+        // access type's designated subtype, a profile in a declaration, a generic actual), or (a tagged one) a body's parameter)
+        enum class incomplete_uses { None, Allowed, TaggedOnly };
+        struct incomplete_use
+        {
+            program& p;
+            incomplete_uses saved;
+            incomplete_use(program& aProgram, incomplete_uses aUses) : p{ aProgram }, saved{ aProgram.iIncompleteUses } { p.iIncompleteUses = aUses; }
+            ~incomplete_use() { p.iIncompleteUses = saved; }
+        };
         // --- the model
     public:
         entity* new_entity(entity_kind aKind, std::string const& aName, node* aDecl, region* aScope);
@@ -109,6 +166,7 @@ namespace neos::compilers::ada
         void analyse_unit(unit_info& aUnit);
         unit_info* find_unit(std::string const& aName, bool aBody);
         void setup_standard();
+        void private_child_with_check(node* aClause, node* aName, std::string const& aFull);
         void apply_context(node* aContext, region* aRegion);
         // --- declarations (analysis of a declarative part: entities, types, and code for their elaboration)
     public:
@@ -185,6 +243,13 @@ namespace neos::compilers::ada
     public:
         std::vector<entity*> visible(std::string const& aName, region* aRegion);    ///< (the entities that a direct name denotes)
         std::vector<entity*> selected(entity* aPrefix, std::string const& aName, region* aRegion);
+        std::vector<entity*> selected_declared(entity* aPrefix, std::string const& aName, region* aRegion);
+        struct declaring        ///< (entities hidden from all visibility while it lives: within their declarations (8.3(16)))
+        {
+            std::vector<entity*> entities;
+            ~declaring() { for (auto* e : entities) e->declaring = false; }
+            void add(entity* aEntity) { aEntity->declaring = true; entities.push_back(aEntity); }
+        };
         void prefixed_view_object(node* aView, region* aRegion);
         std::uint64_t standard_pool();
         std::uint64_t stream_size(ada_type* aType);                 ///< (an elementary type's stream elements per value: its specified Stream_Size's (its ancestor's), else its size's (13.13.2(1.2/3)))                               ///< (the standard storage pool's object (its address))
@@ -194,6 +259,8 @@ namespace neos::compilers::ada
         entity* resolve_entity(node* aName, region* aRegion);                      ///< (a name that denotes a non-overloadable entity)
         ada_type* resolve(node* aExpression, ada_type* aExpected, region* aRegion);  ///< (resolves it (annotating it): its type)
         ada_type* condition(node* aCondition, region* aRegion);
+        void parenthesis_check(node* aExpression);
+        void case_choices_check(node* aCase, node* aSelector, ada_type* aType, std::vector<node*> const& aAlternatives, region* aRegion);
         ada_type* resolve_in_class(node* aExpression, region* aRegion, bool (*aInClass)(ada_type const*));
         bool class_wide_access_actual(ada_type* aFormal, ada_type* aActual);  ///< (resolves a condition (of any boolean type): its type)
         std::vector<interpretation> interpretations(node* aExpression, region* aRegion);
@@ -202,8 +269,18 @@ namespace neos::compilers::ada
         std::unordered_map<node*, cached_interpretations> iInterpretations;
         static_value evaluate(node* aExpression, region* aRegion);                 ///< (its static value, if static)
         bool is_static(node* aExpression);
+        bool static_expression(node* aExpression);                                 ///< (a static expression (4.9))
+        bool static_subtype(ada_type* aType);
+        void end_name_check(node* aDecl);
+        void conformance_check(subprogram_info const& aDeclared, subprogram_info const& aBody, std::string const& aName, node* aWhere);
+        bool static_choice(node* aChoice, ada_type* aType, region* aRegion);         ///< (a static discrete choice)
+        bool is_variable(node* aName, int aDepth = 0);                             ///< (a name that denotes a variable (3.3(13-23)); when in doubt, true)
+        void redeclaration_check(std::string const& aName, entity_kind aKind, node* aDefining, region* aRegion);
+        bool statically_matching(ada_type* a, ada_type* b);                       ///< (subtypes that statically match (4.9.1))
+        std::string formal_type_mismatch(node* aFormal, ada_type* aActual, region* aFormalRegion, region* aRegion);                                      ///< (a static subtype (4.9(26-28)))
         // --- statements
     public:
+        void statement_identifiers_check(node* aStatements);
         void statements(node* aStatements, region* aRegion);
         void statement(node* aStatement, region* aRegion);
         // --- code generation
@@ -326,6 +403,7 @@ namespace neos::compilers::ada
         void resolve_deferred_aspects(region* aRegion);
         void current_instance_components(node* aExpression, entity* aType);   ///< (an aspect of a record type: its components' names denote the current instance's)
         std::map<region*, std::vector<deferred_aspect>> iDeferredAspects;
+        std::map<region const*, entity*> iAcceptEntries;      ///< (an accept statement's region: its entry (the accept's parameters are the entry's))
         bool is_static_resolvable(node* aExpression, region* aRegion);
     public:
         std::map<ada_type*, entity*> iObjectCollections;   ///< (access types whose allocators create objects that need finalization: their collections (hidden objects))
@@ -334,6 +412,13 @@ namespace neos::compilers::ada
     private:
     private:
         compiler& iCompiler;
+        bool const iRecovery = std::getenv("NEOS_ADA_ALL_ERRORS") != nullptr;
+        bool const iCheckOnly = std::getenv("NEOS_ADA_CHECK") != nullptr;
+        int iSpeculation = 0;
+        int iInstancePrivateParts = 0;
+        entity* iPostconditionOf = nullptr;     ///< (resolving a postcondition: its subprogram ('Result))      ///< (of iInstanceBodies: instances' private parts)
+        incomplete_uses iIncompleteUses = incomplete_uses::None;
+        std::vector<compile_error> iDiagnostics;
         std::vector<node*> iCompilations;
         std::deque<entity> iEntities;
         std::deque<ada_type> iTypes;
@@ -352,6 +437,8 @@ namespace neos::compilers::ada
         entity* iStandardPackage = nullptr;
         ada_type* iUniversalInteger = nullptr;
         ada_type* iUniversalReal = nullptr;
+        ada_type* iIntegerLiteral = nullptr;            ///< (a numeric literal's universal type (of a type with Integer_Literal too, 4.2.1))
+        ada_type* iRealLiteral = nullptr;
         ada_type* iUniversalFixed = nullptr;
         ada_type* iUniversalAccess = nullptr;
         ada_type* iStringLiteral = nullptr;
@@ -407,6 +494,7 @@ namespace neos::compilers::ada
         void dynamic_bounds(ada_type* aSubtype, node* aLow, node* aHigh, region* aRegion);
         void discriminant_part(node* aPart, ada_type* aType, region* aRegion);
         void component_list(node* aComponents, ada_type* aType, region* aRegion, int aVariant);
+        std::optional<std::vector<std::pair<bigint, bigint>>> static_values(ada_type* aType, region* aRegion);
         std::pair<std::optional<bigint>, std::optional<bigint>> choice_range(node* aChoice, ada_type* aType, region* aRegion);
         ada_type* derive(ada_type* aParent, std::string const& aName, entity* aEntity, region* aRegion, node* aExtension, node* aDiscriminants);
         subprogram_info* profile_of(node* aProfile, region* aRegion);
@@ -424,6 +512,7 @@ namespace neos::compilers::ada
     private:
         std::map<ada_type*, std::vector<entity*>> iOperators;
         std::deque<node> iClones;
+        std::deque<std::string> iSyntheticSources;      ///< (the text of nodes made by the analysis (e.g. a user-defined literal's string))
         std::map<node*, region*> iBodyRegions;
         entity* iCurrentSubprogram = nullptr;
         entity* iClassWideContract = nullptr;   ///< (resolving a class-wide precondition or postcondition: its subprogram)
@@ -434,6 +523,38 @@ namespace neos::compilers::ada
         call_info const* call_of(node const* aNode) const { auto c = iCalls.find(aNode); return c != iCalls.end() ? &c->second : nullptr; }
         std::string full_name(entity* aEntity) const;       ///< (its expanded name, e.g. "ada.text_io.put_line")
         bool private_part_visible(entity* aPackage, region* aFrom) const;
+        bool private_part_visible_here(entity* aPackage, region* aFrom) const;
+        bool discriminant_dependent(node* aName);
+        bool partial_view_here(ada_type* aType, region* aRegion);
+        void overriding_check(region* aRegion);
+        bool requires_overriding(entity* aOp, ada_type* aType);
+        void null_exclusion_check(ada_type* aType, node* aMark);
+        void predicate_check(ada_type* aType, node* aWhere, bool aDynamicOnly = false);
+        bool limited_type(ada_type* aType, region* aRegion = nullptr, region* aComposite = nullptr) const;
+        ada_type* progenitor(node* aMark, region* aRegion);
+        bool not_completely_defined(ada_type* aType, region* aRegion, int aDepth = 0);
+        void progenitor_mix_check(ada_type* aParent, std::vector<ada_type*> const& aInterfaces, node* aAt);
+        void progenitor_check(ada_type* aProgenitor, node* aAt, bool aLimited, bool aSynchronized, type_kind aUnit);
+        void tagged_type_checks(ada_type* aType, node* aDiscriminants, region* aRegion);
+        node* end_position(node* aNode);
+        std::deque<node> iSyntheticNodes;
+        std::set<std::pair<entity*, std::string>> iRepresentationItems;    ///< (attribute definition clauses given: once each)   ///< (positions for errors (end_position))
+        bool full_declaration_given(node* aDecl, std::vector<node*> const& aParts);
+        bool implicit_homograph(entity* aSubprogram, region* aRegion);
+        bool predicate_static(node* aExpression, entity* aCurrentInstance);
+        void completion_aspects_check(node* aDecl);
+        void others_check(node* aExpression, ada_type* aSubtype);
+        void completion_check(node* aDeclarations, node* aCompletions);
+        void operator_symbol_check(node* aDefining);
+        void homograph_check(entity* aSubprogram, node* aDefining, region* aRegion);
+        void program_unit_pragma_check(node* aPragma, std::string const& aName, std::vector<node*> const& aArguments, region* aRegion);
+        void operator_profile_check(entity* aOperator, node* aDefining);
+        void overriding_indicator_check(entity* aSubprogram, node* aDecl, bool aOverridesImplicit, region* aRegion);
+        void incomplete_check(node* aDeclarations, std::string const& aWhere, node* aAt = nullptr);
+        void complete_partial_view(entity* aEntity, ada_type* aType, node* aDecl, region* aRegion);
+        bool abstract_type(ada_type* aType, region* aRegion = nullptr) const;
+        void abstract_subprogram_check(entity* aSubprogram, node* aDecl, region* aRegion);
+        bool indefinite_subtype(ada_type* aType, node* aIndication, region* aRegion) const;
         bool within_scope(region* aScope, region* aFrom) const;
         std::vector<entity*> use_visible(std::string const& aName, region* aRegion);
         std::vector<interpretation> name_interpretations(node* aName, region* aRegion);
@@ -473,7 +594,39 @@ namespace neos::compilers::ada
         ada_type* library_type(std::string const& aUnit, std::string const& aName);
         ada_type* resolve_array_aggregate(node* aAggregate, ada_type* aType, std::size_t aDimension, region* aRegion);
         std::vector<node*> const* aggregate_of(node const* aAggregate) const { auto a = iAggregates.find(aAggregate); return a != iAggregates.end() ? &a->second : nullptr; }
-        void instantiate(node* aInstantiation, entity* aGeneric, entity* aInstance, region* aRegion, entity* aParentInstance = nullptr);  ///< (aParentInstance: a generic child's, named through an instance of its parent (10.1.1(19)))
+        void instantiate(node* aInstantiation, entity* aGeneric, entity* aInstance, region* aRegion, entity* aParentInstance = nullptr);
+        void check_generic(entity* aGeneric);       ///< (a generic unit's legality: an instance whose actuals are its formals (NEOS_ADA_CHECK))
+        ada_type* template_formal_type(node* aFormal, std::string const& aName, region* aFormalRegion);
+        bool iTemplateCheck = false;                ///< (instantiating a generic for check_generic)
+        std::vector<region*> iInstantiationRegions;  ///< (their regions)
+        std::vector<node*> iInstantiationSites;     ///< (the instantiations being analysed (not check_generic's): errors are reported at the outermost)
+        int iInstanceBodies = 0;
+        std::set<node const*> iInstancePackages;    ///< (instances' package declarations: their private parts' errors are the generic's)                    ///< (analysing an instance's body (not check_generic's): its errors are the generic body's (12.3(11)))
+        struct instance_body
+        {
+            program& p;
+            bool counted;
+            bool privatePart;
+            instance_body(program& aProgram, bool aCounted, bool aPrivatePart = false) : p{ aProgram }, counted{ aCounted }, privatePart{ aPrivatePart }
+            {
+                if (counted)
+                {
+                    ++p.iInstanceBodies;
+                    if (privatePart)
+                        ++p.iInstancePrivateParts;
+                }
+            }
+            ~instance_body()
+            {
+                if (counted)
+                {
+                    --p.iInstanceBodies;
+                    if (privatePart)
+                        --p.iInstancePrivateParts;
+                }
+            }
+        };
+        std::vector<entity*> iGenerics;             ///< (the generic units declared: checked by check_generic (NEOS_ADA_CHECK))  ///< (aParentInstance: a generic child's, named through an instance of its parent (10.1.1(19)))
         node* generic_body(entity* aGeneric);
         ada_type* iterator_cursor_type(ada_type* aIterator);
         ada_type* iterator_element_type(ada_type* aContainer);

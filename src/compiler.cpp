@@ -2981,6 +2981,31 @@ namespace neos::language
             }
             return std::string_view::npos;
         }
+
+        // (the last " as " of a header (with manager as target, except type as name) that is not within a string or brackets)
+        std::size_t header_as(std::string_view aText)
+        {
+            int depth = 0;
+            std::size_t result = std::string_view::npos;
+            for (std::size_t i = 0u; i < aText.size(); ++i)
+            {
+                auto const c = aText[i];
+                if (c == '\'' || c == '"')
+                {
+                    for (++i; i < aText.size() && aText[i] != c; ++i)
+                        if (aText[i] == '\\')
+                            ++i;
+                    continue;
+                }
+                if (c == '(' || c == '[' || c == '{')
+                    ++depth;
+                else if (c == ')' || c == ']' || c == '}')
+                    --depth;
+                else if (depth == 0 && aText.substr(i, 4u) == " as ")
+                    result = i;
+            }
+            return result;
+        }
     }
 
     void compiler::begin_indented(indented_construct aConstruct, neolib::i_string_view const& aSource)
@@ -3041,7 +3066,7 @@ namespace neos::language
                 auto const text = aSource.to_std_string_view();
                 auto const colon = header_colon(text);
                 auto head = text.substr(0u, colon);
-                auto const as = head.rfind(" as ");
+                auto const as = header_as(head);
                 std::optional<std::string> name;
                 if (as != std::string_view::npos)
                 {
@@ -3077,7 +3102,7 @@ namespace neos::language
                 auto const colon = header_colon(text);
                 auto head = text.substr(6u, colon == std::string_view::npos ? std::string_view::npos : colon - 6u);
                 std::optional<std::string> name;
-                auto const as = head.rfind(" as ");
+                auto const as = header_as(head);
                 if (as != std::string_view::npos)
                 {
                     auto n = head.substr(as + 4u);
@@ -3114,6 +3139,7 @@ namespace neos::language
             else
                 top.kind = indented_construct::Finally;
             top.suspended = false;
+            top.arm = ++iIndentedArms;
             top.bodyBase = stack.size();
         }
         else if (aConstruct == indented_construct::ElseIf || aConstruct == indented_construct::Else)
@@ -3130,6 +3156,7 @@ namespace neos::language
             }
             top.kind = aConstruct;
             top.suspended = false;
+            top.arm = ++iIndentedArms;
             top.bodyBase = stack.size();
         }
         else
@@ -3148,6 +3175,7 @@ namespace neos::language
                 ensure_function();
                 construct.base = construct.bodyBase = stack.size();
             }
+            construct.arm = ++iIndentedArms;
             state().indentStack.push_back(construct);
         }
         for (auto const& statement : inlineBody)

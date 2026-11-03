@@ -3100,6 +3100,10 @@ namespace neos::python_runtime
 #ifdef ERANGE
                     { "ERANGE", ERANGE },
 #endif
+                    // (errorcode: the first name of a code, as CPython's (EDEADLOCK, not EDEADLK; ENOTSUP, not EOPNOTSUPP))
+#ifdef EDEADLOCK
+                    { "EDEADLOCK", EDEADLOCK },
+#endif
 #ifdef EDEADLK
                     { "EDEADLK", EDEADLK },
 #endif
@@ -3172,11 +3176,11 @@ namespace neos::python_runtime
 #ifdef EPROTONOSUPPORT
                     { "EPROTONOSUPPORT", EPROTONOSUPPORT },
 #endif
-#ifdef EOPNOTSUPP
-                    { "EOPNOTSUPP", EOPNOTSUPP },
-#endif
 #ifdef ENOTSUP
                     { "ENOTSUP", ENOTSUP },
+#endif
+#ifdef EOPNOTSUPP
+                    { "EOPNOTSUPP", EOPNOTSUPP },
 #endif
 #ifdef EAFNOSUPPORT
                     { "EAFNOSUPPORT", EAFNOSUPPORT },
@@ -3237,6 +3241,187 @@ namespace neos::python_runtime
 #endif
 #ifdef ETXTBSY
                     { "ETXTBSY", ETXTBSY },
+#endif
+                    // (the codes of some systems only (e.g. Linux's); those that Winsock has are Winsock's where the C runtime has none)
+#ifdef EADV
+                    { "EADV", EADV },
+#endif
+#ifdef EBADE
+                    { "EBADE", EBADE },
+#endif
+#ifdef EBADFD
+                    { "EBADFD", EBADFD },
+#endif
+#ifdef EBADR
+                    { "EBADR", EBADR },
+#endif
+#ifdef EBADRQC
+                    { "EBADRQC", EBADRQC },
+#endif
+#ifdef EBADSLT
+                    { "EBADSLT", EBADSLT },
+#endif
+#ifdef EBFONT
+                    { "EBFONT", EBFONT },
+#endif
+#ifdef ECHRNG
+                    { "ECHRNG", ECHRNG },
+#endif
+#ifdef ECOMM
+                    { "ECOMM", ECOMM },
+#endif
+#ifdef EDOTDOT
+                    { "EDOTDOT", EDOTDOT },
+#endif
+#if defined(EDQUOT)
+                    { "EDQUOT", EDQUOT },
+#elif defined(WSAEDQUOT)
+                    { "EDQUOT", WSAEDQUOT },
+#endif
+#if defined(EHOSTDOWN)
+                    { "EHOSTDOWN", EHOSTDOWN },
+#elif defined(WSAEHOSTDOWN)
+                    { "EHOSTDOWN", WSAEHOSTDOWN },
+#endif
+#ifdef EISNAM
+                    { "EISNAM", EISNAM },
+#endif
+#ifdef EKEYEXPIRED
+                    { "EKEYEXPIRED", EKEYEXPIRED },
+#endif
+#ifdef EKEYREJECTED
+                    { "EKEYREJECTED", EKEYREJECTED },
+#endif
+#ifdef EKEYREVOKED
+                    { "EKEYREVOKED", EKEYREVOKED },
+#endif
+#ifdef EL2HLT
+                    { "EL2HLT", EL2HLT },
+#endif
+#ifdef EL2NSYNC
+                    { "EL2NSYNC", EL2NSYNC },
+#endif
+#ifdef EL3HLT
+                    { "EL3HLT", EL3HLT },
+#endif
+#ifdef EL3RST
+                    { "EL3RST", EL3RST },
+#endif
+#ifdef ELIBACC
+                    { "ELIBACC", ELIBACC },
+#endif
+#ifdef ELIBBAD
+                    { "ELIBBAD", ELIBBAD },
+#endif
+#ifdef ELIBEXEC
+                    { "ELIBEXEC", ELIBEXEC },
+#endif
+#ifdef ELIBMAX
+                    { "ELIBMAX", ELIBMAX },
+#endif
+#ifdef ELIBSCN
+                    { "ELIBSCN", ELIBSCN },
+#endif
+#ifdef ELNRNG
+                    { "ELNRNG", ELNRNG },
+#endif
+#ifdef EMEDIUMTYPE
+                    { "EMEDIUMTYPE", EMEDIUMTYPE },
+#endif
+#ifdef EMULTIHOP
+                    { "EMULTIHOP", EMULTIHOP },
+#endif
+#ifdef ENAVAIL
+                    { "ENAVAIL", ENAVAIL },
+#endif
+#ifdef ENOANO
+                    { "ENOANO", ENOANO },
+#endif
+#ifdef ENOCSI
+                    { "ENOCSI", ENOCSI },
+#endif
+#ifdef ENOKEY
+                    { "ENOKEY", ENOKEY },
+#endif
+#ifdef ENOMEDIUM
+                    { "ENOMEDIUM", ENOMEDIUM },
+#endif
+#ifdef ENONET
+                    { "ENONET", ENONET },
+#endif
+#ifdef ENOPKG
+                    { "ENOPKG", ENOPKG },
+#endif
+#ifdef ENOTBLK
+                    { "ENOTBLK", ENOTBLK },
+#endif
+#ifdef ENOTNAM
+                    { "ENOTNAM", ENOTNAM },
+#endif
+#ifdef ENOTUNIQ
+                    { "ENOTUNIQ", ENOTUNIQ },
+#endif
+#if defined(EPFNOSUPPORT)
+                    { "EPFNOSUPPORT", EPFNOSUPPORT },
+#elif defined(WSAEPFNOSUPPORT)
+                    { "EPFNOSUPPORT", WSAEPFNOSUPPORT },
+#endif
+#ifdef EREMCHG
+                    { "EREMCHG", EREMCHG },
+#endif
+#if defined(EREMOTE)
+                    { "EREMOTE", EREMOTE },
+#elif defined(WSAEREMOTE)
+                    { "EREMOTE", WSAEREMOTE },
+#endif
+#ifdef EREMOTEIO
+                    { "EREMOTEIO", EREMOTEIO },
+#endif
+#ifdef ERESTART
+                    { "ERESTART", ERESTART },
+#endif
+#ifdef ERFKILL
+                    { "ERFKILL", ERFKILL },
+#endif
+#if defined(ESHUTDOWN)
+                    { "ESHUTDOWN", ESHUTDOWN },
+#elif defined(WSAESHUTDOWN)
+                    { "ESHUTDOWN", WSAESHUTDOWN },
+#endif
+#if defined(ESOCKTNOSUPPORT)
+                    { "ESOCKTNOSUPPORT", ESOCKTNOSUPPORT },
+#elif defined(WSAESOCKTNOSUPPORT)
+                    { "ESOCKTNOSUPPORT", WSAESOCKTNOSUPPORT },
+#endif
+#ifdef ESRMNT
+                    { "ESRMNT", ESRMNT },
+#endif
+#if defined(ESTALE)
+                    { "ESTALE", ESTALE },
+#elif defined(WSAESTALE)
+                    { "ESTALE", WSAESTALE },
+#endif
+#ifdef ESTRPIPE
+                    { "ESTRPIPE", ESTRPIPE },
+#endif
+#if defined(ETOOMANYREFS)
+                    { "ETOOMANYREFS", ETOOMANYREFS },
+#elif defined(WSAETOOMANYREFS)
+                    { "ETOOMANYREFS", WSAETOOMANYREFS },
+#endif
+#ifdef EUCLEAN
+                    { "EUCLEAN", EUCLEAN },
+#endif
+#ifdef EUNATCH
+                    { "EUNATCH", EUNATCH },
+#endif
+#if defined(EUSERS)
+                    { "EUSERS", EUSERS },
+#elif defined(WSAEUSERS)
+                    { "EUSERS", WSAEUSERS },
+#endif
+#ifdef EXFULL
+                    { "EXFULL", EXFULL },
 #endif
                 };
 #if defined(_WIN32)

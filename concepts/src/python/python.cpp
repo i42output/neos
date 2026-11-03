@@ -269,6 +269,7 @@ namespace neos::concepts::python
         template <> struct python_construct_name<construct::ForTargets> { static constexpr auto Name = "python.for.targets"; };
         template <> struct python_construct_name<construct::ForIn> { static constexpr auto Name = "python.for.in"; };
         template <> struct python_construct_name<construct::AsName> { static constexpr auto Name = "python.as.name"; };
+        template <> struct python_construct_name<construct::WithTargets> { static constexpr auto Name = "python.with.targets"; };
         template <> struct python_construct_name<construct::Conditional> { static constexpr auto Name = "python.conditional"; };
         template <> struct python_construct_name<construct::Or> { static constexpr auto Name = "python.or"; };
         template <> struct python_construct_name<construct::And> { static constexpr auto Name = "python.and"; };
@@ -337,6 +338,7 @@ namespace neos::concepts::python
         template <> struct python_construct_generic<construct::TargetGroup> { static constexpr auto Name = "language.function.local"; };
         template <> struct python_construct_generic<construct::ForTargets> { static constexpr auto Name = "language.function.local"; };
         template <> struct python_construct_generic<construct::AsName> { static constexpr auto Name = "language.function.local"; };
+        template <> struct python_construct_generic<construct::WithTargets> { static constexpr auto Name = "language.function.local"; };
     }
 
     // a construct whose code the compiler generates once its parts have been compiled
@@ -412,7 +414,7 @@ namespace neos::concepts::python
         concepts()[neolib::string{ python_pass::Name }] = neolib::make_ref<python_pass>();
         concepts()[neolib::string{ python_stub::Name }] = neolib::make_ref<python_stub>();
         add_constructs<construct::Return, construct::Break, construct::Continue, construct::Import, construct::ImportFrom, construct::Assign, construct::AugmentedAssign, construct::Target, construct::ForTargets, construct::ForIn, construct::Conditional, construct::Or, construct::And, construct::Not, construct::LessEqual, construct::GreaterEqual, construct::Equal, construct::NotEqual, construct::Less, construct::Greater, construct::NotIn, construct::In, construct::IsNot, construct::Is, construct::BitOr, construct::BitXor, construct::BitAnd, construct::LeftShift, construct::RightShift, construct::Add, construct::Subtract, construct::Multiply, construct::MatMul, construct::FloorDivide, construct::Divide, construct::Modulo, construct::Negative, construct::Positive, construct::Invert, construct::Power, construct::Call, construct::Subscript, construct::Slice, construct::Attribute, construct::EmptyTuple, construct::Tuple, construct::List, construct::Dict, construct::Ellipsis, construct::None, construct::Builtin,
-            construct::ComprehensionStart, construct::ComprehensionFor, construct::ComprehensionIf, construct::ListComprehension, construct::ParameterDefault, construct::Raise, construct::Assert, construct::Imaginary, construct::Global, construct::DictComprehension, construct::Set, construct::SetComprehension, construct::Del, construct::Walrus, construct::AsName, construct::TargetGroup>(concepts());
+            construct::ComprehensionStart, construct::ComprehensionFor, construct::ComprehensionIf, construct::ListComprehension, construct::ParameterDefault, construct::Raise, construct::Assert, construct::Imaginary, construct::Global, construct::DictComprehension, construct::Set, construct::SetComprehension, construct::Del, construct::Walrus, construct::AsName, construct::TargetGroup, construct::WithTargets>(concepts());
     }
 
     const std::string& python::library_name()

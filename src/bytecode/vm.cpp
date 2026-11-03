@@ -765,6 +765,19 @@ namespace neos
                                         return stack;
                                 }
                                 break;
+                            case 0x0E:
+                                {
+                                    // (br_table: the depths (the table's, then the default's) follow their count; the index chooses one)
+                                    auto const count = static_cast<std::size_t>(code.u());
+                                    auto const tableAt = code.position();
+                                    auto const index = static_cast<std::uint32_t>(as_i32(pop()));
+                                    code.seek(tableAt + std::min<std::size_t>(index, count));
+                                    auto const depth = static_cast<std::size_t>(code.u());
+                                    code.seek(tableAt + count + 1u);
+                                    if (branch(depth) && leave())
+                                        return stack;
+                                }
+                                break;
                             case 0x0F:
                                 if (leave())
                                     return stack;

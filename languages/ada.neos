@@ -239,8 +239,11 @@
     (* (a parenthesized suffix: actual parameters, index values, a slice's discrete range or a type conversion's operand) *)
     argument suffix $ ada.apply ::= '(' , WS , argument , { WS , ',' , WS , argument } , WS , ')' ;
     argument ::= named argument / flag box / argument value ;
-    named argument $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / expression ) ;
-    argument value ::= if expression / case expression / quantified expression / declare expression / discrete range / expression ;
+    named argument $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / unparenthesized expression / expression ) ;
+    (* (a conditional, quantified or declare expression without its parentheses: an error unless it is the sole argument (the compiler
+    reports it)) *)
+    unparenthesized expression ::= if expression / case expression / quantified expression / declare expression ;
+    argument value ::= if expression / case expression / quantified expression / declare expression / accuracy constrained subtype / discrete range / expression ;
     (* (an attribute: its designator (a reserved word for 'Access, 'Delta, 'Digits, 'Mod and 'Range), then its arguments) *)
     attribute reference $ ada.attribute ::= '\'' , WS , ( reduction attribute / ( attribute designator , [ WS , attribute arguments ] ) ) ;
     attribute designator $ ada.word ::= potential keyword ;
@@ -272,7 +275,9 @@
     less tail $ ada.lt ::= ( '<' , [ '<' | '=' | '>' ] ) - ( "<<" | "<=" | "<>" ) , WS , simple expression ;
     greater tail $ ada.gt ::= ( '>' , [ '>' | '=' ] ) - ( ">>" | ">=" ) , WS , simple expression ;
     membership tail $ ada.in ::= [ flag not , WS ] , in , WS , membership choice , { WS , ( '|' | '!' ) , WS , membership choice } ;
-    membership choice ::= discrete range / simple expression ;
+    (* (a subtype mark with a digits or delta constraint: illegal (4.5.2(3.1/4)), diagnosed by the compiler) *)
+    membership choice ::= discrete range / accuracy constrained subtype / simple expression ;
+    accuracy constrained subtype $ ada.subtype.indication ::= subtype mark , WS , ( digits constraint | delta constraint ) ;
 
     simple expression ::= ( unary plus / unary minus / term ) , { WS , ( add tail | subtract tail | concatenate tail ) } ;
     unary plus $ ada.plus ::= '+' , WS , term ;
@@ -302,9 +307,9 @@
         parenthesized expression / aggregate ;
     parenthesized expression $ ada.parenthesized ::= '(' , WS , expression , WS , ')' ;
 
-    if expression $ ada.if.expression ::= if , WS , expression , WS , then , WS , expression , { WS , elsif expression part } , [ WS , else expression part ] ;
-    elsif expression part $ ada.elsif ::= elsif , WS , expression , WS , then , WS , expression ;
-    else expression part $ ada.else ::= else , WS , expression ;
+    if expression $ ada.if.expression ::= if , WS , expression , WS , then , WS , ( unparenthesized expression / expression ) , { WS , elsif expression part } , [ WS , else expression part ] ;
+    elsif expression part $ ada.elsif ::= elsif , WS , expression , WS , then , WS , ( unparenthesized expression / expression ) ;
+    else expression part $ ada.else ::= else , WS , ( unparenthesized expression / expression ) ;
     case expression $ ada.case.expression ::= case , WS , expression , WS , is , WS , case expression alternative , { WS , ',' , WS , case expression alternative } ;
     case expression alternative $ ada.alternative ::= when , WS , choice list , WS , "=>" , WS , expression ;
     quantified expression $ ada.quantified ::= for , WS , quantifier , WS , ( iterator specification / loop parameter specification ) , WS , "=>" , WS , expression ;
@@ -321,12 +326,14 @@
         ( ( null , WS , record ) / ( component association , { WS , ',' , WS , component association } ) ) , WS , ')' ;
     delta aggregate $ ada.aggregate.delta ::= '(' , WS , expression , WS , with , WS , delta , WS , component association , { WS , ',' , WS , component association } , WS , ')' ;
     (* (positional: at least two components, or one and others) *)
-    positional aggregate $ ada.aggregate ::= '(' , WS , ( ( expression , { WS , ',' , WS , expression } + , [ WS , ',' , WS , others association ] ) / ( expression , WS , ',' , WS , others association ) ) , WS , ')' ;
+    positional aggregate $ ada.aggregate ::= '(' , WS , ( ( aggregate component , { WS , ',' , WS , aggregate component } + , [ WS , ',' , WS , others association ] ) / ( aggregate component , WS , ',' , WS , others association ) ) , WS , ')' ;
+    aggregate component ::= unparenthesized expression / expression ;
     named aggregate $ ada.aggregate ::= '(' , WS , component association , { WS , ',' , WS , component association } , WS , ')' ;
     others association $ ada.association ::= others choice list , WS , "=>" , WS , ( flag box / expression ) ;
     others choice list $ ada.choices ::= others choice ;
-    component association ::= iterated component association / named component association / expression ;
-    named component association $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / expression ) ;
+    (* (a box as a positional association: illegal (4.3.1(4/2)), diagnosed by the compiler) *)
+    component association ::= iterated component association / named component association / expression / flag box ;
+    named component association $ ada.association ::= choice list , WS , "=>" , WS , ( flag box / unparenthesized expression / expression ) ;
     iterated component association $ ada.iterated ::= for , WS , ( iterator specification / loop parameter specification ) , WS , "=>" , WS , expression ;
     choice list $ ada.choices ::= choice , { WS , ( '|' | '!' ) , WS , choice } ;
     choice ::= others choice | discrete range / expression ;
@@ -412,7 +419,7 @@
     discriminant specification $ ada.discriminant ::= defining identifier list , WS , ':' , WS , ( access definition / ( [ flag not null , WS ] , subtype mark ) ) , [ WS , ":=" , WS , expression ] , aspects ;
 
     record type definition $ ada.type.record ::= [ ( flag abstract , WS , flag tagged , WS ) / ( flag tagged , WS ) ] , [ flag limited , WS ] , record definition ;
-    record definition ::= ( record , WS , component list , WS , end , WS , record , [ WS , simple identifier ] ) / null record ;
+    record definition ::= ( record , WS , component list , WS , end , WS , record , [ WS , end designator ] ) / null record ;
     null record $ ada.record.null ::= null , WS , record ;
     component list $ ada.components ::= ( null , WS , ';' ) / ( { component item , WS } + , [ variant part ] ) / variant part ;
     component item ::= component declaration | aspect clause | pragma ;
@@ -455,7 +462,7 @@
     result profile $ ada.result ::= return , WS , [ flag not null , WS ] , ( access definition / subtype mark ) ;
     formal part ::= '(' , WS , parameter specification , { WS , ';' , WS , parameter specification } , WS , ')' ;
     parameter specification $ ada.parameter ::= defining identifier list , WS , ':' , WS , [ flag aliased , WS ] ,
-        ( access definition / ( mode , [ flag not null , WS ] , subtype mark ) ) , [ WS , ":=" , WS , expression ] , aspects ;
+        ( ( mode , access definition ) / ( mode , [ flag not null , WS ] , subtype mark ) ) , [ WS , ":=" , WS , expression ] , aspects ;
     mode ::= [ flag in , WS ] , [ flag out , WS ] ;
 
     subprogram declaration $ ada.subprogram.declaration ::= [ overriding indicator , WS ] , subprogram specification , aspects , WS , ';' ;
@@ -495,24 +502,24 @@
         [ WS , is , [ WS , new , WS , interface list , WS , with ] , task definition ] , WS , ';' ;
     single task declaration $ ada.task.single ::= task , WS , defining identifier , aspects , [ WS , is , [ WS , new , WS , interface list , WS , with ] , task definition ] , WS , ';' ;
     interface list $ ada.interfaces ::= subtype mark , { WS , and , WS , subtype mark } ;
-    task definition $ ada.task.definition ::= { WS , task item } , [ WS , private part task ] , WS , end , [ WS , simple identifier ] ;
+    task definition $ ada.task.definition ::= { WS , task item } , [ WS , private part task ] , WS , end , [ WS , end designator ] ;
     private part task $ ada.private ::= private , { WS , task item } ;
     task item ::= entry declaration | aspect clause | pragma ;
-    task body $ ada.task.body ::= task , WS , body , WS , defining identifier , aspects , WS , is , declarative part , WS , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    task body $ ada.task.body ::= task , WS , body , WS , defining identifier , aspects , WS , is , declarative part , WS , begin , handled statements , WS , end , [ WS , end designator ] , WS , ';' ;
 
     protected type declaration $ ada.protected.type ::= protected , WS , type , WS , defining identifier , [ WS , known discriminant part ] , aspects , WS , is ,
         [ WS , new , WS , interface list , WS , with ] , protected definition , WS , ';' ;
     single protected declaration $ ada.protected.single ::= protected , WS , defining identifier , aspects , WS , is , [ WS , new , WS , interface list , WS , with ] , protected definition , WS , ';' ;
-    protected definition $ ada.protected.definition ::= { WS , protected operation declaration } , [ WS , private part protected ] , WS , end , [ WS , simple identifier ] ;
+    protected definition $ ada.protected.definition ::= { WS , protected operation declaration } , [ WS , private part protected ] , WS , end , [ WS , end designator ] ;
     private part protected $ ada.private ::= private , { WS , ( protected operation declaration | component declaration ) } ;
     protected operation declaration ::= subprogram declaration / entry declaration / aspect clause / pragma ;
-    protected body $ ada.protected.body ::= protected , WS , body , WS , defining identifier , aspects , WS , is , { WS , protected operation item } , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    protected body $ ada.protected.body ::= protected , WS , body , WS , defining identifier , aspects , WS , is , { WS , protected operation item } , WS , end , [ WS , end designator ] , WS , ';' ;
     protected operation item ::= subprogram declaration / subprogram body / null procedure declaration / expression function declaration / entry body / aspect clause / pragma ;
 
     entry declaration $ ada.entry ::= [ overriding indicator , WS ] , entry , WS , defining identifier , [ WS , '(' , WS , entry family , WS , ')' ] , [ WS , formal part ] , aspects , WS , ';' ;
     entry family $ ada.entry.family ::= discrete subtype definition ;
     entry body $ ada.entry.body ::= entry , WS , defining identifier , [ WS , entry index specification ] , [ WS , formal part ] , aspects , WS ,
-        when , WS , barrier , WS , is , declarative part , WS , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+        [ when , WS , barrier , WS ] , is , declarative part , WS , begin , handled statements , WS , end , [ WS , end designator ] , WS , ';' ;
     entry index specification $ ada.entry.index ::= '(' , WS , for , WS , defining identifier , WS , in , WS , discrete subtype definition , WS , ')' ;
     barrier $ ada.barrier ::= expression ;
 
@@ -523,7 +530,8 @@
     generic package declaration $ ada.generic ::= generic formal part , WS , package declaration ;
     generic formal part $ ada.generic.formals ::= generic , { WS , ( generic formal parameter declaration | use clause | pragma ) } ;
     generic formal parameter declaration ::= formal object declaration / formal type declaration / formal subprogram declaration / formal package declaration ;
-    formal object declaration $ ada.formal.object ::= defining identifier list , WS , ':' , WS , mode , ( access definition / ( [ flag not null , WS ] , subtype mark ) ) ,
+    (* (a constraint: illegal (12.4(2/3)), diagnosed by the compiler) *)
+    formal object declaration $ ada.formal.object ::= defining identifier list , WS , ':' , WS , mode , ( access definition / ( [ flag not null , WS ] , subtype mark , [ WS , constraint ] ) ) ,
         [ WS , ":=" , WS , expression ] , aspects , WS , ';' ;
     formal type declaration ::= formal complete type declaration / formal incomplete type declaration ;
     formal complete type declaration $ ada.formal.type ::= type , WS , defining identifier , [ WS , discriminant part ] , WS , is , WS , formal type definition ,
@@ -534,7 +542,8 @@
         formal signed integer type definition / formal modular type definition / formal floating point definition /
         formal decimal fixed point definition / formal ordinary fixed point definition / array type definition / access type definition /
         interface type definition ;
-    formal private type definition $ ada.formal.private ::= [ ( flag abstract , WS , flag tagged , WS ) / ( flag tagged , WS ) ] , [ flag limited , WS ] , flag private ;
+    formal private type definition $ ada.formal.private ::= { ( flag abstract | flag tagged | flag limited ) , WS } , flag private , { WS , ( flag abstract | flag tagged | flag limited ) } ;
+    (* (its reserved words in any order: the compiler checks the order, abstract tagged limited) *)
     formal derived type definition $ ada.formal.derived ::= [ flag abstract , WS ] , [ ( flag limited | flag synchronized ) , WS ] , new , WS , subtype mark ,
         [ WS , interfaces ] , [ WS , with , WS , flag private ] ;
     formal discrete type definition $ ada.formal.discrete ::= '(' , WS , "<>" , WS , ')' ;
@@ -557,7 +566,7 @@
     aspect clause ::= enumeration representation clause / attribute definition clause / record representation clause / at clause ;
     attribute definition clause $ ada.representation.attribute ::= for , WS , name , WS , use , WS , expression , WS , ';' ;
     enumeration representation clause $ ada.representation.enumeration ::= for , WS , direct name , WS , use , WS , aggregate , WS , ';' ;
-    record representation clause $ ada.representation.record ::= for , WS , name , WS , use , WS , record , [ WS , mod clause ] , { WS , ( component clause | pragma ) } , WS , end , WS , record , [ WS , simple identifier ] , WS , ';' ;
+    record representation clause $ ada.representation.record ::= for , WS , name , WS , use , WS , record , [ WS , mod clause ] , { WS , ( component clause | pragma ) } , WS , end , WS , record , [ WS , end designator ] , WS , ';' ;
     mod clause $ ada.representation.mod ::= at , WS , mod , WS , expression , WS , ';' ;
     component clause $ ada.representation.component ::= name , WS , at , WS , simple expression , WS , range , WS , range , WS , ';' ;
     at clause $ ada.representation.at ::= for , WS , direct name , WS , use , WS , at , WS , expression , WS , ';' ;
@@ -565,7 +574,7 @@
     (* --- pragmas and use clauses *)
 
     pragma $ ada.pragma ::= pragma , WS , designator name , [ WS , '(' , WS , pragma argument , { WS , ',' , WS , pragma argument } , WS , ')' ] , WS , ';' ;
-    pragma argument $ ada.pragma.argument ::= [ designator name , [ '\'' , designator name ] , WS , "=>" , WS ] , expression ;
+    pragma argument $ ada.pragma.argument ::= [ designator name , [ '\'' , designator name ] , WS , "=>" , WS ] , ( unparenthesized expression / expression ) ;
 
     use clause ::= use type clause / use package clause ;
     use package clause $ ada.use ::= use , WS , name , { WS , ',' , WS , name } , WS , ';' ;
@@ -602,7 +611,7 @@
     case statement $ ada.case ::= case , WS , expression , WS , is , { WS , pragma } , { WS , case statement alternative } + , WS , end , WS , case , WS , ';' ;
     case statement alternative $ ada.alternative ::= when , WS , choice list , WS , "=>" , statements ;
 
-    loop statement $ ada.loop ::= [ statement identifier , WS ] , [ iteration scheme , WS ] , loop , statements , WS , end , WS , loop , [ WS , simple identifier ] , WS , ';' ;
+    loop statement $ ada.loop ::= [ statement identifier , WS ] , [ iteration scheme , WS ] , loop , statements , WS , end , WS , loop , [ WS , end designator ] , WS , ';' ;
     statement identifier $ ada.word ::= simple identifier , WS , ':' ;
     iteration scheme ::= while condition / for scheme ;
     while condition $ ada.while ::= while , WS , expression ;
@@ -615,7 +624,7 @@
         of , WS , [ flag reverse , WS ] , name , [ WS , iterator filter ] ;
     iterator filter $ ada.filter ::= when , WS , expression ;
 
-    block statement $ ada.block ::= [ statement identifier , WS ] , [ declare , declarative part , WS ] , begin , handled statements , WS , end , [ WS , simple identifier ] , WS , ';' ;
+    block statement $ ada.block ::= [ statement identifier , WS ] , [ declare , declarative part , WS ] , begin , handled statements , WS , end , [ WS , end designator ] , WS , ';' ;
     parallel block statement $ ada.parallel ::= parallel , WS , do , handled statements , { WS , and , handled statements } + , WS , end , WS , do , WS , ';' ;
 
     exception handler $ ada.handler ::= when , WS , [ choice parameter , WS ] , exception choice , { WS , ( '|' | '!' ) , WS , exception choice } , WS , "=>" , statements ;
@@ -623,8 +632,9 @@
     exception choice ::= others choice | name ;
 
     (* tasking statements *)
-    accept statement $ ada.accept ::= accept , WS , direct name , [ WS , '(' , WS , expression , WS , ')' ] , [ WS , formal part ] ,
-        [ WS , do , handled statements , WS , end , [ WS , simple identifier ] ] , WS , ';' ;
+    (* (an expanded name: illegal (9.5.2(3)), diagnosed by the compiler) *)
+    accept statement $ ada.accept ::= accept , WS , direct name , { WS , selected component } , [ WS , '(' , WS , expression , WS , ')' ] , [ WS , formal part ] ,
+        [ WS , do , handled statements , WS , end , [ WS , end designator ] ] , WS , ';' ;
     select statement ::= selective accept / timed entry call / conditional entry call / asynchronous select ;
     selective accept $ ada.select.accept ::= select , WS , select alternative , { WS , or , WS , select alternative } , [ WS , else , statements ] , WS , end , WS , select , WS , ';' ;
     select alternative $ ada.select.alternative ::= [ guard , WS ] , ( accept alternative / delay alternative / terminate alternative ) ;

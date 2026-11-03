@@ -973,7 +973,7 @@ namespace neos::compilers::ada
                 node* index = nullptr;
                 // (its entry index: not the closing name after a body)
                 for (auto* c : aStatement->children)
-                    if (c != aStatement->child(0) && !c->is(construct::Parameter) && !c->is(construct::Handled) &&
+                    if (c != aStatement->child(0) && !c->is(construct::Parameter) && !c->is(construct::Handled) && !c->is(construct::End) &&
                         !(c == aStatement->children.back() && c->is(construct::Identifier) && aStatement->first(construct::Handled) != nullptr))
                         index = c;
                 i64(entry_key(entry) << 32);
@@ -1060,7 +1060,7 @@ namespace neos::compilers::ada
                     auto* entry = accept->ent;
                     node* index = nullptr;
                     for (auto* c : accept->children)
-                        if (c != accept->child(0) && !c->is(construct::Parameter) && !c->is(construct::Handled) &&
+                        if (c != accept->child(0) && !c->is(construct::Parameter) && !c->is(construct::Handled) && !c->is(construct::End) &&
                             !(c == accept->children.back() && c->is(construct::Identifier) && accept->first(construct::Handled) != nullptr))
                             index = c;
                     get(iFrame);

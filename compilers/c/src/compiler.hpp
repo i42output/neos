@@ -43,6 +43,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 #include <neolib/neolib.hpp>
@@ -115,6 +116,7 @@ namespace neos::compilers::c
             i_source_fragment* pending = nullptr;   ///< (a fragment whose preprocessing waits for the prelude (its headers' folder))
         };
         void preprocess(i_source_fragment& aFragment, fragment_state& aState);
+        void import_libraries(std::vector<std::string> const& aIdentifiers);
         std::vector<fragment_state> iFragments;
         std::deque<node> iNodes;
         std::vector<node*> iStack;
@@ -123,6 +125,12 @@ namespace neos::compilers::c
         std::optional<std::string> iPackagesFolder; ///< (the language's packages (the prelude's folder): its include folder has the standard headers)
         std::size_t iProgramUnits = 0u;     ///< (the program's translation units (not the prelude's), as the declaration pass found them)
         std::size_t iUnitsParsed = 0u;      ///< (this pass's)
+        // (the library's files in C (lib/ in the packages folder): compiled with a program only if it uses a function that one provides)
+        std::map<std::string, std::string> iLibraryProvides;   ///< (a function's name: its file)
+        bool iLibraryRead = false;
+        std::set<std::string> iImportedLibraries;   ///< (this pass's)
+        std::set<std::string> iPendingLibraries;    ///< (imported, not yet parsed)
+        bool iGenerated = false;                    ///< (this pass's)
         std::map<std::uint32_t, std::string> iFrameNames;
         std::unique_ptr<program> iProgram;
         // (the preprocessor's outputs, by source: a pass preprocesses the same sources again)

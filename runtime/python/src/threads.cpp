@@ -1188,6 +1188,25 @@ namespace neos::python_runtime
             }
 
             // Thread.__init__(self, group=None, target=None, name=None, args=(), kwargs=None, *, daemon=None)
+            // (threading._dangling: a weakref.WeakSet of the Threads that have been made, as CPython's (test.support's threading_helper
+            // compares its size before and after tests))
+            object* dangling_threads()
+            {
+                static object* sDangling = nullptr;
+                if (sDangling == nullptr)
+                {
+                    ref const cls{ module_attribute("weakref", "WeakSet") };
+                    if (!cls)
+                        return nullptr;
+                    ref const empty{ make_tuple() };
+                    sDangling = call(cls.get(), empty.get(), nullptr);
+                    if (sDangling == nullptr)
+                        return nullptr;
+                }
+                retain(sDangling);
+                return sDangling;
+            }
+
             object* thread_init(std::vector<object*> const& aArgs, object* aKwargs)
             {
                 std::vector<object*> a;
@@ -1234,6 +1253,13 @@ namespace neos::python_runtime
                 ref const daemonValue{ make_bool(daemon) };
                 if (setattr(self, "_target", target.get()) < 0 || setattr(self, "_args", args.get()) < 0 || setattr(self, "_kwargs", kwargs.get()) < 0 ||
                     setattr(self, "name", nameValue.get()) < 0 || setattr(self, "daemon", daemonValue.get()) < 0 || setattr(self, "_ident", none()) < 0)
+                    return nullptr;
+                ref const dangling{ dangling_threads() };
+                if (!dangling)
+                    return nullptr;
+                retain(self);
+                ref const added{ call_method_named(dangling.get(), "add", { self }) };
+                if (!added)
                     return nullptr;
                 return none();
             }
@@ -1640,6 +1666,20 @@ namespace neos::python_runtime
                 if (timer == nullptr)
                     return false;
                 aAttributes.emplace_back("Timer", timer);
+                auto const dangling = dangling_threads();
+                if (dangling == nullptr)
+                    return false;
+                aAttributes.emplace_back("_dangling", dangling);
+                {
+                    // (the main thread is one of them (CPython's threading makes it when it is imported))
+                    ref const main{ main_thread() };
+                    if (!main)
+                        return false;
+                    retain(main.get());
+                    ref const added{ call_method_named(dangling, "add", { main.get() }) };
+                    if (!added)
+                        return false;
+                }
                 aAttributes.emplace_back("TIMEOUT_MAX", make_float(9223372036.0));
                 if (!is_exception_class("threading.BrokenBarrierError"))
                     user_exception_bases()["threading.BrokenBarrierError"] = { "RuntimeError" };

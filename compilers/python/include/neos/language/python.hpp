@@ -116,5 +116,6 @@ namespace neos::language::python
         Walrus,             ///< name := value
         AsName,             ///< (the name of except ... as name and with ... as name: bound before a body on the header's line)
         TargetGroup,        ///< (a parenthesized or bracketed target list: (a, b) of "(a, b), c = ...")
+        WithTargets,        ///< (the targets of with ... as targets that are not names (e.g. "as self.x"): bound when the manager has been entered)
     };
 }

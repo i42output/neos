@@ -40,7 +40,8 @@ names the CPython sources it is derived from.
   cmd.cpp              Lib/cmd.py
   code.cpp             Lib/code.py
   codeop.cpp           Lib/codeop.py
-  collections.cpp      Lib/collections/__init__.py and Modules/_collectionsmodule.c
+  collections.cpp      Lib/collections/__init__.py (including UserDict, UserList
+                       and UserString) and Modules/_collectionsmodule.c
                        (deque's and defaultdict's reductions)
   compression.cpp      Lib/_compression.py
   compat_pickle_tables.hpp
@@ -96,10 +97,12 @@ names the CPython sources it is derived from.
   generators.cpp       Objects/genobject.c (the asynchronous generators' hooks and
                        finalization, the warning of a coroutine never awaited)
   imaplib.cpp          Lib/imaplib.py (by Piers Lauder and its contributors)
-  importlib.cpp        Lib/importlib/__init__.py, Lib/importlib/util.py and
+  importlib.cpp        Lib/importlib/__init__.py, Lib/importlib/util.py,
                        Lib/importlib/_bootstrap.py (import_module and its
                        checks, reload's checks, find_spec, resolve_name and
-                       ModuleSpec)
+                       ModuleSpec) and Lib/importlib/_bootstrap_external.py
+                       (cache_from_source, source_from_cache, _path_split
+                       and _path_join)
   inspect.cpp          Lib/inspect.py
   io.cpp               Modules/_io/_iomodule.c (open's mode),
                        Objects/exceptions.c (OSError's subclasses of errno),
