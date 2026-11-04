@@ -155,6 +155,7 @@ namespace neos::compilers::javascript
         scope* top = nullptr;               ///< (its parameters and var declarations)
         scope* body = nullptr;              ///< (its lexical declarations, if its parameters are not simple; otherwise top)
         std::vector<function_info*> functions;
+        std::vector<scope*> scopes;         ///< (its scopes, in the order they were created)
         std::uint32_t index = 0u;           ///< (its WebAssembly function)
         std::uint32_t bodyIndex = 0u;       ///< (a generator or async function: the function its body runs as)
         std::uint32_t length = 0u;          ///< (the number of its parameters before the first with a default or a rest)

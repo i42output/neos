@@ -589,7 +589,9 @@ namespace neos::compilers::c
     {
         // (members at increasing offsets, each aligned (a union's all at 0); bit-fields packed into storage units of their declared 
         // type's size (as the System V ABI does): a bit-field that would straddle its unit starts a new one; an unnamed bit-field of
-        // width 0 starts a new unit)
+        // width 0 starts a new unit; a member's specified alignment (alignas, gnu::aligned) raises its alignment; gnu::packed (the 
+        // record's or the member's): aligned to 1 (bit-fields at the next bit); #pragma pack(n): members aligned at most to n (bit-fields 
+        // at the next bit, as GCC's are))
         std::uint64_t offset = 0u;
         std::uint64_t alignment = 1u;
         std::uint64_t size = 0u;
@@ -599,7 +601,11 @@ namespace neos::compilers::c
         {
             auto& m = aRecord.members[i];
             auto const memberSize = m.type->is_array() && !m.type->length ? 0u : size_of(m.type, aWhere);
-            auto const memberAlign = align_of(m.type);
+            auto const natural = align_of(m.type);
+            bool const packed = aRecord.packed || m.packed || aRecord.pack != 0u;
+            auto memberAlign = std::max(aRecord.packed || m.packed ? 1u : natural, m.alignment);
+            if (aRecord.pack != 0u)
+                memberAlign = std::min(memberAlign, aRecord.pack);
             if (m.bitWidth)
             {
                 auto const unitBits = memberSize * 8u;
@@ -622,6 +628,24 @@ namespace neos::compilers::c
                 {
                     // (a new unit)
                     bitPosition = (bitPosition + unitBits - 1u) / unitBits * unitBits;
+                    continue;
+                }
+                if (m.alignment != 0u)
+                    bitPosition = (bitPosition + memberAlign * 8u - 1u) / (memberAlign * 8u) * (memberAlign * 8u);
+                if (packed)
+                {
+                    // (packed: at the next bit; its storage unit from the byte that holds that bit)
+                    m.offset = bitPosition / 8u;
+                    m.bitOffset = static_cast<std::uint32_t>(bitPosition % 8u);
+                    m.unitSize = 1u;
+                    while (m.unitSize * 8u < m.bitOffset + *m.bitWidth)
+                        m.unitSize *= 2u;
+                    // (16: a 64-bit bit-field in 9 bytes (accessed as 8 bytes and 1))
+                    bitPosition += *m.bitWidth;
+                    offset = (bitPosition + 7u) / 8u;
+                    size = std::max(size, offset);
+                    if (!m.name.empty())
+                        alignment = std::max(alignment, memberAlign);
                     continue;
                 }
                 auto unitStart = bitPosition / unitBits * unitBits;
@@ -651,6 +675,7 @@ namespace neos::compilers::c
             }
             alignment = std::max(alignment, memberAlign);
         }
+        alignment = std::max(alignment, aRecord.aligned);
         aRecord.alignment = alignment;
         aRecord.size = (std::max(size, offset) + alignment - 1u) / alignment * alignment;
         aRecord.complete = true;

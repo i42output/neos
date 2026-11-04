@@ -66,6 +66,17 @@ namespace neos::compilers::ada
                     // (a tagged incomplete type: completed by a tagged type (3.10.1(2.1/2)))
                     if (i->second->type->incomplete && i->second->type->tagged && aType->interfaces.empty())
                         error(aDecl, "the completion of a tagged incomplete type must be a tagged type");
+                    // (a tagged partial view completed by a task or protected type: a synchronized private extension (7.3(7.2/3)))
+                    if (!i->second->type->incomplete && iInstanceBodies == 0 && i->second->decl != nullptr && i->second->decl->parent != nullptr)
+                    {
+                        auto* declaration = i->second->decl->parent;
+                        auto* derived = declaration->first(construct::TypeDerived);
+                        bool const synchronized = declaration->has_flag("synchronized") || (derived != nullptr && derived->has_flag("synchronized"));
+                        if (!synchronized && i->second->type->tagged)
+                            recover([&]() { error(aDecl, "a partial view that is not a synchronized private extension cannot be completed by a task or protected type (7.3(7.2/3))"); });
+                        else if (i->second->type->tagged && !same_interfaces(i->second->type, aType))
+                            recover([&]() { error(aDecl, "a tagged partial view and its full view must be descended from the same interfaces (7.3(7.3/2))"); });
+                    }
                     i->second->type->full = aType;
                     i->second->completed = true;
                     aType->partial = i->second->type;
@@ -90,6 +101,9 @@ namespace neos::compilers::ada
         subprogram_specification(&spec, e, parameters);
         e->sub->spec = aEntry;
         e->sub->level = parameters->level;
+        // (implementing a progenitor's procedure (9.4(11.1/3), 9.1(9.2/3)))
+        if (auto* owner = aRegion->owner; owner != nullptr && (owner->kind == entity_kind::Protected || owner->kind == entity_kind::Task) && iInstanceBodies == 0)
+            recover([&]() { synchronized_operation_check(e, aEntry, owner); });
         // (a task's entry: no access parameter (9.5.2(13/2)))
         if (aRegion->owner != nullptr && (aRegion->owner->kind == entity_kind::Task || (aRegion->owner->type != nullptr &&
             aRegion->owner->type->view()->kind == type_kind::Task)) && iInstanceBodies == 0)
@@ -102,13 +116,19 @@ namespace neos::compilers::ada
                 if (auto const n = name_text(aspect->child(0)->source); (n == "pre" || n == "post") && aspect->size() > 2u &&
                     aspect->child(1)->is(construct::Word) && name_text(aspect->child(1)->source) == "class")
                     recover([&]() { error(aspect, "aspect " + n + "'Class cannot be specified for an entry"); });
-        // (an entry family: not overloadable (a homograph of any declaration of its name in the region))
+        // (an entry family: not overloadable (a homograph of any declaration of its name in the region); entries: not homographs of each
+        // other (8.3(26/2)))
         if (iInstanceBodies == 0)
             for (auto [i, end] = aRegion->names.equal_range(e->name); i != end; ++i)
                 if (auto* other = i->second; other != e && other->kind == entity_kind::Entry && other->sub != nullptr &&
                     (aEntry->first(construct::EntryFamily) != nullptr || other->sub->family_type != nullptr))
                 {
                     recover([&]() { error(d, "\"" + e->name + "\" is already declared in this declarative region (an entry family)"); });
+                    break;
+                }
+                else if (other != e && other->kind == entity_kind::Entry && other->sub != nullptr && e->sub != nullptr && type_conformant(*other->sub, *e->sub))
+                {
+                    recover([&]() { error(d, "\"" + e->name + "\" is already declared in this declarative region (with the same profile)"); });
                     break;
                 }
         if (auto* family = aEntry->first(construct::EntryFamily))

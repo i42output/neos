@@ -50,6 +50,7 @@ namespace neos::language::c
     X(Abstract, "c.abstract", false) \
     X(Add, "c.add", true) \
     X(Address, "c.address", false) \
+    X(LabelAddress, "c.label.address", false) \
     X(Alignas, "c.alignas", false) \
     X(Alignof, "c.alignof", false) \
     X(And, "c.and", true) \
@@ -115,6 +116,7 @@ namespace neos::language::c
     X(GenericDefault, "c.generic.default", false) \
     X(GenericType, "c.generic.type", false) \
     X(Goto, "c.goto", false) \
+    X(ComputedGoto, "c.computed.goto", false) \
     X(Greater, "c.greater", true) \
     X(GreaterEqual, "c.greaterequal", true) \
     X(Identifier, "c.identifier", false) \
@@ -138,6 +140,7 @@ namespace neos::language::c
     X(Number, "c.number", false) \
     X(Or, "c.or", true) \
     X(Parameter, "c.parameter", false) \
+    X(OldParameter, "c.old.parameter", false) \
     X(Paren, "c.paren", false) \
     X(Plus, "c.plus", false) \
     X(Pointer, "c.pointer", false) \
@@ -206,6 +209,10 @@ namespace neos::language::c
     namespace layout
     {
         inline constexpr std::uint32_t Memory = 4u;                         ///< (the external memory's index: C's)
+        // (the memory is the shared memory (see neos_rt_host::shared_memory), so that the code of other languages that share it (e.g. Ada's
+        // (see neos::language::ada::layout), whose range is above C's) has the same addresses for C's objects: C's range is from Origin)
+        inline constexpr std::uint64_t Origin = 0u;                         ///< (its range's offset)
+        inline constexpr std::uint64_t Size = std::uint64_t{ 64u } << 30u;  ///< (its range's size)
         inline constexpr std::uint64_t RuntimeBase = 0x10000u;              ///< (the runtime's objects)
         inline constexpr std::uint64_t Errno = RuntimeBase;                 ///< (int errno)
         inline constexpr std::uint64_t Streams = RuntimeBase + 0x100u;      ///< (FILE stdin, stdout, stderr: StreamSize bytes each)

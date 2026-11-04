@@ -35,11 +35,13 @@
 // the globals table) are the other languages' to use by their names (neos_runtime_plugin_link); a global that it reads that is nil is
 // one of theirs, if one of them has it (lua::link, which the code of a linked program calls when it starts, gives the globals table a
 // metatable whose __index finds them with neos_rt_host::link). Values cross as linked values: nil is no value; booleans, integers,
-// floats and strings are themselves; other values are linked objects: a Lua value's own (lua.value), or, given to Lua, another
-// language's, which Lua sees as a function (if it can be called; a native function) or a userdata (its __name "linked"), that is given
-// back as the linked object it is.
+// floats and strings are themselves (a big integer, given to Lua, is a float); other values are linked objects: a Lua value's own
+// (lua.value), or, given to Lua, another language's, which Lua sees as a function (if it can be called; a native function) or a
+// userdata (its __name "linked"), that is given back as the linked object it is.
 
 #include <atomic>
+#include <charconv>
+#include <cmath>
 #include <deque>
 #include <map>
 #include <string>
@@ -157,6 +159,15 @@ namespace neos::lua_runtime
                 return make_float(static_cast<double>(aValue.f32));
             case NEOS_RT_F64:
                 return make_float(aValue.f64);
+            case NEOS_RT_BIG_INTEGER:
+                {
+                    // (an integer that does not fit in 64 bits (its hexadecimal digits: see neos_rt_link_type): a float, as a numeral's is)
+                    std::string_view const digits{ aValue.string != nullptr ? aValue.string : "" };
+                    double result = 0.0;
+                    if (std::from_chars(digits.data(), digits.data() + digits.size(), result, std::chars_format::hex).ec == std::errc::result_out_of_range)
+                        result = !digits.empty() && digits[0] == '-' ? -HUGE_VAL : HUGE_VAL;
+                    return make_float(result);
+                }
             case NEOS_RT_STRING:
                 return make_string(std::string_view{ aValue.string != nullptr ? aValue.string : "" });
             case NEOS_RT_OBJECT:

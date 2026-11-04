@@ -174,6 +174,7 @@ namespace neos::compilers::c
         pp_token stringize(std::vector<pp_token> const& aTokens, source_location const& aWhere) const;
         pp_token paste(pp_token const& aLeft, pp_token const& aRight);
         bool builtin_macro(pp_token const& aToken, reader& aReader, std::vector<pp_token>& aResult);
+        std::vector<pp_token> gnu_attributes(std::vector<pp_token> const& aArgument, pp_token const& aWhere) const;
         // hide sets
         std::uint32_t hide_set_add(std::uint32_t aSet, std::uint32_t aMacro);
         std::uint32_t hide_set_union(std::uint32_t aA, std::uint32_t aB);
@@ -198,6 +199,9 @@ namespace neos::compilers::c
         std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> iHideSetUnions;
         std::set<std::string> iOnce;           ///< (#pragma once: the files' paths)
         std::map<std::string, std::vector<std::optional<macro>>> iPushedMacros;   ///< (#pragma push_macro: the macros' definitions (none: undefined))
+        macro iAttributeMacro;                 ///< (__attribute__ (see gnu_attributes))
+        std::uint64_t iPack = 0u;              ///< (#pragma pack: the members' alignment limit (0: none))
+        std::vector<std::uint64_t> iPackStack;
         std::uint32_t iCounter = 0u;           ///< (__COUNTER__)
         std::string iDate;
         std::string iTime;

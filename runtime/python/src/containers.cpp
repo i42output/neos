@@ -148,6 +148,10 @@ namespace neos::python_runtime
                 auto type = make_type(sViewNames[aWhich], sViewNames[aWhich], retain_object, release_object<view_object>);
                 type.repr = [](neos_py_context*, object* aSelf) -> object*
                 {
+                    // (a view within its own repr (its dict contains it): "..." (as CPython's))
+                    if (repr_enter(aSelf))
+                        return make_str("...");
+                    struct leave { object* view; ~leave() { repr_leave(view); } } const left{ aSelf };
                     auto const& v = as_view(aSelf);
                     std::vector<object*> items;
                     auto const& d = *as<dict_object>(v.dict);

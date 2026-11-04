@@ -166,6 +166,9 @@ namespace neos::compilers::c
         std::uint64_t offset = 0u;
         std::optional<std::uint32_t> bitWidth;  ///< (a bit-field: its width; bitOffset: its first bit within the storage unit at offset)
         std::uint32_t bitOffset = 0u;
+        std::uint32_t unitSize = 0u;            ///< (a bit-field's storage unit's size (0: its type's; a packed bit-field's: 1, 2, 4 or 8))
+        std::uint64_t alignment = 0u;           ///< (alignas or gnu::aligned: its alignment (0: its type's))
+        bool packed = false;                    ///< (gnu::packed: aligned to 1 (unless alignment))
         node* decl = nullptr;
     };
 
@@ -175,6 +178,9 @@ namespace neos::compilers::c
         bool isUnion = false;
         bool complete = false;
         bool flexible = false;                  ///< (a structure whose last member is a flexible array member)
+        bool packed = false;                    ///< (gnu::packed: its members aligned to 1 (unless their alignment is specified))
+        std::uint64_t aligned = 0u;             ///< (gnu::aligned: its alignment at least this)
+        std::uint64_t pack = 0u;                ///< (#pragma pack: its members' alignment at most this (0: no limit))
         std::vector<member_info> members;
         std::uint64_t size = 0u;
         std::uint64_t alignment = 1u;
@@ -240,6 +246,7 @@ namespace neos::compilers::c
         node* decl = nullptr;                   ///< (its (first) declaration)
         node* definition = nullptr;             ///< (a function's definition; an object's initializer's declaration)
         node* initializer = nullptr;
+        entity* cleanup = nullptr;              ///< (an automatic object's gnu::cleanup function: called with its address when its scope is left)
         translation_unit* unit = nullptr;
         // (an object's storage)
         object_storage where = object_storage::Unassigned;
@@ -263,7 +270,12 @@ namespace neos::compilers::c
         std::uint32_t index = 0u;               ///< (its WebAssembly function's index)
         bool defined = false;                   ///< (its WebAssembly function has been defined)
         bool generated = false;
+        bool hasCleanups = false;               ///< (it has an object with gnu::cleanup)
+        bool computedGoto = false;              ///< (it has a goto to a label's address (GNU))
+        std::vector<node*> labelValues;         ///< (the labeled statements whose labels' addresses it takes: a label's address is its index + 1)
         bool runtime = false;                   ///< (a function of the C library (the runtime plugin's))
+        bool linked = false;                    ///< (a function that another translation unit of a linked program defines (an import 
+                                                ///< of its name: see bytecode::LinkNamespace))
         std::string runtimeName;
         std::optional<std::uint64_t> descriptor;    ///< (the address of its descriptor (its function's index), if its address is taken)
         std::optional<std::uint32_t> wrapper;   ///< (a function that calls it, for its descriptor (a function of the runtime's cannot be 

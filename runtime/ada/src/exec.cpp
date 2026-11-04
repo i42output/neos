@@ -50,6 +50,7 @@
 #endif
 #include "core.hpp"
 #include "exec.hpp"
+#include <neos/language/ada.hpp>
 #include "int128.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -58,7 +59,7 @@ namespace neos::ada_runtime
 {
     namespace
     {
-        constexpr std::uint64_t StaticBase = std::uint64_t{ 1u } << 16u;    ///< (static data: its address (the region's first block))
+        constexpr std::uint64_t StaticBase = language::ada::layout::StaticBase; ///< (static data: its address (the region's first block))
         constexpr std::uint64_t EnvironmentStack = std::uint64_t{ 64u } << 20u;
         constexpr std::uint64_t SecondaryStack = std::uint64_t{ 16u } << 20u;
 

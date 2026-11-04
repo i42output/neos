@@ -309,6 +309,68 @@ namespace neos::compilers::ada
                 }
             }
         }
+        // (an unchecked union (B.3.3) without component clauses: its variants overlaid, as a C union's members are, from the variant
+        // part's offset (aligned to its components' alignment), its other components before it (as C's), its discriminants (which 
+        // are stored: for the checks that this implementation makes) after it, so that its objects are laid out as C's (B.3.3(11/5)))
+        if (t->unchecked_union && t->kind == type_kind::Record && !t->tagged && t->parent == nullptr &&
+            std::none_of(t->components.begin(), t->components.end(), [](component_info const& c) { return c.bit_position.has_value(); }))
+        {
+            auto const size_alignment = [&](component_info const& c) -> std::optional<std::pair<std::uint64_t, std::uint64_t>>
+            {
+                auto* cv = c.type != nullptr ? c.type->view() : nullptr;
+                if (cv == nullptr)
+                    return std::make_pair(std::uint64_t{ 8u }, std::uint64_t{ 8u });
+                if (cv->is_scalar() || cv->is_access())
+                    return std::make_pair(scalar_size(cv), scalar_size(cv));
+                if (auto const size = object_size(cv); size != 0u)
+                    return std::make_pair(size, std::uint64_t{ 8u });
+                return std::nullopt;
+            };
+            bool ok = true;
+            std::uint64_t variantAlignment = 1u;
+            for (auto const& c : t->components)
+                if (auto const sa = size_alignment(c); !sa)
+                    ok = false;
+                else if (c.variant >= 0)
+                    variantAlignment = std::max(variantAlignment, sa->second);
+            if (ok)
+            {
+                auto const align = [](std::uint64_t aOffset, std::uint64_t aAlignment) { return (aOffset + aAlignment - 1u) & ~(aAlignment - 1u); };
+                for (auto& c : t->components)
+                    if (!c.discriminant && c.variant < 0)
+                    {
+                        auto const [size, alignment] = *size_alignment(c);
+                        c.offset = align(offset, alignment);
+                        offset = *c.offset + size;
+                    }
+                auto const start = align(offset, variantAlignment);
+                auto end = start;
+                std::map<int, std::uint64_t> next;     // (each variant's next component's offset)
+                for (auto& c : t->components)
+                    if (!c.discriminant && c.variant >= 0)
+                    {
+                        if (!next.contains(c.variant))
+                        {
+                            auto const parent = static_cast<std::size_t>(c.variant) < t->variants.size() ? t->variants[static_cast<std::size_t>(c.variant)].parent : -1;
+                            next[c.variant] = parent >= 0 && next.contains(parent) ? next[parent] : start;
+                        }
+                        auto const [size, alignment] = *size_alignment(c);
+                        c.offset = align(next[c.variant], alignment);
+                        next[c.variant] = *c.offset + size;
+                        end = std::max(end, next[c.variant]);
+                    }
+                offset = align(end, variantAlignment);
+                for (auto& c : t->components)
+                    if (c.discriminant)
+                    {
+                        auto const [size, alignment] = *size_alignment(c);
+                        c.offset = align(offset, alignment);
+                        offset = *c.offset + size;
+                    }
+                t->size = std::max<std::uint64_t>((offset + 7u) & ~std::uint64_t{ 7u }, 8u);
+                return;
+            }
+        }
         // (the scalar (or access) components that component clauses place at a storage unit, in as many storage units as their
         // objects' size: there (13.5.1); the others after them)
         auto const placed = [&](component_info const& aComponent) -> std::optional<std::uint64_t>

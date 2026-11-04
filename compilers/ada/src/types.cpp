@@ -155,7 +155,7 @@ namespace neos::compilers::ada
             // (a type with the Integer_Literal aspect (4.2.1))
             return (e->is_integer() && !hidden()) || (a == iIntegerLiteral && !e->is_numeric() && type_aspect(aExpected, "integer_literal") != nullptr);
         case type_kind::UniversalReal:
-            return (!hidden() && e->kind == type_kind::Float || e->kind == type_kind::Fixed || e->kind == type_kind::Decimal || e->kind == type_kind::UniversalFixed) ||
+            return (!hidden() && (e->kind == type_kind::Float || e->kind == type_kind::Fixed || e->kind == type_kind::Decimal || e->kind == type_kind::UniversalFixed)) ||
                 (a == iRealLiteral && !e->is_numeric() && type_aspect(aExpected, "real_literal") != nullptr);
         case type_kind::UniversalFixed:
             return e->is_fixed();
@@ -228,6 +228,22 @@ namespace neos::compilers::ada
 
     // --- subtype marks and indications
 
+    namespace
+    {
+        // (a subtype mark of an access definition (or access type definition): it denotes the type itself (8.6(17/3)))
+        bool designated_mark(node const* aMark)
+        {
+            for (auto const* n = aMark->parent; n != nullptr; n = n->parent)
+            {
+                if (n->is(construct::AccessDefinition) || n->is(construct::TypeAccess) || n->is(construct::Attribute))
+                    return true;
+                if (!n->is(construct::SubtypeIndication) && !n->is(construct::Selected))
+                    return false;
+            }
+            return false;
+        }
+    }
+
     ada_type* program::subtype_mark(node* aMark, region* aRegion)
     {
         if (aMark->is(construct::SubtypeIndication))
@@ -249,20 +265,44 @@ namespace neos::compilers::ada
                 return prefix->base_type();
             error(aMark, "subtype mark expected");
         }
+        // (the name of an enclosing task or protected unit: its current instance (8.6(17/3)), not a subtype)
+        if (aMark->is(construct::Identifier) && iSpeculation == 0 && iInstanceBodies == 0 && !designated_mark(aMark))
+            for (auto* r = aRegion; r != nullptr; r = r->parent)
+                for (auto* o = r->owner; o != nullptr; o = o->kind == entity_kind::Procedure ? o->owner : nullptr)
+                    if ((o->kind == entity_kind::Task || o->kind == entity_kind::Protected) && o->name == name_text(aMark->source) &&
+                        o->type != nullptr && !o->type->name.empty())
+                        error(aMark, "\"" + o->name + "\" denotes the current instance of the unit here, not a subtype (8.6(17/3))");
         auto* e = resolve_entity(aMark, aRegion);
         if (e == nullptr)
             error(aMark, "subtype mark expected");
         if (e->kind == entity_kind::Task || e->kind == entity_kind::Protected)
             if (e->type != nullptr)
+            {
+                // (within the unit: its current instance, not a subtype (8.6(17/3), 9.1(9), 9.4(9)))
+                if (iSpeculation == 0 && iInstanceBodies == 0 && !designated_mark(aMark))
+                    for (auto* r = aRegion; r != nullptr; r = r->parent)
+                        if (r->owner == e)
+                            error(aMark, "\"" + e->name + "\" denotes the current instance of the unit here, not a subtype (8.6(17/3))");
                 return e->type;
+            }
         if (!e->is_type())
             error(aMark, "\"" + e->name + "\" is not a type");
         aMark->ent = e;
         aMark->type = e->type;
+        // (within its own declaration (a record, task or protected type's region): the current instance, not a subtype (8.6(17/3)); a
+        // subtype mark of an access definition denotes the type)
+        if (iSpeculation == 0 && iInstanceBodies == 0 && !designated_mark(aMark) && e->kind == entity_kind::Type)
+            for (auto* r = aRegion; r != nullptr; r = r->parent)
+            {
+                auto* unit = e->type != nullptr ? e->type->unit : nullptr;
+                if (r->owner != nullptr && (r->owner == e || (unit != nullptr && (r->owner == unit || r->owner->owner == unit))))
+                    error(aMark, "\"" + e->name + "\" denotes the current instance of the type here, not a subtype (8.6(17/3))");
+            }
         // (the name of an incomplete view: only where allowed (3.10.1(5/3)-(9.4/3)))
-        if (auto* t = e->type; t != nullptr && t->incomplete && t->full == nullptr && !t->completing && !e->completed && iSpeculation == 0 &&
-            iIncompleteUses != incomplete_uses::Allowed && !(iIncompleteUses == incomplete_uses::TaggedOnly && t->tagged))
-            error(aMark, "the name of an incomplete view cannot be used here");
+        bool const limitedView = e->scope != nullptr && e->scope->owner != nullptr && e->scope->owner->limited_view;
+        if (auto* t = e->type; t != nullptr && t->incomplete && (limitedView || (t->full == nullptr && !t->completing && !e->completed)) &&
+            iSpeculation == 0 && iIncompleteUses != incomplete_uses::Allowed && !(iIncompleteUses == incomplete_uses::TaggedOnly && t->tagged))
+            recover([&]() { error(aMark, "the name of an incomplete view cannot be used here"); });     // (the rest analysed)
         return e->type;
     }
 
@@ -340,6 +380,11 @@ namespace neos::compilers::ada
                 designated->view()->kind != type_kind::Private && designated->view()->kind != type_kind::Task &&
                 designated->view()->kind != type_kind::Protected && !designated->view()->is_formal)
                 recover([&]() { error(mark, "an index or discriminant constraint needs a designated array or discriminated type"); });
+            // (not of an incomplete view, unless a discriminant constraint of one with a known discriminant part (3.10.1(9.2/3)))
+            else if (auto* v = t->view(); iInstanceBodies == 0 && v->kind == type_kind::Access && designated != nullptr &&
+                (designated->incomplete || designated->view()->incomplete) && !designated->view()->is_formal &&
+                std::none_of(designated->view()->components.begin(), designated->view()->components.end(), [](component_info const& c) { return c.discriminant; }))
+                recover([&]() { error(mark, "an access subtype designating an incomplete view cannot be constrained (3.10.1(9.2/3))"); });
             auto* result = constrain(t, mark, aRegion);
             aIndication->type = result;
             return result;
@@ -450,6 +495,9 @@ namespace neos::compilers::ada
             {
                 auto* result = new_subtype(aType);
                 resolve(aConstraint->child(0), nullptr, aRegion);
+                // (static (3.5.9(16), J.3(3)))
+                if (iInstanceBodies == 0 && iSpeculation == 0 && !static_expression(aConstraint->child(0)))
+                    recover([&]() { error(aConstraint->child(0), "the expression of a digits or delta constraint must be static"); });
                 auto v = evaluate(aConstraint->child(0), aRegion);
                 if (aConstraint->is(construct::ConstraintDigits) && v.is_integer())
                 {
@@ -497,6 +545,15 @@ namespace neos::compilers::ada
                     if (aConstraint->is(construct::ConstraintIndex) || c != aConstraint->child(0))
                         items.push_back(c);
                 auto* target = view;
+                // (an index constraint: of an unconstrained array subtype (3.6.1(3)); a discriminant constraint: of an unconstrained
+                // discriminated subtype (3.7.1(7/3)); neither of a scalar subtype)
+                if (iInstanceBodies == 0 && iSpeculation == 0)
+                {
+                    if (target->is_scalar())
+                        recover([&]() { error(aConstraint, "an index or discriminant constraint cannot be applied to a scalar subtype"); });
+                    else if (target->kind == type_kind::Array && aType->view()->constrained && !target->is_formal)
+                        recover([&]() { error(aConstraint, "an index constraint cannot be applied to a constrained array subtype (3.6.1(3))"); });
+                }
                 if (target->kind == type_kind::Access && target->designated != nullptr)
                 {
                     // (a constrained access subtype: its designated subtype is constrained (a private type's: of its full view))
@@ -506,6 +563,9 @@ namespace neos::compilers::ada
                 }
                 if (target->kind == type_kind::Array)
                 {
+                    // (a range for each index (3.6.1(3)))
+                    if (items.size() != target->indexes.size() && iInstanceBodies == 0 && iSpeculation == 0)
+                        recover([&]() { error(aConstraint, "an index constraint must give a discrete range for each index (3.6.1(3))"); });
                     auto* result = new_subtype(aType);
                     result->constrained = true;
                     result->indexes.clear();
@@ -532,28 +592,61 @@ namespace neos::compilers::ada
                         discriminants.push_back(&c);
                 std::vector<node*> values(discriminants.size(), nullptr);
                 std::size_t position = 0u;
+                bool named = false;
+                bool const check = iInstanceBodies == 0 && iSpeculation == 0 && !discriminants.empty();
                 for (auto* item : items)
                 {
                     if (item->is(construct::Association))
                     {
+                        named = true;
                         auto* choices = item->child(0);
+                        ada_type* associationType = nullptr;
                         for (auto* choice : choices->children)
                         {
                             auto const name = name_text(choice->source);
                             // (a formal type's discriminants' names, within the instance)
                             auto const& formalNames = aType->view()->formal_discriminants;
                             bool const formal = !formalNames.empty() && within_scope(aType->view()->formal_scope, aRegion);
+                            bool found = false;
                             for (std::size_t d = 0u; d < discriminants.size(); ++d)
                                 if (formal ? d < formalNames.size() && formalNames[d] == name : discriminants[d]->ent->name == name)
                                 {
+                                    found = true;
+                                    // (a discriminant: given one value (3.7.1(8)); the discriminants of an association: of the same type (3.7.1(9)))
+                                    if (check && values[d] != nullptr)
+                                        recover([&]() { error(choice, "the discriminant \"" + name + "\" is given more than one value (3.7.1(8))"); });
+                                    if (check && associationType != nullptr && discriminants[d]->type != nullptr &&
+                                        associationType->base_type() != discriminants[d]->type->base_type())
+                                        recover([&]() { error(choice, "the discriminants of a discriminant association must be of the same type (3.7.1(9))"); });
+                                    if (discriminants[d]->type != nullptr)
+                                        associationType = discriminants[d]->type;
                                     values[d] = item->children.back();
                                     choice->ent = discriminants[d]->ent;
                                 }
+                            // (the name of a discriminant of the type (3.7.1(5)))
+                            if (check && !found && !formal)
+                                recover([&]() { error(choice, "\"" + name + "\" is not a discriminant of the type (3.7.1(5))"); });
                         }
                     }
-                    else if (position < values.size())
-                        values[position++] = item;
+                    else
+                    {
+                        // (positional associations: before named ones (3.7.1(3)), at most one for each discriminant)
+                        if (check && named)
+                            recover([&]() { error(item, "a positional discriminant association cannot follow a named one (3.7.1(3))"); });
+                        if (position < values.size())
+                            values[position++] = item;
+                        else if (check)
+                            recover([&]() { error(item, "too many discriminant values (3.7.1(8))"); });
+                    }
                 }
+                // (a value for each discriminant (3.7.1(8)))
+                if (check)
+                    for (std::size_t d = 0u; d < discriminants.size(); ++d)
+                        if (values[d] == nullptr)
+                        {
+                            recover([&]() { error(aConstraint, "the discriminant \"" + discriminants[d]->ent->name + "\" is not given a value (3.7.1(8))"); });
+                            break;
+                        }
                 // (a constraint that depends on a discriminant: its values checked when an object is created (3.7.1(12)))
                 for (std::size_t d = 0u; d < discriminants.size(); ++d)
                     if (values[d] != nullptr)
@@ -632,7 +725,7 @@ namespace neos::compilers::ada
             base->high = static_value{ highest };
     }
 
-    void program::default_storage_pool(ada_type* aAccess, node* aDecl, region* aRegion)
+    void program::default_storage_pool(ada_type* aAccess, node* aDecl, region* aRegion, bool aRecordPool)
     {
         // (the Default_Storage_Pool in effect where an access type is declared: its pool unless it specifies one (13.11.3(6/3)))
         char const* const where = aDecl != nullptr ? aDecl->source.data() : nullptr;
@@ -652,7 +745,10 @@ namespace neos::compilers::ada
                 }
             if (!any)
                 continue;
-            if (*found != nullptr)
+            // (a null default pool: no allocators of the type (unless it specifies a pool))
+            if (*found == nullptr)
+                iNullPoolTypes.insert(aAccess);
+            if (*found != nullptr && aRecordPool)
             {
                 iTypeAspects[aAccess]["storage_pool"] = *found;
                 // (the pool object: in memory (its allocators may be in nested subprograms))
@@ -730,6 +826,8 @@ namespace neos::compilers::ada
             };
             if (less(s->high, s->low) || (!less(s->low, m->low) && !less(m->high, s->high)))
                 return;     // (null, or within: compatible)
+            // (an incompatible static constraint: the subtype is not static (4.9(26/3)))
+            aSubtype->nonstatic = true;
         }
         else if (!s->low_object && !s->high_object && !(m->low_object || m->high_object))
             return;
@@ -843,6 +941,42 @@ namespace neos::compilers::ada
 
     // --- type declarations
 
+    bool program::same_interfaces(ada_type* aPartial, ada_type* aFull)
+    {
+        // (a partial view and its full view: descended from the same interfaces (7.3(7.3/2)))
+        std::function<void(ada_type*, std::set<ada_type const*>&, int)> collect = [&](ada_type* x, std::set<ada_type const*>& out, int depth)
+        {
+            if (x == nullptr || depth > 32)
+                return;
+            auto* v = x->view();
+            if (v->kind == type_kind::ClassWide && v->specific != nullptr)
+                v = v->specific->view();
+            v = v->base_type()->view();
+            if (v->kind == type_kind::Interface)
+                out.insert(v);
+            for (auto* i : x->interfaces)
+                collect(i, out, depth + 1);
+            if (x != v)
+                for (auto* i : v->interfaces)
+                    collect(i, out, depth + 1);
+            if (v->parent != nullptr)
+                collect(v->parent, out, depth + 1);
+        };
+        std::set<ada_type const*> partialSet, fullSet;
+        for (auto* i : aPartial->interfaces)
+            collect(i, partialSet, 0);
+        if (aPartial->parent != nullptr)
+            collect(aPartial->parent, partialSet, 0);
+        auto* full = aFull->base_type();
+        for (auto* i : full->interfaces)
+            collect(i, fullSet, 0);
+        if (full->kind == type_kind::Interface)
+            fullSet.insert(full->view());
+        if (full->parent != nullptr)
+            collect(full->parent, fullSet, 0);
+        return partialSet == fullSet;
+    }
+
     bool program::not_completely_defined(ada_type* aType, region* aRegion, int aDepth)
     {
         // (a private (or incomplete) type declared in an enclosing declarative region whose full declaration has not occurred yet, or a
@@ -853,8 +987,19 @@ namespace neos::compilers::ada
             (aType->kind == type_kind::Private ? aType : aType->base) : aType->base_type();
         if (t->kind == type_kind::Private)
         {
-            if (t->full != nullptr || t->is_formal || t->declared_in == nullptr)
+            // (checking a generic (its template, where it is declared): a full type declaration after (the end of) it has not occurred)
+            bool const later = t->full != nullptr && iCheckedGeneric != nullptr && t->full->decl != nullptr && t->full->decl->decl != nullptr &&
+                t->full->decl->decl->file == iCheckedGeneric->file &&
+                t->full->decl->decl->source.data() >= iCheckedGeneric->source.data() + iCheckedGeneric->source.size();
+            if ((t->full != nullptr && !later) || t->is_formal || t->declared_in == nullptr)
                 return false;
+            // (a type derived from a generic formal type (e.g. a record extension of a formal tagged private type): complete; it is
+            // a view of the formal's kind)
+            // (or of a formal derived type (its root not formal))
+            if (t->parent != nullptr && t->full == nullptr && !t->untagged_partial)
+                for (auto* a = t->parent; a != nullptr; a = a->view()->base_type()->view()->parent)
+                    if (a->view()->is_formal || a->view()->base_type()->view()->is_formal)
+                        return false;
             for (region* jump = nullptr, *r = aRegion; r != nullptr; r = outward(r, jump))
                 if (r == t->declared_in)
                     return true;
@@ -958,7 +1103,8 @@ namespace neos::compilers::ada
                 bool within = false;
                 for (region* jump = nullptr, *r = aComposite; r != nullptr && !within; r = outward(r, jump))
                     within = r->owner == package;
-                if (!within)
+                // (and here: within the composite type's immediate scope (7.3.1(5/1)))
+                if (!within || (iInstanceBodies == 0 && !within_scope(aComposite, aRegion)))
                     return partial->limited;
             }
             return limited_type(partial->full, aRegion);
@@ -1092,6 +1238,8 @@ namespace neos::compilers::ada
             if (parent->view()->kind == type_kind::ClassWide)
                 error_in_private_part_too(parentNode, "the parent type of a derived type cannot be class-wide");
             auto* t = derive(parent, name, e, aRegion, nullptr, nullptr);
+            if (aDecl->first(construct::Discriminants) != nullptr || aDecl->first(construct::DiscriminantsUnknown) != nullptr)
+                t->inherited_unknown_discriminants = false;
             e->type = t;
             t->kind = type_kind::Private;
             t->tagged = true;
@@ -1105,7 +1253,9 @@ namespace neos::compilers::ada
                         t->interfaces.push_back(i);
             }
             t->abstract = aDecl->has_flag("abstract");
-            t->limited = aDecl->has_flag("limited") || parent->view()->limited;
+            // (limited if its parent is, unless the parent is an interface (7.5(6.1/2)))
+            t->limited = aDecl->has_flag("limited") || aDecl->has_flag("synchronized") ||
+                (parent->view()->limited && parent->view()->base_type()->view()->kind != type_kind::Interface);
             bool const limitedExtension = aDecl->has_flag("limited") || aDecl->has_flag("synchronized");
             progenitor_check(parent, parentNode, limitedExtension, aDecl->has_flag("synchronized"), type_kind::Record);
             for (auto* i : aDecl->children)
@@ -1152,6 +1302,10 @@ namespace neos::compilers::ada
         {
             // (the full view of a partial view: the partial view's entity denotes the type (the full view is its completion))
             auto* p = partial->type;
+            // (a private type's or private extension's full declaration: in the private part (7.3(4)))
+            if (!p->incomplete && iInstanceBodies == 0 && aRegion->is_package && !aRegion->package_body &&
+                (aRegion->private_start == static_cast<std::size_t>(-1) || aRegion->declarations.size() < aRegion->private_start))
+                recover([&]() { error(defining, "the full declaration of a private type or private extension must be in the private part (7.3(4))"); });
             p->full = t;    // (the first subtype (e.g. a constrained array type's: constrained))
             // (a partial view whose first subtype is constrained (e.g. a private extension of a constrained subtype): its base's
             // full view too)
@@ -1169,6 +1323,18 @@ namespace neos::compilers::ada
                 t->partial = p;
             partial->completion = e;
             partial->completed = true;
+            // (a partial view with known discriminants: its full view inherits Implicit_Dereference only if the partial view has the same
+            // aspect (13.1.1(18.4/4)))
+            if (iInstanceBodies == 0 && !p->incomplete && p->known_discriminants && t->base_type()->parent != nullptr)
+                if (auto* inherited = type_aspect(t->base_type()->parent, "implicit_dereference"); inherited != nullptr)
+                {
+                    auto* own = type_aspect(p, "implicit_dereference");
+                    if (own == nullptr && p->base_type()->parent != nullptr)
+                        own = type_aspect(p->base_type()->parent, "implicit_dereference");     // (the partial view's own inherited aspect)
+                    if (own == nullptr || name_text(own->source) != name_text(inherited->source))
+                        recover([&]() { error(definition != nullptr ? definition : defining, "the full view inherits aspect Implicit_Dereference, which its partial view "
+                            "(with known discriminants) does not have (13.1.1(18.4/4))"); });
+                }
             // (a tagged incomplete type: completed by a tagged type (3.10.1(2.1/2)))
             // (the view's: a derived type without an extension is tagged if its parent's view is)
             bool tagged = t->base_type()->tagged || t->base_type()->kind == type_kind::Interface;
@@ -1194,10 +1360,108 @@ namespace neos::compilers::ada
                     indefinite_subtype(t->base_type()->parent, definition->first(construct::SubtypeIndication), aRegion) :
                     indefinite_subtype(t, definition, aRegion)))
                 recover([&]() { error(defining, "the full view of a partial view without discriminants must be definite"); });
+            // (a partial view with a known discriminant part: the full view's fully conforming (7.3(13), 6.3.1(14)): the same
+            // discriminants' names, statically matching subtypes, fully conformant defaults)
+            if (!p->incomplete && iInstanceBodies == 0 && iInstantiationSites.empty() && partial->decl != nullptr && partial->decl->parent != nullptr &&
+                partial->decl->parent->first(construct::Discriminants) != nullptr)
+            {
+                std::vector<component_info const*> a, b;
+                for (auto const& c : p->components)
+                    if (c.discriminant)
+                        a.push_back(&c);
+                if (discriminants != nullptr && discriminants->is(construct::Discriminants))
+                    for (auto const& c : t->base_type()->view()->components)
+                        if (c.discriminant && !c.stored && c.ent != nullptr && c.ent->decl != nullptr &&
+                            [&]() { for (auto* n = c.ent->decl; n != nullptr; n = n->parent) if (n == discriminants) return true; return false; }())
+                            b.push_back(&c);
+                bool conformant = discriminants != nullptr && discriminants->is(construct::Discriminants) && a.size() == b.size();
+                for (std::size_t i = 0u; conformant && i < a.size(); ++i)
+                    conformant = a[i]->ent != nullptr && b[i]->ent != nullptr && a[i]->ent->name == b[i]->ent->name &&
+                        (a[i]->type == nullptr || b[i]->type == nullptr || (a[i]->type->anonymous_access && b[i]->type->anonymous_access) ||
+                            statically_matching(a[i]->type, b[i]->type)) &&
+                        (a[i]->default_expression == nullptr) == (b[i]->default_expression == nullptr) &&
+                        (a[i]->default_expression == nullptr || fully_conformant(a[i]->default_expression, b[i]->default_expression));
+                if (!conformant)
+                    recover([&]() { error(defining, "the full view's discriminant part must fully conform to the partial view's (7.3(13))"); });
+            }
             // (a nonlimited partial view: its full view nonlimited (7.5(3/3)))
             if (!p->incomplete && !p->limited && iInstanceBodies == 0 && iInstantiationSites.empty() && limited_type(t, aRegion) &&
                 !(p->parent != nullptr && limited_type(p->parent, aRegion)))
                 recover([&]() { error(defining, "the full view of a nonlimited partial view must be nonlimited"); });
+            // (a limited tagged partial view: its full view limited (7.3(7.1/2)... 7.5(3/3)); a private extension: its full view a record
+            // extension (7.3(10)))
+            if (!p->incomplete && p->tagged && p->limited && iInstanceBodies == 0 && iInstantiationSites.empty() && !limited_type(t, aRegion) &&
+                t->base_type()->tagged)
+                recover([&]() { error(defining, "the full view of a limited tagged partial view must be limited"); });
+            auto const privateExtension = [&]()
+            {
+                auto* derived = partial->decl != nullptr && partial->decl->parent != nullptr ? partial->decl->parent->first(construct::TypeDerived) : nullptr;
+                auto* extension = derived != nullptr ? derived->first(construct::Extension) : nullptr;
+                return extension != nullptr && extension->has_flag("private");
+            };
+            if (!p->incomplete && privateExtension() && definition != nullptr &&
+                !(definition->is(construct::TypeDerived) && definition->first(construct::Extension) != nullptr) && iInstanceBodies == 0)
+                recover([&]() { error(defining, "the full view of a private extension must be a record extension"); });
+            // (a tagged partial view: descended from an interface if and only if its full view is (7.3(7.3/2)))
+            if (!p->incomplete && p->tagged && iInstanceBodies == 0 && iInstantiationSites.empty() && !same_interfaces(p, t))
+                recover([&]() { error(defining, "a tagged partial view and its full view must be descended from the same interfaces (7.3(7.3/2))"); });
+            // (a synchronized private extension: completed by a task or protected type (7.3(7.2/3)))
+            if (!p->incomplete && iInstanceBodies == 0 && partial->decl != nullptr && partial->decl->parent != nullptr)
+                if (auto* declaration = partial->decl->parent; declaration->has_flag("synchronized") ||
+                    (declaration->first(construct::TypeDerived) != nullptr && declaration->first(construct::TypeDerived)->has_flag("synchronized")))
+                    recover([&]() { error(defining, "a synchronized private extension must be completed by a task or protected type (7.3(7.2/3))"); });
+            // (a private extension's full view: limited if and only if the private extension is (7.3(10.1/3)))
+            if (!p->incomplete && privateExtension() && definition != nullptr && definition->is(construct::TypeDerived) && iInstanceBodies == 0)
+            {
+                auto* declaration = partial->decl->parent;
+                auto* derived = declaration->first(construct::TypeDerived);
+                bool const partialLimited = declaration->has_flag("limited") || (derived != nullptr && derived->has_flag("limited"));
+                bool const fullLimited = definition->has_flag("limited") || (definition->parent != nullptr && definition->parent->has_flag("limited"));
+                if (partialLimited != fullLimited)
+                    recover([&]() { error(definition, partialLimited ? "the full view of a limited private extension must be declared limited (7.3(10.1/3))" :
+                        "the full view of a private extension that is not declared limited cannot be declared limited (7.3(10.1/3))"); });
+            }
+            // (... whose parent is derived from the private extension's ancestor (7.3(10)))
+            if (!p->incomplete && privateExtension() && p->parent != nullptr && t->base_type()->parent != nullptr && iInstanceBodies == 0 &&
+                !is_descendant(t->base_type()->parent, p->parent) &&
+                !(p->parent->view()->base_type()->view()->kind == type_kind::Interface && is_descendant(t->base_type(), p->parent)))
+                recover([&]() { error(defining, "the parent type of the full view of a private extension must be derived from its ancestor type"); });
+            // (a private extension whose ancestor subtype constrains its discriminants: its full view's parent subtype statically matching
+            // constraints on them (7.3(13)))
+            if (!p->incomplete && privateExtension() && iInstanceBodies == 0 && iInstantiationSites.empty())
+            {
+                auto const values = [&](ada_type* aType, bool aOwn) -> std::optional<std::vector<static_value>>
+                {
+                    // (the ancestor's discriminants' values: the first subtype's constraint, or the stored values (new discriminants)); the
+                    // partial view's own (not its full view's))
+                    auto* v = aOwn ? aType : aType->view();
+                    if (!v->discriminant_constraint.empty())
+                    {
+                        std::vector<static_value> r;
+                        for (auto* c : v->discriminant_constraint)
+                            r.push_back(c != nullptr ? evaluate(c, aRegion) : static_value{});
+                        return r;
+                    }
+                    std::vector<static_value> r;
+                    for (auto const& c : (aOwn ? v->base_type() : v->base_type()->view())->components)
+                        if (c.stored)
+                            r.push_back(c.default_expression != nullptr ? evaluate(c.default_expression, aRegion) : static_value{});
+                    if (!r.empty())
+                        return r;
+                    return std::nullopt;
+                };
+                auto const pv = values(p, true);
+                auto const tv = values(t, false);
+                bool mismatch = false;
+                if (pv && !tv)
+                    mismatch = true;
+                else if (pv && tv && pv->size() == tv->size())
+                    for (std::size_t k = 0u; k < pv->size(); ++k)
+                        if ((*pv)[k].is_integer() && (*tv)[k].is_integer() && (*pv)[k].integer() != (*tv)[k].integer())
+                            mismatch = true;
+                if (mismatch)
+                    recover([&]() { error(defining, "the parent subtype of the full view must constrain the discriminants as the private extension's ancestor subtype does (7.3(13))"); });
+            }
             // (a tagged partial view: its full view tagged (7.3(7)))
             if (!p->incomplete && p->tagged && !t->base_type()->tagged && t->base_type()->kind != type_kind::Interface)
                 error(defining, "the full view of a tagged partial view must be tagged");
@@ -1403,6 +1667,12 @@ namespace neos::compilers::ada
             }
             return aType;
         };
+        // (a discriminant part: of a composite type (a record, task or protected type, a type derived from one), 3.7(1), (8))
+        if (aDiscriminants != nullptr && iInstanceBodies == 0 && (aDefinition->is(construct::TypeEnumeration) || aDefinition->is(construct::TypeInteger) ||
+            aDefinition->is(construct::TypeModular) || aDefinition->is(construct::TypeFloat) || aDefinition->is(construct::TypeFixed) ||
+            aDefinition->is(construct::TypeDecimal) || aDefinition->is(construct::TypeArray) || aDefinition->is(construct::TypeArrayUnconstrained) ||
+            aDefinition->is(construct::TypeAccess) || aDefinition->is(construct::TypeAccessSubprogram) || aDefinition->is(construct::TypeInterface)))
+            recover([&]() { error(aDiscriminants, "a discriminant part is allowed only for a composite type (3.7(8))"); });
         switch (aDefinition->kind)
         {
         case construct::TypeEnumeration:
@@ -1446,6 +1716,14 @@ namespace neos::compilers::ada
                     for (auto* bound : { aDefinition->child(0), aDefinition->child(1) })
                         if (!static_expression(bound))
                             recover([&]() { error(bound, "the bounds of an integer type must be static"); });
+                // (in System.Min_Int .. System.Max_Int (3.5.4(6)))
+                if (iInstanceBodies == 0)
+                    for (auto const& [bound, v] : { std::pair{ aDefinition->child(0), low }, std::pair{ aDefinition->child(1), high } })
+                        if (v.is_integer() && (v.integer() < -bigint::pow(bigint{ 2 }, 63u) || v.integer() > bigint::pow(bigint{ 2 }, 63u) - bigint{ 1 }))
+                        {
+                            recover([&]() { error(bound, "the bounds of an integer type must be in System.Min_Int .. System.Max_Int (3.5.4(6))"); });
+                            low = high = static_value{ bigint{ 0 } };
+                        }
                 auto const bytes = machine_bytes(low.integer(), high.integer(), false);
                 auto* base = new_type(type_kind::Integer, aName);
                 base->low = static_value{ -bigint::pow(bigint{ 2 }, bytes * 8u - 1u) };
@@ -1464,6 +1742,21 @@ namespace neos::compilers::ada
                 auto modulus = evaluate(aDefinition->child(0), aRegion);
                 if (!modulus.is_integer())
                     error(aDefinition, "modulus must be a static integer");
+                if (iInstanceBodies == 0 && !static_expression(aDefinition->child(0)))
+                    recover([&]() { error(aDefinition->child(0), "the modulus must be static (3.5.4(7))"); });
+                // (positive, at most System.Max_Binary_Modulus (a power of 2) or System.Max_Nonbinary_Modulus (3.5.4(7)))
+                if (iInstanceBodies == 0)
+                {
+                    auto m = modulus.integer();
+                    bool power = m > bigint{ 0 };
+                    for (auto x = m; power && x > bigint{ 1 }; x = x / bigint{ 2 })
+                        power = x % bigint{ 2 } == bigint{ 0 };
+                    if (!(m > bigint{ 0 }) || (power ? m > bigint::pow(bigint{ 2 }, 64u) : m > bigint::pow(bigint{ 2 }, 32u)))
+                    {
+                        recover([&]() { error(aDefinition->child(0), "the modulus must be positive and at most System.Max_Binary_Modulus (or System.Max_Nonbinary_Modulus) (3.5.4(7))"); });
+                        modulus = static_value{ bigint{ 256 } };
+                    }
+                }
                 auto* t = new_type(type_kind::Modular, aName);
                 t->modulus = modulus.integer();
                 t->low = static_value{ bigint{ 0 } };
@@ -1479,6 +1772,8 @@ namespace neos::compilers::ada
                 auto digits = evaluate(aDefinition->child(0), aRegion);
                 if (!digits.is_integer())
                     error(aDefinition, "digits must be a static integer");
+                if (iInstanceBodies == 0 && !static_expression(aDefinition->child(0)))
+                    recover([&]() { error(aDefinition->child(0), "the digits must be static (3.5.7(5))"); });
                 // (positive, at most System.Max_Digits (3.5.7(6)))
                 if (digits.integer() <= bigint{ 0 } || digits.integer() > bigint{ 15 })
                     recover([&]() { error(aDefinition->child(0), "digits must be positive and at most System.Max_Digits"); });
@@ -1506,6 +1801,11 @@ namespace neos::compilers::ada
                     // (the bounds: of any real type (RM 3.5.7(5)))
                     resolve_in_class(r->child(0), aRegion, [](ada_type const* t) { return t->is_real(); });
                     resolve_in_class(r->child(1), aRegion, [](ada_type const* t) { return t->is_real(); });
+                    // (static (3.5.7(5)))
+                    if (iInstanceBodies == 0)
+                        for (auto* bound : { r->child(0), r->child(1) })
+                            if (!static_expression(bound))
+                                recover([&]() { error(bound, "the bounds of a floating point type's range must be static"); });
                     first->low = evaluate(r->child(0), aRegion);
                     first->high = evaluate(r->child(1), aRegion);
                     first->range_node = r;
@@ -1523,6 +1823,8 @@ namespace neos::compilers::ada
                 auto delta = evaluate(aDefinition->child(0), aRegion);
                 if (!delta.known())
                     error(aDefinition, "delta must be static");
+                if (iInstanceBodies == 0 && !static_expression(aDefinition->child(0)))
+                    recover([&]() { error(aDefinition->child(0), "the delta must be static (3.5.9(6))"); });
                 auto* base = new_type(decimal ? type_kind::Decimal : type_kind::Fixed, aName);
                 base->delta = delta.real();
                 base->small = decimal ? delta.real() : power_of_two_at_most(delta.real());
@@ -1561,6 +1863,10 @@ namespace neos::compilers::ada
                     for (auto* bound : { rangeNode->child(0), rangeNode->child(1) })
                         if (!static_expression(bound))
                             recover([&]() { error(bound, "the bounds of a fixed point type's range must be static"); });
+                    // (its values' mantissas: at most System.Max_Mantissa bits (3.5.9(12)); with its Small (specified later in the
+                    // declarative part))
+                    if (!decimal && iInstanceBodies == 0)
+                        iDeferredAspects[aRegion].push_back({ first, "check'mantissa", rangeNode, nullptr, nullptr });
                     if (!decimal)
                         fixed_base_range(first);
                 }
@@ -1577,6 +1883,8 @@ namespace neos::compilers::ada
                     if (!c->is(construct::Flag))
                     {
                         t->component = c->is(construct::AccessDefinition) ? access_definition(c, aRegion) : subtype_indication(c, aRegion);
+                        if (c->is(construct::AccessDefinition) && t->component != nullptr)
+                            t->component->component_access = true;
                         // (the component subtype: definite (3.6(10)), not abstract (3.9.3(8/3)))
                         if (indefinite_subtype(t->component, c, aRegion))
                             error(c, "a component subtype must be definite");
@@ -1663,6 +1971,15 @@ namespace neos::compilers::ada
                             recover([&]() { error(parentNode, "the parent subtype of a derived type with new discriminants must be constrained"); });
                             break;
                         }
+                // (an untagged derived type's new discriminants: each used in the parent subtype's constraint (3.7(13)): its parent
+                // discriminated)
+                if (aDiscriminants != nullptr && aDiscriminants->is(construct::Discriminants) && aDefinition->first(construct::Extension) == nullptr &&
+                    iInstanceBodies == 0 && !parent->view()->is_formal && !parent->view()->base_type()->view()->tagged &&
+                    parent->view()->kind != type_kind::ClassWide && parent->view()->kind != type_kind::Private &&
+                    !parent->view()->base_type()->view()->unknown_discriminants &&
+                    std::none_of(parent->view()->base_type()->view()->components.begin(), parent->view()->base_type()->view()->components.end(),
+                        [](component_info const& c) { return c.discriminant; }))
+                    recover([&]() { error(aDiscriminants, "an untagged derived type's new discriminants must constrain its parent's discriminants (3.7(13))"); });
                 // (the parent type: completely defined (it is frozen, 13.14(7)); not by a private extension ("with private"))
                 bool const privateExtension = [&]()
                 {
@@ -1676,9 +1993,81 @@ namespace neos::compilers::ada
                 }();
                 if (!privateExtension && not_completely_defined(parent, aRegion))
                     error(parentNode, "the parent type of a derived type must be completely defined (its full declaration has not occurred yet)");
+                // (an untagged partial view whose full view is tagged: no derivatives of the partial view within its immediate scope (e.g. in
+                // a child unit's visible part) (7.3(7.3/2)))
+                if (iInstanceBodies == 0)
+                    if (auto* pv = parent->kind == type_kind::Private ? parent : parent->base != nullptr && parent->base->kind == type_kind::Private ? parent->base : nullptr;
+                        pv != nullptr && pv->untagged_partial && pv->full != nullptr && pv->full->base_type()->view()->tagged && pv->declared_in != nullptr &&
+                        pv->declared_in->owner != nullptr && !private_part_visible_here(pv->declared_in->owner, aRegion))
+                    {
+                        bool within = false;
+                        for (region* jump = nullptr, *r = aRegion; r != nullptr && !within; r = outward(r, jump))
+                            within = r == pv->declared_in;
+                        if (within)
+                            recover([&]() { error(parentNode, "a type cannot be derived from an untagged partial view whose full view is tagged within its immediate scope (7.3(7.3/2))"); });
+                    }
                 auto* extension = aDefinition->first(construct::Extension);
+                // (within a generic body: a type extension not a descendant of a formal type of the generic (3.9.1(4/2)))
+                // (a formal of the generic (or of a formal package of it) whose body encloses the declaration)
+                auto const formalOfEnclosingBody = [&](ada_type* aFormal)
+                {
+                    auto* d = aFormal->view()->base_type()->view()->declared_in;
+                    for (int hops = 0; d != nullptr && hops < 8; ++hops, d = d->owner != nullptr ? d->owner->scope : nullptr)
+                        if (d->generic_formals && d->owner != nullptr)
+                            for (region* jump = nullptr, *r = aRegion; r != nullptr; r = outward(r, jump))
+                                if (r->owner == d->owner && (r->package_body || r->is_subprogram))
+                                    return true;
+                    return false;
+                };
+                if (extension != nullptr && iInstanceBodies == 0 && iSpeculation == 0 && within_generic_body(aRegion))
+                    for (auto* a = parent; a != nullptr; a = a->view()->base_type()->view()->parent)
+                        if ((a->view()->is_formal || a->view()->base_type()->view()->is_formal) && formalOfEnclosingBody(a))
+                        {
+                            recover([&]() { error(parentNode, "a type extension in a generic body cannot be a descendant of a formal type of the generic (3.9.1(4/2))"); });
+                            break;
+                        }
+                // (a tagged parent: a record extension part (or a private extension) (3.4(5/2)))
+                if (extension == nullptr && iInstanceBodies == 0 && parent->view()->kind != type_kind::ClassWide &&
+                    parent->view()->base_type()->view()->tagged && (!parent->view()->base_type()->view()->is_formal || !iInstantiationSites.empty()) &&
+                    parent->view()->base_type()->view()->kind != type_kind::Interface)
+                    recover([&]() { error(aDefinition, "a type derived from a tagged type must have a record extension part (3.4(5/2))"); });
                 auto* t = derive(parent, aName, aEntity, aRegion, extension, aDiscriminants);
                 t->abstract = aDefinition->has_flag("abstract");
+                // (derived from an interface: limited only if declared limited (or synchronized) (7.5(6.1/3)))
+                if (parent->view()->base_type()->view()->kind == type_kind::Interface)
+                    t->limited = aDefinition->has_flag("limited") || aDefinition->has_flag("synchronized");
+                // (a limited record extension of a type with a specified Read (Write) attribute: its own limited components with
+                // Read (Write) attributes specified (13.13.2(9/1)... (9/3)))
+                if (extension != nullptr && iInstanceBodies == 0 && limited_type(t, aRegion))
+                    for (auto const* attribute : { "read", "write" })
+                    {
+                        bool specified = false;
+                        for (auto* x = parent->view()->base_type(); x != nullptr && !specified; )
+                        {
+                            specified = type_aspect(x, attribute) != nullptr;
+                            auto* next = x->view()->parent != nullptr ? x->view()->parent->view()->base_type() : nullptr;
+                            x = next != x ? next : nullptr;
+                        }
+                        if (!specified)
+                            continue;
+                        for (auto const& c : t->components)
+                            if (c.ent != nullptr && c.ent->owner == aEntity && !c.discriminant && c.type != nullptr && limited_type(c.type, aRegion))
+                            {
+                                bool available = false;
+                                for (auto* x = c.type->view()->base_type(); x != nullptr && !available; )
+                                {
+                                    available = type_aspect(x, attribute) != nullptr;
+                                    auto* next = x->view()->parent != nullptr ? x->view()->parent->view()->base_type() : nullptr;
+                                    x = next != x ? next : nullptr;
+                                }
+                                if (!available)
+                                {
+                                    recover([&]() { error(aDefinition, std::string{ "a limited extension of a type with a specified " } + attribute +
+                                        " attribute cannot have a limited component without one (13.13.2(9/1))"); });
+                                    break;
+                                }
+                            }
+                    }
                 // (derived from a formal type with known discriminants: its discriminants' names (within the instance))
                 if (aDiscriminants == nullptr && !parent->view()->formal_discriminants.empty())
                 {
@@ -1720,6 +2109,37 @@ namespace neos::compilers::ada
                 // (the designated subtype (may be an incomplete type))
                 incomplete_use use{ *this, incomplete_uses::Allowed };
                 t->designated = subtype_indication(aDefinition->first(construct::SubtypeIndication), aRegion);
+                // (of an incomplete view: no null exclusion, and only a discriminant constraint of one with known discriminants
+                // (3.10.1(9.3/2)))
+                if (auto* indication = aDefinition->first(construct::SubtypeIndication); indication != nullptr && iInstanceBodies == 0 &&
+                    !indication->children.empty())
+                {
+                    std::vector<node*> parts;
+                    for (auto* c : indication->children)
+                        if (!c->is(construct::Flag))
+                            parts.push_back(c);
+                    auto* mark = parts.empty() ? indication->child(0) : parts.front();
+                    bool const constrained = parts.size() > 1u || mark->is(construct::Apply);
+                    if (mark->is(construct::Apply) && !mark->children.empty())
+                        mark = mark->child(0);
+                    auto* e = mark->ent;
+                    auto* it = e != nullptr && e->is_type() ? e->type : nullptr;
+                    bool const limitedView = e != nullptr && e->scope != nullptr && e->scope->owner != nullptr && e->scope->owner->limited_view;
+                    if (it != nullptr && it->incomplete && (limitedView || (it->full == nullptr && !it->completing && !e->completed)) && (constrained ||
+                        indication->has_flag("not null")))
+                    {
+                        node* declaration = e->decl;
+                        while (declaration != nullptr && !declaration->is(construct::Type) && !declaration->is(construct::TypeIncomplete))
+                            declaration = declaration->parent;
+                        bool const discriminants = declaration != nullptr && (declaration->first(construct::Discriminants) != nullptr ||
+                            (declaration->first(construct::TypeIncomplete) != nullptr &&
+                            declaration->first(construct::TypeIncomplete)->first(construct::Discriminants) != nullptr));
+                        bool const discriminantConstraint = parts.size() == 1u && parts.front()->is(construct::Apply) && !limitedView;
+                        if (indication->has_flag("not null") || !(discriminants && discriminantConstraint))
+                            recover([&]() { error(indication, "the designated subtype of an incomplete view can have only a discriminant constraint "
+                                "(of a type with known discriminants), and no null exclusion (3.10.1(9.3/2))"); });
+                    }
+                }
                 default_storage_pool(t, aDefinition, aRegion);
                 break;
             }
@@ -1728,6 +2148,9 @@ namespace neos::compilers::ada
                 auto* t = new_type(type_kind::AccessSubprogram, aName);
                 t->protected_access = aDefinition->has_flag("protected");
                 t->size = 8u;
+                // (not null access procedure ...: its first subtype excludes null)
+                if (auto* parent = aDefinition->parent; parent != nullptr && parent->has_flag("not null"))
+                    t->not_null = true;
                 auto* profile = aDefinition->first(construct::Profile);
                 t->profile = profile_of(profile, aRegion);
                 result = finish(t);
@@ -1798,6 +2221,7 @@ namespace neos::compilers::ada
         for (auto* c : aDefinition->children)
             if (!c->is(construct::Flag))
                 t->designated = subtype_mark(c, aRegion);
+        default_storage_pool(t, aDefinition, aRegion, false);   // (a null default pool's)
         return t;
     }
 
@@ -1815,6 +2239,8 @@ namespace neos::compilers::ada
                         if (!d->is(construct::Flag))
                         {
                             type = d->is(construct::AccessDefinition) ? access_definition(d, aRegion) : subtype_indication(d, aRegion);
+                            if (d->is(construct::AccessDefinition) && type != nullptr)
+                                type->component_access = true;
                             indication = d->is(construct::AccessDefinition) ? nullptr : d;
                             // (the component subtype: definite (3.6(10)))
                             if (indefinite_subtype(type, indication, aRegion))
@@ -1911,6 +2337,7 @@ namespace neos::compilers::ada
                         ce->owner = aType->decl;
                         ce->index = static_cast<std::int32_t>(aType->components.size());
                         ce->aliased = definition->has_flag("aliased");
+                        ce->aliased_declared = ce->aliased;
                         component_info info;
                         info.ent = ce;
                         info.type = type;
@@ -1920,7 +2347,7 @@ namespace neos::compilers::ada
                         aType->components.push_back(info);
                     }
                     if (defaultExpression != nullptr)
-                        recover([&]() { resolve(defaultExpression, type, aRegion); });
+                        recover([&]() { resolve(defaultExpression, type, aRegion); limited_value_check(defaultExpression, type, aRegion); });
                 }
                 else if (c->is(construct::Variants))
                 {
@@ -1946,6 +2373,11 @@ namespace neos::compilers::ada
                                 auto [low, high] = choice_range(choice, discriminant != nullptr ? discriminant->type : nullptr, aRegion);
                                 if (low && high)
                                     info.ranges.emplace_back(*low, *high);
+                                // (of a static constrained discriminant subtype: within it (3.8.1(10)))
+                                auto* dt = discriminant != nullptr && discriminant->type != nullptr ? discriminant->type->view() : nullptr;
+                                if (low && high && !(*high < *low) && dt != nullptr && iInstanceBodies == 0 && static_subtype(discriminant->type) &&
+                                    dt->low.is_integer() && dt->high.is_integer() && (*low < dt->low.integer() || dt->high.integer() < *high))
+                                    error(choice, "a variant's choice covers values outside the discriminant's subtype (3.8.1(10))");
                                 // (static (3.8.1(4)))
                                 if (!static_choice(choice, discriminant != nullptr ? discriminant->type : nullptr, aRegion))
                                     error(choice, "a variant's choice must be static");
@@ -1969,8 +2401,10 @@ namespace neos::compilers::ada
         // (a discrete choice's values: an expression, a range, or a subtype)
         if (aChoice->is(construct::Range))
         {
-            resolve(aChoice->child(0), aType, aRegion);
-            resolve(aChoice->child(1), aType, aRegion);
+            for (auto* bound : { aChoice->child(0), aChoice->child(1) })
+                if (auto* bt = resolve(bound, aType, aRegion); bt != nullptr && aType != nullptr && iSpeculation == 0 && iInstanceBodies == 0 &&
+                    !bt->is_universal() && !bt->view()->is_formal && !aType->view()->is_formal && !covers(aType, bt))
+                    error(bound, "the bound of the choice is not of the expected type");
             auto low = evaluate(aChoice->child(0), aRegion);
             auto high = evaluate(aChoice->child(1), aRegion);
             if (low.is_integer() && high.is_integer())
@@ -1980,6 +2414,10 @@ namespace neos::compilers::ada
         if (aChoice->is(construct::SubtypeIndication) || is_subtype_name(aChoice, aRegion))
         {
             auto* t = discrete_range(aChoice, aType, aRegion);
+            // (of the selector's type (5.4(5)))
+            if (t != nullptr && aType != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && !t->view()->is_formal && !aType->view()->is_formal &&
+                !covers(aType, t))
+                error(aChoice, "the subtype of the choice is not of the expected type");
             return { low_bound(t), high_bound(t) };
         }
         if (aChoice->is(construct::Attribute) && name_text(aChoice->child(1)->source) == "range")
@@ -2216,6 +2654,23 @@ namespace neos::compilers::ada
         t->interfaces.clear();
         t->is_formal = false;
         t->derived_partial = nullptr;
+        // (no discriminant part: the parent's view's unknown discriminants inherited (3.7(26)))
+        if (aDiscriminants == nullptr)
+        {
+            auto* pv = aParent->kind == type_kind::Private ? aParent : aParent->base != nullptr && aParent->base->kind == type_kind::Private ? aParent->base : nullptr;
+            bool unknown = parentBase->inherited_unknown_discriminants;
+            if (pv != nullptr && pv->unknown_discriminants && !pv->is_formal)
+            {
+                auto* package = pv->declared_in != nullptr ? pv->declared_in->owner : nullptr;
+                unknown = unknown || package == nullptr || !private_part_visible_here(package, aRegion);
+            }
+            t->inherited_unknown_discriminants = unknown;
+        }
+        else
+            t->inherited_unknown_discriminants = false;
+        // (a parent subtype that excludes null (e.g. new not null T): so does the first subtype (3.4(6/2)))
+        if (t->is_access() && (aParent->not_null || parentView->not_null))
+            t->not_null = true;
         // (derived from a partial view whose full view is not visible here: its characteristics are the partial view's (7.3.1(5/1)))
         if (auto* partial = aParent->kind == type_kind::Private ? aParent : aParent->base != nullptr && aParent->base->kind == type_kind::Private ? aParent->base : nullptr;
             partial != nullptr && partial->full != nullptr && !partial->is_formal && !partial->tagged)
@@ -2317,6 +2772,7 @@ namespace neos::compilers::ada
                 // tagged type's where the parent's objects have it (its view is the object): see program::layout), else stored (the
                 // constraint's value: e.g. for the parent's variant parts and views))
                 std::vector<component_info> stored;
+                std::vector<std::pair<entity*, std::string>> renamedDiscriminants;  // (a parent's discriminant: the new one that stands for it)
                 {
                     auto const& constraint = parentView->discriminant_constraint;
                     std::set<std::string> named;
@@ -2332,7 +2788,10 @@ namespace neos::compilers::ada
                                 continue;
                             if (value->is(construct::Identifier) && value->ent != nullptr && value->ent->kind == entity_kind::Discriminant &&
                                 named.insert(value->ent->name).second)
+                            {
+                                renamedDiscriminants.emplace_back(pc.ent, value->ent->name);
                                 continue;
+                            }
                             component_info s = pc;
                             s.discriminant = false;
                             s.stored = true;
@@ -2357,8 +2816,38 @@ namespace neos::compilers::ada
                                 c.default_expression->ent = o.ent;
                     t->components.push_back(c);
                 }
+                // (a new discriminant: not a homograph of an inherited component, visible or not (8.3(26/2)))
+                // (a component of a parent's full view that is not visible: only within its package or a descendant of it)
+                bool const hiddenVisibleSomewhere = [&]()
+                {
+                    auto* pb = parentView->base_type();
+                    auto* partial = pb->partial != nullptr ? pb->partial : pb->kind == type_kind::Private ? pb : nullptr;
+                    if (partial == nullptr || partial->declared_in == nullptr || partial->declared_in->owner == nullptr)
+                        return true;
+                    auto const package = full_name(partial->declared_in->owner);
+                    if (iCurrentUnit != nullptr && (iCurrentUnit->name == package || iCurrentUnit->name.starts_with(package + ".")))
+                        return true;
+                    for (auto* q = r; q != nullptr; q = q->parent)
+                        if (q->owner == partial->declared_in->owner)
+                            return true;
+                    return false;
+                }();
+                if (iInstanceBodies == 0 && hiddenVisibleSomewhere)
+                    for (auto const& c : inherited)
+                        if (!c.discriminant && !c.stored && c.ent != nullptr)
+                            for (auto const& d : t->components)
+                                if (d.discriminant && !d.stored && d.ent != nullptr && d.ent->name == c.ent->name)
+                                    recover([&]() { error(d.ent->decl != nullptr ? d.ent->decl : aDiscriminants, "\"" + d.ent->name +
+                                        "\" is already declared in this declarative region"); });
                 for (auto const& c : inherited)
                     t->components.push_back(c);
+                // (the variant parts that a parent's discriminant governs: governed by the new discriminant that stands for it)
+                for (auto& v : t->variants)
+                    for (auto const& [old, name] : renamedDiscriminants)
+                        if (v.discriminant == old)
+                            for (auto const& o : t->components)
+                                if (o.discriminant && o.ent != nullptr && o.ent->name == name)
+                                    v.discriminant = o.ent;
             }
             for (auto const& c : t->components)
                 if (c.ent != nullptr && !c.stored)
@@ -2771,7 +3260,8 @@ namespace neos::compilers::ada
             declaring hiding;
             hiding.add(e);
             // (an incomplete view: its subtype mark alone (no constraint or null exclusion) (3.10.1(8.2/2)))
-            bool const markOnly = indication != nullptr && indication->size() == 1u && !indication->has_flag("not null");
+            bool const markOnly = indication != nullptr && indication->size() == 1u && !indication->has_flag("not null") &&
+                !indication->child(0)->is(construct::Apply);
             incomplete_use use{ *this, markOnly ? incomplete_uses::Allowed : iIncompleteUses };
             t = subtype_indication(indication, aRegion);
         }

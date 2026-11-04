@@ -354,7 +354,18 @@ namespace neos
                 // (linking (see bytecode::LinkedSection): a translation unit after the first run (the running program's 
                 // neos::link_run); the linked value of a global of another translation unit (see neos_rt_host::link))
                 void link_run(std::uint32_t aUnit);
+                bool run_pending_unit();
                 int host_link(char const* aName, char const* aLanguage, neos_rt_type* aType, neos_rt_value* aValue);
+
+                // (a NEOS_RT_BIG_INTEGER's value (its hexadecimal digits: see neos_rt_link_type), rounded to nearest (ties to even))
+                double big_integer_value(char const* aDigits)
+                {
+                    std::string_view const digits{ aDigits != nullptr ? aDigits : "" };
+                    double result = 0.0;
+                    if (std::from_chars(digits.data(), digits.data() + digits.size(), result, std::chars_format::hex).ec == std::errc::result_out_of_range)
+                        result = !digits.empty() && digits[0] == '-' ? -HUGE_VAL : HUGE_VAL;
+                    return result;
+                }
 
                 // the programs that a thread is running: each invocation of a program's function (by the thread, a runtime plugin 
                 // or a coroutine), innermost first, so that its frames can be walked (see neos_rt_host::frames)
@@ -2166,6 +2177,18 @@ namespace neos
                     };
                     std::vector<linked_unit> const& units() const { return iUnits; }
                     void add_unit(std::string const& aLanguage, machine* aProgram, jit::compiled_module* aNative) { iUnits.push_back(linked_unit{ aLanguage, aProgram, aNative }); }
+                    // (the translation units after the first that have begun to run (see link_run), by their indices: a unit runs once)
+                    std::size_t linked_module_count() const { return iLinkedModules.size(); }
+                    bool unit_started(std::uint32_t aUnit) const { return aUnit < iStartedUnits.size() && iStartedUnits[aUnit]; }
+                    bool start_unit(std::uint32_t aUnit)
+                    {
+                        if (unit_started(aUnit))
+                            return false;
+                        if (iStartedUnits.size() <= aUnit)
+                            iStartedUnits.resize(aUnit + 1u, false);
+                        iStartedUnits[aUnit] = true;
+                        return true;
+                    }
                     jit::compiled_module* linker_native() const { return iLinker != nullptr ? iLinker->iNative : nullptr; }
                     void set_linker(machine* aLinker, jit::compiled_module* aNative)
                     {
@@ -2195,8 +2218,11 @@ namespace neos
                         char const resultCode = import[arrow + 1u];
                         neos_rt_type type = NEOS_RT_VOID;
                         neos_rt_value v = {};
-                        if (host_link(name.c_str(), nullptr, &type, &v) == 0)
-                            throw trap{ "'" + name + "' is not defined (no translation unit of the program has a global of the name)" };
+                        // (none of the translation units that have run has it: the next that has not yet run runs now (see 
+                        // run_pending_unit), then the name is linked again)
+                        while (host_link(name.c_str(), nullptr, &type, &v) == 0)
+                            if (!run_pending_unit())
+                                throw trap{ "'" + name + "' is not defined (no translation unit of the program has a global of the name)" };
                         struct release_value
                         {
                             neos_rt_type& type;
@@ -2250,7 +2276,8 @@ namespace neos
                             throw trap{ "'" + name + "' is not a function" };
                         auto const wrong = [&](char const* aWhat) -> trap
                         {
-                            static char const* const sKinds[] = { "no value", "a boolean", "", "", "", "an integer", "", "", "", "a float", "a string", "an object" };
+                            static char const* const sKinds[] = { "no value", "a boolean", "", "", "", "an integer", "", "", "", "a float", "a string", "an object", "", 
+                                "an integer that does not fit in 64 bits" };
                             auto const kind = static_cast<std::size_t>(resultType) < std::size(sKinds) ? sKinds[resultType] : "";
                             return trap{ "'" + name + "' returned " + kind + ", not " + aWhat };
                         };
@@ -2275,6 +2302,7 @@ namespace neos
                             {
                             case NEOS_RT_F64: return result.f64;
                             case NEOS_RT_I64: return static_cast<double>(result.i64);
+                            case NEOS_RT_BIG_INTEGER: return big_integer_value(result.string);
                             default: throw wrong("a float");
                             }
                         };
@@ -2363,6 +2391,7 @@ namespace neos
                     jit::compiled_module* iNative = nullptr;   ///< (its native code, if it runs as native code (see set_linker))
                     machine* iUnit = nullptr;
                     std::vector<linked_unit> iUnits;
+                    std::vector<bool> iStartedUnits;
                     std::unordered_map<std::string, std::uint32_t> iGlobalExports;
                     mutable std::optional<std::uint32_t> iErrorGlobal;    ///< (error_global's)
                     mutable std::pair<std::size_t, std::size_t> iErrorGlobalFor{ ~std::size_t{ 0u }, 0u };
@@ -2841,6 +2870,10 @@ namespace neos
                         throw trap{ "no program is running" };
                     auto& program = *tRunning.program;
                     auto const& linked = program.linked_module(aUnit);
+                    // (it has run already: its code called by an earlier unit's linked a name that no unit that had run had (see 
+                    // link_call))
+                    if (!program.start_unit(aUnit))
+                        return;
                     running context;
                     {
                         std::lock_guard<std::mutex> lock{ loaded_mutex() };
@@ -2874,6 +2907,57 @@ namespace neos
                     external.base = static_cast<std::uint8_t*>(aBase);
                     external.size = aSize;
                     external.fixed = (aFlags & NEOS_RT_EXTERNAL_MEMORY_FIXED) != 0u;
+                }
+
+                bool run_pending_unit()
+                {
+                    // the next translation unit after the first that has not yet run (of the running program's linked program), run now 
+                    // (its turn brought forward: e.g. a library whose functions the first unit's code calls): false if there is none
+                    auto* const linker = tRunning.program != nullptr ? tRunning.program->linker() : nullptr;
+                    if (linker == nullptr)
+                        return false;
+                    for (std::uint32_t u = 0u; u < linker->linked_module_count(); ++u)
+                        if (!linker->unit_started(u))
+                        {
+                            auto const previous = tRunning;
+                            struct restore { running previous; ~restore() { tRunning = previous; } } const restoreRunning{ previous };
+                            tRunning = running{ linker, linker->linker_native() };
+                            link_run(u);
+                            return true;
+                        }
+                    return false;
+                }
+
+                void* host_shared_memory(unsigned long long aOffset, unsigned long long aSize)
+                {
+                    // the shared memory (see neos_rt_host::shared_memory): reserved when a plugin first asks for a range of it; the 
+                    // plugins' ranges (offset, size) do not overlap
+                    static std::mutex sMutex;
+                    static std::uint8_t* sBase = nullptr;
+                    static std::map<unsigned long long, unsigned long long> sRanges;
+                    std::lock_guard<std::mutex> lock{ sMutex };
+                    if (aSize == 0u || aOffset >= NEOS_RT_SHARED_MEMORY_SIZE || aSize > NEOS_RT_SHARED_MEMORY_SIZE - aOffset)
+                        return nullptr;
+                    auto const next = sRanges.lower_bound(aOffset);
+                    if (next != sRanges.end() && next->first < aOffset + aSize)
+                        return nullptr;
+                    if (next != sRanges.begin() && std::prev(next)->first + std::prev(next)->second > aOffset)
+                        return nullptr;
+                    if (sBase == nullptr)
+                    {
+#if defined(_WIN32)
+                        sBase = static_cast<std::uint8_t*>(::VirtualAlloc(nullptr, NEOS_RT_SHARED_MEMORY_SIZE, MEM_RESERVE, PAGE_NOACCESS));
+#else
+                        // (reserved inaccessible: the plugins make their pages accessible as they use them (so that the reservation does 
+                        // not count as the process's data))
+                        auto const p = ::mmap(nullptr, NEOS_RT_SHARED_MEMORY_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                        sBase = p == MAP_FAILED ? nullptr : static_cast<std::uint8_t*>(p);
+#endif
+                        if (sBase == nullptr)
+                            return nullptr;
+                    }
+                    sRanges.emplace(aOffset, aSize);
+                    return sBase;
                 }
 
                 void host_external_memory(void* aBase, unsigned long long aSize)
@@ -3159,8 +3243,8 @@ namespace neos
                         auto const argument = [&](char const* aWhat) { return fail(l.name + "(): argument " + std::to_string(i + 1u) + " must be " + aWhat); };
                         bool const integral = t == NEOS_RT_I64 || t == NEOS_RT_BOOL || (t == NEOS_RT_F64 && std::trunc(a.f64) == a.f64 && std::abs(a.f64) < 9.2e18);
                         std::int64_t const integer = t == NEOS_RT_I64 ? a.i64 : t == NEOS_RT_BOOL ? (a.b != 0 ? 1 : 0) : t == NEOS_RT_F64 && integral ? static_cast<std::int64_t>(a.f64) : 0;
-                        bool const numeric = t == NEOS_RT_I64 || t == NEOS_RT_F64;
-                        double const real = t == NEOS_RT_F64 ? a.f64 : static_cast<double>(a.i64);
+                        bool const numeric = t == NEOS_RT_I64 || t == NEOS_RT_F64 || t == NEOS_RT_BIG_INTEGER;
+                        double const real = t == NEOS_RT_F64 ? a.f64 : t == NEOS_RT_BIG_INTEGER ? big_integer_value(a.string) : static_cast<double>(a.i64);
                         switch (parameters[i])
                         {
                         case 'b':
@@ -3281,10 +3365,16 @@ namespace neos
                     return 0;
                 }
 
+                unsigned long long host_stack_limit()
+                {
+                    return jit::thread_stack_limit();
+                }
+
                 neos_rt_host const sHost{ NEOS_RUNTIME_PLUGIN_VERSION, host_call, host_coroutine_new, host_coroutine_resume, host_coroutine_suspend,
                     host_coroutine_delete, host_thread_context, host_thread_attach, host_load, host_run, host_restricted, host_trap, host_frames,
                     host_function_frame, host_arguments, host_values, host_load_n, host_std_write, host_std_read, host_std_getc, host_std_ungetc,
-                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link, host_watched_changed };
+                    host_std_flush, host_global, host_unload, host_external_memory, host_external_memory_at, host_fix_global, host_link, host_watched_changed, 
+                    host_shared_memory, host_stack_limit };
             }
 
             void const* runtime::host()

@@ -36,15 +36,18 @@
   (the global object's own data properties and the global lexical declarations) are the other languages' to use by their names
   (neos_runtime_plugin_link); a name that it uses but that is not a global (where it would be a ReferenceError) is one of theirs, if
   one of them has it (neos_rt_host::link). Values cross as linked values: undefined and null are no value; booleans, numbers and
-  strings are themselves (a number that is an integer is an integer); other values are linked objects: a JavaScript value's own
-  (javascript.value), or, given to JavaScript, another language's, which JavaScript sees as a proxy (a function, if it can be called,
-  else an object) that is given back as the linked object it is.
+  strings are themselves (a number that is an integer (-0 too) is an integer, as is a BigInt: a big integer if it does not fit in
+  64 bits); other values are linked objects: a JavaScript value's own (javascript.value), or, given to JavaScript, another
+  language's, which JavaScript sees as a proxy (a function, if it can be called, else an object) that is given back as the linked
+  object it is.
 */
 
 #include "js.hpp"
 #include "api.hpp"
 #include <atomic>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <string>
@@ -57,6 +60,45 @@ namespace neos::javascript_runtime
 
     namespace
     {
+        // (a NEOS_RT_BIG_INTEGER's digits (see neos_rt_link_type): of a BigInt's sign and magnitude (not zero))
+        std::string big_integer_digits(bool aNegative, std::vector<std::uint32_t> const& aMagnitude)
+        {
+            std::string result = aNegative ? "-" : "";
+            char buffer[8];
+            result.append(buffer, std::to_chars(buffer, buffer + sizeof(buffer), aMagnitude.back(), 16).ptr);
+            for (auto limb = aMagnitude.rbegin() + 1; limb != aMagnitude.rend(); ++limb)
+            {
+                auto const end = std::to_chars(buffer, buffer + sizeof(buffer), *limb, 16).ptr;
+                result.append(sizeof(buffer) - static_cast<std::size_t>(end - buffer), '0');
+                result.append(buffer, end);
+            }
+            return result;
+        }
+
+        // (a NEOS_RT_BIG_INTEGER's digits: of a number that is an integer, |aValue| >= 2^63 (its mantissa (53 bits) times 2^(exponent - 53),
+        // the exponent at least 64: the mantissa shifted by the shift's remainder of 4 bits, then a zero digit for each 4 bits more))
+        std::string big_integer_digits(double aValue)
+        {
+            int exponent = 0;
+            auto const mantissa = static_cast<std::uint64_t>(std::ldexp(std::frexp(std::fabs(aValue), &exponent), 53));
+            auto const shift = exponent - 53;
+            std::string result = aValue < 0.0 ? "-" : "";
+            char buffer[16];
+            result.append(buffer, std::to_chars(buffer, buffer + sizeof(buffer), mantissa << (shift % 4), 16).ptr);
+            result.append(static_cast<std::size_t>(shift / 4), '0');
+            return result;
+        }
+
+        // (a NEOS_RT_BIG_INTEGER's value as a number (rounded to nearest, ties to even, as Number(aBigInt) is))
+        double big_integer_value(char const* aDigits)
+        {
+            std::string_view const digits{ aDigits != nullptr ? aDigits : "" };
+            double result = 0.0;
+            if (std::from_chars(digits.data(), digits.data() + digits.size(), result, std::chars_format::hex).ec == std::errc::result_out_of_range)
+                result = !digits.empty() && digits[0] == '-' ? -HUGE_VAL : HUGE_VAL;
+            return result;
+        }
+
         // (a JavaScript value's linked object: its value is its slot's (a root) in the linked values of its isolate)
         struct linked_value
         {
@@ -247,6 +289,8 @@ namespace neos::javascript_runtime
                 return number(static_cast<double>(aValue.f32));
             case NEOS_RT_F64:
                 return number(aValue.f64);
+            case NEOS_RT_BIG_INTEGER:
+                return number(big_integer_value(aValue.string));
             case NEOS_RT_STRING:
                 return make_string_utf8(aValue.string != nullptr ? aValue.string : "");
             case NEOS_RT_OBJECT:
@@ -281,10 +325,16 @@ namespace neos::javascript_runtime
             else if (is_number(aValue))
             {
                 auto const n = as_number(aValue);
-                if (std::isfinite(n) && std::trunc(n) == n && std::fabs(n) < 9.2e18 && !(n == 0.0 && std::signbit(n)))
+                if (std::isfinite(n) && std::trunc(n) == n && n >= -9223372036854775808.0 && n < 9223372036854775808.0)
                 {
                     aType = NEOS_RT_I64;
                     aResult.i64 = static_cast<long long>(n);
+                }
+                else if (std::isfinite(n) && std::trunc(n) == n)
+                {
+                    aStrings.push_back(big_integer_digits(n));
+                    aType = NEOS_RT_BIG_INTEGER;
+                    aResult.string = aStrings.back().c_str();
                 }
                 else
                 {
@@ -300,8 +350,20 @@ namespace neos::javascript_runtime
             }
             else if (is_bigint(aValue))
             {
-                aType = NEOS_RT_I64;
-                aResult.i64 = static_cast<long long>(bigint_to_int64(aValue));
+                // (-2^63 to 2^63 - 1: an integer; else a big integer)
+                auto const& b = cell_of<bigint>(aValue);
+                auto const& m = b.magnitude;
+                if (m.size() < 2u || (m.size() == 2u && (m[1] < 0x80000000u || (b.negative && m[1] == 0x80000000u && m[0] == 0u))))
+                {
+                    aType = NEOS_RT_I64;
+                    aResult.i64 = static_cast<long long>(bigint_to_int64(aValue));
+                }
+                else
+                {
+                    aStrings.push_back(big_integer_digits(b.negative, m));
+                    aType = NEOS_RT_BIG_INTEGER;
+                    aResult.string = aStrings.back().c_str();
+                }
             }
             else
             {

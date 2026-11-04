@@ -481,8 +481,13 @@ namespace neos::python_runtime
                         auto const value = builtin_value(aArgs.at(0));
                         if (as<dict_object>(value)->items.empty())
                             return make_str(class_name_of(aArgs[0]) + "()");
+                        // (one that contains itself: "..." within its own repr (as CPython's))
+                        if (repr_enter(aArgs[0]))
+                            return make_str("...");
                         std::string text;
-                        if (!repr_of(value, text))
+                        bool const made = repr_of(value, text);
+                        repr_leave(aArgs[0]);
+                        if (!made)
                             return nullptr;
                         return make_str(class_name_of(aArgs[0]) + "(" + text + ")");
                     } },
@@ -1393,10 +1398,15 @@ namespace neos::python_runtime
                 auto type = make_type("collections.deque", "deque", retain_object, release_object<deque_object>);
                 type.repr = [](neos_py_context*, object* aSelf) -> object*
                 {
+                    // (one that contains itself: "[...]" within its own repr (as CPython's))
+                    if (repr_enter(aSelf))
+                        return make_str("[...]");
                     auto const& d = as_deque(aSelf);
                     ref const list{ deque_list(aSelf) };
                     std::string text;
-                    if (!repr_of(list.get(), text))
+                    bool const made = repr_of(list.get(), text);
+                    repr_leave(aSelf);
+                    if (!made)
                         return nullptr;
                     if (d.maxlen >= 0)
                         return make_str("deque(" + text + ", maxlen=" + std::to_string(d.maxlen) + ")");

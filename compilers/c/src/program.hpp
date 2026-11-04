@@ -53,6 +53,19 @@ namespace neos::compilers::c
     // the WebAssembly value of a C type's values (an aggregate's: its address)
     enum class vkind { None, I32, I64, F32, F64 };
 
+    // the attributes (of attribute specifiers) that the compiler implements: noreturn, and GNU's aligned, packed, constructor and destructor
+    struct attribute_info
+    {
+        bool noreturn = false;
+        bool packed = false;
+        std::uint64_t aligned = 0u;                 ///< (gnu::aligned: the alignment (0: none))
+        std::uint64_t pack = 0u;                    ///< (neos::pack (from #pragma pack): the members' alignment limit (0: none))
+        std::optional<std::int64_t> constructor;    ///< (gnu::constructor: its priority (65535: none given))
+        std::optional<std::int64_t> destructor;
+        node* cleanup = nullptr;                    ///< (gnu::cleanup: its argument (a function's name))
+        void merge(attribute_info const& aOther);
+    };
+
     // the declaration specifiers of a declaration
     struct declaration_specifiers
     {
@@ -64,7 +77,8 @@ namespace neos::compilers::c
         bool isConstexpr = false;
         bool autoType = false;              ///< (auto with no type specifier: the type is inferred from the initializer)
         bool typeSpecified = false;
-        std::uint64_t alignment = 0u;
+        std::uint64_t alignment = 0u;       ///< (alignas's)
+        attribute_info attributes;          ///< (of the attribute specifiers among the specifiers, and before them)
         node* where = nullptr;
     };
 
@@ -156,8 +170,13 @@ namespace neos::compilers::c
         declaration_specifiers specifiers(std::vector<node*> const& aNodes, node* aWhere, bool aAllowStorage = true);
         declarator_result declarator(node* aDeclarator, qtype aType, bool aParameter = false);
         qtype type_name_type(node* aTypeName);
+        void old_style_parameters(declarator_result& aResult, std::vector<node*> const& aDeclarations, std::vector<entity*>& aParameters);
         std::vector<parameter_type> parameters_of(node* aFunctionSuffix, bool& aVariadic, bool& aPrototype, std::vector<entity*>* aEntities = nullptr);
-        c_type const* struct_specifier(node* aSpecifier, bool aDeclarationOnly);
+        c_type const* struct_specifier(node* aSpecifier, bool aDeclarationOnly, attribute_info const* aAttributes = nullptr);
+        void read_attributes(node* aAttributes, attribute_info& aResult);
+        attribute_info declarator_attributes(node* aDeclarator);
+        void startup_function(entity* aFunction, attribute_info const& aAttributes, node* aWhere);
+        void cleanup_function(entity* aObject, node* aFunction, node* aWhere);
         c_type const* enum_specifier(node* aSpecifier, bool aDeclarationOnly);
         entity* declare(node* aName, qtype aType, declaration_specifiers const& aSpecifiers, bool aFileScope, bool aHasInitializer, node* aDecl);
         entity* lookup(std::string const& aName) const;
@@ -200,6 +219,10 @@ namespace neos::compilers::c
         std::uint32_t global(std::string const& aName, type aType);
         void define_function(entity* aFunction);
         std::uint32_t function_index(entity* aFunction);
+        bool exported(entity* aFunction);               ///< (a function that the code of a linked program's other translation units can call 
+                                                        ///< by its name)
+        void linked_object(entity* aObject);            ///< (a function that gives an object's address to the code of a linked program's 
+                                                        ///< other translation units)
         std::uint32_t unprototyped_call(entity* aFunction, std::vector<type> const& aArguments); ///< (a function that calls a function 
                                                                                                 ///< without a prototype with arguments)
         node* statement_expression_value(node* aExpression) const;
@@ -256,6 +279,8 @@ namespace neos::compilers::c
                                                                                         ///< linkage that conflict with another unit's)
         std::vector<entity*> iObjects;                  ///< (objects of static storage duration, canonical)
         std::vector<entity*> iFunctions;                ///< (functions, canonical)
+        std::vector<std::pair<std::int64_t, entity*>> iConstructors;   ///< (gnu::constructor functions: their priorities and functions)
+        std::vector<std::pair<std::int64_t, entity*>> iDestructors;
         std::deque<node> iSyntheticNodes;
         // (the function being analysed)
         entity* iFunction = nullptr;
@@ -263,6 +288,7 @@ namespace neos::compilers::c
         std::vector<node*> iSwitches;
         std::map<std::string, node*> iLabels;
         std::vector<node*> iGotos;
+        std::vector<node*> iLabelAddresses;             ///< (&&label (GNU))
         int iLoopDepth = 0;
         // (code generation)
         std::vector<std::uint8_t> iStatic;              ///< (the static data image (from StaticBase))

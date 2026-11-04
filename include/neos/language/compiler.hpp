@@ -543,6 +543,8 @@ namespace neos::language
             std::shared_ptr<parser::ast_node> ast;
         };
         std::deque<parsed_source> iParsed;
+        std::vector<std::string> iRecoveredErrors;  ///< (the syntax errors that the parses recovered from (reported as found): the program is
+                                                    ///< not compiled)
         std::vector<neolib::ref_ptr<i_language_compiler>> iLanguageCompilers;
         fragment iResult;                                       ///< (i_code_generator: the fragment returned)
         struct line_starts

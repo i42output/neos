@@ -176,6 +176,7 @@ namespace neos::compilers::ada
         bool standard_character = false;    ///< (Character, Wide_Character, Wide_Wide_Character: the literals are the code points)
         bool boolean = false;               ///< (Standard.Boolean or a type derived from it)
         bool anonymous_access = false;
+        bool component_access = false;      ///< (an anonymous access type of a component: of the composite type's level (3.10.2(12/2)))
         bool controlled = false;            ///< (it has controlled parts (needs finalization))
         bool synchronized_interface = false;
         bool task_interface = false;
@@ -186,6 +187,7 @@ namespace neos::compilers::ada
         bool fortran = false;
         std::uint32_t machine_radix = 0u;   ///< (a Machine_Radix clause's (0: none, 2))               ///< (an array type of convention Fortran: its canonical order is column major (5.5.2(10/3)))
         bool has_tasks = false;
+        bool preelaborable_initialization = false;  ///< (pragma (or aspect) Preelaborable_Initialization applies to it (10.2.1(11.6/2)))
 
         // (scalar types: their range (static: low and high; else dynamic: the entities (hidden constants) that hold the bounds))
         static_value low;
@@ -221,6 +223,7 @@ namespace neos::compilers::ada
         ada_type* formal_view = nullptr;                    ///< (a generic formal type's subtype in an instance (denoting the actual's): itself (and its subtypes: it); declarations whose profiles differ in it are distinct, as in the generic (12.3(11)))
         std::vector<std::string> formal_discriminants;     ///< (a formal type with known discriminants within an instance: its discriminants' names (those of the actual's discriminants, by position))
         bool unknown_discriminants = false;
+        bool inherited_unknown_discriminants = false;  ///< (a derived type without a discriminant part whose parent's view has unknown discriminants: indefinite (3.7(26)))
         std::vector<dispatch_slot> slots;   ///< (a tagged type's dispatch table)
         std::vector<ada_type*> interfaces;  ///< (the interfaces it implements)
         predicate_info* predicate = nullptr;    ///< (a subtype with a predicate (its own, or of the subtype it is of))
@@ -414,7 +417,11 @@ namespace neos::compilers::ada
         bool interrupt_priority = false;    ///< (Interrupt_Priority (its default: Interrupt_Priority'Last))
         bool volatile_object = false;       ///< (an object specified Volatile or Atomic (C.6))
         bool volatile_components = false;   ///< (an object specified Volatile_Components or Atomic_Components (C.6))
+        bool atomic_object = false;         ///< (an object specified Atomic (C.6))
+        bool atomic_components = false;     ///< (an object specified Atomic_Components (C.6))
         bool aliased = false;
+        bool aliased_declared = false;      ///< (declared aliased (an object, a component, an explicitly aliased parameter): aliased is also
+                                            ///< set for an object whose 'Access is taken)
         bool by_reference = false;          ///< (a parameter passed by reference)
         bool captured = false;              ///< (a nested subprogram refers to it)
         bool is_private = false;            ///< (declared in a private part)
@@ -423,6 +430,10 @@ namespace neos::compilers::ada
         bool limited_view = false;
         bool completed = false;             ///< (a declaration that has been completed (e.g. a deferred constant))
         bool imported = false;
+        bool exported = false;              ///< (Export (B.1): a subprogram or object that the code of a linked program's other translation 
+                                            ///< units uses by its link name)
+        std::string convention;             ///< (its convention, if Import, Export or Convention specify it (lower case))
+        std::string link_name;              ///< (an exported or imported object's external name (B.1); a subprogram's: see subprogram_info)
         bool visible_in_body = true;
         bool declaring = false;             ///< (hidden from all visibility: within its own declaration (8.3(16)))
         entity* completion = nullptr;       ///< (a deferred constant's full declaration; an incomplete type's full declaration)
@@ -508,9 +519,11 @@ namespace neos::compilers::ada
         bool package_body = false;          ///< (a package body's declarations (its parent: the package's))
         node* private_part = nullptr;       ///< (a package: its private part)
         bool is_subprogram = false;
+        bool subprogram_body = false;       ///< (a subprogram body's parameters and declarations)
         bool master = false;                ///< (a block statement's (a master, 7.6.1(3/2)); subprograms' (is_subprogram) are too)
         bool generic_formals = false;
         std::vector<ada_type*> formal_actuals;  ///< (an instance's formal region: the actuals (base types) of its untagged formal types other than formal derived types)
+        bool subunit_view = false;              ///< (while its subunit is analysed, a stub's region: only the declarations before the stub (visibility_cutoff) are visible from it (10.1.3(17)))
         node* visibility_cutoff = nullptr;      ///< (an instance's formal region: its parent's declarations are visible only if declared before this (the generic's declaration, or its body when that is analysed), as in the generic (12.3(16)))
         std::vector<std::pair<ada_type*, std::size_t>> formal_ancestor_slots;  ///< (an instance's formal region: the actuals (base types) of its tagged formal derived types, with their ancestors' dispatch table sizes (the operations corresponding to the generic's implicit declarations, 12.3(18)))
         int level = 0;                      ///< (the nesting level of subprograms: 0 library (packages at library level))

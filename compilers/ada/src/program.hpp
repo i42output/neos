@@ -80,11 +80,23 @@ namespace neos::compilers::ada
         bool analysing = false;
     };
 
+    // a library unit's categorization: the library unit pragmas (or aspects) Pure and Preelaborate (10.2.1) and the categorization
+    // pragmas of Annex E (E.2); their places (pragmas or aspects)
+    struct categorization
+    {
+        enum kind { Pure, Preelaborate, SharedPassive, RemoteTypes, RemoteCallInterface, AllCallsRemote, Count };
+        node* where[Count] = {};
+        bool is(kind aKind) const { return where[aKind] != nullptr; }
+        bool preelaborated() const { return is(Pure) || is(Preelaborate) || is(SharedPassive); }   ///< (10.2.1(11/3), E.2.1(9))
+        bool categorized() const { return is(Pure) || is(SharedPassive) || is(RemoteTypes) || is(RemoteCallInterface); }  ///< (E.2(2/3))
+    };
+
     class function_generator;
 
     std::u32string literal_string(node const* aNode);       ///< (a string literal's characters, as written)
     char32_t literal_character(node const* aNode);
     bool is_operator_symbol(node const* aNode);              ///< (a string literal that is an operator symbol)
+    void others_choices(node* aAggregate, std::size_t aDimensions, std::vector<node*>& aResult);  ///< (an array aggregate's others choices (its subaggregates' too))
 
     class program
     {
@@ -118,8 +130,13 @@ namespace neos::compilers::ada
                 // (legality checking: an error within an instance's body is the generic body's (reported by check_generic, 12.3(11)))
                 if (iInstanceBodies > 0 && iCheckOnly && !(error.private_part_too && iInstanceBodies == iInstancePrivateParts))
                     return;
-                // (an error within an instance: reported at the (outermost) instantiation (12.3(11)))
-                compile_error const e = iInstantiationSites.empty() || error.where == nullptr ? error : compile_error{ iInstantiationSites.front(),
+                // (an error within an instance: reported at the (outermost) instantiation (12.3(11)); one in the instantiation itself (an
+                // actual): there)
+                bool inInstantiation = false;
+                if (!iInstantiationSites.empty())
+                    for (node const* n = error.where; n != nullptr && !inInstantiation; n = n->parent)
+                        inInstantiation = n == iInstantiationSites.front();
+                compile_error const e = iInstantiationSites.empty() || error.where == nullptr || inInstantiation ? error : compile_error{ iInstantiationSites.front(),
                     std::string{ error.what() } + " (in an instance)" };
                 // (the entities that the failed work declared without completing them: hidden, typed (no cascade of crashes))
                 for (auto i = entities; i < iEntities.size(); ++i)
@@ -258,6 +275,10 @@ namespace neos::compilers::ada
         std::vector<component_info const*> initialization_order(ada_type* aRecord);   ///< (a record type's components in the order in which they are initialized)
         entity* resolve_entity(node* aName, region* aRegion);                      ///< (a name that denotes a non-overloadable entity)
         ada_type* resolve(node* aExpression, ada_type* aExpected, region* aRegion);  ///< (resolves it (annotating it): its type)
+        ada_type* resolve_expression(node* aExpression, ada_type* aExpected, region* aRegion);
+        void static_string_check(node* aExpression, ada_type* aType, region* aRegion);
+        bool statically_unevaluated(node const* aExpression, region* aRegion);   ///< (part of a static expression that is not evaluated (4.9(33/3)): a short circuit's right operand or a conditional expression's dependent expression not chosen)
+        void static_range_check(node* aExpression, node* aValue, ada_type* aType, bool aBase, region* aRegion);  ///< (a static discrete value in a subtype's range (or its base range) (4.9(33/3, 34/3)))    ///< (a static string value's bounds in its index subtype (4.9(34/3), 4.2(11), 4.5.3(7)))
         ada_type* condition(node* aCondition, region* aRegion);
         void parenthesis_check(node* aExpression);
         void case_choices_check(node* aCase, node* aSelector, ada_type* aType, std::vector<node*> const& aAlternatives, region* aRegion);
@@ -269,6 +290,7 @@ namespace neos::compilers::ada
         std::unordered_map<node*, cached_interpretations> iInterpretations;
         static_value evaluate(node* aExpression, region* aRegion);                 ///< (its static value, if static)
         bool is_static(node* aExpression);
+        std::optional<std::pair<bigint, bigint>> array_range_bounds(node* aAttribute);    ///< (A'Range of a statically constrained array subtype or object: its bounds)
         bool static_expression(node* aExpression);                                 ///< (a static expression (4.9))
         bool static_subtype(ada_type* aType);
         void end_name_check(node* aDecl);
@@ -290,6 +312,9 @@ namespace neos::compilers::ada
         std::uint64_t static_data(std::uint64_t aSize, std::uint64_t aAlignment = 8u, std::uint64_t aSkew = 0u);     ///< (its address (aligned at aSkew bytes from it))
         std::uint64_t static_string(std::string const& aBytes);   ///< (an array descriptor (1 .. n) and its data: the descriptor's address)
         void define_subprogram(entity* aSubprogram);
+        void exports();                                 ///< (the functions of the exported subprograms and objects (B.1))
+        std::map<std::string, entity*>& foreign_subprograms() { return iForeignSubprograms; }    ///< (the subprograms imported with 
+                                                        ///< convention C, by their external names: the first of each name)
         std::uint32_t define_procedure(std::string const& aName);
         void generate_code();
         std::uint64_t static_bytes(std::string const& aBytes);    ///< (static data initialized with the bytes: its address)
@@ -369,7 +394,7 @@ namespace neos::compilers::ada
         static constexpr std::uint64_t TagExternal = 72u;   ///< (a tag's type's specified external tag (a static string; 0: its expanded name))
         static constexpr std::uint64_t TagSlots = 80u;
         static constexpr std::uint32_t TaskHandle = 8u;     ///< (a task or protected object's runtime handle (a task's id, a protected object's), after its tag (a type with interfaces'))
-        static constexpr std::uint64_t StaticBase = 0x10000u;
+        static constexpr std::uint64_t StaticBase = language::ada::layout::StaticBase;
         bool has_controlled();
         std::uint64_t fixed_size(ada_type* aType);
         bool has_masters() { return has_controlled() || !iTaskUnits.empty(); }
@@ -401,10 +426,28 @@ namespace neos::compilers::ada
         std::map<ada_type*, std::uint64_t> iProtectedTables;
         struct deferred_aspect { ada_type* type; std::string name; node* value; entity* ent = nullptr; entity* type_entity = nullptr; };
         void resolve_deferred_aspects(region* aRegion);
+        void aspect_names_check(entity* aType, node* aExpression, region* aRegion);
+        void representation_aspect_check(entity* aType, std::string const& aAspect, node* aValue, region* aRegion);
         void current_instance_components(node* aExpression, entity* aType);   ///< (an aspect of a record type: its components' names denote the current instance's)
         std::map<region*, std::vector<deferred_aspect>> iDeferredAspects;
         std::map<region const*, entity*> iAcceptEntries;      ///< (an accept statement's region: its entry (the accept's parameters are the entry's))
         bool is_static_resolvable(node* aExpression, region* aRegion);
+        std::string external_name(node* aExpression, region* aRegion);    ///< (an External_Name or Link_Name: a static string expression)
+        void c_convention(ada_type* aType);             ///< (a type that Convention C specifies)
+        bool intrinsic_unit(node* aItem);
+        void restrictions_check();                      ///< (the partition's units obey its Restrictions (13.12, D.7, H.4))
+        categorization const& unit_categorization(std::string const& aUnit);    ///< (a library unit's categorization (10.2.1, E.2))
+        void categorization_check(unit_info& aUnit);    ///< (a compilation unit of a categorized library unit obeys its category's rules)
+        bool remote_access_type(ada_type* aType);         ///< (a named access type declared in the visible part of a remote types or RCI unit, or derived from one (E.2.2(9/3, 9.3/1)))
+        bool remote_subprogram(entity* aSubprogram);     ///< (a subprogram declared in the visible part of an RCI unit, or one (E.2.3(7/3)))
+        void remote_dereference_check(node* aNode);       ///< (remote access-to-class-wide values dereferenced only as controlling operands of dispatching calls (E.2.2(16/4)))
+        std::uint64_t unit_address(entity* aUnit)      ///< (a program unit's (or label's) 'Address: a storage element of its own)
+        {
+            auto& address = iUnitAddresses[aUnit];
+            if (address == 0u)
+                address = static_data(1u, 1u, 0u);
+            return address;
+        }
     public:
         std::map<ada_type*, entity*> iObjectCollections;   ///< (access types whose allocators create objects that need finalization: their collections (hidden objects))
         std::map<ada_type*, entity*> iCollections;     ///< (access types whose allocators create tasks: their collections (hidden objects))
@@ -426,7 +469,7 @@ namespace neos::compilers::ada
         std::deque<predicate_info> iPredicates;
         std::map<region*, std::map<std::string, bool>> iAssertionPolicies;
         std::map<region*, std::vector<std::pair<char const*, node*>>> iDefaultPools;   ///< (pragma Default_Storage_Pool in a region (from where), or an instance's aspect (from its start): the pool (null: none))
-        void default_storage_pool(ada_type* aAccess, node* aDecl, region* aRegion);    ///< (pragma Assertion_Policy: the assertion kinds (or "") ignored (or checked) in a region)
+        void default_storage_pool(ada_type* aAccess, node* aDecl, region* aRegion, bool aRecordPool = true);    ///< (pragma Assertion_Policy: the assertion kinds (or "") ignored (or checked) in a region)
         std::set<node const*> iIgnoredAssertions;                            ///< (pragma Assert ... whose policy is Ignore)
         bool assertion_ignored(std::string const& aKind, region* aRegion) const;
         std::deque<subprogram_info> iSubprograms;
@@ -471,6 +514,17 @@ namespace neos::compilers::ada
         unit_info* iCurrentUnit = nullptr;
         unit_info* iDeclaringUnit = nullptr;            ///< (the library unit whose declaration is being analysed (until it registers))
         std::vector<entity*> iSubprogramsToGenerate;    ///< (the subprograms whose bodies have code, in order)
+        std::vector<entity*> iExports;                  ///< (the subprograms and objects that Export specifies (B.1))
+        std::map<std::string, entity*> iForeignSubprograms;
+        std::map<entity*, std::uint64_t> iUnitAddresses;
+        std::map<node*, entity*> iStatementNames;       ///< (the names of loops and blocks, and labels: declared at the start of their 
+                                                        ///< body's (or block's) statements (5.1(12)))
+        std::vector<node*> iInstantiating;              ///< (the generic declarations whose instances are being made (12.3(19)))
+        std::map<std::string, categorization> iCategorizations;     ///< (library units' categorizations, by name)
+        std::map<node*, node*> iTemplateBodies;         ///< (a generic's body: its copy analysed by check_generic)
+        unit_info* iTemplateUnit = nullptr;             ///< (a library generic being checked (check_generic): its unit)
+        bool iPrivateWithVisible = false;               ///< (names of private with clauses' units usable anywhere (error recovery))
+        std::map<node*, std::pair<node*, node*>> iInstanceCopies;  ///< (an instantiation: its instance's declaration and body (copies of the generic's))
         std::vector<std::pair<node*, region*>> iPackageElaborations;  ///< (library packages (specification, body) to elaborate)
         std::uint64_t iNextExceptionId = 1u;
     public:
@@ -482,6 +536,11 @@ namespace neos::compilers::ada
         entity* find_completion(entity* aSubprogram, region* aRegion);
         entity* generic_completion(node* aSpec, region* aRegion);
         bool type_conformant(subprogram_info const& a, subprogram_info const& b);
+        bool subtype_conformant(subprogram_info const& a, subprogram_info const& b, bool aResultOnly = false);
+        bool withed_here(std::string const& aUnit);
+        void incomplete_prefix_check(node* aPrefix, ada_type* aType, bool aDereference);  ///< (3.10.1(10/3))
+        void prefixed_view_check(node* aObject, entity* aOperation);   ///< (4.1.3(13.1/2))
+        bool private_with_hidden(entity* aUnit, region* aRegion);  ///< (a library unit named only by private with clauses, here in a visible part (10.1.2(12/3-16/2)))
         bool formal_distinct(subprogram_info const& a, subprogram_info const& b);
         std::uint64_t object_alignment(entity* aObject);
         std::uint64_t type_alignment_clause(ada_type* aType);
@@ -516,6 +575,8 @@ namespace neos::compilers::ada
         std::map<node*, region*> iBodyRegions;
         entity* iCurrentSubprogram = nullptr;
         entity* iClassWideContract = nullptr;   ///< (resolving a class-wide precondition or postcondition: its subprogram)
+        std::set<ada_type const*> iNullPoolTypes;   ///< (access types declared where the default pool is null (no allocators, 13.11.3))
+        node const* iControllingActual = nullptr;   ///< (resolving the actual of a controlling formal: it may be dynamically tagged (3.9.2(9/1)))
         std::vector<entity*> iExceptions;
         std::vector<dynamic_bound_info> iDynamicBounds;
         std::map<node const*, call_info> iCalls;
@@ -544,7 +605,7 @@ namespace neos::compilers::ada
         bool predicate_static(node* aExpression, entity* aCurrentInstance);
         void completion_aspects_check(node* aDecl);
         void others_check(node* aExpression, ada_type* aSubtype);
-        void completion_check(node* aDeclarations, node* aCompletions);
+        void completion_check(node* aDeclarations, node* aCompletions, bool aPartition = false);
         void operator_symbol_check(node* aDefining);
         void homograph_check(entity* aSubprogram, node* aDefining, region* aRegion);
         void program_unit_pragma_check(node* aPragma, std::string const& aName, std::vector<node*> const& aArguments, region* aRegion);
@@ -568,8 +629,27 @@ namespace neos::compilers::ada
         ada_type* designated_of(ada_type* aType);           ///< (an access type's designated subtype (its full view))
         bool is_discrete_range(node* aNode, region* aRegion);
         ada_type* resolve_operator(node* aOperator, ada_type* aExpected, region* aRegion);
+        std::optional<std::int64_t> static_level(node* aObject, region* aRegion);
+        bool within_generic_body(region* aRegion) const;
+        void aliased_actuals_check(node* aExpression, ada_type* aAccess, region* aRegion);    ///< (a function call whose master is an access type's: its explicitly aliased actuals not deeper (6.4.1(6.4/3), 3.10.2(10.2/3, 10.3/3)))
+        void limited_value_check(node* aExpression, ada_type* aType, region* aRegion);   ///< (a limited type's value initializing an object: newly constructed (7.5(2.1/5)))
+        bool package_requires_body(node* aSpec);    ///< (a package specification that requires a body (7.2(4), 3.11.1))
+        static std::string conformance_text(node const* aNode);    ///< (an expression's lexical elements for conformance (6.3.1(19-21)))
+        bool fully_conformant(node* a, node* b);    ///< (fully conformant expressions (6.3.1(18-21)))
+        bool same_interfaces(ada_type* aPartial, ada_type* aFull);  ///< (a partial view and its full view descended from the same interfaces (7.3(7.3/2)))
+        bool frozen_before(ada_type* aType, node const* aDecl);
+        static bool subtype_attribute(node const* aNode);    ///< (a type frozen before a later declaration of its declarative part (13.14))
+        bool immutably_limited(ada_type* aType, int aDepth = 0);    ///< (an immutably limited type (7.5(8.1/3)))
+        void synchronized_operation_check(entity* aSubprogram, node* aDecl, entity* aUnit);   ///< (a protected or task operation implementing a progenitor's (9.4(11.1/3)-(11.5/3), 9.1(9.2/3)-(9.6/3)))
+        std::pair<bool, bool> atomic_view(node* aName);    ///< (a name of an atomic object, of a volatile one (C.6(8/3)))
+        bool aliased_view(node* aName);    ///< (an aliased view of an object (3.10(9/3)))
         ada_type* resolve_attribute(node* aAttribute, ada_type* aExpected, region* aRegion);
         ada_type* resolve_aggregate(node* aAggregate, ada_type* aExpected, region* aRegion);
+        bool operators_visible(ada_type* aType, region* aRegion);
+        bool partial_component_here(ada_type* aArray, region* aRegion);
+        void synchronized_target_check(entity* aOperation, node* aObject, node* aCall);
+        bool dynamically_tagged(node* aExpression);     ///< (a class-wide expression, or a dispatching call with a controlling result (3.9.2(5/2, 6/2)))
+        void incomplete_result_check(entity* aCallee, node* aCall);
         std::vector<entity*> operator_candidates(std::string const& aDesignator, std::vector<node*> const& aOperands, region* aRegion);
         region* selected_operator_scope(node* aPrefix, region* aRegion);
         bool within(entity* aUnit, region* aRegion) const;
@@ -598,6 +678,10 @@ namespace neos::compilers::ada
         void check_generic(entity* aGeneric);       ///< (a generic unit's legality: an instance whose actuals are its formals (NEOS_ADA_CHECK))
         ada_type* template_formal_type(node* aFormal, std::string const& aName, region* aFormalRegion);
         bool iTemplateCheck = false;                ///< (instantiating a generic for check_generic)
+        node const* iCheckedGeneric = nullptr;      ///< (check_generic's generic's declaration: its template is checked where it is declared (later full type declarations have not occurred))
+        std::set<entity const*> iTemplateInstances;
+        std::set<entity const*> iFormalPackagesWithActuals;    ///< (check_generic's instances for formal packages with explicit actual parts: their formals not visible by selection (12.7(10/2))) ///< (check_generic's instances: standing for their generic units (their templates))
+        std::map<entity const*, entity*> iTemplateInstanceOf;   ///< (a generic unit's check_generic instance (where its generic children are checked))
         std::vector<region*> iInstantiationRegions;  ///< (their regions)
         std::vector<node*> iInstantiationSites;     ///< (the instantiations being analysed (not check_generic's): errors are reported at the outermost)
         int iInstanceBodies = 0;
@@ -630,6 +714,8 @@ namespace neos::compilers::ada
         node* generic_body(entity* aGeneric);
         ada_type* iterator_cursor_type(ada_type* aIterator);
         ada_type* iterator_element_type(ada_type* aContainer);
+        bool reversible_iterator(ada_type* aIterator);    ///< (an iterator type that is reversible (5.5.2(4/3)))
+        bool iterator_type(ada_type* aType);              ///< (an iterator type (5.5.1(6/3)))
         entity* return_owner(region* aRegion);
         void accept_statement(node* aAccept, region* aRegion);
         void resolve_requeue(node* aRequeue, region* aRegion);
@@ -641,6 +727,13 @@ namespace neos::compilers::ada
         std::map<node const*, std::vector<node*>> iAggregates;     ///< (a record aggregate's values, by component index (null: default))
         std::map<entity*, node*> iGenericBodies;
         node* type_aspect(ada_type* aType, std::string const& aAspect);
+        void stream_subprogram_check(ada_type* aType, std::string const& aAttribute, bool aClassWide, node* aName, region* aRegion);
+        void stream_size_check(ada_type* aType, node* aExpression, node* aAt, region* aRegion);
+        void default_pool_check(node* aPool, region* aRegion);
+        void storage_pool_check(ada_type* aAccess, node* aPool, region* aRegion);
+        void record_stream_clause(ada_type* aType, std::string const& aAttribute, node* aClause, region* aRegion);
+        bool stream_attribute_specified(ada_type* aType, std::string const& aAttribute, region* aRegion);
+        bool stream_attribute_available(ada_type* aType, std::string const& aAttribute, region* aRegion, int aDepth = 0);
         std::map<entity*, std::uint64_t> iElaborationFlags;
         std::uint64_t elaboration_flag(entity* aSubprogram)
         {
@@ -665,6 +758,8 @@ namespace neos::compilers::ada
                 aSubprogram->scope->owner->kind == entity_kind::Task));
         }
         std::map<ada_type*, std::map<std::string, node*>> iTypeAspects;     ///< (the aspects of types that later analysis uses)
+        struct stream_clause { node* clause = nullptr; region* scope = nullptr; bool in_private = false; };
+        std::map<ada_type*, std::map<std::string, std::vector<stream_clause>>> iStreamClauses;  ///< (the stream attributes specified for types (attribute definition clauses, aspects; "write'class" ...): where (their availability, 13.13.2(39/2)-(48/2)))
         std::map<std::string, ada_type*> iStandins;
         std::vector<instance_constant> iInstanceConstants;
         std::vector<dynamic_constraint_info> iDynamicConstraints;
@@ -709,6 +804,22 @@ namespace neos::compilers::ada
         region* current_context() const { return iContextOverride != nullptr ? iContextOverride : iCurrentUnit != nullptr ? iCurrentUnit->context : nullptr; }
         region* iContextOverride = nullptr;     ///< (an instance's analysis: its generic's units' contexts)
         region* generic_context(entity* aGeneric);
-        entity* library_unit(std::string const& aName) const { auto u = iLibraryUnits.find(aName); return u != iLibraryUnits.end() ? u->second : nullptr; }
+        entity* library_unit(std::string const& aName) const
+        {
+            if (auto u = iLibraryUnits.find(aName); u != iLibraryUnits.end())
+                return u->second;
+            // (a child named through a renaming of its parent (a library unit renaming: 10.1.1(?), 8.5.3)): the child of the renamed unit)
+            for (auto dot = aName.rfind('.'); dot != std::string::npos && dot > 0u; dot = aName.rfind('.', dot - 1u))
+                if (auto p = iLibraryUnits.find(aName.substr(0u, dot)); p != iLibraryUnits.end() && p->second->renamed != nullptr && p->second->renamed != p->second &&
+                    p->second->renamed->is_package())
+                {
+                    for (auto const& [name, unit] : iLibraryUnits)
+                        if (unit == p->second->renamed)
+                            if (auto c = iLibraryUnits.find(name + aName.substr(dot)); c != iLibraryUnits.end())
+                                return c->second;
+                    break;
+                }
+            return nullptr;
+        }
     };
 }

@@ -333,6 +333,9 @@ namespace neos::compilers::ada
         auto* t = aType->view()->base_type()->view();
         if (t->kind == type_kind::ClassWide && t->specific != nullptr)
             t = t->specific->view()->base_type()->view();
+        // (a derived access type: its ultimate ancestor's (3.10.2(10/3)))
+        for (int n = 0; (t->kind == type_kind::Access || t->kind == type_kind::AccessSubprogram) && t->parent != nullptr && n < 64; ++n)
+            t = t->parent->view()->base_type()->view();
         if (t->declared_in == nullptr && t->partial != nullptr)
             t = t->partial;
         return t->declared_in != nullptr ? accessibility_level(t->declared_in) : 0;
@@ -2444,6 +2447,17 @@ namespace neos::compilers::ada
         }
         if (name == "address" || name == "access" || name == "unchecked_access" || name == "unrestricted_access")
         {
+            // (the address of a program unit that is not a subprogram (a package, task unit or entry), or of a label (13.3(11)): 
+            // the address of a storage element of its own (implementation defined))
+            if (name == "address" && prefix->ent != nullptr && (prefix->ent->kind == entity_kind::Package || prefix->ent->kind == entity_kind::Task ||
+                prefix->ent->kind == entity_kind::Label || prefix->ent->kind == entity_kind::Entry || prefix->ent->kind == entity_kind::Protected ||
+                (prefix->ent->is_type() && prefix->ent->type != nullptr && (prefix->ent->type->view()->kind == type_kind::Task ||
+                    prefix->ent->type->view()->kind == type_kind::Protected) && meaning_of(prefix) != meaning::Object) ||
+                ((meaning_of(prefix) == meaning::Subprogram || meaning_of(prefix) == meaning::Unit || meaning_of(prefix) == meaning::Package) && prefix->ent->sub == nullptr)))
+            {
+                i64(static_cast<std::int64_t>(iProgram.unit_address(prefix->ent)));
+                return;
+            }
             if (meaning_of(prefix) == meaning::Subprogram && prefix->ent != nullptr)
             {
                 subprogram_access(prefix->ent, prefix->is(construct::Selected) && iProgram.self_type(ultimate(prefix->ent)) != nullptr ? prefix->child(0) : nullptr);
@@ -3336,6 +3350,15 @@ namespace neos::compilers::ada
         }
         if (target->sub->level <= 1)
         {
+            // (subprograms imported with convention C of the same external name: the one foreign subprogram, whose address is one
+            // (B.1(37), 13.3(11)))
+            if (target->imported && target->convention == "c" && !target->sub->external_name.empty())
+            {
+                auto& foreign = iProgram.foreign_subprograms()[target->sub->external_name];
+                if (foreign == nullptr)
+                    foreign = target;
+                target = foreign;
+            }
             i64(static_cast<std::int64_t>(iProgram.subprogram_descriptor(target)));
             return;
         }

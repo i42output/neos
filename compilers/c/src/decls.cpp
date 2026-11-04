@@ -83,23 +83,173 @@ namespace neos::compilers::c
             return 0u;
         }
 
-        bool has_attribute(node const* aNode, std::string_view aName)
+        std::string attribute_name(node const* aAttribute, bool& aGnu)
         {
-            for (auto* c : aNode->children)
-                if (c->is(construct::Attributes))
-                    for (auto* a : c->children)
-                    {
-                        auto text = a->source;
-                        auto const paren = text.find('(');
-                        if (paren != std::string_view::npos)
-                            text = text.substr(0u, paren);
-                        while (!text.empty() && text.back() == ' ')
-                            text.remove_suffix(1u);
-                        if (text == aName || text == std::string{ "__" } + std::string{ aName } + "__" || text == std::string{ "_" } + std::string{ aName })
-                            return true;
-                    }
-            return false;
+            // (an attribute's name: without its prefix (gnu:: (aGnu) or __gnu__::, or neos:: (the preprocessor's); another vendor's: 
+            // none) and its __ __)
+            auto const trim = [](std::string_view aText)
+            {
+                while (!aText.empty() && aText.front() == ' ')
+                    aText.remove_prefix(1u);
+                while (!aText.empty() && aText.back() == ' ')
+                    aText.remove_suffix(1u);
+                return aText;
+            };
+            auto text = aAttribute->source;
+            if (auto const paren = text.find('('); paren != std::string_view::npos)
+                text = text.substr(0u, paren);
+            text = trim(text);
+            aGnu = false;
+            if (auto const scope = text.find("::"); scope != std::string_view::npos)
+            {
+                auto const prefix = trim(text.substr(0u, scope));
+                aGnu = prefix == "gnu" || prefix == "__gnu__" || prefix == "neos";
+                if (!aGnu)
+                    return {};
+                text = trim(text.substr(scope + 2u));
+            }
+            if (text.size() > 4u && text.starts_with("__") && text.ends_with("__"))
+                text = text.substr(2u, text.size() - 4u);
+            return std::string{ text };
         }
+    }
+
+    // --- attributes
+
+    void attribute_info::merge(attribute_info const& aOther)
+    {
+        noreturn = noreturn || aOther.noreturn;
+        packed = packed || aOther.packed;
+        aligned = std::max(aligned, aOther.aligned);
+        if (aOther.pack != 0u)
+            pack = aOther.pack;
+        if (aOther.constructor)
+            constructor = aOther.constructor;
+        if (aOther.destructor)
+            destructor = aOther.destructor;
+        if (aOther.cleanup != nullptr)
+            cleanup = aOther.cleanup;
+    }
+
+    void program::read_attributes(node* aAttributes, attribute_info& aResult)
+    {
+        // (an attribute specifier's attributes that the compiler implements; it ignores the others)
+        for (auto* a : aAttributes->children)
+        {
+            if (!a->is(construct::Attribute))
+                continue;
+            bool gnu = false;
+            auto const name = attribute_name(a, gnu);
+            auto const argument = [&](char const* aWhat) -> std::int64_t
+            {
+                if (a->size() != 1u)
+                    error(a, "attribute '" + name + "': its argument is not an integer constant");
+                expression(a->child(0));
+                return integer_constant(a->child(0), aWhat);
+            };
+            if (name == "noreturn" || name == "_Noreturn")
+                aResult.noreturn = true;
+            else if (!gnu)
+                continue;
+            else if (name == "packed")
+                aResult.packed = true;
+            else if (name == "aligned")
+            {
+                // (no argument: the largest alignment of a type (as GCC's on x86-64))
+                std::int64_t alignment = 16;
+                if (a->size() != 0u)
+                    alignment = argument("alignment");
+                if (alignment <= 0 || (alignment & (alignment - 1)) != 0)
+                    error(a, "requested alignment is not a positive power of 2");
+                aResult.aligned = std::max(aResult.aligned, static_cast<std::uint64_t>(alignment));
+            }
+            else if (name == "cleanup")
+            {
+                if (a->size() != 1u || !a->child(0)->is(construct::Identifier))
+                    error(a, "attribute 'cleanup': its argument is not a function's name");
+                aResult.cleanup = a->child(0);
+            }
+            else if (name == "pack")
+                aResult.pack = static_cast<std::uint64_t>(argument("pack"));
+            else if (name == "constructor" || name == "destructor")
+            {
+                std::int64_t priority = 65535;
+                if (a->size() != 0u)
+                    priority = argument("priority");
+                (name == "constructor" ? aResult.constructor : aResult.destructor) = priority;
+            }
+        }
+    }
+
+    attribute_info program::declarator_attributes(node* aDeclarator)
+    {
+        // (the attributes of a declarator's declared name, of its suffixes (not its parameters') and of its pointers (GNU's position 
+        // after a '*'), its parenthesized declarator's too)
+        attribute_info result;
+        if (aDeclarator == nullptr)
+            return result;
+        for (auto* c : aDeclarator->children)
+        {
+            if (c->is(construct::Attributes))
+                read_attributes(c, result);
+            else if (c->is(construct::Function) || c->is(construct::Array) || c->is(construct::Pointer))
+            {
+                for (auto* x : c->children)
+                    if (x->is(construct::Attributes))
+                        read_attributes(x, result);
+            }
+            else if (c->is(construct::Declarator))
+                result.merge(declarator_attributes(c));
+        }
+        return result;
+    }
+
+    void program::cleanup_function(entity* aObject, node* aFunction, node* aWhere)
+    {
+        // (gnu::cleanup(f): f(&object) called when the object's scope is left (by its end, a jump out of it or a return); not by longjmp)
+        if (aObject->kind != entity_kind::Object || aObject->where == object_storage::Static || aObject->linkage != linkage::None)
+        {
+            warning(aWhere, "attribute 'cleanup' ignored (not an automatic object)");
+            return;
+        }
+        expression(aFunction);
+        auto* f = aFunction->ent != nullptr ? aFunction->ent->self() : nullptr;
+        if (f == nullptr || f->kind != entity_kind::Function)
+            error(aFunction, "attribute 'cleanup': '" + std::string{ aFunction->source } + "' is not a function");
+        auto const* ft = f->type.type;
+        if (ft->parameters.size() != 1u || ft->variadic || !ft->parameters[0].type->is_pointer() || returns_record(ft) ||
+            !compatible(ft->parameters[0].type->base.unqualified(), aObject->type.unqualified()) && !ft->parameters[0].type->base->is_void())
+            error(aFunction, "attribute 'cleanup': '" + f->name + "' must take one argument, a pointer to '" + type_name(aObject->type) + "'");
+        aObject->cleanup = f;
+        aObject->addressTaken = true;
+        f->used = true;
+        if (iFunction != nullptr)
+            iFunction->function->hasCleanups = true;
+    }
+
+    void program::startup_function(entity* aFunction, attribute_info const& aAttributes, node* aWhere)
+    {
+        // (gnu::constructor: called before main; gnu::destructor: after main returns or exit is called (registered as atexit's are,
+        // before main))
+        if (!aAttributes.constructor && !aAttributes.destructor)
+            return;
+        auto* f = aFunction->self();
+        if (!f->type->parameters.empty() && f->type->prototype)
+            warning(aWhere, "a constructor or destructor function '" + f->name + "' with parameters is called without arguments");
+        auto const add = [&](std::vector<std::pair<std::int64_t, entity*>>& aList, std::int64_t aPriority)
+        {
+            for (auto& existing : aList)
+                if (existing.second == f)
+                {
+                    existing.first = aPriority;
+                    return;
+                }
+            aList.emplace_back(aPriority, f);
+        };
+        if (aAttributes.constructor)
+            add(iConstructors, *aAttributes.constructor);
+        if (aAttributes.destructor)
+            add(iDestructors, *aAttributes.destructor);
     }
 
     // --- scopes
@@ -200,8 +350,9 @@ namespace neos::compilers::c
         qtype other;
         node* bitInt = nullptr;
         int storageCount = 0;
-        for (auto* n : aNodes)
+        for (std::size_t index = 0u; index < aNodes.size(); ++index)
         {
+            auto* n = aNodes[index];
             switch (n->kind)
             {
             case construct::Storage:
@@ -266,11 +417,18 @@ namespace neos::compilers::c
                 result.typeSpecified = true;
                 break;
             case construct::Struct:
+            {
                 if (other)
                     error(n, "two or more data types in declaration specifiers");
-                other = qtype{ struct_specifier(n, false) };
+                // (GNU: the attributes right after a structure's or union's definition are its)
+                attribute_info attributes;
+                if (!n->source.empty() && n->source.back() == '}')
+                    while (index + 1u < aNodes.size() && aNodes[index + 1u]->is(construct::Attributes))
+                        read_attributes(aNodes[++index], attributes);
+                other = qtype{ struct_specifier(n, false, &attributes) };
                 result.typeSpecified = true;
                 break;
+            }
             case construct::Enum:
                 if (other)
                     error(n, "two or more data types in declaration specifiers");
@@ -328,7 +486,15 @@ namespace neos::compilers::c
                 auto* operand = n->child(0);
                 std::uint64_t alignment = 0u;
                 if (operand->is(construct::TypeName))
+                {
                     alignment = align_of(type_name_type(operand));
+                    // (GNU: an aligned attribute of the type name's)
+                    attribute_info attributes;
+                    for (auto* c : operand->children)
+                        if (c->is(construct::Attributes))
+                            read_attributes(c, attributes);
+                    alignment = std::max(alignment, attributes.aligned);
+                }
                 else
                 {
                     expression(operand);
@@ -340,7 +506,8 @@ namespace neos::compilers::c
                 break;
             }
             case construct::Attributes:
-                if (has_attribute(n, "noreturn"))
+                read_attributes(n, result.attributes);
+                if (result.attributes.noreturn)
                     result.noreturn = true;
                 break;
             default:
@@ -434,7 +601,7 @@ namespace neos::compilers::c
 
     // --- structures, unions and enumerations
 
-    c_type const* program::struct_specifier(node* aSpecifier, bool aDeclarationOnly)
+    c_type const* program::struct_specifier(node* aSpecifier, bool aDeclarationOnly, attribute_info const* aAttributes)
     {
         bool const isUnion = keyword_of(aSpecifier) == "union";
         bool const body = !aSpecifier->source.empty() && aSpecifier->source.back() == '}';
@@ -480,6 +647,17 @@ namespace neos::compilers::c
         auto* record = type->record;
         record->decl = aSpecifier;
         record->members.clear();
+        {
+            attribute_info attributes;
+            if (aAttributes != nullptr)
+                attributes = *aAttributes;
+            for (auto* c : aSpecifier->children)
+                if (c->is(construct::Attributes))
+                    read_attributes(c, attributes);
+            record->packed = attributes.packed;
+            record->aligned = attributes.aligned;
+            record->pack = attributes.pack;
+        }
         for (auto* m : aSpecifier->children)
         {
             if (m->is(construct::StaticAssert))
@@ -512,6 +690,8 @@ namespace neos::compilers::c
                     member_info info;
                     info.type = spec.type;
                     info.decl = m;
+                    info.alignment = std::max(spec.alignment, spec.attributes.aligned);
+                    info.packed = spec.attributes.packed;
                     record->members.push_back(info);
                 }
                 else
@@ -523,8 +703,10 @@ namespace neos::compilers::c
                 member_info info;
                 info.decl = d;
                 node* width = nullptr;
+                auto attributes = spec.attributes;
                 if (d->child(0) != nullptr && d->child(0)->is(construct::Declarator))
                 {
+                    attributes.merge(declarator_attributes(d->child(0)));
                     auto const r = declarator(d->child(0), spec.type);
                     info.name = r.name != nullptr ? name_of(r.name) : std::string{};
                     info.type = r.type;
@@ -556,6 +738,8 @@ namespace neos::compilers::c
                 for (auto const& existing : record->members)
                     if (!info.name.empty() && existing.name == info.name)
                         error(d, "duplicate member '" + info.name + "'");
+                info.alignment = std::max(spec.alignment, attributes.aligned);
+                info.packed = attributes.packed;
                 record->members.push_back(info);
             }
         }
@@ -826,6 +1010,82 @@ namespace neos::compilers::c
         return result;
     }
 
+    void program::old_style_parameters(declarator_result& aResult, std::vector<node*> const& aDeclarations, std::vector<entity*>& aParameters)
+    {
+        // (an old-style definition (before C23): its parameters (an identifier list) of the types that the declarations before its body
+        // give (int if none); its type: a prototype of their promoted types (the arguments of a call without a prototype), or a visible
+        // prototype's (its arguments converted to the parameters' types on entry))
+        auto const names = aResult.function->all(construct::OldParameter);
+        std::map<std::string, std::pair<qtype, node*>> declared;
+        for (auto* declaration : aDeclarations)
+        {
+            std::vector<node*> specs;
+            std::vector<node*> declarators;
+            for (auto* c : declaration->children)
+                if (is_specifier(c->kind) || c->is(construct::Attributes))
+                    specs.push_back(c);
+                else if (c->is(construct::InitDeclarator))
+                    declarators.push_back(c);
+            auto const spec = specifiers(specs, declaration);
+            if (spec.storage != storage_class::None && spec.storage != storage_class::Register)
+                error(declaration, "storage class specified for parameter");
+            for (auto* id : declarators)
+            {
+                if (id->child(1) != nullptr)
+                    error(id, "parameter is initialized");
+                auto const r = declarator(id->child(0), spec.type, true);
+                if (r.name == nullptr)
+                    error(id, "a parameter's declaration without a name");
+                auto type = r.type;
+                if (type->is_array())
+                    type = qtype{ pointer_to(type->base), type.qualifiers };
+                else if (type->is_function())
+                    type = qtype{ pointer_to(type) };
+                auto const name = name_of(r.name);
+                if (std::none_of(names.begin(), names.end(), [&](node* n) { return n->text() == name; }))
+                    error(r.name, "declaration for parameter '" + name + "' but no such parameter");
+                if (declared.contains(name))
+                    error(r.name, "redefinition of parameter '" + name + "'");
+                declared[name] = { type, r.name };
+            }
+        }
+        std::vector<parameter_type> types;
+        for (auto* n : names)
+        {
+            auto const name = n->text();
+            qtype type = int_type();
+            node* where = n;
+            if (auto const found = declared.find(name); found != declared.end())
+            {
+                type = found->second.first;
+                where = found->second.second;
+            }
+            else
+                warning(n, "type of '" + name + "' defaults to 'int'");
+            parameter_type pt;
+            pt.type = type->kind == type_kind::Float ? qtype{ basic(type_kind::Double) } : promote(type);
+            pt.name = name;
+            types.push_back(pt);
+            auto& e = iEntities.emplace_back();
+            e.kind = entity_kind::Object;
+            e.name = name;
+            e.type = type;
+            e.parameter = true;
+            e.decl = where;
+            e.unit = iUnit;
+            aParameters.push_back(&e);
+        }
+        if (auto* prior = lookup(name_of(aResult.name)); prior != nullptr && prior->kind == entity_kind::Function && prior->type->is_function() &&
+            prior->type->prototype)
+        {
+            if (prior->type->parameters.size() != types.size() || prior->type->variadic)
+                error(aResult.name, "the number of parameters of '" + name_of(aResult.name) + "' does not match its prototype's");
+            for (std::size_t i = 0u; i < types.size(); ++i)
+                types[i].type = prior->type->parameters[i].type;
+        }
+        aResult.type = qtype{ function_of(aResult.type->base, types, false, true), aResult.type.qualifiers };
+    }
+
     std::vector<parameter_type> program::parameters_of(node* aFunctionSuffix, bool& aVariadic, bool& aPrototype, std::vector<entity*>* aEntities)
     {
         std::vector<parameter_type> result;
@@ -1094,10 +1354,10 @@ namespace neos::compilers::c
                 specs.push_back(c);
             else if (c->is(construct::InitDeclarator))
                 declarators.push_back(c);
-            else if (c->is(construct::Attributes) && !specs.empty())
-                specs.push_back(c);
+            else if (c->is(construct::Attributes))
+                specs.push_back(c);     // (before the specifiers too: they appertain to the declared entities)
         }
-        if (specs.empty())
+        if (std::none_of(specs.begin(), specs.end(), [](node* s) { return is_specifier(s->kind); }))
             return;     // (an attribute declaration)
         // (a declaration with only a structure, union or enumeration specifier declares its tag (in the current scope))
         if (declarators.empty())
@@ -1135,6 +1395,14 @@ namespace neos::compilers::c
             qtype type = r.type;
             if (spec.alignment != 0u && spec.storage == storage_class::Typedef)
                 error(d, "alignment specified for typedef '" + name_of(r.name) + "'");
+            // (the declarator's attributes, with the specifiers')
+            auto dspec = spec;
+            dspec.attributes.merge(declarator_attributes(dn));
+            if (dspec.attributes.noreturn)
+                dspec.noreturn = true;
+            auto const alignment = std::max(dspec.alignment, dspec.attributes.aligned);
+            if (dspec.attributes.aligned != 0u && spec.storage == storage_class::Typedef)
+                warning(d, "attribute 'aligned' ignored on typedef '" + name_of(r.name) + "' (not supported)");
             if (spec.autoType)
             {
                 // (C23: auto: the type of the initializer (after lvalue, array and function conversions))
@@ -1163,19 +1431,18 @@ namespace neos::compilers::c
                 type = initializer_type(type, init);
             if (type->is_variably_modified() && aFileScope && spec.storage != storage_class::Typedef)
                 error(d, "variably modified '" + name_of(r.name) + "' at file scope");
-            auto* e = declare(r.name, type, spec, aFileScope, init != nullptr, d);
+            auto* e = declare(r.name, type, dspec, aFileScope, init != nullptr, d);
             r.name->ent = e;
             d->ent = e;
             if (e->kind == entity_kind::Function)
             {
+                startup_function(e, dspec.attributes, d);
                 if (r.function != nullptr && e->function != nullptr && e->function->parameters.empty() && false)
                     ;
                 continue;
             }
             if (e->kind != entity_kind::Object)
                 continue;
-            if (spec.alignment != 0u)
-                ;   // (alignment: kept by the object's storage (static data is aligned to the type's alignment; larger alignments are honoured below))
             if (e->where == object_storage::Static)
             {
                 if (init != nullptr)
@@ -1201,8 +1468,8 @@ namespace neos::compilers::c
                     else
                         e->defined = true;
                 }
-                if (spec.alignment != 0u)
-                    e->value = static_cast<std::int64_t>(spec.alignment);
+                if (alignment != 0u)
+                    e->value = static_cast<std::int64_t>(alignment);
             }
             else
             {
@@ -1213,8 +1480,10 @@ namespace neos::compilers::c
                     iFunction->function->hasVla = true;
                 e->defined = true;
                 e->storage = spec.storage;
-                if (spec.alignment != 0u)
-                    e->value = static_cast<std::int64_t>(spec.alignment);
+                if (alignment != 0u)
+                    e->value = static_cast<std::int64_t>(alignment);
+                if (dspec.attributes.cleanup != nullptr)
+                    cleanup_function(e, dspec.attributes.cleanup, d);
                 if (iFunction != nullptr)
                     iFunction->function->locals.push_back(e);
                 if (init != nullptr)
@@ -1244,21 +1513,31 @@ namespace neos::compilers::c
         std::vector<node*> specs;
         node* d = nullptr;
         node* body = nullptr;
+        std::vector<node*> oldDeclarations;     ///< (an old-style definition's parameters' declarations)
         for (auto* c : aDefinition->children)
         {
             if (is_specifier(c->kind) || (c->is(construct::Attributes) && d == nullptr))
                 specs.push_back(c);
             else if (c->is(construct::Declarator))
                 d = c;
+            else if (c->is(construct::Declaration))
+                oldDeclarations.push_back(c);
             else if (c->is(construct::Compound))
                 body = c;
         }
         auto spec = specifiers(specs, aDefinition);
-        if (has_attribute(aDefinition, "noreturn"))
+        spec.attributes.merge(declarator_attributes(d));
+        if (spec.attributes.noreturn)
             spec.noreturn = true;
         auto r = declarator(d, spec.type);
         if (r.name == nullptr || !r.type->is_function() || r.function == nullptr)
             error(d, "a function definition's declarator must declare a function");
+        std::vector<entity*> oldParameters;
+        bool const oldStyle = r.function->first(construct::OldParameter) != nullptr;
+        if (oldStyle)
+            old_style_parameters(r, oldDeclarations, oldParameters);
+        else if (!oldDeclarations.empty())
+            error(oldDeclarations[0], "declarations before a function's body without an identifier list");
         if (!r.type->prototype)
             r.type = qtype{ function_of(r.type->base, {}, false, true), r.type.qualifiers };
         if (spec.storage == storage_class::Typedef)
@@ -1271,6 +1550,7 @@ namespace neos::compilers::c
         e->definition = aDefinition;
         if (e->function == nullptr)
             error(r.name, "'" + e->name + "' is not a function");
+        startup_function(e, spec.attributes, d);
         auto* f = e->function;
         f->body = body;
         f->runtime = false;
@@ -1280,6 +1560,8 @@ namespace neos::compilers::c
         std::vector<entity*> parameters;
         auto const types = parameters_of(r.function, variadic, prototype, &parameters);
         (void)types;
+        if (oldStyle)
+            parameters = oldParameters;
         auto* const savedFunction = iFunction;
         iFunction = e;
         f->parameters = parameters;
@@ -1334,6 +1616,7 @@ namespace neos::compilers::c
             fn.definition = &literalNode;
         }
         iLabels.clear();
+        iLabelAddresses.clear();
         iGotos.clear();
         iBreakables.clear();
         iSwitches.clear();
@@ -1347,6 +1630,24 @@ namespace neos::compilers::c
                 error(g, "label '" + label + "' used but not defined");
             g->target = found->second;
         }
+        // (labels' addresses: the labels' numbers (from 1) in the function's list of them, null-based addresses)
+        for (auto* a : iLabelAddresses)
+        {
+            auto const label = name_of(a->child(0));
+            auto const found = iLabels.find(label);
+            if (found == iLabels.end())
+                error(a, "label '" + label + "' used but not defined");
+            a->target = found->second;
+            auto& values = e->function->labelValues;
+            auto position = std::find(values.begin(), values.end(), found->second);
+            if (position == values.end())
+                position = values.insert(values.end(), found->second);
+            constant v;
+            v.k = constant::kind::Address;
+            v.integer = static_cast<std::uint64_t>(position - values.begin()) + 1u;
+            a->value = v;
+        }
+        iLabelAddresses.clear();
         pop_scope();
         iFunction = savedFunction;
     }

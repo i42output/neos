@@ -86,6 +86,66 @@ namespace neos::compilers::ada
                 (body->is(construct::SubprogramBody) || body->is(construct::PackageBody) || body->is(construct::TaskBody) ||
                     body->is(construct::EntryBody)))
                 statement_identifiers_check(aStatements);
+            // (its labels: implicitly declared at the end of the declarative part of the innermost block or body that encloses 
+            // them (5.1(12)), as names that 'Address can have as its prefix (13.3(11)))
+            // (and its loops' and blocks' names likewise (5.5(7), 5.6(4)): they hide the implicitly declared (inherited) homographs
+            // of the region (8.3(12/3)))
+            auto const implicitly_declared = [](entity* x)
+            {
+                return (x->sub != nullptr && x->sub->inherited) || (x->kind == entity_kind::EnumerationLiteral && x->type != nullptr &&
+                    x->type->view()->base_type()->view()->parent != nullptr);
+            };
+            auto const declare_name = [&](node* aStatement, std::string const& aName, entity_kind aKind)
+            {
+                auto range = aRegion->names.equal_range(aName);
+                for (auto i = range.first; i != range.second; ++i)
+                    if (!implicitly_declared(i->second) && i->second->visible_in_body)
+                    {
+                        // (a loop or block name: not a homograph of a declaration of the body (5.1(12), 8.3(26/2)))
+                        if (aKind != entity_kind::Label && iInstanceBodies == 0 && iInstantiationSites.empty() && i->second->kind != entity_kind::Label &&
+                            i->second->kind != entity_kind::Loop && i->second->kind != entity_kind::Block)
+                            recover([&]() { error(aStatement->first(construct::Word) != nullptr ? aStatement->first(construct::Word) : aStatement,
+                                "\"" + aName + "\" is already declared in this declarative region"); });
+                        return;
+                    }
+                // (a generic body: the same declarative region as its formal part)
+                if (aRegion->owner != nullptr && iInstanceBodies == 0)
+                    for (auto [r, steps] = std::pair{ aRegion->parent, 0 }; r != nullptr && steps < 2; r = r->parent, ++steps)
+                        if (r->generic_formals && r->owner != nullptr && r->owner->name == aRegion->owner->name)
+                        {
+                            if (r->names.count(aName) != 0u)
+                                recover([&]() { error(aStatement->is(construct::Label) ? aStatement : aStatement->first(construct::Word) != nullptr ?
+                                    aStatement->first(construct::Word) : aStatement, "\"" + aName + "\" is already declared in this declarative region"); });
+                            break;
+                        }
+                for (auto i = range.first; i != range.second; ++i)
+                    i->second->visible_in_body = false;
+                auto* e = new_entity(aKind, aName, aStatement->is(construct::Label) ? aStatement : aStatement->first(construct::Word), aRegion);
+                aRegion->add(e);
+                iStatementNames[aStatement] = e;
+                if (aStatement->is(construct::Label))
+                    aStatement->ent = e;
+            };
+            std::function<void(node*)> labels = [&](node* aNode)
+            {
+                for (auto* c : aNode->children)
+                {
+                    if (c->is(construct::Label) && !iStatementNames.contains(c))
+                    {
+                        auto text = std::string{ c->source };
+                        for (auto const* delimiter : { "<<", ">>" })
+                            for (auto at = text.find(delimiter); at != std::string::npos; at = text.find(delimiter))
+                                text.erase(at, 2u);
+                        declare_name(c, name_text(text), entity_kind::Label);
+                    }
+                    else if ((c->is(construct::Loop) || c->is(construct::Block)) && !iStatementNames.contains(c) && c->first(construct::Word) != nullptr)
+                        declare_name(c, name_text(c->first(construct::Word)->source), c->is(construct::Loop) ? entity_kind::Loop : entity_kind::Block);
+                    if (!c->is(construct::Block) && !c->is(construct::Handler) && !c->is(construct::Label))
+                        labels(c);
+                }
+            };
+            if (auto* sequence = aStatements->first(construct::Statements))
+                labels(sequence);
             statements(aStatements->first(construct::Statements), aRegion);
             for (auto* handler : aStatements->all(construct::Handler))
             {
@@ -152,6 +212,12 @@ namespace neos::compilers::ada
                 auto* iteratorType = resolve(range->child(0), nullptr, aRegion);
                 e->type = iterator_cursor_type(iteratorType);
                 aSpecification->mark = 1u;  // (a generalized iterator)
+                // (the iterator name: of an iterator type (5.5.2(3/3)))
+                if (iInstanceBodies == 0 && iteratorType != nullptr && !iterator_type(iteratorType))
+                    recover([&]() { error(range, "the name of a generalized iterator must be of an iterator type (5.5.2(3/3))"); });
+                // (reverse: of a reversible iterator type (5.5.2(4/3)))
+                if (aSpecification->has_flag("reverse") && iInstanceBodies == 0 && !reversible_iterator(iteratorType))
+                    recover([&]() { error(range, "the iterator of a reverse iteration must be of a reversible iterator type (5.5.2(4/3))"); });
             }
             else
             {
@@ -178,21 +244,124 @@ namespace neos::compilers::ada
                     subtype = iterable;
                 iterable = c;
             }
+        // (the iterable name: an object (not a type) of an array or iterable container type (5.5.2(3/3)))
+        if (iInstanceBodies == 0 && is_subtype_name(iterable, aRegion))
+            recover([&]() { error(iterable, "the iterable name of an iterator cannot denote a type (5.5.2(3/3))"); });
         auto* t = resolve(iterable, nullptr, aRegion);
         auto* e = declare(entity_kind::Variable, defining, aRegion);
         auto* v = t != nullptr ? t->view() : nullptr;
+        if (iInstanceBodies == 0 && t != nullptr && !is_subtype_name(iterable, aRegion) && !v->is_formal && !v->base_type()->view()->is_formal)
+        {
+            auto* w = v->kind == type_kind::Access && designated_of(v) != nullptr ? designated_of(v)->view() : v;
+            bool iterable_type = w->kind == type_kind::Array;
+            for (auto* a = w->base_type()->view(); !iterable_type && a != nullptr; a = a->parent != nullptr && a->parent->base_type()->view() != a ?
+                a->parent->base_type()->view() : nullptr)
+                iterable_type = type_aspect(a, "default_iterator") != nullptr && type_aspect(a, "iterator_element") != nullptr;
+            if (!iterable_type && w->kind == type_kind::ClassWide && w->specific != nullptr)
+                for (auto* a = w->specific->view()->base_type()->view(); !iterable_type && a != nullptr; a = a->parent != nullptr &&
+                    a->parent->base_type()->view() != a ? a->parent->base_type()->view() : nullptr)
+                    iterable_type = type_aspect(a, "default_iterator") != nullptr && type_aspect(a, "iterator_element") != nullptr;
+            if (!iterable_type && w->kind != type_kind::Private)
+                recover([&]() { error(iterable, "the iterable name of an iterator must be of an array or iterable container type (5.5.2(3/3))"); });
+        }
         if (v != nullptr && v->kind == type_kind::Access)
             v = designated_of(v)->view();
         if (v != nullptr && v->kind == type_kind::Array)
             e->type = v->component;
         else
+        {
             e->type = iterator_element_type(t);
+            // (reverse: the default iterator's type reversible (5.5.2(4/3)))
+            if (aSpecification->has_flag("reverse") && iInstanceBodies == 0 && t != nullptr)
+                for (auto* a = t->view()->base_type()->view(); a != nullptr; a = a->parent != nullptr && a->parent->base_type()->view() != a ?
+                    a->parent->base_type()->view() : nullptr)
+                    if (auto* aspect = type_aspect(a, "default_iterator"))
+                    {
+                        // (its function (of one parameter): the iterator type)
+                        auto* scope = a->declared_in != nullptr ? a->declared_in : a->partial != nullptr ? a->partial->declared_in : nullptr;
+                        if (scope != nullptr)
+                        {
+                            auto range = scope->names.equal_range(name_text(aspect->source));
+                            for (auto i = range.first; i != range.second; ++i)
+                                if (i->second->kind == entity_kind::Function && i->second->sub != nullptr && i->second->sub->result != nullptr &&
+                                    i->second->sub->parameters.size() == 1u && !reversible_iterator(i->second->sub->result))
+                                    recover([&]() { error(iterable, "the default iterator of a reverse container element iteration must be of a "
+                                        "reversible iterator type (5.5.2(4/3))"); });
+                        }
+                        break;
+                    }
+        }
         if (subtype != nullptr)
-            subtype_indication(subtype, aRegion);
+        {
+            // (an array component iterator's subtype: statically matching the component subtype; the element subtype's for a
+            // container (5.5.2(5/5)))
+            auto* st = subtype_indication(subtype, aRegion);
+            if (iInstanceBodies == 0 && st != nullptr && e->type != nullptr && !statically_matching(st, e->type))
+                recover([&]() { error(subtype, "the subtype of an iterator must statically match the component (or element) subtype (5.5.2(5/5))"); });
+        }
+        // (an array component iterator: not of a discriminant-dependent subcomponent of an unconstrained variable (5.5.2(6.1/4)))
+        if (iInstanceBodies == 0 && v != nullptr && v->kind == type_kind::Array && discriminant_dependent(iterable))
+            recover([&]() { error(iterable, "the iterable name of an array component iterator cannot denote a discriminant-dependent subcomponent of an "
+                "unconstrained variable (5.5.2(6.1/4))"); });
         e->where = storage::Renaming;
         e->renamed_name = iterable;
         if (auto* filter = aSpecification->first(construct::Filter))
             condition(filter->child(0), aRegion);
+    }
+
+    bool program::iterator_type(ada_type* aType)
+    {
+        // (a descendant of an instance of Ada.Iterator_Interfaces' Forward_Iterator (its class-wide type); unknown: assumed)
+        if (aType == nullptr)
+            return true;
+        auto* v = aType->view();
+        if (v->kind == type_kind::ClassWide && v->specific != nullptr)
+            v = v->specific->view();
+        if (v->is_formal || v->base_type()->view()->is_formal || v->kind == type_kind::Private)
+            return true;
+        std::set<ada_type*> seen;
+        std::function<bool(ada_type*, int)> iterator = [&](ada_type* aType, int aDepth) -> bool
+        {
+            if (aType == nullptr || aDepth > 32 || !seen.insert(aType).second)
+                return false;
+            auto* b = aType->view()->base_type()->view();
+            for (auto const* n : { "forward_iterator", "reversible_iterator", "parallel_iterator", "parallel_reversible_iterator" })
+                if (b->name == n || aType->base_type()->name == n)
+                    return true;
+            for (auto* i : b->interfaces)
+                if (iterator(i, aDepth + 1))
+                    return true;
+            return b->parent != nullptr && b->parent->base_type()->view() != b && iterator(b->parent, aDepth + 1);
+        };
+        return iterator(v, 0);
+    }
+
+    bool program::reversible_iterator(ada_type* aIterator)
+    {
+        // (a descendant of Ada.Iterator_Interfaces' Reversible_Iterator (an instance's); unknown: assumed)
+        if (aIterator == nullptr)
+            return true;
+        auto* v = aIterator->view();
+        if (v->kind == type_kind::ClassWide && v->specific != nullptr)
+            v = v->specific->view();
+        if (v->is_formal || v->base_type()->view()->is_formal)
+            return true;
+        std::set<ada_type*> seen;
+        std::function<bool(ada_type*, int)> reversible = [&](ada_type* aType, int aDepth) -> bool
+        {
+            if (aType == nullptr || aDepth > 32 || !seen.insert(aType).second)
+                return false;
+            auto* b = aType->view()->base_type()->view();
+            if (b->name == "reversible_iterator" || b->name == "parallel_reversible_iterator" || aType->base_type()->name == "reversible_iterator")
+                return true;
+            for (auto* i : b->interfaces)
+                if (reversible(i, aDepth + 1))
+                    return true;
+            return b->parent != nullptr && b->parent->base_type()->view() != b && reversible(b->parent, aDepth + 1);
+        };
+        if (v->kind != type_kind::Interface && !v->tagged)
+            return true;
+        return reversible(v, 0);
     }
 
     void program::case_choices_check(node* aCase, node* aSelector, ada_type* aType, std::vector<node*> const& aAlternatives, region* aRegion)
@@ -239,29 +408,41 @@ namespace neos::compilers::ada
                     if (alternative->child(0)->size() > 1u)
                         recover([&]() { error(choice, "others must be the only choice of its alternative"); });
                     else if (alternative != aAlternatives.back())
-                        recover([&]() { error(aCase, "others must be in the last alternative"); });
+                        recover([&]() { error(aCase->is(construct::CaseExpression) ? aCase : choice, "others must be in the last alternative"); });
                 }
         }
+        // (a selector of a universal type: its values cannot all be covered but by others (5.4(10)))
+        if (aType != nullptr && aType->is_universal() && !others && iInstanceBodies == 0)
+            recover([&]() { error(aCase, "the case choices do not cover every value of the selector's subtype (others is required)"); });
         // (each value of the selector's subtype covered once (5.4(6-10)): the nominal subtype of a name whose subtype is static,
         // otherwise the base range)
         if (aType != nullptr && complete && aType->view()->is_discrete())
             recover([&]()
             {
                 std::sort(covered.begin(), covered.end(), [](auto const& a, auto const& b) { return std::get<0>(a) < std::get<0>(b); });
+                // (each choice that overlaps one before it (by value): reported at the later of the two in the text)
+                std::size_t widest = 0u;
                 for (std::size_t i = 1u; i < covered.size(); ++i)
-                    if (std::get<0>(covered[i]) <= std::get<1>(covered[i - 1u]))
+                {
+                    if (std::get<0>(covered[i]) <= std::get<1>(covered[widest]))
                     {
-                        // (reported at the later of the two choices)
                         auto* a = std::get<2>(covered[i]);
-                        auto* b = std::get<2>(covered[i - 1u]);
-                        error(a->source.data() < b->source.data() ? b : a, "a value is covered by more than one case choice");
+                        auto* b = std::get<2>(covered[widest]);
+                        recover([&]() { error(a->source.data() < b->source.data() ? b : a, "a value is covered by more than one case choice"); });
                     }
+                    if (std::get<1>(covered[i]) > std::get<1>(covered[widest]))
+                        widest = i;
+                }
                 auto* s = aType->view();
                 // (a name (an object, a function call, a type conversion, a qualified expression) (5.4(7/4)))
                 bool const name = aSelector->is(construct::Identifier) || aSelector->is(construct::Selected) ||
                     aSelector->is(construct::Qualified) || aSelector->is(construct::Apply) ||
                     (aSelector->is(construct::Attribute) && aSelector->size() >= 2u && name_text(aSelector->child(1)->source) == "old");
-                bool const nominal = name && static_subtype(aType);
+                // (a generic formal in out object: of its actual's subtype (nonstatic, 12.4(9/5)))
+                bool const formalInOut = aSelector->is(construct::Identifier) && aSelector->ent != nullptr && aSelector->ent->decl != nullptr &&
+                    aSelector->ent->decl->parent != nullptr && aSelector->ent->decl->parent->is(construct::FormalObject) &&
+                    aSelector->ent->decl->parent->has_flag("out");
+                bool const nominal = name && static_subtype(aType) && !formalInOut;
                 if (!nominal)
                     s = s->base_type()->view();
                 if (!s->low.is_integer() || !s->high.is_integer() || s->is_formal || s->base_type()->view()->is_formal)
@@ -334,7 +515,8 @@ namespace neos::compilers::ada
                 for (auto* r = aRegion; r != nullptr; r = r->parent)
                 {
                     auto range = r->names.equal_range(name);
-                    if (range.first != range.second && range.first->second->kind != entity_kind::Loop && range.first->second->kind != entity_kind::Block)
+                    if (range.first != range.second && range.first->second->kind != entity_kind::Loop && range.first->second->kind != entity_kind::Block &&
+                        range.first->second != aStatement->ent && std::any_of(range.first, range.second, [&](auto const& x) { return x.second->visible_in_body && x.second != aStatement->ent; }))
                     {
                         error(aStatement, "the label \"" + name + "\" is already declared (or hidden) here");
                         break;
@@ -403,6 +585,9 @@ namespace neos::compilers::ada
                 iTargetType = t;
                 resolve(aStatement->child(1), t, aRegion);
                 iTargetType = saved;
+                // (a static value: in its type's base range (4.9(34/3)))
+                if (iInstanceBodies == 0 && t != nullptr)
+                    static_range_check(aStatement->child(1), aStatement->child(1), t, true, aRegion);
                 break;
             }
         case construct::Call:
@@ -468,10 +653,22 @@ namespace neos::compilers::ada
                 auto* selector = aStatement->child(0);
                 auto const options = interpretations(selector, aRegion);
                 ada_type* t = nullptr;
+                std::size_t discrete = 0u;
                 for (auto const& o : options)
                     if (o.type != nullptr && o.type->view()->is_discrete() && !o.type->is_universal())
+                    {
+                        if (t == nullptr || !same_type(t, o.type))
+                            ++discrete;
                         t = o.type;
+                    }
+                // (the selector: of a single discrete type, not a partial view here (5.4(4)))
+                // (a character literal: of every character type (Character, Wide_Character ...): ambiguous)
+                if ((discrete > 1u || selector->is(construct::Character)) && iInstanceBodies == 0)
+                    recover([&]() { error(selector, "the selector of a case statement is ambiguous"); });
                 recover([&]() { t = resolve(selector, t, aRegion); });
+                if (t != nullptr && iInstanceBodies == 0 && !t->view()->is_formal && !t->base_type()->view()->is_formal &&
+                    (!t->view()->is_discrete() || partial_view_here(t, aRegion)))
+                    recover([&]() { error(selector, "the selector of a case statement must be of a discrete type"); });
                 case_choices_check(aStatement, selector, t, aStatement->all(construct::Alternative), aRegion);
                 for (auto* alternative : aStatement->all(construct::Alternative))
                     statements(alternative->first(construct::Statements), aRegion);
@@ -483,8 +680,13 @@ namespace neos::compilers::ada
                 iStatementRegions[aStatement] = r;
                 if (auto* name = aStatement->first(construct::Word))
                 {
-                    auto* e = new_entity(entity_kind::Loop, name_text(name->source), name, aRegion);
-                    aRegion->add(e);
+                    // (declared already (see statements), else now)
+                    auto* e = iStatementNames.contains(aStatement) ? iStatementNames[aStatement] : nullptr;
+                    if (e == nullptr)
+                    {
+                        e = new_entity(entity_kind::Loop, name_text(name->source), name, aRegion);
+                        aRegion->add(e);
+                    }
                     e->inner = r;
                     r->owner = e;
                     aStatement->ent = e;
@@ -507,8 +709,13 @@ namespace neos::compilers::ada
                 iStatementRegions[aStatement] = r;
                 if (auto* name = aStatement->first(construct::Word))
                 {
-                    auto* e = new_entity(entity_kind::Block, name_text(name->source), name, aRegion);
-                    aRegion->add(e);
+                    // (declared already (see statements), else now)
+                    auto* e = iStatementNames.contains(aStatement) ? iStatementNames[aStatement] : nullptr;
+                    if (e == nullptr)
+                    {
+                        e = new_entity(entity_kind::Block, name_text(name->source), name, aRegion);
+                        aRegion->add(e);
+                    }
                     e->inner = r;
                     r->owner = e;
                     aStatement->ent = e;
@@ -523,8 +730,56 @@ namespace neos::compilers::ada
                     condition(c, aRegion);
             break;
         case construct::Goto:
+            // (its target: a labeled statement of a sequence of statements that encloses the goto statement, not outside an enclosing
+            // body or accept statement (5.8(4)))
+            if (iInstanceBodies == 0 && !aStatement->children.empty())
+            {
+                // (its simple name (an expanded name's last))
+                auto label = name_text(aStatement->child(0)->source);
+                if (auto const dot = label.rfind('.'); dot != std::string::npos)
+                    label = label.substr(dot + 1u);
+                auto const label_of = [](node const* c)
+                {
+                    auto text = std::string{ c->source };
+                    for (auto const* delimiter : { "<<", ">>" })
+                        for (auto at = text.find(delimiter); at != std::string::npos; at = text.find(delimiter))
+                            text.erase(at, 2u);
+                    return name_text(text);
+                };
+                bool found = false;
+                for (auto* n = aStatement->parent; n != nullptr && !found; n = n->parent)
+                {
+                    if (n->is(construct::Statements))
+                        for (auto* c : n->children)
+                            if (c->is(construct::Label) && label_of(c) == label)
+                                found = true;
+                    if (n->is(construct::SubprogramBody) || n->is(construct::PackageBody) || n->is(construct::TaskBody) || n->is(construct::EntryBody) ||
+                        n->is(construct::ProtectedBody) || n->is(construct::Accept) || n->is(construct::Unit))
+                        break;
+                }
+                if (!found)
+                    recover([&]() { error(aStatement->child(0), "the goto statement's label \"" + label + "\" is not of a statement of a sequence of statements enclosing it (5.8(4))"); });
+            }
             break;
         case construct::Return:
+            // (the construct it applies to (6.5(4/2)): a function body (with an expression); a procedure body, entry body, accept
+            // statement or extended return statement (without) (6.5(5/2, 6/2)))
+            if (iInstanceBodies == 0)
+            {
+                node const* applies = nullptr;
+                for (auto* n = aStatement->parent; n != nullptr && applies == nullptr; n = n->parent)
+                    if (n->is(construct::SubprogramBody) || n->is(construct::EntryBody) || n->is(construct::Accept) || n->is(construct::ReturnExtended) ||
+                        n->is(construct::TaskBody) || n->is(construct::PackageBody))
+                        applies = n;
+                bool const function = applies != nullptr && applies->is(construct::SubprogramBody) &&
+                    std::any_of(applies->children.begin(), applies->children.end(), [](node const* c) { return c->is(construct::FunctionSpecification); });
+                if (applies != nullptr && (applies->is(construct::TaskBody) || applies->is(construct::PackageBody)))
+                    recover([&]() { error(aStatement, "a return statement must be within a subprogram body, entry body or accept statement (6.5(4/2))"); });
+                else if (applies != nullptr && aStatement->size() > 0u && !function)
+                    recover([&]() { error(aStatement, "a return statement with an expression applies only to a function body (6.5(5/2))"); });
+                else if (applies != nullptr && aStatement->size() == 0u && function)
+                    recover([&]() { error(aStatement, "a return statement in a function body must have an expression (6.5(5/2))"); });
+            }
             if (aStatement->size() > 0u)
             {
                 ada_type* t = nullptr;
@@ -532,10 +787,35 @@ namespace neos::compilers::ada
                 if (owner != nullptr && owner->sub != nullptr)
                     t = owner->sub->result;
                 resolve(aStatement->child(0), t, aRegion);
+                if (owner != nullptr && owner->kind == entity_kind::Function)
+                {
+                    limited_value_check(aStatement->child(0), t, aRegion);
+                    if (iSpeculation == 0)
+                        others_check(aStatement->child(0), t);  // (an unconstrained array result: no applicable index constraint)
+                }
+                // (a class-wide result: the expression's (specific) type not deeper than the function (6.5(8/5), 3.10.2))
+                if (owner != nullptr && t != nullptr && t->view()->kind == type_kind::ClassWide && iInstanceBodies == 0 && iSpeculation == 0 &&
+                    !within_generic_body(aRegion) && owner->scope != nullptr)
+                    if (auto* et = aStatement->child(0)->type; et != nullptr && et->view()->kind != type_kind::ClassWide && et->view()->tagged &&
+                        type_level(et) > accessibility_level(owner->scope))
+                        recover([&]() { error(aStatement->child(0), "the type of the return expression is deeper than the function (its result is class-wide) (6.5(8/5))"); });
             }
             break;
         case construct::ReturnExtended:
             {
+                // (in a function body, not within another extended return statement (6.5(4/2)))
+                if (iInstanceBodies == 0)
+                {
+                    node const* applies = nullptr;
+                    for (auto* n = aStatement->parent; n != nullptr && applies == nullptr; n = n->parent)
+                        if (n->is(construct::SubprogramBody) || n->is(construct::EntryBody) || n->is(construct::Accept) || n->is(construct::ReturnExtended) ||
+                            n->is(construct::TaskBody) || n->is(construct::PackageBody))
+                            applies = n;
+                    bool const function = applies != nullptr && applies->is(construct::SubprogramBody) &&
+                        std::any_of(applies->children.begin(), applies->children.end(), [](node const* c) { return c->is(construct::FunctionSpecification); });
+                    if (applies != nullptr && !function)
+                        recover([&]() { error(aStatement, "an extended return statement applies only to a function body (6.5(4/2))"); });
+                }
                 auto* r = new_region(nullptr, aRegion);
                 iStatementRegions[aStatement] = r;
                 auto* defining = aStatement->first(construct::Defining);
@@ -554,12 +834,81 @@ namespace neos::compilers::ada
                 // (the return subtype: not abstract (3.9.3(8/3)))
                 if (abstract_type(t, aRegion))
                     recover([&]() { error(typeNode, "the return object cannot be of an abstract type"); });
+                // (the return subtype and the function's result subtype (6.5(5.2/3-5.5/3)))
+                if (auto* owner = return_owner(aRegion); owner != nullptr && owner->sub != nullptr && owner->sub->result != nullptr && t != nullptr &&
+                    iInstanceBodies == 0)
+                {
+                    auto* result = owner->sub->result;
+                    bool const accessResult = result->anonymous_access;
+                    bool const accessReturn = typeNode->is(construct::AccessDefinition);
+                    bool const resultNotNull = owner->sub->result_not_null || result->not_null || result->view()->not_null;
+                    bool const returnNotNull = t->not_null || t->view()->not_null || aStatement->has_flag("not null") || typeNode->has_flag("not null");
+                    // (elementary: statically matching, null exclusions included)
+                    auto const matching = [&]() -> bool
+                    {
+                        auto* x = t->view();
+                        auto* y = result->view();
+                        if (x->is_access() || y->is_access())
+                        {
+                            if (returnNotNull != resultNotNull)
+                                return false;
+                            if (accessResult)
+                                return x->kind == y->kind && x->access_constant == y->access_constant && (x->kind != type_kind::Access ||
+                                    x->designated == nullptr || y->designated == nullptr || statically_matching(x->designated, y->designated));
+                            return same_type(x, y) && (x->kind != type_kind::Access || x->designated == nullptr || y->designated == nullptr ||
+                                x->designated == y->designated || statically_matching(x->designated, y->designated));
+                        }
+                        return statically_matching(t, result);
+                    };
+                    if (accessResult != accessReturn)
+                        recover([&]() { error(typeNode, accessResult ? "the return object of a function whose result is an access definition must be declared by an access definition (6.5(5.3/2))" :
+                            "the return object must be declared by a subtype indication when the function's result subtype is a subtype mark (6.5(5.2/3))"); });
+                    else if (accessResult)
+                    {
+                        if (!matching())
+                            recover([&]() { error(typeNode, "the return object's access definition must statically match the function's result subtype (6.5(5.3/2))"); });
+                    }
+                    else if (!covers(result->kind == type_kind::ClassWide || result->view()->kind == type_kind::ClassWide ? result : result->base_type(), t))
+                        recover([&]() { error(typeNode, "the return object's type must be covered by the function's result type (6.5(5.2/3))"); });
+                    else if ((result->view()->is_scalar() || result->view()->is_access()) && !matching())
+                        recover([&]() { error(typeNode, "the return object's subtype must statically match the function's (elementary) result subtype (6.5(5.2/3))"); });
+                    else if ((result->view()->kind == type_kind::Array || !result->view()->discriminant_constraint.empty()) && result->view()->constrained &&
+                        (!t->view()->constrained || !statically_matching(t, result)))
+                        recover([&]() { error(typeNode, "the return object's subtype must be statically compatible with the function's result subtype (6.5(5.2/3))"); });
+                    if (!accessReturn && init == nullptr && indefinite_subtype(t, typeNode, aRegion))
+                        recover([&]() { error(typeNode, "a return object of an indefinite subtype must be initialized (6.5(5.2/3))"); });
+                }
+                // (a class-wide result: the return object's (specific) type, and its initial value's, not deeper than the function (6.5(8/5)))
+                if (auto* owner = return_owner(aRegion); owner != nullptr && owner->sub != nullptr && owner->sub->result != nullptr &&
+                    owner->sub->result->view()->kind == type_kind::ClassWide && t != nullptr && iInstanceBodies == 0 && !within_generic_body(aRegion) &&
+                    owner->scope != nullptr)
+                {
+                    auto const level = accessibility_level(owner->scope);
+                    if (t->view()->kind != type_kind::ClassWide && t->view()->tagged && type_level(t) > level)
+                        recover([&]() { error(typeNode, "the return object's type is deeper than the function (its result is class-wide) (6.5(8/5))"); });
+                }
+                // (an aliased return object: of an immutably limited type (6.5(5.10/3)))
+                if (aStatement->has_flag("aliased") && iInstanceBodies == 0 && t != nullptr && !immutably_limited(t))
+                    recover([&]() { error(defining, "an aliased return object must be of an immutably limited type (6.5(5.10/3))"); });
+                // (a constant return object: initialized (6.5(5.1/3)... 3.3.1))
+                if (aStatement->has_flag("constant") && init == nullptr && iInstanceBodies == 0)
+                    recover([&]() { error(aStatement, "a constant return object must have an expression (6.5(2.1/3))"); });
                 auto* e = declare(aStatement->has_flag("constant") ? entity_kind::Constant : entity_kind::Variable, defining, r);
+                e->aliased_declared = aStatement->has_flag("aliased");
                 e->type = t;
                 e->initial = init;
                 aStatement->ent = e;
                 if (init != nullptr)
+                {
                     resolve(init, t, aRegion);
+                    limited_value_check(init, t, aRegion);
+                    if (iSpeculation == 0)
+                        others_check(init, t);  // (an unconstrained array return object: no applicable index constraint)
+                    if (auto* owner = return_owner(aRegion); owner != nullptr && t != nullptr && t->view()->kind == type_kind::ClassWide && iInstanceBodies == 0 &&
+                        !within_generic_body(aRegion) && owner->scope != nullptr && init->type != nullptr && init->type->view()->kind != type_kind::ClassWide &&
+                        init->type->view()->tagged && type_level(init->type) > accessibility_level(owner->scope))
+                        recover([&]() { error(init, "the type of the return object's initial value is deeper than the function (its result is class-wide) (6.5(8/5))"); });
+                }
                 statements(aStatement->first(construct::Handled), r);
                 break;
             }
@@ -576,11 +925,39 @@ namespace neos::compilers::ada
         case construct::Delay:
             for (auto* c : aStatement->children)
                 if (!c->is(construct::Flag))
-                    resolve(c, aStatement->has_flag("until") ? nullptr : iDuration, aRegion);
+                {
+                    auto* t = resolve(c, aStatement->has_flag("until") ? nullptr : iDuration, aRegion);
+                    // (a delay until's expression: of a time type (Calendar.Time, Real_Time.Time) (9.6(5)))
+                    if (aStatement->has_flag("until") && iInstanceBodies == 0 && t != nullptr)
+                    {
+                        bool time = false;
+                        for (auto const* package : { "ada.calendar", "ada.real_time" })
+                            if (auto* tt = library_type(package, "time"); tt != nullptr && tt->view()->base_type()->view() == t->view()->base_type()->view())
+                                time = true;
+                        if (!time && !t->view()->is_formal)
+                            recover([&]() { error(c, "the expression of a delay until statement must be of a time type (9.6(5))"); });
+                    }
+                }
             break;
         case construct::Abort:
             for (auto* c : aStatement->children)
-                resolve(c, nullptr, aRegion);
+            {
+                auto* t = resolve(c, nullptr, aRegion);
+                // (a task object (9.8(3)); a task type's name within its body: the current instance)
+                bool currentInstance = false;
+                if (meaning_of(c) == meaning::Type && c->ent != nullptr)
+                    for (region* jump = nullptr, *r = aRegion; r != nullptr && !currentInstance; r = outward(r, jump))
+                        for (auto* o = r->owner; o != nullptr && !currentInstance; o = o->owner != o ? o->owner : nullptr)
+                        {
+                            currentInstance = o == c->ent || (o->kind == entity_kind::Task && o->type != nullptr && o->type == c->ent->type);
+                            if (o->owner == nullptr)
+                                break;
+                        }
+                if (iInstanceBodies == 0 && !currentInstance && (meaning_of(c) == meaning::Type || (t != nullptr && t->view()->kind != type_kind::Task &&
+                    !(t->view()->kind == type_kind::ClassWide && t->view()->specific != nullptr && t->view()->specific->view()->task_interface) &&
+                    !t->view()->task_interface && !t->view()->is_formal)))
+                    recover([&]() { error(c, "the name in an abort statement must denote a task object (9.8(3))"); });
+            }
             break;
         case construct::Requeue:
             resolve_requeue(aStatement, aRegion);
@@ -704,6 +1081,29 @@ namespace neos::compilers::ada
         }
     }
 
+    bool program::immutably_limited(ada_type* aType, int aDepth)
+    {
+        // (an explicitly limited record type, a task, protected or synchronized interface type, a tagged limited private type, or a
+        // descendant of one (7.5(8.1/3)))
+        if (aType == nullptr || aDepth > 16)
+            return false;
+        auto* v = aType->view();
+        if (v->kind == type_kind::ClassWide && v->specific != nullptr)
+            v = v->specific->view();
+        auto* b = v->base_type()->view();
+        if (b->kind == type_kind::Task || b->kind == type_kind::Protected)
+            return true;
+        if (b->kind == type_kind::Interface)
+            return b->synchronized_interface || b->task_interface || b->protected_interface;
+        if (b->is_formal)
+            return false;
+        // (a partial view: if tagged limited private)
+        if (auto* partial = aType->kind == type_kind::Private ? aType : aType->base != nullptr && aType->base->kind == type_kind::Private ? aType->base : nullptr)
+            return partial->tagged && partial->limited;
+        // (an explicitly limited record type or record extension, or derived from one)
+        return b->kind == type_kind::Record && b->limited;
+    }
+
     entity* program::return_owner(region* aRegion)
     {
         // (the subprogram (or entry or accept) that a return statement returns from)
@@ -812,8 +1212,59 @@ namespace neos::compilers::ada
                 break;
             }
         }
+        // (its formal part: fully conformant with the entry declaration's (9.5.2(16)): the same names, modes, subtypes and default
+        // expressions)
+        if (iInstanceBodies == 0 && entry->sub != nullptr && entry->sub->spec != nullptr)
+        {
+            struct formal { node* name; parameter_mode mode; node* subtype; node* initial; };
+            auto const formals = [&](node* aParent)
+            {
+                std::vector<formal> result;
+                for (auto* p : aParent->children)
+                {
+                    if (!p->is(construct::Parameter))
+                        continue;
+                    auto mode = p->has_flag("out") ? (p->has_flag("in") ? parameter_mode::InOut : parameter_mode::Out) : parameter_mode::In;
+                    node* subtype = nullptr;
+                    node* initial = nullptr;
+                    for (auto* c : p->children)
+                        if (!c->is(construct::Defining) && !c->is(construct::Flag) && !c->is(construct::Aspects))
+                        {
+                            if (subtype == nullptr)
+                                subtype = c;
+                            else if (initial == nullptr)
+                                initial = c;
+                        }
+                    for (auto* d : p->all(construct::Defining))
+                        result.push_back({ d, mode, subtype, initial });
+                }
+                return result;
+            };
+            auto const declared = formals(entry->sub->spec);
+            auto const accepted = formals(aAccept);
+            if (declared.size() == accepted.size())
+                for (std::size_t k = 0u; k < declared.size(); ++k)
+                {
+                    auto const& a = declared[k];
+                    auto const& b = accepted[k];
+                    if (b.initial != nullptr && b.initial->type == nullptr && k < entry->sub->parameters.size())
+                        recover([&]() { resolve(b.initial, entry->sub->parameters[k].type, aRegion); });
+                    if (b.initial != nullptr && k < entry->sub->parameters.size())
+                        others_check(b.initial, entry->sub->parameters[k].type);   // (an unconstrained array formal's default: no applicable index constraint)
+                    bool const conformant = name_text(a.name->source) == name_text(b.name->source) && a.mode == b.mode &&
+                        (k >= profile.size() || profile[k] == nullptr || k >= entry->sub->parameters.size() || entry->sub->parameters[k].type == nullptr ||
+                            statically_matching(entry->sub->parameters[k].type, profile[k])) &&
+                        (a.initial == nullptr) == (b.initial == nullptr) && (a.initial == nullptr || fully_conformant(a.initial, b.initial));
+                    if (!conformant)
+                    {
+                        recover([&]() { error(b.name, "the accept statement's formal part must be fully conformant with the entry declaration's (9.5.2(16))"); });
+                        break;
+                    }
+                }
+        }
         auto* r = new_region(entry, aRegion);
         r->owner = nullptr;
+        r->master = true;   // (an accept statement: a master (7.6.1(3/2)))
         iStatementRegions[aAccept] = r;
         iAcceptEntries[r] = entry;
         // (not within an accept statement for the same entry (9.5.2(14)))
@@ -1004,6 +1455,88 @@ namespace neos::compilers::ada
                 resolve(ancestor, ancestorType, aRegion);
                 if (ancestorType == nullptr)
                     ancestorType = ancestor->type;
+                limited_value_check(ancestor, ancestorType, aRegion);
+            }
+            // (the ancestor: of a tagged type (an expression: resolved without the aggregate's type, not dynamically tagged; a subtype
+            // mark: not class-wide), a proper ancestor of the aggregate's type, not through a private extension (4.3.2(4/2-5/3)); the
+            // aggregate's type: not a partial view (4.3.2(5/3)))
+            if (iSpeculation == 0 && iInstanceBodies == 0)
+            {
+                bool const subtypeMark = meaning_of(ancestor) == meaning::Type;
+                if (!subtypeMark)
+                {
+                    std::vector<ada_type*> tagged;
+                    for (auto const& o : interpretations(ancestor, aRegion))
+                        if (o.type != nullptr && (o.type->view()->tagged || o.type->view()->kind == type_kind::ClassWide) &&
+                            std::none_of(tagged.begin(), tagged.end(), [&](ada_type* x) { return same_type(x, o.type); }))
+                            tagged.push_back(o.type);
+                    if (tagged.size() > 1u)
+                        error(ancestor, "the ancestor expression of an extension aggregate is ambiguous (it is resolved without the aggregate's type, 4.3.2(4/2))");
+                    if (dynamically_tagged(ancestor))
+                        error(ancestor, "the ancestor expression of an extension aggregate cannot be dynamically tagged (4.3.2(5/3))");
+                }
+                // (a subtype mark: not of a view with unknown discriminants (its own, or inherited by extensions without a known discriminant
+                // part) (4.3.2(5.1/3)))
+                if (subtypeMark && ancestorType != nullptr)
+                {
+                    int steps = 0;
+                    for (auto* x = ancestorType; x != nullptr && ++steps < 64; )
+                    {
+                        auto* xb = x->base_type();
+                        auto* partial = xb->kind == type_kind::Private ? xb : xb->partial;
+                        if (xb->unknown_discriminants || (partial != nullptr && partial->unknown_discriminants))
+                        {
+                            error(ancestor, "the ancestor subtype of an extension aggregate cannot denote a view with unknown discriminants (4.3.2(5.1/3))");
+                            break;
+                        }
+                        if (xb->known_discriminants || (partial != nullptr && partial->known_discriminants))
+                            break;
+                        x = xb->parent != nullptr ? xb->parent : xb->view() != xb ? xb->view()->parent : nullptr;
+                    }
+                }
+                auto* av = ancestorType != nullptr ? ancestorType->view() : nullptr;
+                if (av != nullptr && av->kind == type_kind::ClassWide)
+                {
+                    if (subtypeMark)
+                        error(ancestor, "the ancestor subtype of an extension aggregate cannot be class-wide (4.3.2(5/3))");
+                }
+                else if (av != nullptr && !av->base_type()->view()->tagged && !av->is_formal)
+                    error(ancestor, "the ancestor of an extension aggregate must be of a tagged type (4.3.2(4/2))");
+                else if (av != nullptr && !av->is_formal && !t->is_formal)
+                {
+                    auto* ab = av->base_type()->view();
+                    if (same_type(ancestorType, aExpected) || is_descendant(ancestorType, aExpected))
+                        error(ancestor, "the ancestor type of an extension aggregate must be a proper ancestor of the aggregate's type (4.3.2(5/3))");
+                    else if (!is_descendant(aExpected, ancestorType))
+                        error(ancestor, "the ancestor type of an extension aggregate must be an ancestor of the aggregate's type (4.3.2(5/3))");
+                    else
+                    {
+                        // (the derivation from the ancestor: not through a private extension (whose full view is not visible here))
+                        auto const hidden = [&](ada_type* aView)
+                        {
+                            if (aView == nullptr)
+                                return false;
+                            auto* partial = aView->kind == type_kind::Private ? aView : aView->base != nullptr && aView->base->kind == type_kind::Private ? aView->base :
+                                aView->base_type()->partial;
+                            if (partial == nullptr || partial->is_formal || partial->incomplete)
+                                return false;
+                            auto* package = partial->declared_in != nullptr ? partial->declared_in->owner : nullptr;
+                            return package == nullptr || !private_part_visible(package, aRegion) || partial->full == nullptr;
+                        };
+                        bool through = false;
+                        int steps = 0;
+                        for (auto* x = aExpected; x != nullptr && !through && ++steps < 64; )
+                        {
+                            auto* xb = x->view()->base_type()->view();
+                            if (xb == ab)
+                                break;
+                            through = hidden(x) || hidden(xb);
+                            x = xb->parent;
+                        }
+                        if (through)
+                            error(aAggregate, "the type of an extension aggregate cannot be derived from its ancestor through a private extension (4.3.2(5/3))");
+                    }
+                }
             }
             if (ancestorType != nullptr)
             {
@@ -1026,6 +1559,32 @@ namespace neos::compilers::ada
         std::size_t positional = 0u;
         // (discriminant values (static) choose the variant: the components of other variants are not in the aggregate)
         std::map<entity*, bigint> discriminantValues;
+        // (a discriminant's value; the parent's (stored) discriminants that the derivation's constraint gives it to (see
+        // component_info::stored) have it too)
+        auto const set_discriminant = [&](entity* aDiscriminant, bigint const& aValue)
+        {
+            discriminantValues[aDiscriminant] = aValue;
+            for (auto const& sc : record->components)
+                if (sc.stored && sc.ent != nullptr && sc.default_expression != nullptr && sc.default_expression->is(construct::Identifier) &&
+                    (sc.default_expression->ent == aDiscriminant || name_text(sc.default_expression->source) == aDiscriminant->name))
+                    discriminantValues[sc.ent] = aValue;
+            // (the parent's discriminants that the derivation's constraint gives it to (a type with new discriminants))
+            if (auto* parent = record->parent; parent != nullptr && !parent->discriminant_constraint.empty())
+            {
+                std::vector<entity*> parentDiscriminants;
+                for (auto const& pc : parent->base_type()->view()->components)
+                    if (pc.discriminant && !pc.stored)
+                        parentDiscriminants.push_back(pc.ent);
+                for (std::size_t i = 0u; i < parent->discriminant_constraint.size() && i < parentDiscriminants.size(); ++i)
+                {
+                    auto* x = parent->discriminant_constraint[i];
+                    while (x != nullptr && (x->is(construct::Association) || x->is(construct::Parenthesized)) && !x->children.empty())
+                        x = x->children.back();
+                    if (x != nullptr && x->is(construct::Identifier) && (x->ent == aDiscriminant || name_text(x->source) == aDiscriminant->name))
+                        discriminantValues[parentDiscriminants[i]] = aValue;
+                }
+            }
+        };
         // (the value of a discriminant that governs a variant part: static (4.3.1(17/5)))
         auto const governing = [&](std::size_t aComponent, node* aValue)
         {
@@ -1094,7 +1653,7 @@ namespace neos::compilers::ada
                                     resolve(value, record->components[c].type, aRegion);
                                     governing(c, value);
                                     if (auto v = evaluate(value, aRegion); v.is_integer())
-                                        discriminantValues[record->components[c].ent] = v.integer();
+                                        set_discriminant(record->components[c].ent, v.integer());
                                 }
                             }
                         for (auto c : order)
@@ -1127,7 +1686,7 @@ namespace neos::compilers::ada
                                 governing(c, value);
                                 auto v = evaluate(value, aRegion);
                                 if (v.is_integer())
-                                    discriminantValues[record->components[c].ent] = v.integer();
+                                    set_discriminant(record->components[c].ent, v.integer());
                             }
                         }
                     if (!found)
@@ -1174,7 +1733,7 @@ namespace neos::compilers::ada
                     governing(c, item);
                     auto v = evaluate(item, aRegion);
                     if (v.is_integer())
-                        discriminantValues[record->components[c].ent] = v.integer();
+                        set_discriminant(record->components[c].ent, v.integer());
                 }
             }
         }
@@ -1186,6 +1745,7 @@ namespace neos::compilers::ada
             auto* componentType = record->components[c].type;
             // (an anonymous access component of a type with a discriminant constraint)
             resolve(values[c], componentType, aRegion);
+            limited_value_check(values[c], componentType, aRegion);
         }
         for (auto c : order)
             if (!present[c] && in_variant(record->components[c]) && !aAggregate->is(construct::AggregateNullRecord))
@@ -1209,7 +1769,10 @@ namespace neos::compilers::ada
         auto const component = [&](node* aValue)
         {
             if (last)
+            {
                 resolve(aValue, t->component, aRegion);
+                limited_value_check(aValue, t->component, aRegion);
+            }
             else if (aValue->is(construct::Aggregate) || aValue->is(construct::AggregateBracket))
                 resolve_array_aggregate(aValue, aType, aDimension + 1u, aRegion);
             else if (aValue->is(construct::Operator))
@@ -1318,7 +1881,26 @@ namespace neos::compilers::ada
         }
         // (named static choices: no null range among several, no value covered twice, and without others no missing values between
         // the smallest and the largest (4.3.3(18)))
-        if (requireStatic && iInstanceBodies == 0 && iSpeculation == 0)
+        // (a choice that is a subtype with a static predicate: covers only the values that satisfy it, so it too must be contiguous when
+        // it is the only one (4.3.3))
+        auto const predicated = [&](node* aChoice) -> ada_type*
+        {
+            auto* ct = aChoice->type;
+            if (ct != nullptr && (aChoice->is(construct::SubtypeIndication) || meaning_of(aChoice) == meaning::Type) &&
+                (ct->predicate != nullptr || ct->view()->predicate != nullptr))
+                return ct;
+            return nullptr;
+        };
+        bool const singlePredicated = !requireStatic && [&]()
+        {
+            for (auto* item : aAggregate->children)
+                if (item->is(construct::Association))
+                    for (auto* choice : item->child(0)->children)
+                        if (predicated(choice) != nullptr)
+                            return true;
+            return false;
+        }();
+        if ((requireStatic || singlePredicated) && iInstanceBodies == 0 && iSpeculation == 0)
             recover([&]()
             {
                 std::vector<std::tuple<bigint, bigint, node*>> covered;
@@ -1332,6 +1914,15 @@ namespace neos::compilers::ada
                         if (choice->is(construct::Others))
                         {
                             others = true;
+                            continue;
+                        }
+                        if (auto* ct = predicated(choice))
+                        {
+                            auto values = static_values(ct, aRegion);
+                            if (!values)
+                                return;
+                            for (auto const& [l, h] : *values)
+                                covered.emplace_back(l, h, choice);
                             continue;
                         }
                         auto [low, high] = choice_range(choice, indexType->base_type(), aRegion);

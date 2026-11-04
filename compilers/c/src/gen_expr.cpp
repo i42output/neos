@@ -390,12 +390,43 @@ namespace neos::compilers::c
         throw compile_error{ e, "internal error: the address of an expression that is not an lvalue" };
     }
 
-    void function_generator::bit_field_load(member_info const& aMember)
+    void function_generator::bit_field_load(member_info const& aMember, vkind aKind)
     {
         // ([its storage unit's address] -> its value)
+        if (aMember.unitSize == 16u)
+        {
+            // (a packed 64-bit bit-field in 9 bytes: the 8 bytes from its address, then the 9th byte's bits)
+            auto const where = temporary(type::I64);
+            set(where);
+            auto const width = *aMember.bitWidth;
+            get(where);
+            op(opcode::I64LoadMem);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(0u);
+            i64(aMember.bitOffset);
+            op(opcode::I64ShrU);
+            get(where);
+            op(opcode::I64LoadMem8U);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(8u);
+            i64(64u - aMember.bitOffset);
+            op(opcode::I64Shl);
+            op(opcode::I64Ior);
+            i64(64u - width);
+            op(opcode::I64Shl);
+            i64(64u - width);
+            op(iProgram.integer_type(aMember.type.type)->is_signed() ? opcode::I64ShrS : opcode::I64ShrU);
+            if (aKind == vkind::I32)
+                op(opcode::I32ConvertI64);
+            release(where);
+            return;
+        }
         auto const unit = aMember.type;
-        auto const k = kind_of(unit);
-        auto const size = iProgram.size_of(unit);
+        auto const memberKind = aKind != vkind::None ? aKind : kind_of(unit);   // (the value's kind)
+        auto const size = aMember.unitSize != 0u ? aMember.unitSize : iProgram.size_of(unit);
+        auto const k = size == 8u ? vkind::I64 : vkind::I32;    // (the storage unit's kind (a packed bit-field's unit: its own size))
         bool const isSigned = iProgram.integer_type(unit.type)->is_signed();
         auto const width = *aMember.bitWidth;
         auto const bits = k == vkind::I64 ? 64u : 32u;
@@ -432,15 +463,20 @@ namespace neos::compilers::c
                 op(isSigned ? opcode::I32ShrS : opcode::I32ShrU);
             }
         }
+        if (k == vkind::I64 && memberKind != vkind::I64)
+            op(opcode::I32ConvertI64);
+        else if (k != vkind::I64 && memberKind == vkind::I64)
+            op(isSigned ? opcode::I64SConvertI32 : opcode::I64UConvertI32);
     }
 
-    void function_generator::bit_field_store(member_info const& aMember, bool aValueUsed)
+    void function_generator::bit_field_store(member_info const& aMember, bool aValueUsed, vkind aKind)
     {
-        // ([its storage unit's address, value] -> (the value stored, if used))
+        // ([its storage unit's address, value (of aKind (None: the member type's))] -> (the value stored, if used))
         auto const unit = aMember.type;
-        auto const k = kind_of(unit);
-        auto const t = wasm_of(unit);
-        auto const size = iProgram.size_of(unit);
+        auto const memberKind = aKind != vkind::None ? aKind : kind_of(unit);   // (the value's kind)
+        auto const t = iProgram.wasm(memberKind);
+        auto const size = aMember.unitSize != 0u ? aMember.unitSize : iProgram.size_of(unit);
+        auto const k = size == 8u ? vkind::I64 : vkind::I32;    // (the storage unit's kind)
         auto const width = *aMember.bitWidth;
         auto const value = temporary(t);
         auto const where = temporary(type::I64);
@@ -448,55 +484,105 @@ namespace neos::compilers::c
         set(where);
         std::uint64_t const fieldMask = width >= 64u ? ~std::uint64_t{} : ((std::uint64_t{ 1 } << width) - 1u);
         std::uint64_t const mask = fieldMask << aMember.bitOffset;
-        opcode loadOp = k == vkind::I64 ? opcode::I64LoadMem : size == 1u ? opcode::I32LoadMem8U : size == 2u ? opcode::I32LoadMem16U : opcode::I32LoadMem;
-        opcode storeOp = k == vkind::I64 ? opcode::I64StoreMem : size == 1u ? opcode::I32StoreMem8 : size == 2u ? opcode::I32StoreMem16 : opcode::I32StoreMem;
-        get(where);
-        get(where);
-        op(loadOp);
-        u32(0x40u);
-        u32(language::c::layout::Memory);
-        u32(0u);
-        if (k == vkind::I64)
+        if (aMember.unitSize == 16u)
         {
+            // (a packed 64-bit bit-field in 9 bytes: its low bits in the 8 bytes from its address, the rest in the 9th byte's)
+            std::uint64_t const highMask = (std::uint64_t{ 1 } << (aMember.bitOffset + width - 64u)) - 1u;
+            get(where);
+            get(where);
+            op(opcode::I64LoadMem);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(0u);
             i64(static_cast<std::int64_t>(~mask));
             op(opcode::I64And);
             get(value);
-            i64(static_cast<std::int64_t>(fieldMask));
-            op(opcode::I64And);
-            if (aMember.bitOffset != 0u)
-            {
-                i64(aMember.bitOffset);
-                op(opcode::I64Shl);
-            }
+            if (memberKind != vkind::I64)
+                op(opcode::I64SConvertI32);
+            i64(aMember.bitOffset);
+            op(opcode::I64Shl);
             op(opcode::I64Ior);
+            op(opcode::I64StoreMem);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(0u);
+            get(where);
+            get(where);
+            op(opcode::I64LoadMem8U);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(8u);
+            i64(static_cast<std::int64_t>(~highMask));
+            op(opcode::I64And);
+            get(value);
+            if (memberKind != vkind::I64)
+                op(opcode::I64SConvertI32);
+            i64(64u - aMember.bitOffset);
+            op(opcode::I64ShrU);
+            i64(static_cast<std::int64_t>(highMask));
+            op(opcode::I64And);
+            op(opcode::I64Ior);
+            op(opcode::I64StoreMem8);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(8u);
         }
         else
         {
-            i32(static_cast<std::int32_t>(static_cast<std::uint32_t>(~mask)));
-            op(opcode::I32And);
-            get(value);
-            i32(static_cast<std::int32_t>(static_cast<std::uint32_t>(fieldMask)));
-            op(opcode::I32And);
-            if (aMember.bitOffset != 0u)
+            opcode loadOp = k == vkind::I64 ? opcode::I64LoadMem : size == 1u ? opcode::I32LoadMem8U : size == 2u ? opcode::I32LoadMem16U : opcode::I32LoadMem;
+            opcode storeOp = k == vkind::I64 ? opcode::I64StoreMem : size == 1u ? opcode::I32StoreMem8 : size == 2u ? opcode::I32StoreMem16 : opcode::I32StoreMem;
+            get(where);
+            get(where);
+            op(loadOp);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(0u);
+            if (k == vkind::I64)
             {
-                i32(static_cast<std::int32_t>(aMember.bitOffset));
-                op(opcode::I32Shl);
+                i64(static_cast<std::int64_t>(~mask));
+                op(opcode::I64And);
+                get(value);
+                if (memberKind != vkind::I64)
+                    op(opcode::I64UConvertI32);
+                i64(static_cast<std::int64_t>(fieldMask));
+                op(opcode::I64And);
+                if (aMember.bitOffset != 0u)
+                {
+                    i64(aMember.bitOffset);
+                    op(opcode::I64Shl);
+                }
+                op(opcode::I64Ior);
             }
-            op(opcode::I32Ior);
+            else
+            {
+                i32(static_cast<std::int32_t>(static_cast<std::uint32_t>(~mask)));
+                op(opcode::I32And);
+                get(value);
+                if (memberKind == vkind::I64)
+                    op(opcode::I32ConvertI64);
+                i32(static_cast<std::int32_t>(static_cast<std::uint32_t>(fieldMask)));
+                op(opcode::I32And);
+                if (aMember.bitOffset != 0u)
+                {
+                    i32(static_cast<std::int32_t>(aMember.bitOffset));
+                    op(opcode::I32Shl);
+                }
+                op(opcode::I32Ior);
+            }
+            op(storeOp);
+            u32(0x40u);
+            u32(language::c::layout::Memory);
+            u32(0u);
         }
-        op(storeOp);
-        u32(0x40u);
-        u32(language::c::layout::Memory);
-        u32(0u);
         if (aValueUsed)
         {
             // (the value as the bit-field holds it)
             get(value);
             bool const isSigned = iProgram.integer_type(unit.type)->is_signed();
-            auto const bits = k == vkind::I64 ? 64u : 32u;
+            auto const bits = memberKind == vkind::I64 ? 64u : 32u;
             if (bits - width != 0u)
             {
-                if (k == vkind::I64)
+                if (memberKind == vkind::I64)
                 {
                     i64(bits - width);
                     op(opcode::I64Shl);
@@ -632,6 +718,9 @@ namespace neos::compilers::c
         case construct::Nullptr:
             constant_value(*e->value, e->type);
             return;
+        case construct::LabelAddress:
+            i64(static_cast<std::int64_t>(e->value->integer));     // (GNU: a label's number in its function, from 1)
+            return;
         case construct::Identifier:
         {
             if (e->value)
@@ -687,7 +776,7 @@ namespace neos::compilers::c
             }
             address(e);
             if (e->bitField)
-                bit_field_load(*e->members.back());
+                bit_field_load(*e->members.back(), kind_of(e->type));
             else
                 load(e->type);
             return;
@@ -888,6 +977,8 @@ namespace neos::compilers::c
         {
             if (aUse == use::Address)
                 throw compile_error{ aExpression, "internal error: the address of a statement expression without a value" };
+            if (iInfo.hasCleanups)
+                cleanups(compound, 0u, compound->size());
             return;
         }
         switch (aUse)
@@ -901,6 +992,23 @@ namespace neos::compilers::c
         case use::Discard:
             discard(value);
             break;
+        }
+        if (iInfo.hasCleanups)
+        {
+            // (gnu::cleanup: its block's objects' functions called after its value is computed)
+            auto const w = aUse == use::Address ? type::I64 : aUse == use::Value ? wasm_of(iProgram.value_type(value)) : type::Void;
+            std::optional<std::uint32_t> saved;
+            if (w != type::Void)
+            {
+                saved = temporary(w);
+                set(*saved);
+            }
+            cleanups(compound, 0u, compound->size());
+            if (saved)
+            {
+                get(*saved);
+                release(*saved);
+            }
         }
     }
 
@@ -1157,7 +1265,7 @@ namespace neos::compilers::c
         {
             address(target);
             aValue();
-            bit_field_store(*target->members.back(), aValueUsed);
+            bit_field_store(*target->members.back(), aValueUsed, kind_of(target->type));
             return;
         }
         address(aTarget);
@@ -1265,8 +1373,8 @@ namespace neos::compilers::c
         tee(where);
         if (s->bitField)
         {
-            compute([&]() { get(where); bit_field_load(*s->members.back()); });
-            bit_field_store(*s->members.back(), aValueUsed);
+            compute([&]() { get(where); bit_field_load(*s->members.back(), kind_of(s->type)); });
+            bit_field_store(*s->members.back(), aValueUsed, kind_of(s->type));
         }
         else
         {
@@ -1369,7 +1477,7 @@ namespace neos::compilers::c
         tee(where);
         get(where);
         if (s->bitField)
-            bit_field_load(*s->members.back());
+            bit_field_load(*s->members.back(), kind_of(s->type));
         else
             load(t);
         std::optional<std::uint32_t> old;
@@ -1381,7 +1489,7 @@ namespace neos::compilers::c
         step();
         if (s->bitField)
         {
-            bit_field_store(*s->members.back(), aValueUsed && !post);
+            bit_field_store(*s->members.back(), aValueUsed && !post, kind_of(s->type));
         }
         else if (aValueUsed && !post)
         {

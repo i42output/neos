@@ -128,8 +128,9 @@ namespace neos::compilers::c
         void assignment(node* aAssignment, bool aValueUsed);
         void increment(node* aExpression, bool aValueUsed);
         void store_to(node* aTarget, std::function<void()> const& aValue, bool aValueUsed);   ///< (the value is of the target's type)
-        void bit_field_load(member_info const& aMember);        ///< ([unit address] -> value)
-        void bit_field_store(member_info const& aMember, bool aValueUsed);  ///< ([unit address, value] -> (value))
+        void bit_field_load(member_info const& aMember, vkind aKind = vkind::None);        ///< ([unit address] -> value (of aKind (None: 
+                                                                                            ///< the member type's)))
+        void bit_field_store(member_info const& aMember, bool aValueUsed, vkind aKind = vkind::None);  ///< ([unit address, value] -> (value))
         void dynamic_size(qtype aType);                         ///< (an i64: the size of a type (a variable length array's, evaluated))
         void conditional(node* aExpression, bool aDiscard);
         void compound_literal(node* aLiteral);
@@ -147,6 +148,12 @@ namespace neos::compilers::c
     public:
         void statement(node* aStatement);
         void compound(node* aCompound);
+        void computed_goto(node* aGoto);
+        void declaration_cleanups(node* aDeclaration);
+        void cleanups(node* aCompound, std::size_t aFirst, std::size_t aEnd);   ///< (gnu::cleanup: the functions of the block's objects 
+                                                                                ///< declared by its items [aFirst, aEnd), in reverse order)
+        void jump_cleanups(node* aJump, node* aTarget);     ///< (gnu::cleanup: those of the blocks that a jump to aTarget (a label's 
+                                                            ///< statement, a loop or switch; nullptr: return) leaves)
         void reset_vla_marks(std::vector<node*> const& aItems);
         void block_items(std::vector<node*> const& aItems);
         void switch_statement(node* aSwitch);
@@ -196,6 +203,7 @@ namespace neos::compilers::c
         std::uint64_t iTemporaries = 0u;
         std::uint64_t iTemporaryBase = 0u;          ///< (a statement expression's statements: the enclosing statement's temporaries kept)
         std::uint64_t iFrameSize = 0u;
+        std::uint64_t iFrameAlignment = 16u;    ///< (the fixed objects' largest alignment (the stack's: 16))
         bool iFrameUsed = false;
         bool iDynamicStack = false;                 ///< (the stack pointer moves in the body (variable length arrays, alloca))
         std::map<node const*, std::uint32_t> iJumpTargets;  ///< (a goto's label: forward or backward region)

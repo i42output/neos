@@ -313,6 +313,9 @@ namespace neos::language
             function.frameName = aFrameName.to_std_string();
         function.frameSource = source_name();
         function.firstLine = aFirstLine;
+        // (the language whose compiler defines it (e.g. for linking: see i_language_compiler::linked_function))
+        if (!iCompilationStateStack.empty())
+            function.language = state().language;
         return id;
     }
 

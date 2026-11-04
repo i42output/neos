@@ -43,6 +43,7 @@
 #include <set>
 #include <neos/language/emit.hpp>
 #include <neos/language/c_library.hpp>
+#include <neos/bytecode/bytecode.hpp>
 #include "codegen.hpp"
 
 namespace neos::compilers::c
@@ -118,7 +119,9 @@ namespace neos::compilers::c
         for (auto* unit : iUnits)
             analyse_unit(*unit);
         auto* main = function_entity("main");
-        if (main == nullptr || !main->defined)
+        // (a translation unit of a linked program (see i_code_generator::linked) need not have main: its functions are called by the 
+        // code of the program's others)
+        if ((main == nullptr || !main->defined) && !gen().linked())
         {
             node const* where = nullptr;
             for (auto* unit : iUnits)
@@ -336,14 +339,19 @@ namespace neos::compilers::c
                 error(aValue, "initializer element is not constant");
             if (v->k == constant::kind::Floating)
                 v->integer = static_cast<std::uint64_t>(static_cast<std::int64_t>(v->floating));
-            std::uint64_t unit = 0u;
-            auto const unitSize = size_of(aMember.type);
-            for (std::uint64_t b = 0u; b < unitSize; ++b)
-                unit |= static_cast<std::uint64_t>(aImage[aAt + b]) << (8u * b);
-            auto const mask = (*aMember.bitWidth >= 64u ? ~std::uint64_t{} : ((std::uint64_t{ 1 } << *aMember.bitWidth) - 1u)) << aMember.bitOffset;
-            unit = (unit & ~mask) | ((v->integer << aMember.bitOffset) & mask);
-            for (std::uint64_t b = 0u; b < unitSize; ++b)
-                aImage[aAt + b] = static_cast<std::uint8_t>(unit >> (8u * b));
+            // (the field's bits, from its storage unit's bit bitOffset)
+            for (std::uint32_t b = 0u; b < *aMember.bitWidth; ++b)
+            {
+                auto const position = aMember.bitOffset + b;
+                auto const at = aAt + position / 8u;
+                if (at >= aImage.size())
+                    break;
+                auto const bit = static_cast<std::uint8_t>(1u << (position % 8u));
+                if (b < 64u && ((v->integer >> b) & 1u) != 0u)
+                    aImage[at] |= bit;
+                else
+                    aImage[at] &= static_cast<std::uint8_t>(~bit);
+            }
         };
         visitor.characters = [&](qtype aT, node* aStrings, std::uint64_t aAt)
         {
@@ -404,7 +412,9 @@ namespace neos::compilers::c
         }
         signature.set_parameters(parameters);
         signature.set_return_type(wasm_result(aFunction->type.type));
-        auto const name = "%c." + aFunction->name + "." + std::to_string(iFunctionCount++);
+        auto const name = exported(aFunction) ? aFunction->name : "%c." + aFunction->name + "." + std::to_string(iFunctionCount++);
+        if (exported(aFunction))
+            comp().linked_functions().insert(name);
         signature.set_name(neolib::string{ name });
         std::uint32_t line = 1u;
         if (aFunction->definition != nullptr && aFunction->definition->unit != nullptr)
@@ -413,6 +423,39 @@ namespace neos::compilers::c
         note_function_type(f->index, wasm_parameters(aFunction->type.type), wasm_result(aFunction->type.type));
         iCompiler.frame_names()[f->index] = aFunction->name;
         f->defined = true;
+    }
+
+    bool program::exported(entity* aFunction)
+    {
+        // (a function with external linkage that a translation unit of a linked program (see i_code_generator::linked) defines (not the 
+        // library's, and not main: the unit's entry point calls it): the code of the program's other translation units can call it by 
+        // its name (its WebAssembly function's: see bytecode::LinksSection))
+        return gen().linked() && aFunction->kind == entity_kind::Function && aFunction->linkage == linkage::External && 
+            aFunction->definition != nullptr && aFunction->name != "main" && aFunction->definition->unit != nullptr && 
+            !aFunction->definition->unit->prelude;
+    }
+
+    void program::linked_object(entity* aObject)
+    {
+        // (an object with external linkage: a function named '&' and its name, with no parameters, whose result is its address (an 
+        // offset in the C memory: the shared memory (see neos::language::c::layout)), so that the code of a linked program's other 
+        // translation units can use it by its name (see function_generator::object_address))
+        auto const name = "&" + aObject->name;
+        function_signature signature;
+        signature.set_parameters(function_parameters{});
+        signature.set_return_type(type::I64);
+        signature.set_name(neolib::string{ name });
+        auto const index = gen().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{ name }, 1u);
+        note_function_type(index, {}, type::I64);
+        comp().linked_functions().insert(name);
+        std::vector<std::uint8_t> code;
+        put_op(code, opcode::I64Const);
+        put_s64(code, static_cast<std::int64_t>(aObject->address));
+        put_op(code, opcode::End);
+        fragment body;
+        body.fragmentCode.as_std_vector() = code;
+        gen().set_function_body(index, body);
+        gen().set_function_locals(index, neolib::vector<type>{});
     }
 
     std::uint32_t program::function_index(entity* aFunction)
@@ -457,6 +500,16 @@ namespace neos::compilers::c
                 }
                 // (a function of the C library that the runtime implements)
                 auto const* lf = library_function(aFunction->name);
+                if (lf == nullptr && gen().linked())
+                {
+                    // (a function that another translation unit of the linked program defines: an import of its name (see 
+                    // bytecode::LinkNamespace))
+                    f->index = runtime(std::string{ bytecode::LinkNamespace } + "::" + aFunction->name, params, result);
+                    f->linked = true;
+                    f->defined = true;
+                    f->generated = true;
+                    return f->index;
+                }
                 if (lf == nullptr)
                     error(aFunction->decl, "undefined reference to '" + aFunction->name + "'");
                 std::string const signature = lf->signature;
@@ -515,9 +568,9 @@ namespace neos::compilers::c
         aFunction = aFunction->self();
         auto const index = function_index(aFunction);
         auto* f = aFunction->function;
-        if (!f->runtime)
+        if (!f->runtime && !f->linked)
             return index;
-        // (a function of the runtime's cannot be called indirectly: a function that calls it)
+        // (a function of the runtime's (or an import) cannot be called indirectly: a function that calls it)
         if (!f->wrapper)
         {
             auto const params = wasm_parameters(aFunction->type.type);
@@ -628,7 +681,43 @@ namespace neos::compilers::c
         iJumpValueGlobal = global("%c.jmpval", type::I64);
         // (the functions: main's, then those that it uses (directly or not), defined as their calls are generated)
         auto* main = function_entity("main");
-        function_index(main);
+        bool const hasMain = main != nullptr && main->defined;
+        if (hasMain)
+            function_index(main);
+        // (a linked program (see i_code_generator::linked): the functions with external linkage that its units define, which the code
+        // of the program's other translation units can call by their names, and its objects with external linkage (a function named 
+        // '&' and the object's name: its address (see linked_object)))
+        if (gen().linked())
+        {
+            std::vector<std::string> names;
+            for (auto const& external : iExternals)
+                names.push_back(external.first);
+            std::sort(names.begin(), names.end());
+            for (auto const& name : names)
+            {
+                auto* e = iExternals[name]->self();
+                if (e->kind == entity_kind::Function && exported(e))
+                    function_index(e);
+                else if (e->kind == entity_kind::Object && e->address != 0u && e->unit != nullptr && !e->unit->prelude)
+                    linked_object(e);
+            }
+        }
+        // (gnu::constructor and gnu::destructor functions: in the order of their priorities (then of their declarations))
+        auto const by_priority = [](auto const& aA, auto const& aB) { return aA.first < aB.first; };
+        std::stable_sort(iConstructors.begin(), iConstructors.end(), by_priority);
+        std::stable_sort(iDestructors.begin(), iDestructors.end(), by_priority);
+        for (auto const* list : { &iConstructors, &iDestructors })
+            for (auto const& [priority, f] : *list)
+            {
+                if (!f->defined || f->definition == nullptr)
+                    error(f->decl, "undefined reference to '" + f->name + "' (a constructor or destructor function)");
+                if (list == &iDestructors && (!f->type->base->is_void() || (!f->type->parameters.empty() || f->type->variadic)))
+                    error(f->decl, "destructor function '" + f->name + "' must return void and take no arguments");
+                if (list == &iConstructors)
+                    function_index(f);
+                else
+                    descriptor_of(f);
+            }
         // (the static objects' data (their initializers may use functions' addresses and string literals))
         for (auto* o : iObjects)
             if (o->self() == o)
@@ -648,7 +737,7 @@ namespace neos::compilers::c
                     if (l->where != object_storage::Static)
                         l->where = object_storage::Unassigned;
             };
-            bool dispatch = f->function->usesSetjmp;
+            bool dispatch = f->function->usesSetjmp || f->function->computedGoto;
             if (!dispatch)
             {
                 try
@@ -742,6 +831,30 @@ namespace neos::compilers::c
             put_u32(code, 0x43u);
             put_u32(code, language::c::layout::Memory);
             put_u32(code, 0u);
+        }
+        // (the constructor functions called; the destructor functions registered (as atexit's: called after those registered later, 
+        // in the reverse order))
+        for (auto const& [priority, f] : iConstructors)
+        {
+            auto const* ft = f->type.type;
+            if (!ft->parameters.empty() || ft->variadic || returns_record(ft))
+                error(f->decl, "constructor function '" + f->name + "' must take no arguments");
+            call_index(function_index(f));
+            if (!ft->base->is_void())
+                put_op(code, opcode::Drop);
+        }
+        for (auto const& [priority, f] : iDestructors)
+        {
+            i64const(static_cast<std::int64_t>(descriptor_of(f)));
+            call_index(runtime("c::libc.atexit", { type::I64 }, type::I32));
+            put_op(code, opcode::Drop);
+        }
+        // (a linked program's translation unit without main: its entry point initializes it (its functions are called later, by
+        // the code of the program's other translation units))
+        if (!hasMain)
+        {
+            iCompiler.emit_entry(statement);
+            return;
         }
         // (main: int main(void), int main(int, char**), or int main(int, char**, char**))
         auto const* mt = main->type.type;
@@ -1190,6 +1303,7 @@ namespace neos::compilers::c
     {
         iFrameUsed = true;
         aAlignment = std::max<std::uint64_t>(aAlignment, 1u);
+        iFrameAlignment = std::max(iFrameAlignment, aAlignment);
         iFrameFixed = (iFrameFixed + aAlignment - 1u) / aAlignment * aAlignment;
         auto const result = static_cast<std::int64_t>(iFrameFixed);
         iFrameFixed += std::max<std::uint64_t>(aSize, 1u);
@@ -1219,6 +1333,13 @@ namespace neos::compilers::c
         switch (e->where)
         {
         case object_storage::Static:
+            if (e->address == 0u && e->linkage == linkage::External && iProgram.gen().linked())
+            {
+                // (an object that another translation unit of the linked program defines: its address, from that unit's function
+                // named '&' and its name (see program::linked_object))
+                call(iProgram.runtime(std::string{ bytecode::LinkNamespace } + "::&" + e->name, {}, type::I64));
+                break;
+            }
             if (e->address == 0u)
                 throw compile_error{ e->decl, "undefined reference to '" + e->name + "'" };
             i64(static_cast<std::int64_t>(e->address));
@@ -1288,9 +1409,16 @@ namespace neos::compilers::c
         // (the parameters: in their locals (a scalar whose address is taken: copied to the frame; a structure or union: at the address 
         // passed, a copy that the caller made))
         std::vector<std::pair<entity*, std::uint32_t>> copies;
+        std::vector<std::pair<std::uint32_t, entity*>> conversions;     ///< (an old-style definition's parameters: from their arguments' types)
         for (std::size_t i = 0u; i < iInfo.parameters.size(); ++i)
         {
             auto* p = iInfo.parameters[i];
+            if (!p->type->is_record() && i < iType->parameters.size() &&
+                !iProgram.compatible(iType->parameters[i].type.unqualified(), p->type.unqualified()))
+            {
+                conversions.emplace_back(parameterLocals[i], p);
+                parameterLocals[i] = local(wasm_of(p->type));
+            }
             if (p->type->is_record())
             {
                 p->where = object_storage::Dynamic;
@@ -1315,6 +1443,14 @@ namespace neos::compilers::c
         // (the body, in a block that returns branch out of)
         begin(control_kind::Block);
         iControls.back().kind = control_kind::Exit;
+        for (std::size_t i = 0u, c = 0u; i < iInfo.parameters.size() && c < conversions.size(); ++i)
+            if (conversions[c].second == iInfo.parameters[i])
+            {
+                get(conversions[c].first);
+                convert(iType->parameters[i].type, iInfo.parameters[i]->type);
+                set(parameterLocals[i]);
+                ++c;
+            }
         for (auto const& [p, l] : copies)
         {
             object_address(p);
@@ -1355,6 +1491,12 @@ namespace neos::compilers::c
             {
                 i64(static_cast<std::int64_t>(frameSize));
                 op(opcode::I64Sub);
+                if (iFrameAlignment > 16u)
+                {
+                    // (an object aligned more than the stack (16): the frame aligned so)
+                    i64(-static_cast<std::int64_t>(iFrameAlignment));
+                    op(opcode::I64And);
+                }
                 tee(iFramePointer);
                 op(opcode::GlobalSet);
                 u32(iProgram.sp_global());

@@ -126,14 +126,13 @@ namespace neos
         {
             // (a four byte sequence is a surrogate pair in UTF-16)
             string_header header{ static_cast<std::uint32_t>(aText.size()), 0u, 0u };
+            // (without branches, so that it can be vectorized: a byte that is not a continuation byte starts a code point)
             for (auto c : aText)
             {
                 auto const b = static_cast<unsigned char>(c);
-                if ((b & 0xC0u) != 0x80u)
-                {
-                    ++header.codePoints;
-                    header.utf16Units += (b >= 0xF0u) ? 2u : 1u;
-                }
+                std::uint32_t const starts = (b & 0xC0u) != 0x80u ? 1u : 0u;
+                header.codePoints += starts;
+                header.utf16Units += starts + (b >= 0xF0u ? 1u : 0u);
             }
             return header;
         }

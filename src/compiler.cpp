@@ -226,6 +226,7 @@ namespace neos::language
     bool compiler::compile_module(program& aProgram)
     {
         bool ok = true;
+        iRecoveredErrors.clear();
 
         auto reset = [&]()
         {
@@ -336,6 +337,9 @@ namespace neos::language
                         throw std::runtime_error("types could not be inferred");
                 }
             }
+            // (syntax errors recovered from (each reported as it was found): the program is not made)
+            if (ok && !iRecoveredErrors.empty())
+                throw compiler_error{ std::to_string(iRecoveredErrors.size()) + (iRecoveredErrors.size() == 1u ? " syntax error" : " syntax errors") };
             if (ok)
                 emit_module(aProgram);
             // (the parsed sources' ASTs were kept for the passes (each walks them again): not needed once the program is compiled)
@@ -507,13 +511,382 @@ namespace neos::language
             std::ostringstream parserOutput;
             parser.set_debug_output(parserOutput, false, false);
             parser.set_debug_timing(iShowParseTimes);
-            if (stage->root)
-                ok = parser.parse(stage->symbolMap->at(stage->root.value()), text);
-            else
-                ok = parser.parse(text);
-            iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
+            // (syntax error recovery (meta: syntax.recovery.synchronize): after a syntax error, the source is parsed again with the text
+            // from the end of the last synchronizing terminal before the error to the end of the next one replaced by spaces (newlines
+            // kept), or by a filler (meta: syntax.recovery.filler) if the spaces make the parse fail there, so that the errors that
+            // follow are found too; the source parsed is of the same length, so its tree's text is made the fragment's)
+            auto const& synchronize = aUnit.schema->meta().syntaxRecoverySynchronize;
+            auto const& fillers = aUnit.schema->meta().syntaxRecoveryFiller;
+            std::string repaired;
+            std::string_view parseText = text;
+            std::size_t spanStart = 0u;
+            std::size_t spanEnd = 0u;
+            std::size_t filler = 0u;
+            bool haveSpan = false;
+            std::size_t spanFrom = 0u;      // (the end of the last synchronizing terminal before the error)
+            bool widened = false;
+            std::size_t recoveries = 0u;
+            std::size_t constexpr MaxRecoveries = 1000u;
+            std::vector<std::pair<std::size_t, std::string>> found;     // (the errors recovered from: offset, message)
+            // (the offset of the error in the parser's message ("syntax error: (line,column) ..."))
+            auto const error_offset = [&](std::string const& aMessage) -> std::optional<std::size_t>
+            {
+                std::uint32_t line = 0u, column = 0u;
+                if (!aMessage.starts_with("syntax error: (") || std::sscanf(aMessage.c_str() + 15u, "%u,%u", &line, &column) != 2)
+                    return {};
+                std::size_t offset = 0u;
+                for (std::uint32_t l = 1u; l < line && offset < parseText.size(); ++offset)
+                    if (parseText[offset] == '\n')
+                        ++l;
+                for (std::uint32_t c = 1u; c < column && offset < parseText.size() && parseText[offset] != '\n'; ++c)
+                    ++offset;
+                return offset;
+            };
+            // (the end of the next synchronizing terminal at or after an offset; the end of the last one before it)
+            // (a terminal's text at a position (a word's: not within a longer word))
+            auto const matches = [&](std::size_t aAt, std::string const& aTerminal)
+            {
+                if (aTerminal.empty() || parseText.compare(aAt, aTerminal.size(), aTerminal) != 0)
+                    return false;
+                auto const word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+                if (word(aTerminal.front()) && aAt > 0u && word(parseText[aAt - 1u]))
+                    return false;
+                if (word(aTerminal.back()) && aAt + aTerminal.size() < parseText.size() && word(parseText[aAt + aTerminal.size()]))
+                    return false;
+                return true;
+            };
+            // (the end of the next synchronizing terminal at or after an offset that is not nested (meta: syntax.recovery.nesting) in
+            // what begins after a base)
+            auto const& nesting = aUnit.schema->meta().syntaxRecoveryNesting;
+            auto const next_sync = [&](std::size_t aFrom, std::size_t aBase) -> std::size_t
+            {
+                std::ptrdiff_t depth = 0;
+                for (std::size_t i = std::min(aBase, aFrom); i < parseText.size(); ++i)
+                {
+                    if (i >= aFrom && depth <= 0)
+                        for (auto const& t : synchronize)
+                            if (matches(i, t))
+                                return i + t.size();
+                    for (std::size_t n = 0u; n + 1u < nesting.size(); n += 2u)
+                        if (matches(i, nesting[n + 1u]))
+                        {
+                            --depth;
+                            i += nesting[n + 1u].size() - 1u;
+                            break;
+                        }
+                        else if (matches(i, nesting[n]))
+                        {
+                            ++depth;
+                            i += nesting[n].size() - 1u;
+                            break;
+                        }
+                }
+                return parseText.size();
+            };
+            auto const previous_sync = [&](std::size_t aBefore) -> std::size_t
+            {
+                std::size_t best = 0u;
+                for (auto const& t : synchronize)
+                    if (aBefore > 0u)
+                        if (auto const at = parseText.rfind(t, aBefore - 1u); at != std::string_view::npos && at + t.size() <= aBefore && at + t.size() > best)
+                            best = at + t.size();
+                return best;
+            };
+            auto const rewrite = [&]()
+            {
+                if (repaired.empty())
+                    repaired = std::string{ text };
+                for (std::size_t i = spanStart; i < spanEnd && i < repaired.size(); ++i)
+                    if (repaired[i] != '\n' && repaired[i] != '\r')
+                        repaired[i] = ' ';
+                if (filler > 0u && filler <= fillers.size())
+                {
+                    auto const& f = fillers[filler - 1u];
+                    // (the filler where the text began (after its leading spaces): if it fits, on that line)
+                    std::size_t at = spanStart;
+                    while (at < spanEnd && (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r'))
+                        ++at;
+                    if (at + f.size() > spanEnd)
+                        at = spanStart;
+                    if (at + f.size() <= spanEnd)
+                        std::copy(f.begin(), f.end(), repaired.begin() + static_cast<std::ptrdiff_t>(at));
+                }
+                parseText = repaired;
+            };
+            for (;;)
+            {
+                if (stage->root)
+                    ok = parser.parse(stage->symbolMap->at(stage->root.value()), parseText);
+                else
+                    ok = parser.parse(parseText);
+                iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
+                if (ok || !last || synchronize.empty() || ++recoveries > MaxRecoveries)
+                    break;
+                auto const output = parserOutput.str();
+                auto const at = output.rfind("Error: ");
+                std::string message = at != std::string::npos ? output.substr(at + 7u) : std::string{};
+                while (!message.empty() && (message.back() == '\n' || message.back() == '\r'))
+                    message.pop_back();
+                auto const offset = error_offset(message);
+                if (!offset)
+                    break;
+                // (an error that the text skipped (or its filler) made: the next filler, else the text to the next synchronizing terminal
+                // skipped too)
+                std::size_t after = spanEnd;
+                while (after < parseText.size() && std::isspace(static_cast<unsigned char>(parseText[after])))
+                    ++after;
+                if (haveSpan && *offset >= spanStart && *offset <= after)
+                {
+                    if (filler < fillers.size())
+                        ++filler;
+                    else if (!widened && spanStart > spanFrom)
+                    {
+                        // (the text skipped: from the last synchronizing terminal (not the error's line))
+                        spanStart = spanFrom;
+                        widened = true;
+                        filler = 0u;
+                    }
+                    else
+                    {
+                        if (spanEnd >= parseText.size())
+                            break;
+                        spanEnd = next_sync(spanEnd, spanStart);
+                        filler = 0u;
+                    }
+                }
+                else
+                {
+                    found.emplace_back(*offset, message);
+                    haveSpan = true;
+                    // (the text skipped: first from the start of the error's line (if after the last synchronizing terminal), to the end of
+                    // the next synchronizing terminal)
+                    spanFrom = previous_sync(*offset);
+                    std::size_t lineStart = *offset;
+                    while (lineStart > 0u && parseText[lineStart - 1u] != '\n')
+                        --lineStart;
+                    // (to the next synchronizing terminal, or (if the parse then fails within the statement that follows) the next one
+                    // that is not nested)
+                    auto const plainEnd = next_sync(*offset, *offset);
+                    auto const nestedEnd = next_sync(*offset, lineStart);
+                    spanEnd = plainEnd;
+                    widened = false;
+                    // (the skip that lets the parse go furthest: from the error's line or the last synchronizing terminal, with spaces or
+                    // a filler)
+                    // (the starts tried: the error's line, the lines before it (back to the last synchronizing terminal), that terminal)
+                    // (a terminal within the error's line (e.g. in a literal) may not end anything: its line's start is tried too)
+                    std::vector<std::size_t> starts{ std::max(spanFrom, lineStart) };
+                    if (lineStart < starts.front())
+                        starts.push_back(lineStart);
+                    for (std::size_t l = lineStart; l > 0u && l > spanFrom && starts.size() < 8u;)
+                    {
+                        --l;
+                        while (l > 0u && parseText[l - 1u] != '\n')
+                            --l;
+                        if (l >= spanFrom)
+                            starts.push_back(l);
+                    }
+                    if (std::find(starts.begin(), starts.end(), spanFrom) == starts.end())
+                        starts.push_back(spanFrom);
+                    std::size_t bestStart = starts.front();
+                    std::size_t bestFiller = 0u;
+                    std::size_t bestReach = 0u;
+                    std::string const saved = repaired;
+                    for (auto const start : starts)
+                        for (std::size_t f = 0u; f <= fillers.size() && bestReach != parseText.size() + 1u; ++f)
+                        {
+                            spanStart = start;
+                            filler = f;
+                            rewrite();
+                            parserOutput.str({});
+                            bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), parseText) : parser.parse(parseText);
+                            std::size_t reach = parseText.size() + 1u;
+                            if (!parsed)
+                            {
+                                auto const o = parserOutput.str();
+                                auto const e = o.rfind("Error: ");
+                                std::string m = e != std::string::npos ? o.substr(e + 7u) : std::string{};
+                                reach = error_offset(m).value_or(0u);
+                            }
+                            if (reach > bestReach)
+                            {
+                                bestReach = reach;
+                                bestStart = start;
+                                bestFiller = f;
+                            }
+                            repaired = saved;
+                            parseText = repaired.empty() ? text : std::string_view{ repaired };
+                        }
+                    if (nestedEnd != plainEnd && bestReach != parseText.size() + 1u)
+                    {
+                        auto const plainReach = bestReach;
+                        spanEnd = nestedEnd;
+                        for (auto const start : starts)
+                            for (std::size_t f = 0u; f <= fillers.size(); ++f)
+                            {
+                                spanStart = start;
+                                filler = f;
+                                rewrite();
+                                parserOutput.str({});
+                                bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), parseText) : parser.parse(parseText);
+                                std::size_t reach = parseText.size() + 1u;
+                                if (!parsed)
+                                {
+                                    auto const o = parserOutput.str();
+                                    auto const e = o.rfind("Error: ");
+                                    reach = error_offset(e != std::string::npos ? o.substr(e + 7u) : std::string{}).value_or(0u);
+                                }
+                                if (reach > bestReach)
+                                {
+                                    bestReach = reach;
+                                    bestStart = start;
+                                    bestFiller = f;
+                                }
+                                repaired = saved;
+                                parseText = repaired.empty() ? text : std::string_view{ repaired };
+                            }
+                        if (bestReach == plainReach)
+                            spanEnd = plainEnd;
+                    }
+                    // (or only the text from the error to the closing terminal that ends what it is in (e.g. ")"), or to (not
+                    // including) the next synchronizing terminal)
+                    if (bestReach != parseText.size() + 1u)
+                    {
+                        std::vector<std::size_t> ends;
+                        std::ptrdiff_t depth = 0;
+                        for (std::size_t i = *offset; i < plainEnd && ends.empty(); ++i)
+                            for (std::size_t n = 0u; n + 1u < nesting.size(); n += 2u)
+                                if (matches(i, nesting[n + 1u]))
+                                {
+                                    if (--depth < 0)
+                                        ends.push_back(i);
+                                    i += nesting[n + 1u].size() - 1u;
+                                    break;
+                                }
+                                else if (matches(i, nesting[n]))
+                                {
+                                    ++depth;
+                                    i += nesting[n].size() - 1u;
+                                    break;
+                                }
+                        for (auto const& t : synchronize)
+                            if (plainEnd >= t.size() && plainEnd - t.size() > *offset && matches(plainEnd - t.size(), t))
+                                ends.push_back(plainEnd - t.size());
+                        auto const savedEnd = spanEnd;
+                        bool partial = false;
+                        for (auto const end : ends)
+                        {
+                            spanStart = *offset;
+                            spanEnd = end;
+                            filler = 0u;
+                            rewrite();
+                            parserOutput.str({});
+                            bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), parseText) : parser.parse(parseText);
+                            std::size_t reach = parseText.size() + 1u;
+                            if (!parsed)
+                            {
+                                auto const o = parserOutput.str();
+                                auto const e = o.rfind("Error: ");
+                                reach = error_offset(e != std::string::npos ? o.substr(e + 7u) : std::string{}).value_or(0u);
+                            }
+                            repaired = saved;
+                            parseText = repaired.empty() ? text : std::string_view{ repaired };
+                            if (reach > bestReach)
+                            {
+                                bestReach = reach;
+                                bestStart = *offset;
+                                bestFiller = 0u;
+                                partial = true;
+                                spanEnd = end;
+                            }
+                            else
+                                spanEnd = savedEnd;
+                            if (partial)
+                                break;
+                        }
+                        if (!partial)
+                            spanEnd = savedEnd;
+                    }
+                    spanStart = bestStart;
+                    filler = bestFiller;
+                    widened = bestStart == spanFrom;
+                    // (a closing terminal after the skip that no longer has its opening one (it was skipped, or it was missing, e.g.
+                    // "for I in 1 .. 10;" ... "end loop;"): the skip extended through it (the text before the error was parsed, so it
+                    // is balanced))
+                    auto const& blocks = aUnit.schema->meta().syntaxRecoveryBlocks;
+                    for (std::size_t extensions = 0u; extensions < 4u && !blocks.empty(); ++extensions)
+                    {
+                        std::vector<std::size_t> open(blocks.size() / 2u, 0u);
+                        std::optional<std::size_t> closer;
+                        for (std::size_t i = 0u; i < parseText.size() && !closer; ++i)
+                        {
+                            if (i >= spanStart && i < spanEnd)
+                            {
+                                i = spanEnd - 1u;
+                                continue;
+                            }
+                            for (std::size_t n = 0u; n + 1u < blocks.size(); n += 2u)
+                                if (matches(i, blocks[n + 1u]))
+                                {
+                                    if (open[n / 2u] > 0u)
+                                        --open[n / 2u];
+                                    else if (i >= spanEnd)
+                                        closer = i + blocks[n + 1u].size();
+                                    i += blocks[n + 1u].size() - 1u;
+                                    break;
+                                }
+                                else if (matches(i, blocks[n]))
+                                {
+                                    ++open[n / 2u];
+                                    i += blocks[n].size() - 1u;
+                                    break;
+                                }
+                        }
+                        if (!closer)
+                            break;
+                        spanEnd = next_sync(*closer, *closer);
+                    }
+                }
+                rewrite();
+                if (std::getenv("NEOS_DEBUG_RECOVERY") != nullptr)
+                    std::cerr << "recovery: error at " << *offset << ", skipping " << spanStart << ".." << spanEnd << " filler " << filler << std::endl;
+                parserOutput.str({});
+            }
+            // (the errors recovered from: reported (once) now)
+            for (auto const& [offset, message] : found)
+                {
+                    auto position = aFragment.begin();
+                    for (std::size_t i = 0u; i < offset && position != aFragment.end(); ++i)
+                        ++position;
+                    auto const close = message.find(") ");
+                    auto const error = compile_error(position, neolib::string{ close != std::string::npos ? message.substr(close + 2u) : message },
+                        neolib::string{ "syntax error" });
+                    if (std::find(iRecoveredErrors.begin(), iRecoveredErrors.end(), error.diagnostic) == iRecoveredErrors.end())
+                    {
+                        iRecoveredErrors.push_back(error.diagnostic);
+                        iContext.cerr() << error.what() << (std::string_view{ error.what() }.ends_with('\n') ? "" : "\n") << std::flush;
+                    }
+                }
             if (ok && last)
+            {
                 parser.create_ast();
+                // (a repaired source's tree: its text the fragment's)
+                if (!repaired.empty())
+                {
+                    std::vector<neos::language::parser::ast_node*> nodes{ &parser.ast() };
+                    std::unordered_set<neos::language::parser::ast_node*> visited;
+                    while (!nodes.empty())
+                    {
+                        auto* const node = nodes.back();
+                        nodes.pop_back();
+                        if (!visited.insert(node).second)
+                            continue;
+                        if (node->value.data() != nullptr && node->value.data() >= repaired.data() && node->value.data() <= repaired.data() + repaired.size())
+                            node->value = std::string_view{ text.data() + (node->value.data() - repaired.data()), node->value.size() };
+                        for (auto const& child : node->children)
+                            nodes.push_back(child.get());
+                    }
+                }
+            }
             parser.set_debug_output(sQuiet, false, false);
             if (!ok)
             {
@@ -3467,20 +3840,22 @@ namespace neos::language
                     steps.push_back(step{ std::nullopt, linked->second });
                 else
                 {
-                    // (its entry point: a function that is one, else its function main)
-                    auto const unitEntry = [&](bool aNamed)
+                    // (its entry point: a function that is one, else its function main, else one that an imported fragment's code made
+                    // (e.g. a language that generates the program's code when its last fragment is compiled), as a program's (see the 
+                    // module's entry point))
+                    auto const unitEntry = [&](bool aNamed, bool aImported)
                     {
                         bool found = false;
                         for (auto id = static_cast<std::uint32_t>(begin); id < end; ++id)
-                            if (auto const& f = iModule.functions[id]; !f.fromImportedFragment && !f.imported && (aNamed ? f.name == "main" : f.entry))
+                            if (auto const& f = iModule.functions[id]; (aImported || !f.fromImportedFragment) && !f.imported && (aNamed ? f.name == "main" : f.entry))
                             {
                                 steps.push_back(step{ id });
                                 found = true;
                             }
                         return found;
                     };
-                    if (!unitEntry(false))
-                        unitEntry(true);
+                    if (!unitEntry(false, false) && !unitEntry(true, false))
+                        unitEntry(false, true);
                 }
                 begin = end;
             }
@@ -3901,10 +4276,12 @@ namespace neos::language
         if (fold_stack().empty())
             return false;
 
-        auto trace_out = [&](std::string const& op, i_ast_node const& lhs, std::optional<neolib::ref_ptr<i_ast_node>> const& rhs = {}, const std::optional<neolib::ref_ptr<i_ast_node>> result = {})
+        auto trace_out = [&](std::string_view op, i_ast_node const& lhs, std::optional<neolib::ref_ptr<i_ast_node>> const& rhs = {}, const std::optional<neolib::ref_ptr<i_ast_node>> result = {})
             {
+                // (not tracing: nothing to output)
+                if (trace() < 1)
+                    return;
                 std::ostringstream traceOutput;
-                if (trace() >= 1)
                 {
                     if (rhs)
                         traceOutput << op << ": " << 

@@ -107,8 +107,18 @@ namespace neos::compilers::javascript
         std::optional<std::u16string> unescape(std::string_view aText, bool aTemplate, bool* aLegacyOctal = nullptr)
         {
             std::u16string result;
+            result.reserve(aText.size());
             for (std::size_t i = 0u; i < aText.size();)
             {
+                // (ASCII without escapes (or a template's CRs): its characters' code units are its bytes)
+                auto const run = std::find_if(aText.begin() + i, aText.end(), [aTemplate](char ch)
+                    { return static_cast<unsigned char>(ch) >= 0x80u || ch == '\\' || (ch == '\r' && aTemplate); });
+                if (run != aText.begin() + i)
+                {
+                    result.append(aText.begin() + i, run);
+                    i = static_cast<std::size_t>(run - aText.begin());
+                    continue;
+                }
                 auto const c = static_cast<unsigned char>(aText[i]);
                 if (c == '\r' && aTemplate)
                 {
@@ -237,6 +247,13 @@ namespace neos::compilers::javascript
         // UTF-16 as the runtime's literals are encoded: WTF-8 (lone surrogates are encoded as code points) with NUL as C0 80
         std::string literal_encoding(std::u16string_view aText)
         {
+            // (ASCII without NUL: its code units are its bytes)
+            if (std::all_of(aText.begin(), aText.end(), [](char16_t c) { return c != 0u && c < 0x80u; }))
+            {
+                std::string ascii(aText.size(), '\0');
+                std::transform(aText.begin(), aText.end(), ascii.begin(), [](char16_t c) { return static_cast<char>(c); });
+                return ascii;
+            }
             std::string result;
             for (std::size_t i = 0u; i < aText.size(); ++i)
             {
@@ -9849,9 +9866,10 @@ namespace neos::compilers::javascript
             std::vector<node*> updates;
         };
         std::unordered_map<binding*, use> uses;
-        for (auto& s : iCompiler.iScopes)
+        for (auto* ps : iFunction.scopes)
         {
-            if (s.function != &iFunction || s.dynamic || s.kind == scope_kind::With)
+            auto& s = *ps;
+            if (s.dynamic || s.kind == scope_kind::With)
                 continue;
             for (auto& b : s.bindings)
                 if (!b->captured && (b->kind == binding_kind::Let || b->kind == binding_kind::Const || (b->kind == binding_kind::Var && s.kind != scope_kind::Script)))
@@ -10541,8 +10559,8 @@ namespace neos::compilers::javascript
             iFunction.staticBlock || iFunction.directEval || iFunction.usesArguments || iFunction.argumentsBinding != nullptr || !iFunction.simpleParameters ||
             !iFunction.functions.empty() || iFunction.declaration == nullptr || iCompiler.eval_code() || iFunction.declaration->source.size() > 20000u)
             return false;
-        for (auto const& s : iCompiler.iScopes)
-            if (s.function == &iFunction && (s.dynamic || s.kind == scope_kind::With || s.hasEnvironment))
+        for (auto const* s : iFunction.scopes)
+            if (s->dynamic || s->kind == scope_kind::With || s->hasEnvironment)
                 return false;
         std::function<bool(node const*)> tagged = [&](node const* aNode)
         {

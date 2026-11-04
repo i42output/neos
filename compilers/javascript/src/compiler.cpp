@@ -334,6 +334,8 @@ namespace neos::compilers::javascript
         s->parent = aParent;
         s->owner = aOwner;
         s->function = aFunction;
+        if (aFunction != nullptr)
+            aFunction->scopes.push_back(s);
         if (aOwner != nullptr && aOwner->ownScope == nullptr)
             aOwner->ownScope = s;
         return s;
@@ -1016,10 +1018,9 @@ namespace neos::compilers::javascript
     {
         // (the slots of the environments of its scopes; generators' and async functions' bindings are all captured (their bodies
         // run as functions of their own))
-        for (auto& s : iScopes)
+        for (auto* ps : aFunction.scopes)
         {
-            if (s.function != &aFunction)
-                continue;
+            auto& s = *ps;
             if ((aFunction.generator || aFunction.async) && !aFunction.script)
                 for (auto& b : s.bindings)
                     b->captured = true;
@@ -1641,13 +1642,18 @@ namespace neos::compilers::javascript
         {
             // (the script's source text as a literal (UTF-8, NUL as C0 80: see utf8_encoding))
             std::string text;
-            text.reserve(iSourceText.size());
-            for (auto c : iSourceText)
+            if (iSourceText.find('\0') == std::string_view::npos)
+                text = iSourceText;
+            else
             {
-                if (c == '\0')
-                    text.append("\xC0\x80");
-                else
-                    text.push_back(c);
+                text.reserve(iSourceText.size());
+                for (auto c : iSourceText)
+                {
+                    if (c == '\0')
+                        text.append("\xC0\x80");
+                    else
+                        text.push_back(c);
+                }
             }
             iSourceLiteral = literal_string(text);
         }

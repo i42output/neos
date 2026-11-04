@@ -40,6 +40,8 @@
 #include <cstring>
 #include <set>
 #include <neos/language/emit.hpp>
+#include <neos/bytecode/bytecode.hpp>
+#include "../../c/include/neos/language/c_library.hpp"   // (the C library's functions: see function_generator::foreign_call)
 #include "codegen.hpp"
 
 namespace neos::compilers::ada
@@ -287,6 +289,88 @@ namespace neos::compilers::ada
         return index;
     }
 
+    void program::exports()
+    {
+        // Export (B.1) in a linked program (see i_code_generator::linked): functions named by the link names, that the code of the
+        // program's other translation units (e.g. C's) calls (see bytecode::LinksSection): a library level subprogram's calls it 
+        // (its parameters as its own: C's (B.3(68-75)) for those of a subprogram of convention C); an object's (a library level 
+        // one's, in memory), named '&' and the link name, has no parameters and its result is the object's address (the memories are 
+        // one: see neos::language::ada::layout)
+        if (!gen().linked())
+            return;
+        std::set<std::string> defined;
+        for (auto* e : iExports)
+        {
+            if (e->link_name.empty() || e->link_name.find("::") != std::string::npos)
+                continue;
+            std::vector<std::uint8_t> code;
+            function_signature signature;
+            function_parameters parameters;
+            std::vector<type> types;
+            type result = type::Void;
+            std::string name;
+            if (e->sub != nullptr && e->sub->defined && !e->imported && e->sub->level <= 1 && self_type(e) == nullptr &&
+                subprogram_form(e) == subprogram_kind::Normal)
+            {
+                name = e->link_name;
+                function_generator probe{ *this, e, 0u, e->sub->level };
+                for (auto const& formal : e->sub->parameters)
+                    types.push_back(probe.by_copy(formal) ? probe.wasm_of(formal.type) : type::I64);
+                result = e->sub->result != nullptr ? probe.wasm_of(e->sub->result) : type::Void;
+                if (e->sub->result != nullptr && e->sub->result->view()->is_composite())
+                    continue;
+                put_op(code, opcode::I64Const);
+                put_s64(code, 0);       // (the static link: none, at library level)
+                for (std::size_t i = 0u; i < types.size(); ++i)
+                {
+                    put_op(code, opcode::LocalGet);
+                    put_u32(code, static_cast<std::uint32_t>(i));
+                }
+                put_op(code, opcode::CallFunction);
+            }
+            else if (e->is_object() && (e->where == storage::Static || e->where == storage::IndirectStatic))
+            {
+                name = "&" + e->link_name;
+                result = type::I64;
+                put_op(code, opcode::I64Const);
+                put_s64(code, e->offset);
+                if (e->where == storage::IndirectStatic)
+                {
+                    put_op(code, opcode::I64LoadMem);
+                    put_u32(code, 0x43u);
+                    put_u32(code, language::ada::layout::Memory);
+                    put_u32(code, 0u);
+                }
+            }
+            else
+                continue;
+            if (!defined.insert(name).second)
+                continue;
+            for (auto t : types)
+            {
+                function_parameter p;
+                p.set_parameter_type(t);
+                parameters.push_back(p);
+            }
+            signature.set_parameters(parameters);
+            signature.set_return_type(result);
+            signature.set_name(neolib::string{ name });
+            auto const index = gen().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{ name }, 1u);
+            note_function_type(index, types, result);
+            fragment body;
+            if (e->sub != nullptr)
+            {
+                body.fragmentRelocations.push_back(neolib::pair<std::uint32_t, std::uint32_t>{ static_cast<std::uint32_t>(code.size()), e->sub->function_index });
+                code.resize(code.size() + 5u);
+            }
+            put_op(code, opcode::End);
+            body.fragmentCode.as_std_vector() = code;
+            gen().set_function_body(index, body);
+            gen().set_function_locals(index, neolib::vector<type>{});
+            iCompiler.linked_functions().insert(name);
+        }
+    }
+
     void program::generate_code()
     {
         iSpGlobal = global("%ada.sp", type::I64);
@@ -296,6 +380,14 @@ namespace neos::compilers::ada
         // (the subprograms' functions)
         for (auto* s : iSubprogramsToGenerate)
             define_subprogram(s);
+        // (the exported subprograms' bodies: generated even if the program does not call them)
+        for (auto* e : iExports)
+            if (gen().linked() && e->sub != nullptr && e->sub->body != nullptr && !e->imported && 
+                std::find(iSubprogramsToGenerate.begin(), iSubprogramsToGenerate.end(), e) == iSubprogramsToGenerate.end())
+            {
+                define_subprogram(e);
+                iSubprogramsToGenerate.push_back(e);
+            }
         // (the library units' elaboration procedures)
         std::vector<std::uint32_t> elaborations;
         for (auto const& [unit, r] : iPackageElaborations)
@@ -323,6 +415,7 @@ namespace neos::compilers::ada
                 g.generate_subprogram();
             }
         }
+        exports();
         // the entry point: the runtime initialized, static data, exceptions registered, the library units elaborated, then the
         // main subprogram called (an exception it does not handle is reported: the exit status is 1)
         gen().ensure_function();
@@ -1176,9 +1269,10 @@ namespace neos::compilers::ada
             renaming_body();
         else if (sub.body != nullptr && iSubprogram->imported && sub.op == intrinsic::None && !sub.body->is(construct::SubprogramBody))
         {
-            // (a foreign subprogram (pragma or aspect Import of a convention other than neos or Intrinsic): no program provides it
-            // (B.1(38)))
-            raise_check(1, sub.body, "imported subprogram " + (sub.external_name.empty() ? iSubprogram->name : sub.external_name) + " is not available");
+            // (a foreign subprogram (pragma or aspect Import of a convention other than neos or Intrinsic): of convention C, the
+            // function of its external name (see foreign_call); else no program provides it (B.1(38)))
+            if (!foreign_call())
+                raise_check(1, sub.body, "imported subprogram " + (sub.external_name.empty() ? iSubprogram->name : sub.external_name) + " is not available");
         }
         else if (sub.body != nullptr)
         {
@@ -1496,6 +1590,100 @@ namespace neos::compilers::ada
         u32(iProgram.sp_global());
         if (iHasResult)
             get(iResult);
+    }
+
+    bool function_generator::foreign_call()
+    {
+        // an imported subprogram of convention C (B.3): a call of the function of its external name (else its name) that another 
+        // translation unit of the program (e.g. C's) or a runtime plugin (e.g. the C library's) defines (see bytecode::LinkNamespace), 
+        // its parameters passed as C's (B.3(68-75)): an elementary in parameter by value; an out or in out one, and a record, by 
+        // reference (its address); an array, by its first component's address. Ada's memory and C's are one (the shared memory: see 
+        // neos::language::ada::layout), so an address is the same object's in both. False: not of convention C, or its result is not
+        // elementary
+        auto& sub = *iSubprogram->sub;
+        if (iSubprogram->convention != "c" || (sub.result != nullptr && sub.result->view()->is_composite()) || 
+            iProgram.self_type(iSubprogram) != nullptr)
+            return false;
+        auto const name = sub.external_name.empty() ? iSubprogram->name : sub.external_name;
+        // (a function of the C library (the C runtime's: its native functions, see c_library.hpp): called as the C library's (its
+        // parameters' and result's types are the library's), as C's calls are; else the function of the name that another 
+        // translation unit defines)
+        struct library_function { std::string_view name; std::string_view signature; };
+        static library_function const sLibrary[] = {
+#define NEOS_ADA_C_LIBRARY_FUNCTION(aName, aSignature, aRestricted) { #aName, aSignature },
+            NEOS_C_LIBRARY(NEOS_ADA_C_LIBRARY_FUNCTION)
+#undef NEOS_ADA_C_LIBRARY_FUNCTION
+        };
+        std::string_view signature;
+        for (auto const& f : sLibrary)
+            if (f.name == name)
+                signature = f.signature;
+        auto const library_type = [](char aCode)
+        {
+            switch (aCode)
+            {
+            case 'I': return type::I32;
+            case 'L': return type::I64;
+            case 'F': return type::F32;
+            case 'D': return type::F64;
+            default: return type::Void;
+            }
+        };
+        // (a value of one type as another: integers sign extended or wrapped, floating values converted)
+        auto const convert = [&](type aFrom, type aTo)
+        {
+            if (aFrom == aTo || aTo == type::Void)
+                return;
+            if (aFrom == type::I32 && aTo == type::I64)
+                op(opcode::I64SConvertI32);
+            else if (aFrom == type::I64 && aTo == type::I32)
+                op(opcode::I32ConvertI64);
+            else if (aFrom == type::F32 && aTo == type::F64)
+                op(opcode::F64ConvertF32);
+            else if (aFrom == type::F64 && aTo == type::F32)
+                op(opcode::F32ConvertF64);
+        };
+        bool const library = !signature.empty() && signature.size() == sub.parameters.size() + 2u;
+        std::vector<type> parameters;
+        for (std::size_t i = 0u; i < sub.parameters.size(); ++i)
+        {
+            auto const& p = sub.parameters[i];
+            auto const parameter = static_cast<std::uint32_t>(i + 1u);
+            get(parameter);
+            auto t = type::I64;
+            if (by_copy(p))
+                t = wasm_of(p.type);
+            else if (p.type != nullptr && p.type->view()->kind == type_kind::Array)
+            {
+                // (an array: its descriptor's data (the data offset is the descriptor's first word))
+                get(parameter);
+                load64(0u);
+                op(opcode::I64Add);
+            }
+            if (library)
+            {
+                convert(t, library_type(signature[i + 2u]));
+                t = library_type(signature[i + 2u]);
+            }
+            parameters.push_back(t);
+        }
+        auto const result = sub.result != nullptr ? wasm_of(sub.result) : type::Void;
+        if (library)
+        {
+            auto const libraryResult = library_type(signature[0]);
+            call(iProgram.runtime("c::libc." + name, parameters, libraryResult));
+            if (sub.result != nullptr && libraryResult == type::Void)
+                i64(0);
+            else if (sub.result == nullptr && libraryResult != type::Void)
+                op(opcode::Drop);
+            else
+                convert(libraryResult, result);
+        }
+        else
+            call(iProgram.runtime(std::string{ bytecode::LinkNamespace } + "::" + name, parameters, result));
+        if (sub.result != nullptr)
+            return_value(sub.result, false);
+        return true;
     }
 
     void function_generator::generate_elaboration(node* aUnit, region*, bool aBody)

@@ -43,6 +43,7 @@
 #include <sys/mman.h>
 #endif
 #include "core.hpp"
+#include <neos/language/ada.hpp>
 
 namespace neos::ada_runtime
 {
@@ -50,34 +51,48 @@ namespace neos::ada_runtime
     {
         neos_rt_host const* gHost = nullptr;
 
-        // the region: address space reserved once (pages committed as they are used); offsets below FirstAddress are not used
-        // (0 is null)
-        constexpr std::uint64_t RegionSize = std::uint64_t{ 64u } << 30u;
+        // the region: address space reserved once (pages committed as they are used): the range of the shared memory (see 
+        // neos_rt_host::shared_memory) from Origin (see neos::language::ada::layout); offsets below FirstAddress are not used (0 is null)
+        constexpr std::uint64_t Origin = language::ada::layout::Origin;
+        constexpr std::uint64_t RegionSize = language::ada::layout::Size;
         constexpr std::uint64_t Granule = std::uint64_t{ 1u } << 16u;
-        constexpr std::uint64_t FirstAddress = Granule;
+        constexpr std::uint64_t FirstAddress = language::ada::layout::FirstAddress;
 
         class region
         {
         public:
             region()
             {
-#if defined(_WIN32)
-                iBase = static_cast<std::uint8_t*>(::VirtualAlloc(nullptr, RegionSize, MEM_RESERVE, PAGE_NOACCESS));
-#else
-                // (reserved inaccessible: blocks are made accessible as they are committed (so that the reservation does not count as
-                // the process's data))
-                auto const p = ::mmap(nullptr, RegionSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                iBase = p == MAP_FAILED ? nullptr : static_cast<std::uint8_t*>(p);
-#endif
-                if (iBase == nullptr)
+                // (the shared memory's range, so that the code of other languages that share it (e.g. C's: Annex B) has the same 
+                // addresses for Ada's objects)
+                if (gHost != nullptr && gHost->version >= 18u && gHost->shared_memory != nullptr)
+                    iBase = static_cast<std::uint8_t*>(gHost->shared_memory(Origin, RegionSize));
+                if (iBase != nullptr)
+                    iSize = NEOS_RT_SHARED_MEMORY_SIZE;
+                else
                 {
-                    std::fputs("Ada runtime: cannot reserve the memory's address space\n", stderr);
-                    std::abort();
+                    // (else a reservation of its own: the range's offsets are its)
+#if defined(_WIN32)
+                    auto* const p = static_cast<std::uint8_t*>(::VirtualAlloc(nullptr, RegionSize, MEM_RESERVE, PAGE_NOACCESS));
+#else
+                    // (reserved inaccessible: blocks are made accessible as they are committed (so that the reservation does not count 
+                    // as the process's data))
+                    auto const m = ::mmap(nullptr, RegionSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                    auto* const p = m == MAP_FAILED ? nullptr : static_cast<std::uint8_t*>(m);
+#endif
+                    if (p == nullptr)
+                    {
+                        std::fputs("Ada runtime: cannot reserve the memory's address space\n", stderr);
+                        std::abort();
+                    }
+                    iBase = reinterpret_cast<std::uint8_t*>(reinterpret_cast<std::uintptr_t>(p) - Origin);
+                    iSize = Origin + RegionSize;
                 }
                 iTop = FirstAddress;
             }
         public:
             std::uint8_t* base() const { return iBase; }
+            std::uint64_t size() const { return iSize; }     ///< (the memory's: its offsets are below it)
             // (a block of whole granules, committed)
             address take(std::uint64_t aSize)
             {
@@ -94,7 +109,7 @@ namespace neos::ada_runtime
                             iFree.emplace(result + aSize, rest);
                         return result;
                     }
-                if (iTop + aSize > RegionSize)
+                if (iTop + aSize > Origin + RegionSize)
                     return 0;
                 auto const result = static_cast<address>(iTop);
                 commit(iTop, aSize);
@@ -143,6 +158,7 @@ namespace neos::ada_runtime
         private:
             std::mutex iMutex;
             std::uint8_t* iBase = nullptr;
+            std::uint64_t iSize = 0u;
             std::uint64_t iTop = 0u;
             std::map<address, std::uint64_t> iFree;
         };
@@ -238,7 +254,7 @@ namespace neos::ada_runtime
         gHost = aHost;
         // (the memory: the external memory that generated code uses (fixed: its address and size never change))
         if (gHost != nullptr && gHost->version >= 14u && gHost->external_memory_at != nullptr)
-            gHost->external_memory_at(3u, memory(), RegionSize, NEOS_RT_EXTERNAL_MEMORY_FIXED);
+            gHost->external_memory_at(language::ada::layout::Memory, memory(), the_region().size(), NEOS_RT_EXTERNAL_MEMORY_FIXED);
     }
 
     function_table::function_table(std::initializer_list<neos_rt_function> aFunctions)

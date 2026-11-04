@@ -281,6 +281,7 @@ add_neos_compiler_plugin(compiler.ada ada
     compilers/ada/src/bignum.cpp
     compilers/ada/src/units.cpp
     compilers/ada/src/units2.cpp
+    compilers/ada/src/categorization.cpp
     compilers/ada/src/decls.cpp
     compilers/ada/src/types.cpp
     compilers/ada/src/names.cpp

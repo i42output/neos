@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -203,7 +204,7 @@ namespace neos::compilers::c
     {
         // (a macro's name; and the operators of #if that #ifdef and defined treat as macros (6.10.1))
         return iMacros.contains(aName) || aName == "__has_include" || aName == "__has_embed" || aName == "__has_c_attribute" || 
-            aName == "__has_include_next";
+            aName == "__has_include_next" || aName == "__has_attribute";
     }
 
     std::uint32_t preprocessor::add_file(std::string const& aPath)
@@ -1024,13 +1025,53 @@ namespace neos::compilers::c
 
     void preprocessor::pragma(std::vector<pp_token> const& aLine, std::size_t aFirst, source_location const& aWhere)
     {
-        // (pragmas: once; push_macro and pop_macro (as GCC and MSVC have them); STDC's (FP_CONTRACT, FENV_ACCESS, CX_LIMITED_RANGE, 
+        // (pragmas: once; push_macro, pop_macro and pack (as GCC and MSVC have them); STDC's (FP_CONTRACT, FENV_ACCESS, CX_LIMITED_RANGE, 
         // FENV_ROUND, FENV_DEC_ROUND) and others are ignored)
         if (aLine.size() <= aFirst || aLine[aFirst].kind != token_kind::Identifier)
             return;
         auto const& name = aLine[aFirst].text;
         if (name == "once")
             iOnce.insert(iFiles[aWhere.file]);
+        else if (name == "pack")
+        {
+            // (pack(n), pack(), pack(push[, identifier][, n]), pack(pop[, identifier | n]): the alignment limit of the members of the
+            // structures and unions defined after it (0: none))
+            std::vector<pp_token> operands;
+            for (std::size_t i = aFirst + 1u; i < aLine.size(); ++i)
+                if (!aLine[i].is("(") && !aLine[i].is(")") && !aLine[i].is(","))
+                    operands.push_back(aLine[i]);
+            auto const value = [&](pp_token const& aToken) -> std::optional<std::uint64_t>
+            {
+                if (aToken.kind != token_kind::Number)
+                    return {};
+                auto const n = std::strtoull(aToken.text.c_str(), nullptr, 0);
+                if (n == 0u || n > 16u || (n & (n - 1u)) != 0u)
+                {
+                    warn(aToken.where, "alignment must be a small power of two, not " + aToken.text + " (#pragma pack ignored)");
+                    return {};
+                }
+                return n;
+            };
+            if (operands.empty())
+                iPack = 0u;
+            else if (operands[0].kind == token_kind::Identifier && operands[0].text == "push")
+            {
+                iPackStack.push_back(iPack);
+                if (operands.size() > 1u)
+                    if (auto const n = value(operands.back()))
+                        iPack = *n;
+            }
+            else if (operands[0].kind == token_kind::Identifier && operands[0].text == "pop")
+            {
+                if (!iPackStack.empty())
+                {
+                    iPack = iPackStack.back();
+                    iPackStack.pop_back();
+                }
+            }
+            else if (auto const n = value(operands[0]))
+                iPack = *n;
+        }
         else if ((name == "push_macro" || name == "pop_macro") && aLine.size() > aFirst + 3u && aLine[aFirst + 1u].is("(") &&
             aLine[aFirst + 2u].kind == token_kind::String)
         {
@@ -1174,19 +1215,38 @@ namespace neos::compilers::c
                         aOut.push_back(number(path ? 1u : 0u));
                     continue;
                 }
-                if (t.kind == token_kind::Identifier && t.text == "__has_c_attribute")
+                if (t.kind == token_kind::Identifier && (t.text == "__has_c_attribute" || t.text == "__has_attribute"))
                 {
+                    // (GNU's __has_attribute: of its attributes, those that the compiler implements (see gnu_attributes))
+                    bool const gnu = t.text == "__has_attribute";
                     ++i;
                     auto const operand = operator_operands(aTokens, i, true);
                     std::string attribute;
                     for (auto const& o : operand)
                         attribute += o.text;
-                    if (attribute.size() > 4u && attribute.starts_with("__") && attribute.ends_with("__"))
-                        attribute = attribute.substr(2u, attribute.size() - 4u);
+                    auto const unwrap = [](std::string& aName)
+                    {
+                        if (aName.size() > 4u && aName.starts_with("__") && aName.ends_with("__"))
+                            aName = aName.substr(2u, aName.size() - 4u);
+                    };
+                    if (attribute.starts_with("gnu::") || attribute.starts_with("__gnu__::"))
+                    {
+                        attribute = attribute.substr(attribute.find("::") + 2u);
+                        unwrap(attribute);
+                        attribute = "gnu::" + attribute;
+                    }
+                    else
+                    {
+                        unwrap(attribute);
+                        if (gnu)
+                            attribute = "gnu::" + attribute;
+                    }
                     static std::map<std::string, std::uint64_t> const sAttributes =
                     {
                         { "deprecated", 201904u }, { "fallthrough", 201904u }, { "maybe_unused", 201904u }, { "nodiscard", 202003u },
-                        { "noreturn", 202202u }, { "_Noreturn", 202202u }, { "unsequenced", 202207u }, { "reproducible", 202207u }
+                        { "noreturn", 202202u }, { "_Noreturn", 202202u }, { "unsequenced", 202207u }, { "reproducible", 202207u },
+                        { "gnu::aligned", 1u }, { "gnu::packed", 1u }, { "gnu::constructor", 1u }, { "gnu::destructor", 1u },
+                        { "gnu::cleanup", 1u }, { "gnu::noreturn", 1u }
                     };
                     auto const known = sAttributes.find(attribute);
                     aOut.push_back(number(known != sAttributes.end() ? known->second : 0u));
@@ -1832,6 +1892,68 @@ namespace neos::compilers::c
         return true;
     }
 
+    std::vector<pp_token> preprocessor::gnu_attributes(std::vector<pp_token> const& aArgument, pp_token const& aWhere) const
+    {
+        // (GNU's __attribute__((a, b(...), ...)): the attributes that the compiler implements, as C23's [[gnu::a, gnu::b(...)]] (their
+        // arguments replaced when the result is examined again); the others are dropped (they may be where C23 allows no attributes))
+        static std::set<std::string> const sImplemented = { "aligned", "packed", "constructor", "destructor", "cleanup", "noreturn" };
+        std::vector<pp_token> result;
+        if (aArgument.size() < 2u || !aArgument.front().is("(") || !aArgument.back().is(")"))
+            return result;
+        auto const make = [&](token_kind aKind, std::string const& aText)
+        {
+            pp_token t;
+            t.kind = aKind;
+            t.text = aText;
+            t.where = aWhere.where;
+            t.space = true;
+            t.noExpand = aKind == token_kind::Identifier;
+            return t;
+        };
+        std::size_t i = 1u;
+        std::size_t const end = aArgument.size() - 1u;
+        while (i < end)
+        {
+            // (one attribute: its name, then its arguments up to the next comma outside parentheses)
+            std::size_t next = i;
+            int depth = 0;
+            for (; next < end; ++next)
+            {
+                if (aArgument[next].is("("))
+                    ++depth;
+                else if (aArgument[next].is(")"))
+                    --depth;
+                else if (aArgument[next].is(",") && depth == 0)
+                    break;
+            }
+            if (aArgument[i].kind == token_kind::Identifier)
+            {
+                auto name = aArgument[i].text;
+                if (name.size() > 4u && name.starts_with("__") && name.ends_with("__"))
+                    name = name.substr(2u, name.size() - 4u);
+                if (sImplemented.contains(name))
+                {
+                    result.push_back(make(token_kind::Punctuator, result.empty() ? "[" : ","));
+                    if (result.size() == 1u)
+                        result.push_back(make(token_kind::Punctuator, "["));
+                    result.push_back(make(token_kind::Identifier, "gnu"));
+                    result.push_back(make(token_kind::Punctuator, "::"));
+                    result.push_back(make(token_kind::Identifier, name));
+                    for (std::size_t k = i + 1u; k < next; ++k)
+                        result.push_back(aArgument[k]);
+                }
+            }
+            i = next + 1u;
+        }
+        if (!result.empty())
+        {
+            result.push_back(make(token_kind::Punctuator, "]"));
+            result.push_back(make(token_kind::Punctuator, "]"));
+            result.front().space = aWhere.space;
+        }
+        return result;
+    }
+
     void preprocessor::expand(reader& aReader, std::vector<pp_token>& aOutput, bool aDirective)
     {
         pp_token t;
@@ -1857,12 +1979,37 @@ namespace neos::compilers::c
                 continue;
             }
             auto const found = iMacros.find(t.text);
-            if (found == iMacros.end())
+            // (__attribute__ is GNU's keyword: #undef does not remove it)
+            macro const* const pm = found != iMacros.end() ? &found->second : 
+                t.text == "__attribute__" || t.text == "__attribute" ? &iAttributeMacro : nullptr;
+            if (pm == nullptr)
             {
+                // (#pragma pack: a structure or union specifier's members' alignment limited (by an attribute after the keyword))
+                if (iPack != 0u && !aDirective && (t.text == "struct" || t.text == "union"))
+                {
+                    auto const where = t.where;
+                    aOutput.push_back(std::move(t));
+                    for (auto const* text : { "[", "[", "neos", "::", "pack", "(", "#", ")", "]", "]" })
+                    {
+                        pp_token a;
+                        a.kind = std::isalpha(static_cast<unsigned char>(text[0])) ? token_kind::Identifier : token_kind::Punctuator;
+                        a.text = text;
+                        if (a.text == "#")
+                        {
+                            a.kind = token_kind::Number;
+                            a.text = std::to_string(iPack);
+                        }
+                        a.where = where;
+                        a.space = true;
+                        a.noExpand = a.kind == token_kind::Identifier;
+                        aOutput.push_back(std::move(a));
+                    }
+                    continue;
+                }
                 aOutput.push_back(std::move(t));
                 continue;
             }
-            auto const& m = found->second;
+            auto const& m = *pm;
             if (hidden(t.hideSet, m.id))
             {
                 t.noExpand = true;
@@ -1938,6 +2085,13 @@ namespace neos::compilers::c
             if (arguments.size() != named)
                 throw preprocess_error{ t.where, "macro \"" + m.name + "\" takes " + std::to_string(m.variadic ? named - 1u : named) +
                     (m.variadic ? " or more" : "") + " arguments, but " + std::to_string(arguments.size()) + " given" };
+            if (m.builtin)
+            {
+                // (__attribute__)
+                auto body = gnu_attributes(arguments[0], t);
+                aReader.push(body);
+                continue;
+            }
             auto const hideSet = hide_set_add(hide_set_intersection(t.hideSet, u.hideSet), m.id);
             auto body = substitute(m, arguments, hideSet, t.where);
             if (!body.empty())
@@ -2424,6 +2578,8 @@ namespace neos::compilers::c
         };
         iFiles.clear();
         iFileIndex.clear();
+        iPack = 0u;
+        iPackStack.clear();
         add_file(aPath);
         for (auto const* name : { "__LINE__", "__FILE__", "__DATE__", "__TIME__", "__COUNTER__", "_Pragma" })
             predefine(name, "", true);
@@ -2448,14 +2604,17 @@ namespace neos::compilers::c
             predefine(name, value);
         for (auto const* name : { "__attribute__", "__attribute" })
         {
-            // (__attribute__((...)): nothing)
+            // (__attribute__((...)): the attributes that the compiler implements as C23 attributes ([[gnu::...]]); others: nothing
+            // (see gnu_attributes))
             macro m;
             m.id = iNextMacro++;
             m.name = name;
             m.function = true;
             m.variadic = true;
+            m.builtin = true;
             m.parameters.push_back("__VA_ARGS__");
             iMacros[m.name] = m;
+            iAttributeMacro = m;
         }
         // (function-like predefined macros: GNU's offsetof and atomic operations (of a program with one thread))
         auto const predefine_function = [&](std::string const& aName, std::vector<std::string> const& aParameters, std::string const& aBody)

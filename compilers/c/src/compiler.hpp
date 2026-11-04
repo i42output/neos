@@ -88,12 +88,14 @@ namespace neos::compilers::c
         bool parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const override;
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
+        bool linked_function(neolib::i_string_view const& aName) const override;
         std::uint32_t source_line(i_source_fragment const& aFragment, std::size_t aPosition) override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, 
             std::uint32_t& aEndColumn, neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;
     public:
         i_code_generator& gen() { return generator(); }
         std::map<std::uint32_t, std::string>& frame_names() { return iFrameNames; }
+        std::set<std::string>& linked_functions() { return iLinkedFunctions; }
         void emit_entry(fragment const& aStatement) { push_operand(operand_type{ aStatement }); generator().end_indented(); }   ///< (the entry point's code)
         void warning(translation_unit const* aUnit, source_location const& aWhere, std::string const& aMessage);
         void warning(node const* aWhere, std::string const& aMessage);
@@ -102,6 +104,7 @@ namespace neos::compilers::c
         // the syntax tree
         node* make_node(construct aKind, std::string_view aSource);
         void build(construct aKind, std::string_view aSource);
+        static int binary_precedence(construct aKind);     ///< (a binary operator's: 1 (||) to 10 (*); 0: not one)
         void unit_parsed(node* aUnit);
         void dump(node* aNode, int aDepth = 0) const;
         void generate();
@@ -132,6 +135,8 @@ namespace neos::compilers::c
         std::set<std::string> iPendingLibraries;    ///< (imported, not yet parsed)
         bool iGenerated = false;                    ///< (this pass's)
         std::map<std::uint32_t, std::string> iFrameNames;
+        std::set<std::string> iLinkedFunctions;     ///< (the functions that the code of a linked program's other translation units can 
+                                                    ///< call by their names (see program::exported))
         std::unique_ptr<program> iProgram;
         // (the preprocessor's outputs, by source: a pass preprocesses the same sources again)
         std::map<std::pair<std::string, std::string>, std::pair<preprocessor::output, std::vector<std::string>>> iPreprocessed;

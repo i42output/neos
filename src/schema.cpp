@@ -730,6 +730,19 @@ namespace neos::language
                 else if (meta.name() == "source.encoding.fallback")
                     iMeta.sourceEncodingFallback = meta.type() == neolib::json_type::String ? std::string{ meta.as<neolib::rjson_string>() } :
                         std::string{ meta.as<neolib::rjson_keyword>().text };
+                else if (meta.name() == "syntax.recovery.synchronize" || meta.name() == "syntax.recovery.filler" || meta.name() == "syntax.recovery.nesting" ||
+                    meta.name() == "syntax.recovery.blocks")
+                {
+                    auto& values = meta.name() == "syntax.recovery.synchronize" ? iMeta.syntaxRecoverySynchronize :
+                        meta.name() == "syntax.recovery.nesting" ? iMeta.syntaxRecoveryNesting :
+                        meta.name() == "syntax.recovery.blocks" ? iMeta.syntaxRecoveryBlocks : iMeta.syntaxRecoveryFiller;
+                    if (meta.type() == neolib::json_type::String)
+                        values.push_back(std::string{ meta.as<neolib::rjson_string>() });
+                    else
+                        for (auto const& value : meta)
+                            values.push_back(value.type() == neolib::json_type::String ?
+                                std::string{ value.as<neolib::rjson_string>() } : std::string{ value.as<neolib::rjson_keyword>().text });
+                }
                 else if (meta.name() == "prelude")
                 {
                     for (auto const& package : meta)
@@ -776,4 +789,4 @@ namespace neos::language
             throw std::runtime_error(iMetaSource.to_error_text(aNode, aErrorText));
         throw std::runtime_error(aErrorText);
     }
-}
+}

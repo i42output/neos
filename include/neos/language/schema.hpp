@@ -63,6 +63,16 @@ namespace neos::language
                                         ///< is promoted to an arbitrary precision integer (e.g. Python's int); the compiler can override it
         std::string sourceEncodingFallback; ///< (meta: source.encoding.fallback) a source that is not valid UTF-8 is read in this encoding
                                             ///< instead (supported: "latin-1"; e.g. Ada's default source representation)
+        std::vector<std::string> syntaxRecoverySynchronize; ///< (meta: syntax.recovery.synchronize) syntax error recovery: the terminals
+                                            ///< after which the parse can resume (the text from the last one before an error to the next one
+                                            ///< is skipped, so that the syntax errors that follow are reported too); none: no recovery
+        std::vector<std::string> syntaxRecoveryNesting; ///< (meta: syntax.recovery.nesting) syntax error recovery: pairs of opening and
+                                            ///< closing terminals (e.g. "(" ")"): a synchronizing terminal between them does not end a skip
+        std::vector<std::string> syntaxRecoveryBlocks; ///< (meta: syntax.recovery.blocks) syntax error recovery: pairs of terminals
+                                            ///< that open and close blocks (e.g. "loop" "end loop"): a skip that leaves a closing one
+                                            ///< without its opening one is extended through it
+        std::vector<std::string> syntaxRecoveryFiller; ///< (meta: syntax.recovery.filler) syntax error recovery: the texts tried in place
+                                            ///< of a skipped text, in order, if skipping it (leaving spaces) makes the parse fail there
     };
 
     namespace code_parser
@@ -123,4 +133,4 @@ namespace neos::language
         const concept_libraries_t& iConceptLibraries;
         std::chrono::steady_clock::duration iParseTime = {};
     };
-}
+}

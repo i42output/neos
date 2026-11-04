@@ -70,6 +70,7 @@ namespace neos::compilers::c
     {
         iProgramUnits = 0u;
         iLibraryRead = false;
+        iLinkedFunctions.clear();
         begin_pass();
     }
 
@@ -259,6 +260,11 @@ namespace neos::compilers::c
         return true;
     }
 
+    bool compiler::linked_function(neolib::i_string_view const& aName) const
+    {
+        return iLinkedFunctions.contains(aName.to_std_string());
+    }
+
     std::uint32_t compiler::source_line(i_source_fragment const& aFragment, std::size_t aPosition)
     {
         for (auto& unit : iUnits)
@@ -386,11 +392,57 @@ namespace neos::compilers::c
         for (auto* child : result->children)
             child->parent = result;
         iStack.resize(first);
+        // (a binary operator's (the grammar has them at one level, left to right): grouped by precedence: one whose left operand is
+        // an operator of lower precedence takes the right operand of that operator (down its right operands) as its left operand)
+        if (auto const precedence = binary_precedence(aKind); precedence != 0 && result->children.size() == 2u)
+        {
+            node* parent = nullptr;
+            node* left = result->children[0];
+            while (binary_precedence(left->kind) != 0 && binary_precedence(left->kind) < precedence && left->children.size() == 2u)
+            {
+                parent = left;
+                left = left->children[1];
+            }
+            if (parent != nullptr)
+            {
+                auto* const root = result->children[0];
+                auto const end = result->source.data() + result->source.size();
+                // (this operator: the deeper left operand and its right operand)
+                result->children[0] = left;
+                left->parent = result;
+                result->source = std::string_view{ left->source.data(), static_cast<std::size_t>(end - left->source.data()) };
+                parent->children[1] = result;
+                result->parent = parent;
+                // (the operators above it: their sources end where it does)
+                for (auto* n = parent; n != nullptr; n = n == root ? nullptr : n->parent)
+                    n->source = std::string_view{ n->source.data(), static_cast<std::size_t>(end - n->source.data()) };
+                result = root;
+                result->parent = nullptr;
+            }
+        }
         iStack.push_back(result);
         if (aKind == construct::TranslationUnit)
         {
             iStack.clear();
             unit_parsed(result);
+        }
+    }
+
+    int compiler::binary_precedence(construct aKind)
+    {
+        switch (aKind)
+        {
+        case construct::Multiply: case construct::Divide: case construct::Modulo: return 10;
+        case construct::Add: case construct::Subtract: return 9;
+        case construct::ShiftLeft: case construct::ShiftRight: return 8;
+        case construct::Less: case construct::Greater: case construct::LessEqual: case construct::GreaterEqual: return 7;
+        case construct::Equal: case construct::NotEqual: return 6;
+        case construct::BitAnd: return 5;
+        case construct::BitXor: return 4;
+        case construct::BitOr: return 3;
+        case construct::And: return 2;
+        case construct::Or: return 1;
+        default: return 0;
         }
     }
 

@@ -39,6 +39,8 @@
 #include <neolib/core/pair.hpp>
 #include <algorithm>
 #include <functional>
+#include <set>
+#include <cctype>
 #include "program.hpp"
 
 namespace neos::compilers::ada
@@ -410,7 +412,8 @@ namespace neos::compilers::ada
         // (its types: incomplete (tagged ones' too, so that their class-wide types can be named))
         std::function<bool(node*)> tagged = [&](node* aNode) -> bool
         {
-            if (aNode->has_flag("tagged") || aNode->is(construct::Extension) || aNode->is(construct::TypePrivateExtension))
+            if (aNode->has_flag("tagged") || aNode->is(construct::Extension) || aNode->is(construct::TypePrivateExtension) ||
+                aNode->is(construct::TypeInterface))
                 return true;
             for (auto* c : aNode->children)
                 if (tagged(c))
@@ -490,6 +493,8 @@ namespace neos::compilers::ada
     {
         if (aContext == nullptr)
             return;
+        // (the root library units that the context clause's with clauses have named so far: what its use clauses can name (10.1.6(3)))
+        std::set<std::string> withed;
         for (auto* clause : aContext->children)
         {
             if (clause->is(construct::With))
@@ -499,9 +504,38 @@ namespace neos::compilers::ada
                     if (name->is(construct::Flag))
                         continue;
                     auto const full = dotted_name(name);
+                    withed.insert(full.substr(0u, full.find('.')));
+                    // (Standard is not a library unit that a with clause can name; nor are the declarations within it (10.1.2(4)))
+                    if (full == "standard" || full.starts_with("standard."))
+                    {
+                        recover([&]() { error(name, "a with clause cannot name Standard (or a name within it): it is not a library unit (10.1.2(4))"); });
+                        continue;
+                    }
+                    if (auto* u = library_unit(full); u != nullptr && !u->library && !u->limited_view && full.find('.') == std::string::npos &&
+                        u->scope == iStandard)
+                    {
+                        recover([&]() { error(name, "\"" + full + "\" is declared in Standard: it is not a library unit (10.1.2(4))"); });
+                        continue;
+                    }
                     if (iCurrentUnit != nullptr && aContext == iCurrentUnit->unit->first(construct::Context))
                         recover([&]() { private_child_with_check(clause, name, full); });
-                    // (a limited with of a package not analysed yet: its limited view (its types incomplete))
+                    // (a limited with of a package not analysed yet: its limited view (its types incomplete); of one analysed already: its
+                    // limited view too (10.1.4(7/2)), its types completed by the package's)
+                    if (clause->has_flag("limited") && full.find('.') == std::string::npos)
+                        if (auto* unit = library_unit(full); unit != nullptr && unit->is_package() && unit->inner != nullptr && iInstanceBodies == 0)
+                            if (auto* view = limited_view(full); view != nullptr && view != unit)
+                            {
+                                for (auto* e : view->inner->declarations)
+                                    if (e->type != nullptr && e->type->full == nullptr)
+                                        for (auto [i, end] = unit->inner->names.equal_range(e->name); i != end; ++i)
+                                            if (i->second->is_type() && i->second->type != nullptr && i->second->type != e->type)
+                                            {
+                                                e->type->full = i->second->type;
+                                                break;
+                                            }
+                                aRegion->add(view);
+                                continue;
+                            }
                     if (clause->has_flag("limited") && library_unit(full) == nullptr && full.find('.') == std::string::npos)
                     {
                         if (auto* view = limited_view(full))
@@ -520,14 +554,27 @@ namespace neos::compilers::ada
                             if (auto* p = library_unit(parent); p != nullptr && p->inner != nullptr)
                                 p->inner->names.emplace(simple, view);
                             else
+                            {
                                 iLimitedChildViews[parent].push_back(view);
-                            if (auto* rootUnit = library_unit(full.substr(0u, full.find('.'))))
+                                // (the parent's limited view (not analysed): the child's view declared in it (10.1.2(19.1/2): limited views of
+                                // the ancestors))
+                                if (auto* pv = limited_view(parent); pv != nullptr && pv->inner != nullptr)
+                                {
+                                    bool present = false;
+                                    for (auto [i, end] = pv->inner->names.equal_range(simple); i != end; ++i)
+                                        present = present || i->second == view;
+                                    if (!present)
+                                        pv->inner->names.emplace(simple, view);
+                                }
+                            }
+                            auto const rootName = full.substr(0u, full.find('.'));
+                            if (auto* rootUnit = library_unit(rootName) != nullptr ? library_unit(rootName) : limited_view(rootName))
                             {
                                 bool present = false;
-                                for (auto [i, end] = aRegion->names.equal_range(rootUnit->name); i != end; ++i)
+                                for (auto [i, end] = aRegion->names.equal_range(rootName); i != end; ++i)
                                     present = present || i->second == rootUnit;
                                 if (!present)
-                                    aRegion->add(rootUnit);
+                                    aRegion->names.emplace(rootName, rootUnit);
                             }
                             continue;
                         }
@@ -552,9 +599,23 @@ namespace neos::compilers::ada
                 }
             }
             else if (clause->is(construct::Use) || clause->is(construct::UseType))
-                use_clause(clause, aRegion);
+            {
+                // (a context clause's use clause: of the library units named by its earlier with clauses (and declarations within
+                // them) (10.1.6(3)))
+                bool ok = true;
+                if (iInstanceBodies == 0)
+                    for (auto* name : clause->children)
+                        if (name->is(construct::Identifier) || name->is(construct::Selected))
+                            if (auto const full = dotted_name(name); !full.empty() && !withed.contains(full.substr(0u, full.find('.'))))
+                            {
+                                ok = false;
+                                recover([&]() { error(name, "a use clause of a context clause must name a library unit (or a declaration within one) named by an earlier with clause of it (10.1.6(3))"); });
+                            }
+                if (ok)
+                    recover([&]() { use_clause(clause, aRegion); });
+            }
             else if (clause->is(construct::Pragma))
-                pragma(clause, aRegion);
+                recover([&]() { pragma(clause, aRegion); });
         }
     }
 
@@ -575,7 +636,15 @@ namespace neos::compilers::ada
             if (auto* spec = find_unit(aUnit.name, false); spec != nullptr && spec->context != nullptr)
             {
                 for (auto* e : spec->context->declarations)
-                    aUnit.context->add(e);
+                {
+                    // (a limited view (limited with): not where the body's own with clause names the package)
+                    bool hidden = false;
+                    if (e->limited_view)
+                        for (auto [i, end] = aUnit.context->names.equal_range(e->name); i != end; ++i)
+                            hidden = hidden || !i->second->limited_view;
+                    if (!hidden)
+                        aUnit.context->add(e);
+                }
                 aUnit.context->used.insert(aUnit.context->used.end(), spec->context->used.begin(), spec->context->used.end());
                 aUnit.context->used_types.insert(aUnit.context->used_types.end(), spec->context->used_types.begin(), spec->context->used_types.end());
             }
@@ -599,6 +668,22 @@ namespace neos::compilers::ada
             auto* parent = library_unit(aUnit.name.substr(0u, dot));
             if (parent == nullptr || parent->inner == nullptr)
                 error(item, "parent unit \"" + aUnit.name.substr(0u, dot) + "\" not found");
+            // (a child's parent: a library package or generic package (10.1.1(8)); a child of a generic: a generic unit or a renaming of
+            // one (10.1.1(10/2)); a child of an instance: an instance (10.1.1(12/3)))
+            if (!aUnit.body && iInstanceBodies == 0)
+            {
+                auto* p = parent;
+                while (p->renamed != nullptr && p->renamed != p && p->is_package())
+                    p = p->renamed;
+                bool const instance = item->is(construct::Instantiation) || (item->is(construct::Package) && item->first(construct::Instantiation) != nullptr);
+                if (!p->is_package() && p->kind != entity_kind::GenericPackage)
+                    recover([&]() { error(item, "the parent of a child unit must be a library package or generic package (10.1.1(8))"); });
+                else if (p->kind == entity_kind::GenericPackage && !item->is(construct::Generic) && !item->is(construct::RenamingGeneric))
+                    recover([&]() { error(item, "a child of a generic unit must be a generic unit (or a renaming of one) (10.1.1(10/2))"); });
+                else if (p->generic != nullptr && !instance && !item->is(construct::RenamingPackage) && !item->is(construct::RenamingGeneric) &&
+                    !item->is(construct::RenamingSubprogram))
+                    recover([&]() { error(item, "a child of an instance must be an instance (10.1.1(12/3))"); });
+            }
             parentRegion = parent->inner;
             for (auto p = aUnit.name.substr(0u, dot);;)
             {
@@ -699,13 +784,184 @@ namespace neos::compilers::ada
         iCurrentUnit = nullptr;
     }
 
+    bool program::intrinsic_unit(node* aItem)
+    {
+        // (a library subprogram (or generic subprogram) declaration whose Convention aspect is Intrinsic (e.g. Ada.Unchecked_Deallocation): 
+        // the implementation's, it has no body)
+        std::function<bool(node*, int)> intrinsic = [&](node* aNode, int aDepth)
+        {
+            if (aNode->is(construct::Aspects))
+                for (auto* a : aNode->children)
+                    if (a->size() >= 2u && name_text(a->child(0)->source) == "convention" && name_text(a->children.back()->source) == "intrinsic")
+                        return true;
+            if (aDepth < 2)
+                for (auto* c : aNode->children)
+                    if (intrinsic(c, aDepth + 1))
+                        return true;
+            return false;
+        };
+        return !aItem->is(construct::Package) && intrinsic(aItem, 0);
+    }
+
     void program::generate()
     {
         collect_units();
         order_units();
         setup_standard();
+        // (the main file's identifiers: no consecutive underscores, none last (2.3(2/2)))
+        {
+            std::set<void const*> mainFiles;
+            for (auto* u : iOrder)
+                if (u->main_file && u->item != nullptr)
+                    mainFiles.insert(u->item->file);
+            std::function<void(node*)> identifiers = [&](node* aNode)
+            {
+                if (aNode->is(construct::Identifier) || aNode->is(construct::Defining) || aNode->is(construct::Word))
+                {
+                    std::string_view const text{ aNode->source };
+                    for (std::size_t i = 0u; i < text.size(); ++i)
+                        if (text[i] == '_' && (i + 1u == text.size() || text[i + 1u] == '_' || !(std::isalnum(static_cast<unsigned char>(text[i + 1u])) ||
+                            static_cast<unsigned char>(text[i + 1u]) >= 0x80u)))
+                        {
+                            recover([&]() { error(aNode, "an identifier cannot have consecutive underscores or end with an underscore"); });
+                            break;
+                        }
+                }
+                for (auto* c : aNode->children)
+                    identifiers(c);
+            };
+            for (auto* compilation : iCompilations)
+                if (!compilation->children.empty() && mainFiles.contains(compilation->file))
+                    identifiers(compilation);
+        }
         for (auto* u : iOrder)
             recover([&]() { analyse_unit(*u); });
+        // (the partition: a library unit declaration that requires a body has one (10.2(5)): not when checking legality only (a 
+        // compilation, not a partition))
+        if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
+            for (auto* u : iOrder)
+                if (!u->body && !u->subunit && u->item != nullptr && !u->item->is(construct::SubprogramBody) && !intrinsic_unit(u->item) &&
+                    std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aBody) { return aBody->body && aBody->name == u->name; }))
+                {
+                    node declarations;
+                    declarations.kind = construct::Declarations;
+                    declarations.children.push_back(u->item);
+                    node none;
+                    none.kind = construct::Declarations;
+                    recover([&]() { completion_check(&declarations, &none, true); });
+                }
+        recover([&]() { restrictions_check(); });
+        // (an elaboration order exists (10.2(10-13)): no cycle of the order's constraints (a unit's declaration before its body, a 
+        // parent's declaration before its children, the declarations of the units that a unit names in with clauses before it, the
+        // bodies of those that its pragmas Elaborate name before it; a subunit is its parent body's))
+        if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
+        {
+            auto const owner = [&](unit_info* aUnit)
+            {
+                // (a subunit: the library unit body that it is part of)
+                auto* u = aUnit;
+                while (u != nullptr && u->subunit)
+                {
+                    auto const dot = u->name.rfind('.');
+                    auto* parent = dot == std::string::npos ? nullptr : find_unit(u->name.substr(0u, dot), true);
+                    if (parent == nullptr || parent == u)
+                        break;
+                    u = parent;
+                }
+                return u;
+            };
+            std::map<unit_info*, std::set<unit_info*>> after;  // (a unit: the units elaborated before it)
+            for (auto* u : iOrder)
+            {
+                auto* o = owner(u);
+                if (o == nullptr)
+                    continue;
+                auto& before = after[o];
+                if (o->body)
+                    if (auto* spec = find_unit(o->name, false); spec != nullptr && spec != o)
+                        before.insert(spec);
+                if (auto const dot = o->name.rfind('.'); dot != std::string::npos && !o->body)
+                    if (auto* parent = find_unit(o->name.substr(0u, dot), false))
+                        before.insert(parent);
+                for (auto const& w : u->withs)
+                    if (auto* spec = find_unit(w, false); spec != nullptr && spec != o)
+                        before.insert(spec);
+                for (auto const& e : u->elaborates)
+                    if (auto* body = find_unit(e, true); body != nullptr && body != o)
+                        before.insert(body);
+            }
+            std::map<unit_info*, int> state;
+            std::vector<unit_info*> path;
+            std::function<bool(unit_info*)> cycle = [&](unit_info* aUnit) -> bool
+            {
+                auto& s = state[aUnit];
+                if (s == 2)
+                    return false;
+                if (s == 1)
+                {
+                    path.push_back(aUnit);
+                    return true;
+                }
+                s = 1;
+                for (auto* b : after[aUnit])
+                    if (cycle(b))
+                    {
+                        path.push_back(aUnit);
+                        return true;
+                    }
+                s = 2;
+                return false;
+            };
+            for (auto* u : iOrder)
+                if (path.empty() && cycle(u))
+                {
+                    std::string units;
+                    for (auto i = path.rbegin(); i != path.rend(); ++i)
+                        units += (units.empty() ? "" : ", ") + std::string{ (*i)->body ? "the body of " : "" } + (*i)->name;
+                    auto* where = path.front()->item;
+                    recover([&]() { error(where, "the partition has no elaboration order: its units' elaboration depends on itself (" + units + ") (10.2(10/5))"); });
+                }
+        }
+        // (no two units of the partition (library units and subunits) have the same expanded name (10.2(19)): a subunit's is not a 
+        // library unit's)
+        if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
+            for (auto* u : iOrder)
+                if (u->subunit && u->item != nullptr)
+                    if (auto const other = std::find_if(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return !aUnit->subunit && aUnit->name == u->name; }); 
+                        other != iOrder.end())
+                        recover([&]() { error(u->item, "the subunit \"" + u->name + "\" has the expanded name of a library unit of the partition (10.2(19))"); });
+        // (and a body stub (of the bodies in the partition: generic ones too) has its subunit (10.2(5)): the subunit's name is its 
+        // parent body's expanded name and the stub's)
+        if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
+        {
+            auto const name_of = [&](node* aBody) -> std::string
+            {
+                if (auto* spec = specification_of(aBody); spec != nullptr && !spec->children.empty())
+                    return defining_name(spec->child(0));
+                if (auto* d = aBody->first(construct::Defining))
+                    return defining_name(d);
+                return {};
+            };
+            std::function<void(node*, std::string const&)> stubs = [&](node* aNode, std::string const& aParent)
+            {
+                for (auto* c : aNode->children)
+                {
+                    if (c->is(construct::Stub))
+                    {
+                        auto const name = aParent + "." + name_of(c);
+                        if (std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return aUnit->subunit && aUnit->name == name; }))
+                            recover([&]() { error(c, "the subunit \"" + name + "\" of the body stub is not in the partition (10.2(5))"); });
+                    }
+                    else if (c->is(construct::PackageBody) || c->is(construct::SubprogramBody) || c->is(construct::TaskBody) || c->is(construct::ProtectedBody))
+                        stubs(c, aParent + "." + name_of(c));
+                    else if (!c->is(construct::Statements) && !c->is(construct::Handled))
+                        stubs(c, aParent);
+                }
+            };
+            for (auto* u : iOrder)
+                if ((u->body || u->subunit) && u->item != nullptr)
+                    stubs(u->subunit && u->item->is(construct::Subunit) && u->item->child(1) != nullptr ? u->item->child(1) : u->item, u->name);
+        }
         // (legality checking: the generic units of the main file (and those declared within them))
         if (std::getenv("NEOS_ADA_CHECK") != nullptr)
         {
@@ -717,6 +973,15 @@ namespace neos::compilers::ada
                 if (auto* g = iGenerics[i]; g->decl != nullptr && mainFiles.contains(g->decl->file))
                     recover([&]() { check_generic(g); });
         }
+        // (the categorized (and preelaborated) library units' compilation units: their categories' rules (10.2.1, E.2))
+        // (after the generics' checks: their bodies' analysed copies (iTemplateBodies))
+        for (auto* u : iOrder)
+            if (u->main_file && u->analysed)
+            {
+                recover([&]() { categorization_check(*u); });
+                if (u->item != nullptr)
+                    remote_dereference_check(u->item);
+            }
         // (errors recovered from: the first thrown (the compiler reports the others before it))
         if (!iDiagnostics.empty())
             throw iDiagnostics.front();

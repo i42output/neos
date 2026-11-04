@@ -290,5 +290,12 @@ namespace neos::language::ada
     namespace layout
     {
         inline constexpr std::uint32_t Memory = 3u;                 ///< (the external memory's index: Ada's)
+        // (the memory is the shared memory (see neos_rt_host::shared_memory), so that the code of other languages that share it (e.g. C's
+        // (see neos::language::c::layout), whose range is below Ada's) has the same addresses for Ada's objects (Annex B): Ada's range is 
+        // from Origin; the offsets below FirstAddress are not used; the program's static data begins at StaticBase)
+        inline constexpr std::uint64_t Origin = std::uint64_t{ 64u } << 30u;        ///< (its range's offset)
+        inline constexpr std::uint64_t Size = std::uint64_t{ 64u } << 30u;          ///< (its range's size)
+        inline constexpr std::uint64_t FirstAddress = Origin + 0x10000u;
+        inline constexpr std::uint64_t StaticBase = FirstAddress;                   ///< (the program's static data)
     }
 }

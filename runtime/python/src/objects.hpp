@@ -402,6 +402,10 @@ namespace neos::python_runtime
         object* compare(int aOperation, object* aLhs, object* aRhs);
         bool repr_of(object* aObject, std::string& aResult);
         bool str_of(object* aObject, std::string& aResult);
+        // (a container whose repr is being made (by this thread), as CPython's Py_ReprEnter: true if its repr is being made already 
+        // (its repr within its own is "[...]", "{...}", ...); else repr_leave once it has been made)
+        bool repr_enter(object* aObject);
+        void repr_leave(object* aObject);
         bool to_double(object* aObject, double& aResult);
         long long length(object* aObject);
         object* exception_class(std::string const& aName);
@@ -509,6 +513,7 @@ namespace neos::python_runtime
         object* datetime_class_function(std::string const& aClass, char const* aName);    // (datetime.cpp: e.g. datetime.max, date.today)
         // (big integers (objects.cpp))
         object* make_int(big_integer aValue);
+        object* digits_int(std::string_view aDigits, unsigned aBase, bool aNegative);  // (its digits valid (base 2 to 36), without a sign)
         big_integer big_value(object* aObject);
         bool big_negative(big_integer const& aValue);
         bool big_zero(big_integer const& aValue);

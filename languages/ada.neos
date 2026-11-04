@@ -56,6 +56,10 @@
         version: "0.1.0"
         prelude: [ Standard ]
         source.encoding.fallback: "latin-1"
+        syntax.recovery.synchronize: [ ";" ]
+        syntax.recovery.nesting: [ "(" ")" "record" "end record" "loop" "end loop" "if" "end if" "case" "end case" "select" "end select" "begin" "end" ]
+        syntax.recovery.blocks: [ "(" ")" "record" "end record" "loop" "end loop" "if" "end if" "case" "end case" "select" "end select" ]
+        syntax.recovery.filler: [ "null;" "end if;" "end loop;" "end case;" "end select;" "end;" ]
     }
 
     stages: {

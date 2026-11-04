@@ -80,7 +80,7 @@
 extern "C" {
 #endif
 
-#define NEOS_RUNTIME_PLUGIN_VERSION 17
+#define NEOS_RUNTIME_PLUGIN_VERSION 20
 #define NEOS_RUNTIME_PLUGIN_ENTRY_NAME "neos_runtime_plugin"
 
 #if defined(_WIN32)
@@ -103,7 +103,8 @@ typedef enum neos_rt_type
     NEOS_RT_F64,
     NEOS_RT_STRING,
     NEOS_RT_OBJECT,
-    NEOS_RT_INTEGER
+    NEOS_RT_INTEGER,
+    NEOS_RT_BIG_INTEGER                                 /* (version 20) a linked value only: see neos_rt_link_type */
 } neos_rt_type;
 
 /* an object: its type (whose functions implement it) is its first member; each plugin defines its own types (which
@@ -123,6 +124,7 @@ struct neos_rt_object
 #define NEOS_RT_MAX_PARAMETERS 16
 #define NEOS_RT_EXTERNAL_MEMORIES 8                     /* external memories (memory indices 1 to 8): see neos_rt_host::external_memory_at */
 #define NEOS_RT_EXTERNAL_MEMORY_FIXED 0x01u             /* external_memory_at: the region's address and size never change */
+#define NEOS_RT_SHARED_MEMORY_SIZE (1ull << 40)         /* the shared memory's size: see neos_rt_host::shared_memory */
 
 /* function flags */
 #define NEOS_RT_RESTRICTED 0x1u /* can change the host environment: not callable by scripts running in restricted mode */
@@ -192,8 +194,10 @@ typedef union neos_rt_value
    neos::context::load_program), of any languages, the code of each language run by the language's runtime plugin; each unit is a program
    of its own (the host runs those after the first when their turns come: see bytecode::LinkedSection); the code of each unit calls the
    functions (and uses the other values) of the others by their names, as linked values: NEOS_RT_VOID (no value: undefined, null, None,
-   nil, ...), NEOS_RT_BOOL (b), NEOS_RT_I64 (an integer), NEOS_RT_F64 (a float), NEOS_RT_STRING (UTF-8) or NEOS_RT_OBJECT (any other 
-   value: a linked object). A language runtime plugin that takes part:
+   nil, ...), NEOS_RT_BOOL (b), NEOS_RT_I64 (an integer), (version 20) NEOS_RT_BIG_INTEGER (an integer that NEOS_RT_I64 cannot hold: its
+   hexadecimal digits (lower case, without leading zeros, after a '-' if it is negative, e.g. "-8000000000000001") as string, valid as
+   a NEOS_RT_STRING's is), NEOS_RT_F64 (a float), NEOS_RT_STRING (UTF-8) or NEOS_RT_OBJECT (any other value: a linked object). A 
+   language runtime plugin that takes part:
    - runs more than one program of its language on a thread (each with globals of its own (as the language's code sees them), its 
      functions called on their own program);
    - defines NEOS_RUNTIME_PLUGIN_LINK { (if the running program's code of the plugin's language has a global named aName (e.g. a function
@@ -350,6 +354,18 @@ typedef struct neos_rt_host
        assumes it (it takes the comparison's other path from now on). A plugin whose code flags a load as watched calls this after each 
        change of the word's value (on the thread that runs the program, as the program would change it) */
     void (*watched_changed)(void const* aAddress);
+    /* (version 18) the shared memory: a region of address space (NEOS_RT_SHARED_MEMORY_SIZE bytes) reserved once for the process, so 
+       that the external memories of plugins whose programs share objects (e.g. the runtimes of languages whose code passes pointers to
+       each other's objects) are one memory: such a plugin sets its external memory (external_memory_at) to the shared memory (its 
+       address, the result, and NEOS_RT_SHARED_MEMORY_SIZE) and uses its own range of it (aOffset, aSize: as the plugin's language's 
+       compiler and runtime agree, as they agree the memory's index), so that an address in one is the same object's in all. The range
+       is reserved inaccessible: the plugin makes its pages accessible as it uses them (e.g. mprotect, VirtualAlloc's MEM_COMMIT). The
+       result is null if the range is not available (another plugin has a range that overlaps it, or it is not within the region) */
+    void* (*shared_memory)(unsigned long long aOffset, unsigned long long aSize);
+    /* (version 19) the lowest address that the calling thread's native stack (or that of the coroutine it is running) can reach, with 
+       headroom left for host functions (generated code's stack limit), e.g. for a plugin whose functions recurse (a language runtime's 
+       repr or comparison of objects that contain others) to raise its language's error before its stack overflows; 0 if not known */
+    unsigned long long (*stack_limit)(void);
 } neos_rt_host;
 
 typedef void (*neos_rt_plugin_set_host)(neos_rt_host const* aHost);

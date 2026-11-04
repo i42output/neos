@@ -1105,9 +1105,9 @@ namespace neos::compilers::c
                 q |= p->type.qualifiers;
             e->type = m.type.with(q);
             e->bitField = m.bitWidth.has_value();
-            // (a bit-field narrower than int, of an integer type no wider: int (its values are int's; its promotion is int's))
-            if (e->bitField && *m.bitWidth < width_of(basic(type_kind::Int)) && m.type->is_integer() && m.type->kind != type_kind::Bool &&
-                kind_of(m.type) == vkind::I32)
+            // (a bit-field narrower than int, of an integer type (a wider one's too, as GCC's): int (its values are int's; its promotion 
+            // is int's))
+            if (e->bitField && *m.bitWidth < width_of(basic(type_kind::Int)) && m.type->is_integer() && m.type->kind != type_kind::Bool)
                 e->type = qtype{ basic(type_kind::Int) }.with(q);
             return;
         }
@@ -1182,6 +1182,15 @@ namespace neos::compilers::c
             if (!value_type(a)->is_scalar())
                 error(e, "invalid operand to unary !");
             e->type = int_type();
+            return;
+        }
+        case construct::LabelAddress:
+        {
+            // (GNU: a label's address: a void* that a computed goto in its function goes to (its value: see function_definition))
+            if (iFunction == nullptr)
+                error(e, "a label's address outside a function");
+            e->type = qtype{ pointer_to(qtype{ basic(type_kind::Void) }) };
+            iLabelAddresses.push_back(e);
             return;
         }
         case construct::Sizeof:
@@ -1697,6 +1706,8 @@ namespace neos::compilers::c
             return e->value;
         switch (e->kind)
         {
+        case construct::LabelAddress:
+            return e->value;        // (GNU: a label's address (see function_definition))
         case construct::Identifier:
         {
             if (e->value)

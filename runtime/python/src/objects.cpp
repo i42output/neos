@@ -1857,6 +1857,111 @@ namespace neos::python_runtime
 
         bool repr_of(object* aObject, std::string& aResult);
 
+        namespace
+        {
+            constexpr int NativeRecursionLimit = 10000;     // (CPython 3.13's Py_C_RECURSION_LIMIT)
+            constexpr int StackCheckDepth = 32;             // (shallower: the stack is not checked)
+            struct recursion_state
+            {
+                int depth = 0;
+                std::vector<object*> reprs;                 // (the containers whose reprs are being made)
+            };
+            thread_local recursion_state tRecursion;        // (found once per call: a plugin's thread locals are not cheap to find)
+
+            bool enter_recursive_call(recursion_state& aState, char const* aWhere)
+            {
+                // (beyond the limit, or (checked every few calls) near the end of the stack (its limit for host functions: see 
+                // neos_rt_host::stack_limit): frames of such calls can be large)
+                constexpr std::uint64_t StackMargin = 128u * 1024u;
+                bool stackLow = false;
+                if (aState.depth >= StackCheckDepth && aState.depth % 8 == 7)
+                    if (auto const* h = python_runtime::host(); h != nullptr && h->version >= 19u && h->stack_limit != nullptr)
+                    {
+                        char probe = 0;
+                        auto const limit = h->stack_limit();
+                        stackLow = limit != 0u && reinterpret_cast<std::uint64_t>(&probe) < limit + StackMargin;
+                    }
+                if (aState.depth >= NativeRecursionLimit || stackLow)
+                {
+                    error("RecursionError", std::string{ "maximum recursion depth exceeded" } + aWhere);
+                    return false;
+                }
+                ++aState.depth;
+                return true;
+            }
+
+            struct recursive_call
+            {
+                recursion_state& state;
+                bool entered;
+                explicit recursive_call(char const* aWhere) : state{ tRecursion }, entered{ enter_recursive_call(state, aWhere) } {}
+                ~recursive_call() { if (entered) --state.depth; }
+            };
+
+            // (an item of a container whose comparison or repr can recurse (it can contain others, or it has its own))
+            bool can_recurse(object* aObject)
+            {
+                auto const k = kind_of(aObject);
+                return k == NEOS_PY_LIST || k == NEOS_PY_TUPLE || k == NEOS_PY_DICT || k == NEOS_PY_OTHER;
+            }
+
+            // (a container's repr, unless none of its items can contain others (then it cannot be within its own, nor recurse): entered
+            // (repr_enter), and a recursive call (as PyObject_Repr's: failed (RecursionError) beyond the limit))
+            struct repr_entry
+            {
+                recursion_state* state = nullptr;
+                bool failed = false;
+                bool active = false;
+                template <typename Items>
+                repr_entry(object* aContainer, Items const& aItems)
+                {
+                    for (auto const& item : aItems)
+                        if (item_recurses(item))
+                        {
+                            auto& s = tRecursion;
+                            if (!enter_recursive_call(s, " while getting the repr of an object"))
+                            {
+                                failed = true;
+                                return;
+                            }
+                            state = &s;
+                            if (std::find(s.reprs.begin(), s.reprs.end(), aContainer) != s.reprs.end())
+                                active = true;
+                            else
+                                s.reprs.push_back(aContainer);
+                            break;
+                        }
+                }
+                ~repr_entry()
+                {
+                    if (state == nullptr)
+                        return;
+                    --state->depth;
+                    if (!active)
+                        state->reprs.pop_back();
+                }
+                static bool item_recurses(object* aItem) { return can_recurse(aItem); }
+                template <typename Pair>
+                static bool item_recurses(Pair const& aItem) { return can_recurse(aItem.first) || can_recurse(aItem.second); }
+            };
+        }
+
+        bool repr_enter(object* aObject)
+        {
+            auto& reprs = tRecursion.reprs;
+            if (std::find(reprs.begin(), reprs.end(), aObject) != reprs.end())
+                return true;
+            reprs.push_back(aObject);
+            return false;
+        }
+
+        void repr_leave(object* aObject)
+        {
+            auto& reprs = tRecursion.reprs;
+            if (auto const r = std::find(reprs.rbegin(), reprs.rend(), aObject); r != reprs.rend())
+                reprs.erase(std::next(r).base());
+        }
+
         bool join_repr(std::vector<object*> const& aItems, std::string& aResult)
         {
             for (std::size_t i = 0u; i < aItems.size(); ++i)
@@ -1903,13 +2008,32 @@ namespace neos::python_runtime
                 return true;
             case NEOS_PY_STR: aResult = str_repr(as<str_object>(aObject)->value); return true;
             case NEOS_PY_LIST:
-                aResult = "[";
-                if (!join_repr(as<list_object>(aObject)->items, aResult))
-                    return false;
-                aResult += "]";
+                {
+                    // (one that contains itself: "[...]" within its own repr)
+                    repr_entry const entry{ aObject, as<list_object>(aObject)->items };
+                    if (entry.failed)
+                        return false;
+                    if (entry.active)
+                    {
+                        aResult = "[...]";
+                        return true;
+                    }
+                    aResult = "[";
+                    if (!join_repr(as<list_object>(aObject)->items, aResult))
+                        return false;
+                    aResult += "]";
+                }
                 return true;
             case NEOS_PY_TUPLE:
                 {
+                    repr_entry const entry{ aObject, as<tuple_object>(aObject)->items };
+                    if (entry.failed)
+                        return false;
+                    if (entry.active)
+                    {
+                        aResult = "(...)";
+                        return true;
+                    }
                     auto const& items = as<tuple_object>(aObject)->items;
                     aResult = "(";
                     if (!join_repr(items, aResult))
@@ -1918,6 +2042,15 @@ namespace neos::python_runtime
                 }
                 return true;
             case NEOS_PY_DICT:
+                {
+                repr_entry const entry{ aObject, as<dict_object>(aObject)->items };
+                if (entry.failed)
+                    return false;
+                if (entry.active)
+                {
+                    aResult = "{...}";
+                    return true;
+                }
                 aResult = "{";
                 for (auto const& item : as<dict_object>(aObject)->items)
                 {
@@ -1929,6 +2062,7 @@ namespace neos::python_runtime
                     aResult += key + ": " + value;
                 }
                 aResult += "}";
+                }
                 return true;
             case NEOS_PY_SLICE:
                 {
@@ -2773,6 +2907,14 @@ namespace neos::python_runtime
             {
                 if (a[i] == b[i])
                     continue;   // (identity: equal (as CPython's containers compare their items))
+                // (items that can contain others: a recursive call (as PyObject_RichCompare's))
+                std::optional<recursive_call> call;
+                if (can_recurse(a[i]) || can_recurse(b[i]))
+                    if (call.emplace(" in comparison"); !call->entered)
+                    {
+                        aError = 1;
+                        return 0;
+                    }
                 ref const equal{ compare(NEOS_PY_EQ, a[i], b[i]) };
                 if (!equal) { aError = 1; return 0; }
                 auto const t = truth(equal.get());
@@ -2887,6 +3029,13 @@ namespace neos::python_runtime
                     if (position == -2) { aError = 1; return 0; }
                     if (position < 0)
                         return 4;
+                    std::optional<recursive_call> call;
+                    if (can_recurse(value.get()) || can_recurse(b[static_cast<std::size_t>(position)].second))
+                        if (call.emplace(" in comparison"); !call->entered)
+                        {
+                            aError = 1;
+                            return 0;
+                        }
                     auto const e = equal(value.get(), b[static_cast<std::size_t>(position)].second);
                     if (e < 0) { aError = 1; return 0; }
                     if (e == 0)
@@ -15949,6 +16098,11 @@ namespace neos::python_runtime
             for (auto item : aItems)
             {
                 long long lane = 0;
+                // (a tuple within it: a recursive call (CPython's has no limit but its stack's; RecursionError, not a crash, here))
+                std::optional<recursive_call> call;
+                if (kind_of(item) == NEOS_PY_TUPLE)
+                    if (call.emplace(""); !call->entered)
+                        return false;
                 if (!hash_of(item, lane))
                     return false;
                 acc += static_cast<std::uint64_t>(lane) * prime2;

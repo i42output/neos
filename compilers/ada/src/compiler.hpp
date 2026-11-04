@@ -82,11 +82,15 @@ namespace neos::compilers::ada
         bool parsable_source(neolib::i_string_view const& aSource, neolib::i_string& aResult, neolib::i_vector<std::uint32_t>& aPositions) const override;
         void emit_construct(std::uint32_t aConstruct, neolib::i_string_view const& aSource) override;
         bool frame_name(std::uint32_t aFunction, neolib::i_string& aName) override;
+        bool linked_function(neolib::i_string_view const& aName) const override;
         void diagnose(i_source_fragment const& aFragment, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t& aEndLine, 
             std::uint32_t& aEndColumn, neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport) override;
     public:
         i_code_generator& gen() { return generator(); }
         std::map<std::uint32_t, std::string>& frame_names() { return iFrameNames; }
+        std::set<std::string>& linked_functions() { return iLinkedFunctions; }
+        std::optional<std::string> const& packages_folder() const { return iPackagesFolder; }
+        static constexpr std::string_view ConfigurationUnit = "neos_configuration_pragmas";  ///< (the unit of the configuration pragmas' file)
         void emit_entry(fragment const& aStatement) { push_operand(operand_type{ aStatement }); generator().end_indented(); }   ///< (the entry point's code)
     private:
         // the syntax tree
@@ -116,6 +120,8 @@ namespace neos::compilers::ada
         std::size_t iExpected = 0u;                 ///< (the compilations (files) of the program: generated when all have been parsed)
         bool iMainSeen = false;
         std::map<std::uint32_t, std::string> iFrameNames;
+        std::set<std::string> iLinkedFunctions;     ///< (the functions that the code of a linked program's other translation units can 
+                                                    ///< call by their names: exported subprograms and objects (see program::exports))
         std::unique_ptr<program> iProgram;
         struct pending_error
         {
@@ -125,5 +131,7 @@ namespace neos::compilers::ada
             std::string message;
         };
         std::optional<pending_error> iPendingError;
+        std::optional<std::uint32_t> iSyntaxErrorLine;     ///< (the first syntax error's line)
+        source_file const* iSyntaxErrorFile = nullptr;      ///< (... in this file)
     };
 }

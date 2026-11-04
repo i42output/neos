@@ -6677,12 +6677,25 @@ namespace neos
                                 if (i.crossesCall && needs_location(i.v) && where(i.v).kind == location::Register && callerSaved(i.xmm, where(i.v).reg))
                                     for (auto c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start); c != iCalls.end() && *c < i.end; ++c)
                                     {
-                                        // (not a value defined by the call, or after it (an interval starts at its block's start))
-                                        if (iPosition[i.v] >= *c)
+                                        // (not a value defined by the call, or after it (an interval starts at its block's start); not a phi 
+                                        // where it is not live (its interval reaches the moves to it: a value that only it uses may have its 
+                                        // register there, e.g. the call's result (see allocate)))
+                                        if (iPosition[i.v] >= *c || !live_across(i.v, *c))
                                             continue;
                                         iSavesAtCalls[*c].push_back(i.v);
                                         iCallSaveSlots.emplace(i.v, 0);
                                     }
+                        }
+                        // (a value is live across a call (it is used after it): a phi only where it is live (see iPhiRanges); another 
+                        // throughout its interval)
+                        bool live_across(value aValue, std::uint32_t aCall) const
+                        {
+                            if (f.values[aValue].op != ssa::Phi)
+                                return true;
+                            for (auto const& r : iPhiRanges[aValue])
+                                if (r.first <= aCall && aCall < r.second)
+                                    return true;
+                            return false;
                         }
                         void save_at_call(value v)
                         {
@@ -6716,7 +6729,8 @@ namespace neos
                             for (auto const& i : iIntervals)
                                 if (i.xmm && i.crossesCall && needs_location(i.v) && where(i.v).kind == location::Register && where(i.v).reg >= 8)
                                     for (auto c = std::upper_bound(iCalls.begin(), iCalls.end(), i.start); c != iCalls.end() && *c < i.end; ++c)
-                                        iLiveXmmsAtCalls[*c] |= 1u << where(i.v).reg;
+                                        if (live_across(i.v, *c))
+                                            iLiveXmmsAtCalls[*c] |= 1u << where(i.v).reg;
                         }
                         void spill(value aValue)
                         {
@@ -10483,6 +10497,11 @@ namespace neos
                     tCoroutineStack = aLow;
                 }
 
+                std::uint64_t thread_stack_limit()
+                {
+                    return stack_limit();
+                }
+
                 namespace
                 {
                     // (the patch points of optimized code's watched tests (see optimizer::MemargWatched), by their words' addresses: each
@@ -10862,6 +10881,11 @@ namespace neos
 
                 void set_coroutine_stack(std::uint64_t)
                 {
+                }
+
+                std::uint64_t thread_stack_limit()
+                {
+                    return 0u;
                 }
 
                 void watched_changed(void const*)

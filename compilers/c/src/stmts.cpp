@@ -276,6 +276,16 @@ namespace neos::compilers::c
                 f->hasGoto = true;
             iGotos.push_back(s);
             return;
+        case construct::ComputedGoto:
+        {
+            // (GNU: goto *p, p a label's address (&&label) in this function)
+            expression(s->child(0));
+            if (!value_type(s->child(0))->is_pointer())
+                error(s, "a computed goto's operand is not a pointer");
+            if (f != nullptr)
+                f->hasGoto = f->computedGoto = true;
+            return;
+        }
         case construct::Continue:
         {
             node* loop = nullptr;

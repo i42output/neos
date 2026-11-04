@@ -250,6 +250,7 @@ namespace neos::compilers::ada
         void with_secondary_stack(std::function<void()> const& aGenerate);
         void prologue();
         void renaming_body();
+        bool foreign_call();                                ///< (an imported subprogram of convention C: the call of its external name)
         void return_value(ada_type* aType, bool aAdjust = false);
         void epilogue();
         entity* resolve_renaming(entity* aObject);

@@ -59,6 +59,7 @@ namespace neos::compilers::ada
 
     void compiler::begin_compilation()
     {
+        iLinkedFunctions.clear();
         begin_pass();
     }
 
@@ -130,11 +131,24 @@ namespace neos::compilers::ada
         return true;
     }
 
+    bool compiler::linked_function(neolib::i_string_view const& aName) const
+    {
+        return iLinkedFunctions.contains(aName.to_std_string());
+    }
+
     void compiler::diagnose(i_source_fragment const&, std::uint32_t& aLine, std::uint32_t& aColumn, std::uint32_t&, std::uint32_t&, 
         neolib::i_string& aType, neolib::i_string& aMessage, neolib::i_string& aReport)
     {
         if (!iPendingError)
+        {
+            // (a syntax error: the analysis' errors after it are not reported (its syntax tree is incomplete there))
+            if (!iSyntaxErrorLine || aLine < *iSyntaxErrorLine)
+            {
+                iSyntaxErrorLine = aLine;
+                iSyntaxErrorFile = !iFragments.empty() ? iFragments.back().file : nullptr;
+            }
             return;
+        }
         aLine = iPendingError->line;
         aColumn = iPendingError->column;
         aMessage = neolib::string{ iPendingError->message };
@@ -293,6 +307,15 @@ namespace neos::compilers::ada
         // (the units named, and the units that their files name)
         std::string mainPath = aMainFile.empty() ? std::string{} : std::filesystem::absolute(std::filesystem::path{ aMainFile }, ec).lexically_normal().generic_string();
         std::vector<std::string> work = units_named(aMainSource);
+        // (the main file's own unit's declaration (a body's specification: its with clauses apply to the body, 10.1.2(5)): by GNAT's file
+        // naming, the unit whose name the file's is)
+        if (auto const mainFile = std::filesystem::path{ aMainFile }; mainFile.extension() == ".adb")
+        {
+            auto own = mainFile.stem().string();
+            std::transform(own.begin(), own.end(), own.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            std::replace(own.begin(), own.end(), '-', '.');
+            work.push_back(own);
+        }
         std::set<std::string> seen;
         // (the subunits of a file's body stubs: the files named for them (GNAT's names: the parent's file's name, a '-' and the
         // stub's name (or nested units' names then the stub's)))
@@ -347,11 +370,27 @@ namespace neos::compilers::ada
             std::string folded{ aMainSource };
             fold_case(folded);
             load_subunits(mainPath, folded);
+            // (the environment's configuration pragmas (10.1.5(8): a compilation of configuration pragmas only applies to the 
+            // partition's units): those of the file gnat.adc in the main file's folder (as GNAT's), compiled as the context of a 
+            // unit of their own (ConfigurationUnit))
+            auto const configuration = (std::filesystem::path{ mainPath }.parent_path() / "gnat.adc").generic_string();
+            if (std::ifstream stream{ configuration, std::ios::binary }; stream && !iImported.contains(configuration))
+            {
+                std::ostringstream contents;
+                contents << stream.rdbuf();
+                std::string source = source_text(contents.str());
+                source += "\npackage " + std::string{ ConfigurationUnit } + " is end " + std::string{ ConfigurationUnit } + ";\n";
+                iImported.insert(configuration);
+                generator().import_fragment(neolib::string{ configuration }, neolib::string{ source });
+            }
         }
         for (std::size_t i = 0u; i < work.size(); ++i)
         {
             auto const unit = work[i];
             if (!seen.insert(unit).second)
+                continue;
+            // (package Standard: the prelude, already loaded (a with clause naming it is illegal, 10.1.2(4)))
+            if (unit == "standard" || unit.starts_with("standard."))
                 continue;
             // (a library unit that is an instance has no body: of a declaration that is an instance and a body of its name, the one
             // compiled (written) later replaces the other (10.1.4(5)))
@@ -440,9 +479,31 @@ namespace neos::compilers::ada
         catch (compile_error const& e)
         {
             // (errors recovered from (NEOS_ADA_ALL_ERRORS): the others, then the first)
+            // (after a syntax error in a file: not the errors it causes (the text skipped by the parser's recovery): missing completions
+            // or declarations, errors of the statement or declaration that contains it)
+            auto const afterSyntaxError = [&](compile_error const& aError)
+            {
+                if (!iSyntaxErrorLine || aError.where == nullptr || aError.where->file == nullptr || iSyntaxErrorFile != aError.where->file)
+                    return false;
+                std::string_view const message{ aError.what() };
+                if (message.find("requires a completion") != std::string_view::npos || message.find("has no declaration") != std::string_view::npos)
+                    return true;
+                auto const& file = *aError.where->file;
+                for (node const* n = aError.where; n != nullptr && n->parent != nullptr; n = n->parent)
+                {
+                    if (!n->source.empty() && file.line_of(n->source) <= *iSyntaxErrorLine &&
+                        file.line_of(n->source.substr(n->source.size() - 1u)) >= *iSyntaxErrorLine)
+                        return true;
+                    // (up to the statement or declaration: the lists that contain them)
+                    if (n->parent->is(construct::Declarations) || n->parent->is(construct::Statements) || n->parent->is(construct::Private) ||
+                        n->parent->is(construct::Compilation) || n->parent->is(construct::Unit))
+                        break;
+                }
+                return false;
+            };
             if (iProgram != nullptr)
                 for (auto const& d : iProgram->diagnostics())
-                    if (d.where != e.where || std::string{ d.what() } != e.what())
+                    if ((d.where != e.where || std::string{ d.what() } != e.what()) && !afterSyntaxError(d))
                     {
                         std::string location;
                         if (d.where != nullptr && d.where->file != nullptr)
@@ -450,6 +511,8 @@ namespace neos::compilers::ada
                                 std::to_string(d.where->file->column_of(d.where->source)) + "): ";
                         std::cerr << location << "error: " << d.what() << std::endl;
                     }
+            if (afterSyntaxError(e))
+                return;     // (the syntax error is the compilation's error)
             report(e);
         }
     }

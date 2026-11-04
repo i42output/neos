@@ -139,6 +139,17 @@ namespace neos::python_runtime
                     return make_float(aValue.f32);
                 case NEOS_RT_F64:
                     return make_float(aValue.f64);
+                case NEOS_RT_BIG_INTEGER:
+                    {
+                        // (its hexadecimal digits: see neos_rt_link_type)
+                        std::string_view digits{ aValue.string != nullptr ? aValue.string : "" };
+                        bool const negative = !digits.empty() && digits[0] == '-';
+                        if (negative)
+                            digits.remove_prefix(1u);
+                        if (digits.empty())
+                            break;
+                        return digits_int(digits, 16u, negative);
+                    }
                 case NEOS_RT_STRING:
                     return make_str(aValue.string != nullptr ? aValue.string : "");
                 case NEOS_RT_OBJECT:
