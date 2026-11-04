@@ -451,6 +451,9 @@ namespace neos::compilers::ada
         // (a scalar subtype with a nonstatic constraint: not static, nor its subtypes (4.9(26/3)))
         if (result != aType && result->view()->is_scalar() && (!result->view()->low.known() || !result->view()->high.known()))
             result->nonstatic = true;
+        // (nor one formed by constraining a nonstatic subtype (4.9(26/3)))
+        if (result != aType && result->view()->is_scalar() && aType->view()->is_scalar() && !aType->is_universal() && !static_subtype(aType))
+            result->nonstatic = true;
         if (result != aType && result->kind == type_kind::Private && result->full != nullptr && result->full == aType->full &&
             (result->constrained || result->full->view()->is_scalar()))
             result->full = full_subtype(result, result->full->view());
@@ -1114,8 +1117,9 @@ namespace neos::compilers::ada
             return true;
         if (b->kind == type_kind::ClassWide)
             return b->specific != nullptr && limited_type(b->specific, aRegion);
-        // (a derived type: limited if its parent (its view) is (7.5(3/3)))
-        if (b->parent != nullptr && b->parent != aType && b->parent->base_type() != b && limited_type(b->parent, aRegion, b->declared_in))
+        // (a derived type: limited if its parent (its view) is (7.5(3/3)); not if the parent is an interface (unless declared limited, 7.5(6.1/3)))
+        if (b->parent != nullptr && b->parent != aType && b->parent->base_type() != b && b->parent->view()->base_type()->view()->kind != type_kind::Interface &&
+            limited_type(b->parent, aRegion, b->declared_in))
             return true;
         // (a composite type's components)
         if (b->kind == type_kind::Array)
@@ -1131,6 +1135,9 @@ namespace neos::compilers::ada
     {
         auto* t = aType->base_type();
         if (!t->tagged || (t->kind != type_kind::Record && t->kind != type_kind::Private))
+            return;
+        // (a type derived from an untagged partial view (its full view tagged, not visible here): untagged (7.3(7.3/2), 7.3.1(5/1)))
+        if (t->derived_partial != nullptr)
             return;
         // (a nonlimited tagged type's discriminants: no defaults (3.7(10/3)))
         if (aDiscriminants != nullptr && !t->limited)
@@ -2027,7 +2034,17 @@ namespace neos::compilers::ada
                             break;
                         }
                 // (a tagged parent: a record extension part (or a private extension) (3.4(5/2)))
-                if (extension == nullptr && iInstanceBodies == 0 && parent->view()->kind != type_kind::ClassWide &&
+                // (not the full view of an untagged partial view, where that full view is not visible (7.3(7.3/2)))
+                bool const untaggedPartial = [&]()
+                {
+                    auto* partial = parent->kind == type_kind::Private ? parent : parent->base != nullptr && parent->base->kind == type_kind::Private ? parent->base :
+                        parent->base_type()->partial;
+                    if (partial == nullptr || !(partial->untagged_partial || !partial->tagged) || partial->is_formal)
+                        return false;
+                    auto* package = partial->declared_in != nullptr ? partial->declared_in->owner : nullptr;
+                    return package != nullptr && package->is_package() && !private_part_visible(package, aRegion);
+                }();
+                if (extension == nullptr && iInstanceBodies == 0 && parent->view()->kind != type_kind::ClassWide && !untaggedPartial &&
                     parent->view()->base_type()->view()->tagged && (!parent->view()->base_type()->view()->is_formal || !iInstantiationSites.empty()) &&
                     parent->view()->base_type()->view()->kind != type_kind::Interface)
                     recover([&]() { error(aDefinition, "a type derived from a tagged type must have a record extension part (3.4(5/2))"); });
@@ -2672,8 +2689,9 @@ namespace neos::compilers::ada
         if (t->is_access() && (aParent->not_null || parentView->not_null))
             t->not_null = true;
         // (derived from a partial view whose full view is not visible here: its characteristics are the partial view's (7.3.1(5/1)))
-        if (auto* partial = aParent->kind == type_kind::Private ? aParent : aParent->base != nullptr && aParent->base->kind == type_kind::Private ? aParent->base : nullptr;
-            partial != nullptr && partial->full != nullptr && !partial->is_formal && !partial->tagged)
+        // (a constrained subtype of the partial view: of its full type, whose partial view it is)
+        if (auto* partial = aParent->kind == type_kind::Private ? aParent : aParent->base != nullptr && aParent->base->kind == type_kind::Private ? aParent->base :
+            aParent->base_type()->partial; partial != nullptr && partial->full != nullptr && !partial->is_formal && (!partial->tagged || partial->untagged_partial))
             if (auto* package = partial->declared_in != nullptr ? partial->declared_in->owner : nullptr;
                 package != nullptr && package->is_package() && !private_part_visible(package, aRegion))
                 t->derived_partial = partial;

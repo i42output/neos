@@ -710,6 +710,13 @@ namespace neos::compilers::ada
     {
         auto* result = resolve_expression(aExpression, aExpected, aRegion);
         // (a specific tagged expected type: the expression not dynamically tagged, unless it is a controlling operand (3.9.2(9/1)))
+        // (an implicit conversion of an access parameter to a named access type: illegal (8.6))
+        if (aExpression != nullptr && aExpected != nullptr && result != nullptr && iSpeculation == 0 && iInstanceBodies == 0 &&
+            aExpected->view()->kind == type_kind::Access && !aExpected->view()->anonymous_access && result->anonymous_access &&
+            result->view()->kind == type_kind::Access)
+            if (auto* a = aExpression->is(construct::Parenthesized) && !aExpression->children.empty() ? aExpression->child(0) : aExpression;
+                a->is(construct::Identifier) && a->ent != nullptr && a->ent->kind == entity_kind::Parameter && a->ent->type != nullptr && a->ent->type->anonymous_access)
+                recover([&]() { error(aExpression, "an access parameter cannot be implicitly converted to a named access type (8.6)"); });
         // (an implicit conversion to an anonymous access-to-variable type: not from an access-to-constant type (4.6(24.10/2), 8.6(27.1/4)))
         if (aExpression != nullptr && aExpected != nullptr && result != nullptr && iSpeculation == 0 && iInstanceBodies == 0 &&
             aExpected->view()->kind == type_kind::Access && aExpected->view()->anonymous_access && !aExpected->view()->access_constant &&
@@ -1425,6 +1432,17 @@ namespace neos::compilers::ada
                         aliased_actuals_check(qualified, aExpected, aRegion);
                     if (qualified->type != nullptr)
                         limited_value_check(qualified, qualified->type, aRegion);
+                    // (a class-wide designated type: the qualified expression's type not statically deeper than the allocator's type
+                    // (4.8(5.1/3)))
+                    if (qualified->type != nullptr && aExpected != nullptr && aExpected->view()->kind == type_kind::Access && iSpeculation == 0 &&
+                        (iInstanceBodies == 0 || iInstanceBodies == iInstancePrivateParts) && !within_generic_body(aRegion) && !aExpected->view()->anonymous_access)
+                        if (auto* d = designated_of(aExpected); d != nullptr && d->view()->kind == type_kind::ClassWide)
+                        {
+                            auto* qt = qualified->type->view()->kind == type_kind::ClassWide && qualified->type->view()->specific != nullptr ?
+                                qualified->type->view()->specific : qualified->type;
+                            if (!qt->view()->is_formal && type_level(qt) > type_level(aExpected))
+                                error_in_private_part_too(qualified, "the type of an allocator's qualified expression is statically deeper than the allocator's access type (4.8(5.1/3))");
+                        }
                 }
                 else
                 {
@@ -1435,6 +1453,12 @@ namespace neos::compilers::ada
                     // (an object of an abstract type (3.9.3(8/3)))
                     if (abstract_type(t, aRegion))
                         error(indication, "an allocator cannot create an object of an abstract type");
+                    // (an uninitialized allocator of an access type: no constraint (4.8(4)))
+                    if (iSpeculation == 0 && iInstanceBodies == 0 && t != nullptr && t->view()->is_access() &&
+                        ((indication->is(construct::SubtypeIndication) && (indication->first(construct::Apply) != nullptr ||
+                          std::count_if(indication->children.begin(), indication->children.end(), [](node* c) { return !c->is(construct::Flag); }) > 1)) ||
+                         indication->is(construct::Apply)))
+                        recover([&]() { error(indication, "the subtype indication of an uninitialized allocator of an access type cannot have a constraint (4.8(4))"); });
                     // (an uninitialized allocator's subtype: definite (4.8(4)))
                     if (indefinite_subtype(t, indication, aRegion))
                         error(indication, "an uninitialized allocator's subtype must be definite");
@@ -1507,12 +1531,21 @@ namespace neos::compilers::ada
                 // (the selector: of a discrete type (5.4(4)))
                 auto* selector = aExpression->child(0);
                 ada_type* discrete = nullptr;
+                std::size_t discreteTypes = 0u;
                 for (auto const& o : interpretations(selector, aRegion))
                     if (o.type != nullptr && o.type->view()->is_discrete() && !o.type->is_universal())
+                    {
+                        if (discrete == nullptr || !same_type(discrete, o.type))
+                            ++discreteTypes;
                         discrete = o.type;
+                    }
+                // (resolved without the choices: of a single discrete type (4.5.7(16/3), 5.4(4)))
+                bool const ambiguous = (discreteTypes > 1u || selector->is(construct::Character)) && iSpeculation == 0 && iInstanceBodies == 0;
+                if (ambiguous)
+                    recover([&]() { error(selector, "the selector of a case expression is ambiguous"); });
                 auto* selectorType = resolve(selector, discrete, aRegion);
-                // (its choices: as a case statement's (4.5.7(16/3)))
-                if (iSpeculation == 0)
+                // (its choices: as a case statement's (4.5.7(16/3)); not against a guessed type)
+                if (iSpeculation == 0 && !ambiguous)
                     case_choices_check(aExpression, selector, selectorType, std::vector<node*>(aExpression->children.begin() + 1, aExpression->children.end()), aRegion);
                 for (std::size_t i = 1u; i < aExpression->size(); ++i)
                 {
@@ -1574,11 +1607,27 @@ namespace neos::compilers::ada
         }
         // (a value of a reference type where its designated type is expected: implicitly dereferenced (4.1.5))
         if (result != nullptr && aExpected != nullptr && aExpected != iVoid && implicit_dereference_of(aExpression) == nullptr && !covers(aExpected, result))
+        {
             if (auto* d = implicit_dereference(result); d != nullptr && d != result && covers(aExpected, d))
             {
                 iImplicitDereferences[aExpression] = result;
                 result = d;
             }
+            // (an indexed component or a slice: of the expected type (8.6(22)); here, one of another class of type)
+            else if (aExpression->is(construct::Apply) && (meaning_of(aExpression) == meaning::Index || meaning_of(aExpression) == meaning::Slice) &&
+                iSpeculation == 0 && iInstanceBodies == 0 && [&]()
+                {
+                    auto* r = result->view()->base_type()->view();
+                    auto* e = aExpected->view()->base_type()->view();
+                    if (r->is_formal || e->is_formal || r->kind == type_kind::Private || e->kind == type_kind::Private || r->is_universal() || e->is_universal() ||
+                        r->kind == type_kind::ClassWide || e->kind == type_kind::ClassWide)
+                        return false;
+                    bool const rNumeric = r->is_numeric();
+                    bool const eNumeric = e->is_numeric();
+                    return r->kind != e->kind && !(rNumeric && eNumeric);
+                }())
+                error(aExpression, "the indexed component or slice is not of the expected type");
+        }
         aExpression->type = result;
         return result;
     }
@@ -2051,6 +2100,7 @@ namespace neos::compilers::ada
         }
         aOperator->ent = op;
         set_meaning(aOperator, meaning::Call);
+        class_wide_contract_call_check(op, aOperator, operands);
         // (a fixed-fixed multiplying operator: not an operand of another (its expected type would be universal_fixed, 4.5.5(19.1/2)))
         if ((op->sub->op == intrinsic::UniversalFixedMultiply || op->sub->op == intrinsic::UniversalFixedDivide) && iSpeculation == 0 && iInstanceBodies == 0)
             for (auto* operand : operands)
@@ -2092,6 +2142,21 @@ namespace neos::compilers::ada
         auto const options = interpretations(aOperand, aRegion);
         auto* target = aTarget->view();
         ada_type* chosen = nullptr;
+        // (a tagged target type: the operand's type a descendant of it, or class-wide covering it (a conversion toward the root, or a
+        // checked one away from it); an interface either way (4.6(21.3/2-23/2)))
+        auto const taggedConvertible = [&](ada_type* aTo, ada_type* aFrom)
+        {
+            auto* to = aTo->view();
+            auto* from = aFrom->view();
+            bool const classWide = from->kind == type_kind::ClassWide;
+            auto* ts = to->kind == type_kind::ClassWide && to->specific != nullptr ? to->specific : aTo;
+            auto* fs = classWide && from->specific != nullptr ? from->specific : aFrom;
+            auto const interfaceType = [](ada_type* x) { return x->view()->base_type()->view()->kind == type_kind::Interface; };
+            if (interfaceType(ts) || interfaceType(fs) || ts->view()->is_formal || fs->view()->is_formal || ts->view()->base_type()->view()->is_formal ||
+                fs->view()->base_type()->view()->is_formal || iInstanceBodies != 0)
+                return true;
+            return same_type(ts, fs) || is_descendant(fs, ts) || (classWide && is_descendant(ts, fs));
+        };
         for (auto const& o : options)
         {
             if (o.type == nullptr)
@@ -2163,7 +2228,24 @@ namespace neos::compilers::ada
                 convertible = !(tb->kind == type_kind::Access && ob->kind == type_kind::Access && !tb->access_all && !tb->access_constant &&
                     !tb->anonymous_access && !ob->anonymous_access && !tb->is_formal && !ob->is_formal && iInstanceBodies == 0 &&
                     (tb->root != nullptr ? tb->root : tb)->view() != (ob->root != nullptr ? ob->root : ob)->view());
+                // (general access types designating tagged types: the designated types convertible (4.6(24.15/2)))
+                if (convertible && tb->kind == type_kind::Access && ob->kind == type_kind::Access && tb->designated != nullptr && ob->designated != nullptr &&
+                    (tb->root != nullptr ? tb->root : tb)->view() != (ob->root != nullptr ? ob->root : ob)->view())
+                {
+                    auto* td = tb->designated->view();
+                    auto* od = ob->designated->view();
+                    if ((td->base_type()->view()->tagged || td->kind == type_kind::ClassWide) && (od->base_type()->view()->tagged || od->kind == type_kind::ClassWide))
+                        convertible = taggedConvertible(tb->designated, ob->designated);
+                }
             }
+            else if ([&]()
+                {
+                    // (tagged views: not a type derived from an untagged partial view (whose full view is tagged, 7.3(7.3/2)))
+                    auto const tagged = [](ada_type* x) { return x->kind == type_kind::ClassWide || (x->base_type()->view()->tagged &&
+                        x->base_type()->derived_partial == nullptr && x->derived_partial == nullptr); };
+                    return tagged(target) && tagged(t);
+                }())
+                convertible = taggedConvertible(aTarget, o.type);
             else if (target->root == t->root || (target->base_type()->root != nullptr && target->base_type()->root == t->base_type()->root))
                 convertible = true;
             else if ((target->tagged || target->kind == type_kind::ClassWide) && (t->tagged || t->kind == type_kind::ClassWide))
@@ -2227,6 +2309,10 @@ namespace neos::compilers::ada
             else if (auto* operand = aOperand; operand->is(construct::Identifier) && operand->ent != nullptr && operand->ent->kind == entity_kind::Discriminant &&
                 operand->ent->scope != nullptr && operand->ent->scope->owner != nullptr && operand->ent->scope->owner->kind == entity_kind::Type)
                 level = std::numeric_limits<std::int64_t>::max();
+            // (an access discriminant of an object (X.D): the object's level (3.10.2))
+            else if (operand->is(construct::Selected) && operand->size() == 2u && operand->child(1)->ent != nullptr &&
+                operand->child(1)->ent->kind == entity_kind::Discriminant)
+                level = static_level(operand->child(0), aRegion);
             if (level && *level > type_level(aTarget))
                 error_in_private_part_too(aOperand, "the operand's access type is statically deeper than the target type (4.6(24.17/3))");
         }

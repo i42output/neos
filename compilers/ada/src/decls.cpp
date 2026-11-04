@@ -729,6 +729,16 @@ namespace neos::compilers::ada
                     }
                     return;
                 }
+                if (name == "no_return")
+                {
+                    // (a static Boolean value (6.5.1))
+                    resolve(value, iBoolean, aRegion);
+                    if (iInstanceBodies == 0 && !static_expression(value))
+                        error(value, "the value of aspect No_Return must be static (6.5.1)");
+                    if (auto v = evaluate(value, aRegion); ent != nullptr && ent->sub != nullptr && v.is_integer() && v.integer() != bigint{ 0 })
+                        ent->sub->no_return = true;
+                    return;
+                }
                 if (name.starts_with("indexing'"))
                 {
                     // (the functions that the name denotes: declared immediately in the same declaration list as the type, each with at least
@@ -965,8 +975,10 @@ namespace neos::compilers::ada
                     // (a subprogram's precondition or postcondition (the latter can name its result))
                     // (a class-wide one: of a primitive subprogram of a tagged type (6.1.1(5/3)))
                     // (declared in a package body (or other body): not primitive)
+                    // (nor of a formal type, which has no primitive subprograms declared in the generic)
                     if ((name == "pre'class" || name == "post'class") && iInstanceBodies == 0 && ent->sub != nullptr && ent->sub->controlling != nullptr &&
-                        ent->scope != nullptr && (ent->scope->package_body || ent->scope->subprogram_body || ent->scope->is_subprogram))
+                        ((ent->scope != nullptr && (ent->scope->package_body || ent->scope->subprogram_body || ent->scope->is_subprogram)) ||
+                         ent->sub->controlling->view()->is_formal || ent->sub->controlling->is_formal))
                         recover([&]() { error(value, "aspect " + name + " can be specified only for a primitive subprogram of a tagged type"); });
                     else if ((name == "pre'class" || name == "post'class") && iInstanceBodies == 0 && ent->sub != nullptr && ent->sub->controlling == nullptr &&
                         [&]()
@@ -2551,7 +2563,7 @@ namespace neos::compilers::ada
             conformant = a[i].ent != nullptr && b[i].ent != nullptr && a[i].ent->name == b[i].ent->name && a[i].mode == b[i].mode &&
                 (a[i].not_null == b[i].not_null || (a[i].type != nullptr && a[i].type->anonymous_access)) && subtypes(a[i].type, b[i].type) &&
                 (a[i].default_expression == nullptr) == (b[i].default_expression == nullptr) &&
-                (a[i].default_expression == nullptr || conformance_text(a[i].default_expression) == conformance_text(b[i].default_expression));
+                (a[i].default_expression == nullptr || fully_conformant(a[i].default_expression, b[i].default_expression));
         if (!conformant)
             error(aWhere, "the body of \"" + aName + "\" does not conform to its declaration");
     }
@@ -3318,6 +3330,27 @@ namespace neos::compilers::ada
                         recover([&]() { error(renamed, "the renamed entity must be an object"); });
                     else if (discriminant_dependent(renamed))
                         recover([&]() { error(renamed, "a subcomponent that depends on discriminants of an unconstrained variable cannot be renamed"); });
+                    // (an access definition: the name resolved to any anonymous access type (not using the designated subtype): one interpretation
+                    // (8.5.1(3/2)))
+                    if (typeNode != nullptr && typeNode->is(construct::AccessDefinition) && object)
+                    {
+                        std::vector<ada_type*> anonymous;
+                        // (of the same designated type (access-to-object), or type conformant profile (access-to-subprogram))
+                        auto const fits = [&](ada_type* x)
+                        {
+                            if (type == nullptr || x->view()->kind != type->view()->kind)
+                                return false;
+                            if (x->view()->kind == type_kind::Access)
+                                return x->view()->designated == nullptr || type->view()->designated == nullptr || same_type(x->view()->designated, type->view()->designated);
+                            return x->view()->profile == nullptr || type->view()->profile == nullptr || type_conformant(*x->view()->profile, *type->view()->profile);
+                        };
+                        for (auto const& o : interpretations(renamed, aRegion))
+                            if (o.type != nullptr && o.type->anonymous_access && fits(o.type) &&
+                                std::none_of(anonymous.begin(), anonymous.end(), [&](ada_type* x) { return x == o.type; }))
+                                anonymous.push_back(o.type);
+                        if (anonymous.size() > 1u)
+                            recover([&]() { error(renamed, "the renamed name is ambiguous (it is resolved to any anonymous access type, 8.5.1(3/2))"); });
+                    }
                     // (an access definition: the renamed object of an anonymous access type, both access-to-constant or neither, their
                     // designated subtypes statically matching (8.5.1(3/2), (4.2/2)))
                     if (typeNode != nullptr && typeNode->is(construct::AccessDefinition) && type != nullptr && target != nullptr && target->is_object() &&
@@ -3716,6 +3749,15 @@ namespace neos::compilers::ada
                             else if (earlier->scope != aRegion && !subtype_conformant(*earlier->sub, *renamed->sub))
                                 recover([&]() { error(target, "the renamed subprogram must be subtype conformant with the declaration the renaming-as-body "
                                     "completes (8.5.4(5/3))"); });
+                            // (completing a nonreturning procedure: of a nonreturning procedure (6.5.1))
+                            if (earlier->sub->no_return && [&]()
+                                {
+                                    for (auto* x = renamed; x != nullptr && x->sub != nullptr; x = x->sub->renames != x ? x->sub->renames : nullptr)
+                                        if (x->sub->no_return)
+                                            return false;
+                                    return true;
+                                }())
+                                recover([&]() { error(target, "a renaming-as-body that completes a nonreturning procedure must rename a nonreturning procedure (6.5.1)"); });
                         }
                     }
                     earlier->sub->renames = renamed;
@@ -3732,6 +3774,9 @@ namespace neos::compilers::ada
                     aDecl->ent = earlier;
                     break;
                 }
+                // (a renaming-as-declaration: not a homograph of a nonoverloadable declaration of the region (8.3(26/2)))
+                if (iInstanceBodies == 0 && iInstantiationSites.empty() && iDeclaringUnit == nullptr)
+                    recover([&]() { redeclaration_check(e->name, kind, defining, aRegion); });
                 e->is_private = aRegion->private_start != static_cast<std::size_t>(-1) && aRegion->declarations.size() >= aRegion->private_start;
                 aRegion->add(e);
                 register_library_unit(e);

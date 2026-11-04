@@ -377,6 +377,9 @@ namespace neos::compilers::ada
                         entry = i->second;
                 if (entry == nullptr)
                     error(item, "entry body \"" + name + "\" has no declaration");
+                // (one body per entry (9.5.2))
+                if (iInstanceBodies == 0 && entry->sub != nullptr && entry->sub->spec != nullptr && entry->sub->spec != item && entry->sub->spec->is(construct::EntryBody))
+                    recover([&]() { error(item, "entry \"" + name + "\" already has a body"); });
                 item->ent = entry;
                 ed->ent = entry;
                 auto* er = new_region(entry, r);

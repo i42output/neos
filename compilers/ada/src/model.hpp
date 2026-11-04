@@ -445,7 +445,8 @@ namespace neos::compilers::ada
         std::uint32_t function_level = 0u;  ///< (an object: the level of the subprogram whose frame it is in)
         int elaborated = 0;
         std::int32_t index = 0;             ///< (a component's index in its record type; a parameter's index)
-        bool overloadable() const { return kind == entity_kind::Procedure || kind == entity_kind::Function || kind == entity_kind::EnumerationLiteral || kind == entity_kind::Entry || kind == entity_kind::Attribute; }
+        bool overloadable() const { return kind == entity_kind::Procedure || kind == entity_kind::Function || kind == entity_kind::EnumerationLiteral ||
+            (kind == entity_kind::Entry && !(sub != nullptr && sub->family_type != nullptr)) || kind == entity_kind::Attribute; }   ///< (not an entry family (8.3(9/1)))
         bool is_object() const { return kind == entity_kind::Variable || kind == entity_kind::Constant || kind == entity_kind::Parameter || kind == entity_kind::LoopParameter || kind == entity_kind::Component || kind == entity_kind::Discriminant; }
         bool is_subprogram() const { return kind == entity_kind::Procedure || kind == entity_kind::Function || kind == entity_kind::Entry; }
         bool is_type() const { return kind == entity_kind::Type || kind == entity_kind::Subtype; }

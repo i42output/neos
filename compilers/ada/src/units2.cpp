@@ -185,8 +185,14 @@ namespace neos::compilers::ada
             }
             else if (name == "no_return")
             {
-                if (aEntity->sub != nullptr && (value == nullptr || name_text(value->source) == "true"))
+                // (of a procedure or generic procedure, not a null procedure nor an instance; its value static Boolean (6.5.1))
+                if (iInstanceBodies == 0 && ((aEntity->kind != entity_kind::Procedure && aEntity->kind != entity_kind::GenericProcedure) ||
+                    aDecl->is(construct::Instantiation) || aDecl->is(construct::SubprogramNull)))
+                    recover([&]() { error(aspect, "aspect No_Return can be specified only for a procedure or generic procedure (not a null procedure nor an instance) (6.5.1)"); });
+                else if (aEntity->sub != nullptr && value == nullptr)
                     aEntity->sub->no_return = true;
+                else if (aEntity->sub != nullptr)
+                    iDeferredAspects[aRegion].push_back({ nullptr, name, value, aEntity });     // (its value: at the end of the declarative part)
             }
             else if (name == "pre" || name == "pre'class" || name == "post" || name == "post'class")
             {
@@ -200,6 +206,89 @@ namespace neos::compilers::ada
                 else if ((name == "pre'class" || name == "post'class") && iInstanceBodies == 0 && aRegion != nullptr && aRegion->owner != nullptr &&
                     (aRegion->owner->kind == entity_kind::Protected || aRegion->owner->kind == entity_kind::Task))
                     recover([&]() { error(aspect, "aspect " + name + " cannot be specified for a protected operation"); });
+                // (Pre'Class of an overriding: only if an overridden operation has Pre'Class (6.1.1(17.1/4)))
+                else if (name == "pre'class" && iInstanceBodies == 0 && aEntity->sub != nullptr && [&]()
+                    {
+                        // (its controlling type (not yet determined here): a tagged type of its profile declared in its region)
+                        auto const tagged = [&](ada_type* x) { return x != nullptr && x->view()->base_type()->view()->tagged &&
+                            x->view()->kind != type_kind::ClassWide && x->view()->base_type()->view()->declared_in == aRegion; };
+                        for (auto const& p : aEntity->sub->parameters)
+                            if (tagged(p.type))
+                                return true;
+                        return tagged(aEntity->sub->result);
+                    }())
+                {
+                    auto const hasPreClass = [&](entity* aOp)
+                    {
+                        for (int n = 0; aOp != nullptr && aOp->sub != nullptr && n < 64; ++n, aOp = aOp->sub->parent_operation)
+                        {
+                            if (!aOp->sub->class_preconditions.empty())
+                                return true;
+                            for (node* d = aOp->decl; d != nullptr; d = d->parent)
+                                if (auto* as = d->first(construct::Aspects))
+                                {
+                                    for (auto* a : as->children)
+                                        if (name_text(a->child(0)->source) == "pre" && a->size() > 2u && a->child(1)->is(construct::Word) &&
+                                            name_text(a->child(1)->source) == "class")
+                                            return true;
+                                    break;
+                                }
+                                else if (d->is(construct::SubprogramDeclaration) || d->is(construct::SubprogramAbstract) || d->is(construct::SubprogramNull) ||
+                                    d->is(construct::SubprogramBody) || d->is(construct::SubprogramExpression))
+                                    break;
+                        }
+                        return false;
+                    };
+                    ada_type* t = nullptr;
+                    for (auto const& p : aEntity->sub->parameters)
+                        if (t == nullptr && p.type != nullptr && p.type->view()->base_type()->view()->tagged && p.type->view()->kind != type_kind::ClassWide &&
+                            p.type->view()->base_type()->view()->declared_in == aRegion)
+                            t = p.type->view()->base_type()->view();
+                    if (t == nullptr)
+                        t = aEntity->sub->result->view()->base_type()->view();
+                    std::vector<entity*> overridden;
+                    // (the ancestors' (parent's and progenitors') primitives of the name and profile, their controlling type for T)
+                    std::vector<ada_type*> ancestors;
+                    std::function<void(ada_type*, int)> collect = [&](ada_type* x, int aDepth)
+                    {
+                        if (x == nullptr || aDepth > 32)
+                            return;
+                        auto* xv = x->view()->base_type()->view();
+                        if (std::find(ancestors.begin(), ancestors.end(), xv) != ancestors.end())
+                            return;
+                        ancestors.push_back(xv);
+                        if (xv->parent != nullptr && xv->parent->view()->base_type()->view() != xv)
+                            collect(xv->parent, aDepth + 1);
+                        for (auto* i : xv->interfaces)
+                            collect(i, aDepth + 1);
+                    };
+                    if (t->parent != nullptr && t->parent->view()->base_type()->view() != t)
+                        collect(t->parent, 0);
+                    for (auto* i : t->interfaces)
+                        collect(i, 0);
+                    for (auto* a : ancestors)
+                        for (auto* op : a->primitives)
+                        {
+                            if (op->sub == nullptr || op->name != aEntity->name || op->sub->parameters.size() != aEntity->sub->parameters.size() ||
+                                (op->sub->result == nullptr) != (aEntity->sub->result == nullptr))
+                                continue;
+                            auto const corresponds = [&](ada_type* x, ada_type* y)
+                            {
+                                if (x == nullptr || y == nullptr)
+                                    return x == y;
+                                if (same_type(x, y))
+                                    return true;
+                                return x->view()->base_type()->view() == a && y->view()->base_type()->view() == t;
+                            };
+                            bool same = corresponds(op->sub->result, aEntity->sub->result);
+                            for (std::size_t k = 0u; same && k < op->sub->parameters.size(); ++k)
+                                same = corresponds(op->sub->parameters[k].type, aEntity->sub->parameters[k].type);
+                            if (same)
+                                overridden.push_back(op);
+                        }
+                    if (!overridden.empty() && std::none_of(overridden.begin(), overridden.end(), hasPreClass))
+                        recover([&]() { error(value != nullptr ? value : aspect, "Pre'Class cannot be specified for an overriding of a subprogram without Pre'Class (6.1.1(17.1/4))"); });
+                }
                 // (resolved at the end of the declarative part (they can name declarations after the subprogram's))
                 if (aEntity->sub != nullptr && value != nullptr && !assertion_ignored(name, aRegion))
                 {
@@ -1560,6 +1649,52 @@ namespace neos::compilers::ada
     void program::resolve_requeue(node* aRequeue, region* aRegion)
     {
         auto* name = aRequeue->child(0);
+        // (directly within an entry body or an accept statement: the innermost enclosing body or callable construct (9.5.4))
+        if (iInstanceBodies == 0)
+        {
+            node const* innermost = nullptr;
+            for (auto* n = aRequeue->parent; n != nullptr && innermost == nullptr; n = n->parent)
+                if (n->is(construct::EntryBody) || n->is(construct::Accept) || n->is(construct::SubprogramBody) || n->is(construct::PackageBody) ||
+                    n->is(construct::TaskBody) || n->is(construct::ProtectedBody))
+                    innermost = n;
+            if (innermost == nullptr || !(innermost->is(construct::EntryBody) || innermost->is(construct::Accept)))
+                recover([&]() { error(aRequeue, "a requeue statement must be directly within an entry body or an accept statement (9.5.4)"); });
+            // (the target object: not declared within the entry body or accept statement (statically deeper), unless a formal parameter
+            // of it (9.5.4))
+            else if (name->is(construct::Selected) || name->is(construct::Apply))
+            {
+                auto* root = name->is(construct::Apply) ? name->child(0) : name;
+                root = root->is(construct::Selected) ? root->child(0) : nullptr;
+                while (root != nullptr && (root->is(construct::Selected) || root->is(construct::Apply) || root->is(construct::Parenthesized)) && !root->children.empty())
+                    root = root->child(0);
+                entity* object = nullptr;
+                if (root != nullptr && root->is(construct::Identifier))
+                {
+                    std::vector<entity*> found;
+                    try { speculation guard{ *this }; found = visible(name_text(root->source), aRegion); } catch (compile_error const&) {}
+                    if (found.size() == 1u && found.front()->is_object())
+                        object = found.front();
+                }
+                // (within an enclosing accept statement (or the entry body): deeper, unless a formal parameter of the innermost one)
+                if (object != nullptr && object->decl != nullptr && [&]()
+                    {
+                        for (node const* a = innermost; a != nullptr; a = a->parent)
+                        {
+                            if (!(a->is(construct::Accept) || a->is(construct::EntryBody)))
+                            {
+                                if (a->is(construct::TaskBody) || a->is(construct::ProtectedBody) || a->is(construct::SubprogramBody) || a->is(construct::PackageBody))
+                                    break;
+                                continue;
+                            }
+                            for (node const* n = object->decl; n != nullptr; n = n->parent)
+                                if (n == a)
+                                    return !(a == innermost && object->kind == entity_kind::Parameter);
+                        }
+                        return false;
+                    }())
+                    recover([&]() { error(aRequeue, "the target object of a requeue statement cannot be statically deeper than the entry body or accept statement (9.5.4)"); });
+            }
+        }
         // (an entry of the same or another task or protected object)
         try
         {
@@ -1624,6 +1759,20 @@ namespace neos::compilers::ada
         if (target != nullptr && enclosing != nullptr && target->sub != nullptr && enclosing->sub != nullptr && !target->sub->parameters.empty() &&
             !type_conformant(*target->sub, *enclosing->sub))
             recover([&]() { error(name, "the target of a requeue must have no parameters or a profile type conformant with the enclosing entry's"); });
+        // (the target protected object: a variable (9.5.4, AI05-0225-1))
+        if (iInstanceBodies == 0 && target != nullptr && target->kind == entity_kind::Entry && target->scope != nullptr && target->scope->owner != nullptr &&
+            target->scope->owner->kind == entity_kind::Protected)
+        {
+            node* object = call != nullptr && call->object != nullptr ? call->object : nullptr;
+            if (object == nullptr)
+            {
+                auto* n = name->is(construct::Apply) ? name->child(0) : name;
+                if (n->is(construct::Selected))
+                    object = n->child(0);
+            }
+            if (object != nullptr && !is_variable(object))
+                recover([&]() { error(name, "the target protected object of a requeue must be a variable (9.5.4)"); });
+        }
     }
 
     // --- generic units
@@ -2262,9 +2411,11 @@ namespace neos::compilers::ada
         auto const limited = [&]()
         {
             auto* b = v->base_type();
+            // (the view's limitedness (7.5): a record extension of a limited interface is not limited unless it says so)
+            if (iInstanceBodies == 0)
+                return limited_type(aActual, aRegion);
             return v->limited || b->limited || b->kind == type_kind::Task || b->kind == type_kind::Protected ||
-                (b->view()->kind == type_kind::ClassWide && b->view()->specific != nullptr && b->view()->specific->view()->limited) ||
-                (iInstanceBodies == 0 && limited_type(aActual, aRegion));
+                (b->view()->kind == type_kind::ClassWide && b->view()->specific != nullptr && b->view()->specific->view()->limited);
         };
         auto const definite = [&]()
         {

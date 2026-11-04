@@ -283,6 +283,10 @@ namespace neos::compilers::ada
                     result = e->sub->result;
             return result;
         }
+        // (S'Class (X): a conversion to the class-wide type)
+        if (name == "class" && !arguments_of(aAttribute).empty() && is_subtype_name(prefix, aRegion))
+            if (auto* t = prefix_type(); t != nullptr)
+                return t->view()->kind == type_kind::ClassWide ? t : class_wide(t);
         if (name == "old" || name == "loop_entry" || name == "class")
             return prefix_type();
         if (name == "range" || name == "reverse_range")
@@ -522,6 +526,9 @@ namespace neos::compilers::ada
         ada_type* prefixType = nullptr;
         if (typePrefix)
         {
+            // (F'Result: of a function, not a type (6.1.1(29/3)))
+            if (name == "result" && iSpeculation == 0 && iInstanceBodies == 0)
+                error(aAttribute, "'Result can be used only in a postcondition of the function");
             prefixType = subtype_mark(prefix, aRegion);
             set_meaning(prefix, meaning::Type);
             // (T'Access of the current instance of a type, of a named access type: assumed statically deeper (3.10.2(28/3)))
@@ -994,7 +1001,7 @@ namespace neos::compilers::ada
                     prefixName = prefixName.substr(dot + 1);
                 if (prefixName.size() >= 2u && prefixName.front() == '"' && prefixName.back() == '"')
                     prefixName = prefixName.substr(1, prefixName.size() - 2u);
-                if (iPostconditionOf == nullptr || prefixName != iPostconditionOf->name)
+                if (iPostconditionOf == nullptr || prefixName != iPostconditionOf->name || iPostconditionOf->kind != entity_kind::Function)
                     error(aAttribute, "'Result can be used only in a postcondition of the function");
             }
         }

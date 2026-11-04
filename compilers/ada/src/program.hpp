@@ -649,6 +649,7 @@ namespace neos::compilers::ada
         bool partial_component_here(ada_type* aArray, region* aRegion);
         void synchronized_target_check(entity* aOperation, node* aObject, node* aCall);
         bool dynamically_tagged(node* aExpression);     ///< (a class-wide expression, or a dispatching call with a controlling result (3.9.2(5/2, 6/2)))
+        void class_wide_contract_call_check(entity* aCallee, node* aCall, std::vector<node*> const& aActuals);    ///< (a call in a class-wide condition (6.1.1(18.2/4)))
         void incomplete_result_check(entity* aCallee, node* aCall);
         std::vector<entity*> operator_candidates(std::string const& aDesignator, std::vector<node*> const& aOperands, region* aRegion);
         region* selected_operator_scope(node* aPrefix, region* aRegion);

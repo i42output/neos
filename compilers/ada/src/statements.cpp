@@ -207,6 +207,9 @@ namespace neos::compilers::ada
                     }
             }
             auto* e = declare(entity_kind::LoopParameter, defining, aRegion);
+            // (hidden from all visibility within its own specification (8.3(16)))
+            e->declaring = true;
+            struct restore_declaring { entity* e; ~restore_declaring() { e->declaring = false; } } restoreDeclaring{ e };
             if (iterator)
             {
                 auto* iteratorType = resolve(range->child(0), nullptr, aRegion);
@@ -230,6 +233,7 @@ namespace neos::compilers::ada
                 if (t != nullptr && !static_subtype(t))
                     predicate_check(t, range);
             }
+            e->declaring = false;   // (visible in its filter)
             if (auto* filter = aSpecification->first(construct::Filter))
                 condition(filter->child(0), aRegion);
             return;
@@ -305,6 +309,10 @@ namespace neos::compilers::ada
                 "unconstrained variable (5.5.2(6.1/4))"); });
         e->where = storage::Renaming;
         e->renamed_name = iterable;
+        // (a container element iterator without Variable_Indexing: a constant loop parameter (5.5.2(12/3)))
+        if (v != nullptr && v->kind != type_kind::Array && !v->is_formal && t != nullptr && aspect_subprogram(t, "variable_indexing") == nullptr &&
+            aspect_subprogram(t, "constant_indexing") != nullptr)
+            e->kind = entity_kind::Constant;
         if (auto* filter = aSpecification->first(construct::Filter))
             condition(filter->child(0), aRegion);
     }
@@ -669,7 +677,9 @@ namespace neos::compilers::ada
                 if (t != nullptr && iInstanceBodies == 0 && !t->view()->is_formal && !t->base_type()->view()->is_formal &&
                     (!t->view()->is_discrete() || partial_view_here(t, aRegion)))
                     recover([&]() { error(selector, "the selector of a case statement must be of a discrete type"); });
-                case_choices_check(aStatement, selector, t, aStatement->all(construct::Alternative), aRegion);
+                // (an ambiguous selector: its choices not checked against a guessed type (no cascade))
+                if (!((discrete > 1u || selector->is(construct::Character)) && iInstanceBodies == 0))
+                    case_choices_check(aStatement, selector, t, aStatement->all(construct::Alternative), aRegion);
                 for (auto* alternative : aStatement->all(construct::Alternative))
                     statements(alternative->first(construct::Statements), aRegion);
                 break;
@@ -728,6 +738,26 @@ namespace neos::compilers::ada
             for (auto* c : aStatement->children)
                 if (!c->is(construct::Word))
                     condition(c, aRegion);
+            // (within a loop (the one it names), not outside a body or accept statement (5.7(4)))
+            if (iInstanceBodies == 0)
+            {
+                auto* name = aStatement->first(construct::Word);
+                bool found = false;
+                for (auto* n = aStatement->parent; n != nullptr && !found; n = n->parent)
+                {
+                    if (n->is(construct::SubprogramBody) || n->is(construct::EntryBody) || n->is(construct::Accept) || n->is(construct::TaskBody) ||
+                        n->is(construct::PackageBody))
+                        break;
+                    if (n->is(construct::Loop))
+                    {
+                        auto* loopName = n->first(construct::Word);
+                        found = name == nullptr || (loopName != nullptr && name_text(loopName->source) == name_text(name->source));
+                    }
+                }
+                if (!found)
+                    recover([&]() { error(aStatement, name != nullptr ? "an exit statement must be within the loop that it names (5.7(4))" :
+                        "an exit statement must be within a loop (5.7(4))"); });
+            }
             break;
         case construct::Goto:
             // (its target: a labeled statement of a sequence of statements that encloses the goto statement, not outside an enclosing
@@ -780,6 +810,13 @@ namespace neos::compilers::ada
                 else if (applies != nullptr && aStatement->size() == 0u && function)
                     recover([&]() { error(aStatement, "a return statement in a function body must have an expression (6.5(5/2))"); });
             }
+            // (not of a nonreturning procedure (6.5.1))
+            if (iInstanceBodies == 0)
+                if (auto* owner = return_owner(aRegion); owner != nullptr && owner->kind == entity_kind::Procedure && owner->sub != nullptr && (owner->sub->no_return ||
+                    // (check_generic's instance: of a nonreturning generic procedure)
+                    (iTemplateInstances.contains(owner) && std::any_of(iTemplateInstanceOf.begin(), iTemplateInstanceOf.end(), [&](auto const& g)
+                        { return g.second == owner && g.first->sub != nullptr && g.first->sub->no_return; }))))
+                    recover([&]() { error(aStatement, "a return statement cannot apply to a nonreturning procedure (6.5.1)"); });
             if (aStatement->size() > 0u)
             {
                 ada_type* t = nullptr;
