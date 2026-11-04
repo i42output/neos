@@ -35,8 +35,10 @@
 
 #ifndef __NEOS_ERRNO_H
 #define __NEOS_ERRNO_H
-/* (errno: an int of the runtime's (a fixed address in the C memory); the error numbers are POSIX's (as Linux has them)) */
-#define errno (*(int*)0x10000)
+/* (errno: an int of the runtime's, each thread's own (the program's thread's at a fixed address in the C memory); the error numbers
+   are POSIX's (as Linux has them)) */
+int* __errno_location(void);
+#define errno (*__errno_location())
 
 #define EPERM 1
 #define ENOENT 2

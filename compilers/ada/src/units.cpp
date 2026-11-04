@@ -420,21 +420,41 @@ namespace neos::compilers::ada
                     return true;
             return false;
         };
-        if (auto* decls = u->item->first(construct::Declarations))
+        // (the types of its visible part, and of its nested packages' visible parts, task and protected types included (10.1.1))
+        std::function<void(node*, region*)> populate = [&](node* aPackage, region* aRegion)
+        {
+            auto* decls = aPackage->first(construct::Declarations);
+            if (decls == nullptr)
+                return;
             for (auto* d : decls->children)
-                if (d->is(construct::Type) || d->is(construct::TypePrivate) || d->is(construct::TypePrivateExtension) || d->is(construct::TypeIncomplete))
+                if (d->is(construct::Type) || d->is(construct::TypePrivate) || d->is(construct::TypePrivateExtension) || d->is(construct::TypeIncomplete) ||
+                    d->is(construct::TaskType) || d->is(construct::ProtectedType))
+                {
                     if (auto* defining = d->first(construct::Defining))
                     {
                         auto* t = new_type(type_kind::Private, {});
                         t->incomplete = true;
                         t->tagged = tagged(d);
-                        auto* e = new_entity(entity_kind::Type, name_text(defining->source), nullptr, view->inner);
+                        auto* e = new_entity(entity_kind::Type, name_text(defining->source), nullptr, aRegion);
                         e->type = t;
                         t->decl = e;
-                        t->declared_in = view->inner;
+                        t->declared_in = aRegion;
                         t->first_subtype = true;
-                        view->inner->add(e);
+                        aRegion->add(e);
                     }
+                }
+                else if (d->is(construct::Package))
+                    if (auto* defining = d->first(construct::Defining))
+                    {
+                        auto* nested = new_entity(entity_kind::Package, name_text(defining->source), nullptr, aRegion);
+                        nested->limited_view = true;
+                        nested->inner = new_region(nested, aRegion);
+                        nested->inner->is_package = true;
+                        aRegion->add(nested);
+                        populate(d, nested->inner);
+                    }
+        };
+        populate(u->item, view->inner);
         if (std::getenv("NEOS_ADA_DEBUG"))
         {
             std::fprintf(stderr, "limited view %s:", aName.c_str());
@@ -519,6 +539,20 @@ namespace neos::compilers::ada
                     }
                     if (iCurrentUnit != nullptr && aContext == iCurrentUnit->unit->first(construct::Context))
                         recover([&]() { private_child_with_check(clause, name, full); });
+                    // (a unit's declaration: not depending on itself (10.1.4(5)))
+                    if (iCurrentUnit != nullptr && aContext == iCurrentUnit->unit->first(construct::Context) && !iCurrentUnit->body &&
+                        full == iCurrentUnit->name && !clause->has_flag("limited") && iInstanceBodies == 0)
+                    {
+                        recover([&]() { error(name, "a compilation unit cannot depend on itself (10.1.4(5))"); });
+                        continue;
+                    }
+                    // (a limited with clause: of a library package declaration (not a subprogram, generic unit, instance or renaming) (10.1.6(2/2)))
+                    if (clause->has_flag("limited") && iInstanceBodies == 0)
+                        if (auto* u = find_unit(full, false); u != nullptr && u->item != nullptr && !u->item->is(construct::Package))
+                        {
+                            recover([&]() { error(name, "a limited with clause can name only a library package (not a subprogram, generic unit, instance or renaming) (10.1.6(2/2))"); });
+                            continue;
+                        }
                     // (a limited with of a package not analysed yet: its limited view (its types incomplete); of one analysed already: its
                     // limited view too (10.1.4(7/2)), its types completed by the package's)
                     if (clause->has_flag("limited") && full.find('.') == std::string::npos)

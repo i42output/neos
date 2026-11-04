@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "format.hpp"
@@ -200,8 +201,23 @@ namespace neos::c_runtime
             return sState;
         }
 
-        std::int32_t c_rand() { return random().next(); }
-        void c_srand(std::int32_t aSeed) { random().seed(static_cast<std::uint32_t>(aSeed)); }
+        // (the library's state that the program's threads share: its lock)
+        std::mutex& state_mutex()
+        {
+            static std::mutex sMutex;
+            return sMutex;
+        }
+
+        std::int32_t c_rand()
+        {
+            std::lock_guard lock{ state_mutex() };
+            return random().next();
+        }
+        void c_srand(std::int32_t aSeed)
+        {
+            std::lock_guard lock{ state_mutex() };
+            random().seed(static_cast<std::uint32_t>(aSeed));
+        }
 
         // --- memory management
 
@@ -262,12 +278,14 @@ namespace neos::c_runtime
 
         std::int32_t c_atexit(std::int64_t aFunction)
         {
+            std::lock_guard lock{ state_mutex() };
             exit_functions(false).push_back(static_cast<address>(aFunction));
             return 0;
         }
 
         std::int32_t c_at_quick_exit(std::int64_t aFunction)
         {
+            std::lock_guard lock{ state_mutex() };
             exit_functions(true).push_back(static_cast<address>(aFunction));
             return 0;
         }
@@ -276,6 +294,7 @@ namespace neos::c_runtime
         {
             // (a copy in the C memory: the same name's value has the same copy while it is unchanged)
             static std::map<std::string, std::pair<std::string, address>> sValues;
+            std::lock_guard lock{ state_mutex() };
             std::string const name = str(static_cast<address>(aName));
             auto const* value = std::getenv(name.c_str());
             if (value == nullptr)
@@ -519,10 +538,16 @@ namespace neos::c_runtime
     {
         // (in the reverse order of their registration; a handler may register more)
         auto& list = exit_functions(aQuick);
-        while (!list.empty())
+        for (;;)
         {
-            auto const f = list.back();
-            list.pop_back();
+            address f;
+            {
+                std::lock_guard lock{ state_mutex() };
+                if (list.empty())
+                    break;
+                f = list.back();
+                list.pop_back();
+            }
             call_function(f, {}, NEOS_RT_VOID);
         }
     }

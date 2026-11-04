@@ -94,6 +94,10 @@ namespace neos
         // and its module; and the custom section of the functions of a module that the code of the program's other translation units calls
         // by their names (e.g. neoscript's, whose language has no runtime plugin): a count, then for each its name, its language, its index and
         // its link signature
+        // (a global's flags (the global section's mutability byte): 0x01 mutable, as WebAssembly's; GlobalPerThread: each thread that runs the 
+        // program has its own (its value as the global's initializer gives it, when the thread first uses it; the program's own thread's: the
+        // module's), e.g. a language's stack pointer)
+        inline constexpr std::uint8_t GlobalPerThread = 0x80u;
         inline constexpr char LinkedSection[] = "neos.linked";
         inline constexpr char LinksSection[] = "neos.links";
         // (a module's import of a function that another translation unit's code defines (its global of the name): "link::<name>#<link 

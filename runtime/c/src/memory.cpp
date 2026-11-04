@@ -39,6 +39,7 @@
 #include <cstring>
 #include <cwchar>
 #include <map>
+#include <atomic>
 #include <mutex>
 #include <string>
 #if defined(_WIN32)
@@ -276,7 +277,26 @@ namespace neos::c_runtime
         address gArgv = 0u;
         int gArgc = 0;
         address gEnvp = 0u;
-        bool gEnded = false;
+        std::atomic<bool> gEnded = false;
+        // (the globals of a thread's stack (see rt_init): another thread's are set when it starts (see lib_threads.cpp))
+        unsigned gSpGlobal = 0u;
+        unsigned gLimitGlobal = 0u;
+    }
+
+    address take_pages(std::uint64_t aSize)
+    {
+        return the_region().take(aSize);
+    }
+
+    void give_pages(address aAddress, std::uint64_t aSize)
+    {
+        the_region().give(aAddress, aSize);
+    }
+
+    void stack_globals(unsigned& aSp, unsigned& aLimit)
+    {
+        aSp = gSpGlobal;
+        aLimit = gLimitGlobal;
     }
 
     neos_rt_host const* host()
@@ -462,10 +482,40 @@ namespace neos::c_runtime
         return aResult == NEOS_RT_I32 ? result.i32 : aResult == NEOS_RT_VOID ? 0 : result.i64;
     }
 
+    namespace
+    {
+        // (a trap requested: the plugin's error when the function returns (see NEOS_RUNTIME_PLUGIN_ERROR in plugin.cpp), so that the 
+        // host stops the program (its trap request's message); the threads that have one: so that the test after each call is cheap)
+        thread_local bool tTrapped = false;
+        std::atomic<long> gTrappedThreads = 0;
+    }
+
     void trap(char const* aMessage)
     {
         if (gHost != nullptr && gHost->trap != nullptr)
+        {
             gHost->trap(aMessage);
+            if (!tTrapped)
+            {
+                tTrapped = true;
+                ++gTrappedThreads;
+            }
+        }
+    }
+
+    long const* trap_pending()
+    {
+        static_assert(sizeof(std::atomic<long>) == sizeof(long) && std::atomic<long>::is_always_lock_free);
+        return reinterpret_cast<long const*>(&gTrappedThreads);
+    }
+
+    char const* trapped()
+    {
+        if (gTrappedThreads.load(std::memory_order_relaxed) == 0 || !tTrapped)
+            return nullptr;
+        tTrapped = false;
+        --gTrappedThreads;
+        return "C runtime: trap";
     }
 
     namespace
@@ -476,6 +526,8 @@ namespace neos::c_runtime
         {
             // (the static data committed; the stack (NEOS_C_STACK bytes, by default 8 MB) after it, the heap after that)
             gEnded = false;
+            gSpGlobal = static_cast<unsigned>(aSpGlobal);
+            gLimitGlobal = static_cast<unsigned>(aLimitGlobal);
             the_region().static_data(static_cast<std::uint64_t>(aStaticEnd));
             std::uint64_t stackSize = std::uint64_t{ 8u } << 20u;
             if (auto const s = std::getenv("NEOS_C_STACK"))
@@ -558,35 +610,34 @@ namespace neos::c_runtime
 
         std::int32_t rt_exit_prepare(std::int32_t aStatus)
         {
-            // (exit: the functions that atexit registered (in the reverse order), then the streams flushed and closed)
-            if (!gEnded)
+            // (exit: the functions that atexit registered (in the reverse order), then the streams flushed and closed; if other threads
+            // are running, the process ends (see end_threads))
+            if (!gEnded.exchange(true))
             {
-                gEnded = true;
                 exit_handlers(false);
                 streams_end();
             }
+            end_threads(aStatus);
             return aStatus;
         }
 
         std::int32_t rt_quick_exit_prepare(std::int32_t aStatus)
         {
-            if (!gEnded)
+            if (!gEnded.exchange(true))
             {
-                gEnded = true;
                 exit_handlers(true);
                 streams_end();
             }
+            end_threads(aStatus);
             return aStatus;
         }
 
         std::int32_t rt_exit_flush(std::int32_t aStatus)
         {
             // (_Exit: the streams flushed (as most implementations do), no handlers)
-            if (!gEnded)
-            {
-                gEnded = true;
+            if (!gEnded.exchange(true))
                 streams_end();
-            }
+            end_threads(aStatus);
             return aStatus;
         }
 

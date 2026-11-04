@@ -113,6 +113,19 @@ namespace neos::compilers::c
         void value_as(node* aExpression, qtype aType);          ///< (its value converted to a type, as by assignment)
         void convert(qtype aFrom, qtype aTo);
         void normalize(qtype aType);                            ///< (an integer value made its type's (truncated, sign or zero extended))
+        // atomic accesses (prefix 0xFE; an object of an atomic type, the atomic builtins): of a scalar's bits (a float's as an integer's; 
+        // a narrower integer's as its normalized i32's)
+        bool atomic_object(qtype aType) const;                  ///< (an object of an atomic scalar type in memory: its accesses are atomic)
+        void atomic(std::uint32_t aBase, qtype aType, std::uint32_t aOffset = 0u);  ///< (the instruction of aBase's group (0x10 load, 0x17 store, 
+                                                                ///< 0x1E add, 0x25 sub, 0x2C and, 0x33 or, 0x3A xor, 0x41 xchg, 0x48 cmpxchg) for the type's width)
+        type bits_of(qtype aType) const;                        ///< (the integer type of its bits: i32 or i64)
+        void to_bits(qtype aType);                              ///< ([value] -> [bits])
+        void from_bits(qtype aType);                            ///< ([bits] -> [value])
+        void atomic_load(qtype aType, std::uint32_t aOffset = 0u);    ///< ([address] -> value)
+        void atomic_store(qtype aType);                         ///< ([address, value] -> ())
+        void atomic_update(qtype aType, std::uint32_t aWhere, std::function<void()> const& aCompute, bool aValueUsed, bool aOld); ///< (*where =
+                                                                ///< aCompute(*where) ([old value] -> new value), in a compare-exchange loop:
+                                                                ///< (if used) the new value, or (aOld) the old)
         void truth(node* aExpression);                          ///< (an i32: 1 if it compares unequal to 0)
         void to_truth(qtype aType);                             ///< ([value] -> i32)
         void discard(node* aExpression);                        ///< (evaluated for its side effects)

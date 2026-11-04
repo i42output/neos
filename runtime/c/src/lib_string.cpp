@@ -37,6 +37,7 @@
 #include <cerrno>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include "core.hpp"
 
@@ -165,7 +166,7 @@ namespace neos::c_runtime
 
         std::int64_t c_strtok(std::int64_t aString, std::int64_t aDelimiters)
         {
-            static address sSave = 0u;
+            static thread_local address sSave = 0u;     // (each thread's)
             if (sSave == 0u)
                 sSave = allocate(8u);
             return c_strtok_r(aString, aDelimiters, static_cast<std::int64_t>(sSave));
@@ -181,6 +182,8 @@ namespace neos::c_runtime
         std::int64_t c_strerror(std::int32_t aError)
         {
             static std::map<int, address> sMessages;
+            static std::mutex sMutex;
+            std::lock_guard lock{ sMutex };
             auto& message = sMessages[aError];
             if (message == 0u)
                 message = copy_string(std::strerror(aError));

@@ -1303,6 +1303,8 @@ namespace neos::compilers::c
                 canonical->noreturn = true;
             if (aSpecifiers.isInline)
                 canonical->isInline = true;
+            if (aSpecifiers.threadLocal && !isFunction)
+                canonical->threadLocal = true;
             current.names[name] = canonical;
             return canonical;
         }
@@ -1317,6 +1319,7 @@ namespace neos::compilers::c
         e.isInline = aSpecifiers.isInline;
         e.noreturn = aSpecifiers.noreturn;
         e.isConstexpr = aSpecifiers.isConstexpr;
+        e.threadLocal = aSpecifiers.threadLocal && !isFunction;
         if (isFunction)
         {
             auto& f = iFunctionInfos.emplace_back();

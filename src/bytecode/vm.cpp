@@ -47,6 +47,7 @@
 #include <iostream>
 #include <span>
 #include <boost/container/small_vector.hpp>
+#include <neos/bytecode/bytecode.hpp>
 #include <neos/bytecode/vm/vm.hpp>
 #include <neos/bytecode/vm/jit.hpp>
 #include <neos/bytecode/vm/runtime_plugins.hpp>
@@ -66,6 +67,7 @@
 #endif
 #include <list>
 #include <mutex>
+#include <thread>
 
 // coroutines' switches (see host_coroutine_resume) on x86-64 System V (ELF): the registers that a call preserves, MXCSR and the x87
 // control word, saved on the stack being left (its stack pointer stored in *aSave), then restored from the stack switched to (aTo) 
@@ -409,7 +411,7 @@ namespace neos
                     machine(text const& aText, std::ostream& aOutput, std::istream& aInput, std::ostream& aErrorOutput, std::uint64_t& aInstructions, bool aRestricted,
                         compile_service const& aCompileService, std::vector<std::string> const& aArguments) :
                         iSerial{ ++sSerial }, iOutput{ aOutput }, iInput{ aInput }, iErrorOutput{ aErrorOutput }, iInstructions{ aInstructions }, iRestricted{ aRestricted },
-                        iCompileService{ aCompileService }, iArguments{ aArguments }
+                        iCompileService{ aCompileService }, iArguments{ aArguments }, iThread{ std::this_thread::get_id() }
                     {
                         // (the text is read only while it is parsed (its bodies' tokens, its data copied to the memory): not copied)
                         iModule = std::span<std::uint8_t const>{ reinterpret_cast<std::uint8_t const*>(aText.data()), aText.size() };
@@ -490,6 +492,7 @@ namespace neos
                         iFixedGlobals.resize(iGlobals.size(), 0u);
                         module.fixedGlobals = &iFixedGlobals;
                         module.globalTypes = &iGlobalTypes;
+                        module.threadGlobals = iAnyThreadGlobals ? &iThreadGlobals : nullptr;
                         module.linearMemory = &iMemoryView;
                         module.objects = &iObjectTable;
                         module.host = jit::host_interface{ this,
@@ -508,7 +511,8 @@ namespace neos
                             [](void* aHost, char const* aText) 
                             { 
                                 return static_cast<machine*>(aHost)->allocate_string(aText != nullptr ? std::string_view{ aText } : std::string_view{}); 
-                            } };
+                            },
+                            [](void* aHost) { return static_cast<machine*>(aHost)->thread_globals(); } };
                         return jit::compile(module, [this](std::uint32_t aFunction, value* aBuffer)
                         {
                             call_import(aFunction, aBuffer);
@@ -913,8 +917,18 @@ namespace neos
                             case 0x20: stack.push_back(locals.at(code.u())); break;
                             case 0x21: locals.at(code.u()) = pop(); break;
                             case 0x22: locals.at(code.u()) = stack.back(); break;
-                            case 0x23: stack.push_back(iGlobals.at(code.u())); break;
-                            case 0x24: iGlobals.at(code.u()) = pop(); break;
+                            case 0x23:
+                                {
+                                    auto const g = code.u();
+                                    stack.push_back(iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g));
+                                }
+                                break;
+                            case 0x24:
+                                {
+                                    auto const g = code.u();
+                                    (iThreadGlobals.at(g) != 0u ? thread_globals()[g] : iGlobals.at(g)) = pop();
+                                }
+                                break;
                             case 0x41: stack.push_back(of_i32(static_cast<std::int32_t>(code.s()))); break;
                             case 0x42: stack.push_back(of_i64(code.s())); break;
                             case 0x43: stack.push_back(of_f32(code.raw<float>())); break;
@@ -1114,6 +1128,51 @@ namespace neos
                                     throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
                                 }
                                 break;
+                            // (prefix 0xFE: atomic accesses (see jit::atomic_access))
+                            case 0xFE:
+                                {
+                                    auto const sub = code.u();
+                                    auto const memarg = code.u();
+                                    auto const offset = code.u();
+                                    if (sub == 0x03u)
+                                    {
+                                        std::atomic_thread_fence(std::memory_order_seq_cst);
+                                        break;
+                                    }
+                                    auto const width = jit::atomic_width(sub);
+                                    value operand = 0u;
+                                    value replacement = 0u;
+                                    if (sub == 0x48u || (sub > 0x48u && sub <= 0x4Eu))
+                                    {
+                                        replacement = pop();
+                                        operand = pop();
+                                    }
+                                    else if (sub >= 0x17u)
+                                        operand = pop();
+                                    auto const memoryIndex = memarg >> 32u;
+                                    std::uint8_t* at;
+                                    if (memoryIndex == 0u)
+                                    {
+                                        auto const address = static_cast<std::uint64_t>(as_u32(pop())) + offset;
+                                        if (address + width > iMemory.size())
+                                            throw trap{ "out of bounds memory access" };
+                                        at = &iMemory[address];
+                                    }
+                                    else
+                                    {
+                                        auto const& external = jit::external_memory(memoryIndex);
+                                        auto const address = pop() + offset;
+                                        if (address + width > external.size || address + width < address)
+                                            throw trap{ "out of bounds memory access" };
+                                        at = external.base + address;
+                                    }
+                                    if ((reinterpret_cast<std::uintptr_t>(at) & (width - 1u)) != 0u)
+                                        throw trap{ "unaligned atomic" };
+                                    auto const result = jit::atomic_access(at, sub, operand, replacement);
+                                    if (sub < 0x17u || sub >= 0x1Eu)
+                                        stack.push_back(jit::atomic_wide(sub) ? result : of_u32(static_cast<std::uint32_t>(result)));
+                                }
+                                break;
                             default:
                                 throw trap{ "unsupported instruction 0x" + to_hex(op) };
                             }
@@ -1255,8 +1314,11 @@ namespace neos
                                 for (auto n = r.u(); n > 0u; --n)
                                 {
                                     iGlobalTypes.push_back(r.byte());
-                                    r.byte();
+                                    auto const flags = r.byte();
+                                    iThreadGlobals.push_back((flags & bytecode::GlobalPerThread) != 0u ? 1u : 0u);
+                                    iAnyThreadGlobals = iAnyThreadGlobals || iThreadGlobals.back() != 0u;
                                     iGlobals.push_back(constant(r));
+                                    iGlobalInitials.push_back(iGlobals.back());
                                 }
                                 break;
                             case 7:
@@ -1443,6 +1505,28 @@ namespace neos
                                         token(r.byte());
                                     else if (sub > 0x07u)
                                         throw trap{ "unsupported instruction 0xfc 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
+                                }
+                                break;
+                            case 0xFE:
+                                {
+                                    // (prefix 0xFE (atomic accesses): the instruction, then its memarg (as a load's: its flags (with the memory
+                                    // index in their high 32 bits) and offset); atomic.fence's: its reserved byte, then 0 (three immediates each))
+                                    auto const sub = r.u();
+                                    token(sub);
+                                    if (sub == 0x03u)
+                                    {
+                                        token(r.byte());
+                                        token(0u);
+                                    }
+                                    else if (sub >= 0x10u && sub <= 0x4Eu)
+                                    {
+                                        auto const flags = r.u();
+                                        std::uint64_t const memoryIndex = (flags & 0x40u) != 0u ? r.u() : 0u;
+                                        token((flags & ~std::uint64_t{ 0x40u } & 0xFFFFFFFFull) | (memoryIndex << 32u));
+                                        token(r.u());
+                                    }
+                                    else
+                                        throw trap{ "unsupported instruction 0xfe 0x" + to_hex(static_cast<std::uint8_t>(sub)) };
                                 }
                                 break;
                             case 0x41:
@@ -2328,9 +2412,25 @@ namespace neos
                         }
                     }
                 public:
-                    // (a global's storage (its word): the interpreter and generated code use it (it does not move))
+                    // (the calling thread's globals (see bytecode::GlobalPerThread): the program's own thread's are the module's; another thread's
+                    // (one that a runtime plugin attached: see neos_rt_host::thread_attach), its own, from the globals' initial values when it 
+                    // first uses them (the others are the module's: they are not used there))
+                    value* thread_globals()
+                    {
+                        if (!iAnyThreadGlobals || std::this_thread::get_id() == iThread)
+                            return iGlobals.data();
+                        thread_local std::unordered_map<std::uint64_t, std::vector<value>> tGlobals;
+                        auto& globals = tGlobals[iSerial];
+                        if (globals.size() != iGlobalInitials.size())
+                            globals = iGlobalInitials;
+                        return globals.data();
+                    }
+                    // (a global's storage (its word): the interpreter and generated code use it (it does not move); one that each thread has
+                    // its own of: the calling thread's)
                     value* global_address(std::uint32_t aIndex)
                     {
+                        if (aIndex < iThreadGlobals.size() && iThreadGlobals[aIndex] != 0u)
+                            return &thread_globals()[aIndex];     // (the calling thread's (see thread_globals))
                         return aIndex < iGlobals.size() ? &iGlobals[aIndex] : nullptr;
                     }
                     // (a global whose value does not change again (see neos_rt_host::fix_global): code optimized after this uses it as a constant)
@@ -2349,6 +2449,7 @@ namespace neos
                     bool const iRestricted; ///< runtime plugin functions that can change the host environment cannot be called
                     compile_service const iCompileService;
                     std::vector<std::string> const iArguments;
+                    std::thread::id const iThread;     ///< (the program's own (see thread_globals))
                     std::span<std::uint8_t const> iModule;    ///< (the text, while it is parsed (see the constructor))
                     std::vector<std::uint64_t> iTokens;   ///< decoded function bodies
                     std::vector<std::size_t> iEnds;       ///< block/loop/if token -> token after its end (see block_tables)
@@ -2369,6 +2470,9 @@ namespace neos
                     jit::memory iMemoryView;   ///< (for the JIT)
                     std::vector<value> iGlobals;
                     std::vector<std::uint8_t> iFixedGlobals;    ///< (see fix_global)
+                    std::vector<std::uint8_t> iThreadGlobals;   ///< (see thread_globals: nonzero for a global that each thread has its own of)
+                    bool iAnyThreadGlobals = false;
+                    std::vector<value> iGlobalInitials;
                     std::vector<std::uint8_t> iGlobalTypes;
                     std::unordered_map<std::string, std::uint32_t> iImportTypes;
                     std::vector<import_kind> iImportKinds;

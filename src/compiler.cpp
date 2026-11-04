@@ -4030,7 +4030,7 @@ namespace neos::language
             {
                 auto const t = *wasm_type(global.second);
                 section.push_back(t);
-                section.push_back(0x01u);
+                section.push_back(static_cast<std::uint8_t>(0x01u | (iInference.threadGlobals.contains(global.first) ? bytecode::GlobalPerThread : 0u)));
                 switch (t)
                 {
                 case 0x7Cu: put_op(section, opcode::F64Const); put_raw(section, 0.0); break;

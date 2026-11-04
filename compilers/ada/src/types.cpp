@@ -584,7 +584,11 @@ namespace neos::compilers::ada
                     }
                     return result;
                 }
-                // (a discriminant constraint)
+                // (a discriminant constraint: of a type with (known) discriminants (3.7.1(7/3)); a formal private type's: its own)
+                if (iInstanceBodies == 0 && iSpeculation == 0 && (target->kind == type_kind::Private || target->kind == type_kind::Record) &&
+                    std::none_of(target->components.begin(), target->components.end(), [](component_info const& c) { return c.discriminant; }) &&
+                    (target->is_formal || aType->view()->is_formal) && target->formal_discriminants.empty())
+                    recover([&]() { error(aConstraint, "a discriminant constraint can be applied only to a type with discriminants (3.7.1(7/3))"); });
                 auto* result = new_subtype(aType);
                 result->constrained = true;
                 result->discriminant_constraint.clear();

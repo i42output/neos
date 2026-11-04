@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <span>
@@ -161,6 +162,9 @@ namespace neos
                     // while the string is); and a C function's string result copied into memory (its address))
                     char const* (*stringPointer)(void* aHost, std::uint32_t aAddress) = nullptr;
                     std::uint32_t (*stringAddress)(void* aHost, char const* aText) = nullptr;
+                    // (the calling thread's globals (see bytecode::GlobalPerThread): those that each thread has its own of are there; null:
+                    // the module's (globals))
+                    value* (*threadGlobals)(void* aHost) = nullptr;
                 };
 
                 struct module_description
@@ -171,6 +175,8 @@ namespace neos
                     std::vector<value>* globals = nullptr;
                     std::vector<std::uint8_t> const* globalTypes = nullptr;
                     std::vector<std::uint8_t> const* fixedGlobals = nullptr;   ///< (globals whose values do not change again (see neos_rt_host::fix_global): nonzero)
+                    std::vector<std::uint8_t> const* threadGlobals = nullptr;  ///< (globals that each thread has its own of (see host_interface::threadGlobals): 
+                                                                                ///< nonzero)
                     memory const* linearMemory = nullptr;
                     object_table* objects = nullptr;    ///< (null: generated code calls the host's object functions)
                     host_interface host;
@@ -214,6 +220,63 @@ namespace neos
                 // (the word at aAddress has changed: the optimized code's tests of it (its watched loads' comparisons: see 
                 // optimizer::MemargWatched) take their other paths from now on (on the program's thread))
                 void watched_changed(void const* aAddress);
+
+                // --- atomic memory accesses (WebAssembly's threads proposal: prefix 0xFE; the interpreter's and generated code's)
+                // (aSub: the instruction (0x10 to 0x4E): its access's width (0: none, e.g. atomic.fence))
+                inline std::uint32_t atomic_width(std::uint64_t aSub)
+                {
+                    static constexpr std::uint8_t sWidths[7] = { 4u, 8u, 1u, 2u, 1u, 2u, 4u };
+                    return aSub >= 0x10u && aSub <= 0x4Eu ? sWidths[(aSub - 0x10u) % 7u] : 0u;
+                }
+                // (its result's (or a store's operand's) type: true for i64)
+                inline bool atomic_wide(std::uint64_t aSub)
+                {
+                    auto const k = (aSub - 0x10u) % 7u;
+                    return k == 1u || k >= 4u;
+                }
+                namespace detail
+                {
+                    template <typename T>
+                    std::uint64_t atomic_access(void* aAt, std::uint64_t aSub, std::uint64_t aOperand, std::uint64_t aReplacement)
+                    {
+                        std::atomic_ref<T> word{ *static_cast<T*>(aAt) };
+                        auto const operand = static_cast<T>(aOperand);
+                        if (aSub < 0x17u)
+                            return word.load();
+                        if (aSub < 0x1Eu)
+                        {
+                            word.store(operand);
+                            return 0u;
+                        }
+                        switch ((aSub - 0x1Eu) / 7u)
+                        {
+                        case 0u: return word.fetch_add(operand);
+                        case 1u: return word.fetch_sub(operand);
+                        case 2u: return word.fetch_and(operand);
+                        case 3u: return word.fetch_or(operand);
+                        case 4u: return word.fetch_xor(operand);
+                        case 5u: return word.exchange(operand);
+                        default:
+                            {
+                                auto expected = operand;
+                                word.compare_exchange_strong(expected, static_cast<T>(aReplacement));
+                                return expected;
+                            }
+                        }
+                    }
+                }
+                // (an atomic access (aSub: its instruction) of the word at aAt (aligned to its width): its result (zero extended; a store's:
+                // 0); aOperand: a store's or a read-modify-write's operand (cmpxchg's: its expected value), aReplacement: cmpxchg's replacement)
+                inline std::uint64_t atomic_access(void* aAt, std::uint64_t aSub, std::uint64_t aOperand, std::uint64_t aReplacement)
+                {
+                    switch (atomic_width(aSub))
+                    {
+                    case 1u: return detail::atomic_access<std::uint8_t>(aAt, aSub, aOperand, aReplacement);
+                    case 2u: return detail::atomic_access<std::uint16_t>(aAt, aSub, aOperand, aReplacement);
+                    case 4u: return detail::atomic_access<std::uint32_t>(aAt, aSub, aOperand, aReplacement);
+                    default: return detail::atomic_access<std::uint64_t>(aAt, aSub, aOperand, aReplacement);
+                    }
+                }
             }
         }
     }

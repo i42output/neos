@@ -76,3 +76,14 @@ NEOS_RUNTIME_PLUGIN_ENTRY
     };
     return &sPlugin;
 }
+
+// (a trap that the runtime requested (see c_runtime::trap): an error that the function returns, so that the host stops the program)
+NEOS_RUNTIME_PLUGIN_ERROR_PENDING
+{
+    return neos::c_runtime::trap_pending();
+}
+
+NEOS_RUNTIME_PLUGIN_ERROR
+{
+    return neos::c_runtime::trapped();
+}

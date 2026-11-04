@@ -587,7 +587,8 @@ namespace neos::compilers::c
             { "__builtin_atomic_exchange", builtin_kind::AtomicExchange }, { "__builtin_atomic_compare_exchange", builtin_kind::AtomicCompareExchange },
             { "__builtin_atomic_fetch_add", builtin_kind::AtomicFetchAdd }, { "__builtin_atomic_fetch_sub", builtin_kind::AtomicFetchSub },
             { "__builtin_atomic_fetch_or", builtin_kind::AtomicFetchOr }, { "__builtin_atomic_fetch_xor", builtin_kind::AtomicFetchXor },
-            { "__builtin_atomic_fetch_and", builtin_kind::AtomicFetchAnd }
+            { "__builtin_atomic_fetch_and", builtin_kind::AtomicFetchAnd }, { "__builtin_atomic_load", builtin_kind::AtomicLoad },
+            { "__builtin_atomic_store", builtin_kind::AtomicStore }, { "__builtin_atomic_fence", builtin_kind::AtomicFence }
         };
         auto const found = sBuiltins.find(aName);
         return found != sBuiltins.end() ? found->second : builtin_kind::None;
@@ -1022,6 +1023,22 @@ namespace neos::compilers::c
                     want(2u);
                     e->type = qtype{ basic(type_kind::Double) };
                     break;
+                case builtin_kind::AtomicFence:
+                    want(0u);
+                    e->type = qtype{ basic(type_kind::Void) };
+                    break;
+                case builtin_kind::AtomicLoad:
+                case builtin_kind::AtomicStore:
+                {
+                    want(kind == builtin_kind::AtomicLoad ? 1u : 2u);
+                    auto const p = value_type(e->child(1));
+                    if (!p->is_pointer() || !p->base->is_scalar())
+                        error(e->child(1), "the object of an atomic operation must be a pointer to an atomic scalar object");
+                    e->type = kind == builtin_kind::AtomicLoad ? p->base.unqualified() : qtype{ basic(type_kind::Void) };
+                    if (kind == builtin_kind::AtomicStore)
+                        check_assignable(p->base.unqualified(), e->child(2), e, "atomic store");
+                    break;
+                }
                 case builtin_kind::AtomicExchange:
                 case builtin_kind::AtomicCompareExchange:
                 case builtin_kind::AtomicFetchAdd:

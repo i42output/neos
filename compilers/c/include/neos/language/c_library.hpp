@@ -136,6 +136,19 @@
     /* <fenv.h> */ \
     X(feclearexcept, "I:I", false) X(fetestexcept, "I:I", false) X(feraiseexcept, "I:I", false) X(fegetround, "I:", false) \
     X(fesetround, "I:I", false) \
+    /* <threads.h>, <pthread.h>, <semaphore.h>, <errno.h> (the runtime's: see languages/packages/c/lib/threads.c) */ \
+    X(__errno_location, "L:", false) X(__neos_thread_create, "I:LLLLLI", false) X(__neos_thread_join, "I:LL", false) \
+    X(__neos_thread_detach, "I:L", false) X(__neos_thread_self, "L:", false) X(__neos_thread_main, "I:", false) \
+    X(__neos_thread_sleep, "I:LL", false) X(__neos_thread_yield, "V:", false) X(__neos_thread_cancel, "I:L", false) \
+    X(__neos_thread_cancelled, "I:", false) X(__neos_thread_wait_others, "V:", false) X(__neos_thread_exit, "V:L", false) X(__neos_mutex_init, "I:LI", false) X(__neos_mutex_lock, "I:L", false) \
+    X(__neos_mutex_trylock, "I:L", false) X(__neos_mutex_timedlock, "I:LLL", false) X(__neos_mutex_unlock, "I:L", false) \
+    X(__neos_object_destroy, "I:L", false) X(__neos_cond_init, "I:L", false) X(__neos_cond_wait, "I:LL", false) \
+    X(__neos_cond_timedwait, "I:LLLL", false) X(__neos_cond_signal, "I:L", false) X(__neos_cond_broadcast, "I:L", false) \
+    X(__neos_rwlock_init, "I:L", false) X(__neos_rwlock_lock, "I:LII", false) X(__neos_rwlock_unlock, "I:L", false) \
+    X(__neos_barrier_init, "I:LI", false) X(__neos_barrier_wait, "I:L", false) X(__neos_sem_init, "I:LI", false) \
+    X(__neos_sem_wait, "I:LI", false) X(__neos_sem_timedwait, "I:LLL", false) X(__neos_sem_post, "I:L", false) \
+    X(__neos_sem_getvalue, "I:LL", false) X(__neos_key_create, "I:LL", false) X(__neos_key_delete, "I:I", false) \
+    X(__neos_key_get, "L:I", false) X(__neos_key_set, "I:IL", false) \
     /* (the library's C code's (the prelude's) own) */ \
     X(__neos_exit_prepare, "I:I", false) X(__neos_quick_exit_prepare, "I:I", false) X(__neos_exit_flush, "I:I", false) \
     X(__neos_abort, "V:", false)

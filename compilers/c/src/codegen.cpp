@@ -184,6 +184,8 @@ namespace neos::compilers::c
             return existing->second;
         gen().add_global(neolib::string{ aName }, aType);
         gen().function_global(neolib::string{ aName });
+        // (C's globals are a thread's state (its stack, its pending longjmp, its thread-local objects): each thread has its own)
+        gen().thread_global(neolib::string{ aName });
         auto const index = static_cast<std::uint32_t>(gen().global_count());
         iGlobals[aName] = index;
         note_global_type(index, aType);
@@ -231,23 +233,46 @@ namespace neos::compilers::c
 
     void program::assign_static_addresses()
     {
-        for (auto* o : iObjects)
-        {
-            auto* e = o->self();
-            if (e != o || e->address != 0u)
-                continue;
-            if (!e->defined && !e->tentative)
-                continue;
-            auto alignment = align_of(e->type);
-            if (e->value > 0 && e->kind == entity_kind::Object)
-                alignment = std::max(alignment, static_cast<std::uint64_t>(e->value));
-            auto size = size_of(e->type, e->decl);
-            if (e->type->is_record() && e->type->record->flexible && e->initializer != nullptr)
+        // (thread-local objects: in the thread-local block's template (in the static data, initialized as static objects are: a new thread's
+        // block is a copy of it (see the runtime's threads)), at their offsets in a thread's block (whose address is in %c.tls); then the
+        // others)
+        std::vector<std::pair<entity*, std::uint64_t>> threadLocals;
+        std::uint64_t tlsSize = 0u;
+        std::uint64_t tlsAlignment = 16u;
+        for (int pass = 0; pass < 2; ++pass)
+            for (auto* o : iObjects)
             {
-                // (a structure with a flexible array member initialized: room for the member's initializer (an extension, as GCC's))
-                size += 4096u;
+                auto* e = o->self();
+                if (e != o || e->address != 0u || e->threadLocal != (pass == 0))
+                    continue;
+                if (!e->defined && !e->tentative)
+                    continue;
+                auto alignment = align_of(e->type);
+                if (e->value > 0 && e->kind == entity_kind::Object)
+                    alignment = std::max(alignment, static_cast<std::uint64_t>(e->value));
+                auto size = size_of(e->type, e->decl);
+                if (e->type->is_record() && e->type->record->flexible && e->initializer != nullptr)
+                {
+                    // (a structure with a flexible array member initialized: room for the member's initializer (an extension, as GCC's))
+                    size += 4096u;
+                }
+                if (pass == 0)
+                {
+                    tlsSize = (tlsSize + alignment - 1u) / alignment * alignment;
+                    threadLocals.emplace_back(e, tlsSize);
+                    tlsSize += std::max<std::uint64_t>(size, 1u);
+                    tlsAlignment = std::max(tlsAlignment, alignment);
+                    continue;
+                }
+                e->address = static_data(size, alignment);
             }
-            e->address = static_data(size, alignment);
+        if (!threadLocals.empty())
+        {
+            iTlsSize = (tlsSize + 15u) & ~std::uint64_t{ 15u };
+            iTlsAlignment = tlsAlignment;
+            iTlsTemplate = static_data(iTlsSize, tlsAlignment);
+            for (auto const& [e, offset] : threadLocals)
+                e->address = iTlsTemplate + offset;
         }
     }
 
@@ -281,6 +306,8 @@ namespace neos::compilers::c
                 {
                     if (target->address == 0u)
                         error(aWhere, "undefined reference to '" + target->name + "'");
+                    if (target->threadLocal)
+                        error(aWhere, "initializer element is not constant (the address of thread-local '" + target->name + "')");
                     bits += target->address;
                 }
             }
@@ -679,6 +706,7 @@ namespace neos::compilers::c
         iLimitGlobal = global("%c.limit", type::I64);
         iJumpGlobal = global("%c.jmp", type::I64);
         iJumpValueGlobal = global("%c.jmpval", type::I64);
+        iTlsGlobal = global("%c.tls", type::I64);
         // (the functions: main's, then those that it uses (directly or not), defined as their calls are generated)
         auto* main = function_entity("main");
         bool const hasMain = main != nullptr && main->defined;
@@ -698,7 +726,7 @@ namespace neos::compilers::c
                 auto* e = iExternals[name]->self();
                 if (e->kind == entity_kind::Function && exported(e))
                     function_index(e);
-                else if (e->kind == entity_kind::Object && e->address != 0u && e->unit != nullptr && !e->unit->prelude)
+                else if (e->kind == entity_kind::Object && e->address != 0u && !e->threadLocal && e->unit != nullptr && !e->unit->prelude)
                     linked_object(e);
             }
         }
@@ -722,6 +750,14 @@ namespace neos::compilers::c
         for (auto* o : iObjects)
             if (o->self() == o)
                 static_initializer(o);
+        // (the program's own thread's block of thread-local objects: a copy of the template)
+        if (iTlsSize != 0u)
+        {
+            iTlsMain = static_data(iTlsSize, iTlsAlignment);
+            auto const from = iTlsTemplate - language::c::layout::StaticBase;
+            std::copy(iStatic.begin() + static_cast<std::ptrdiff_t>(from), iStatic.begin() + static_cast<std::ptrdiff_t>(from + iTlsSize),
+                iStatic.begin() + static_cast<std::ptrdiff_t>(iTlsMain - language::c::layout::StaticBase));
+        }
         for (std::size_t i = 0u; i < iToGenerate.size(); ++i)
         {
             auto* f = iToGenerate[i];
@@ -831,6 +867,18 @@ namespace neos::compilers::c
             put_u32(code, 0x43u);
             put_u32(code, language::c::layout::Memory);
             put_u32(code, 0u);
+        }
+        // (thread-local objects: the program's thread's block, and the template that other threads' blocks are copies of (see the 
+        // runtime's threads))
+        if (iTlsSize != 0u)
+        {
+            i64const(static_cast<std::int64_t>(iTlsMain));
+            put_op(code, opcode::GlobalSet);
+            put_u32(code, iTlsGlobal);
+            i64const(static_cast<std::int64_t>(iTlsTemplate));
+            i64const(static_cast<std::int64_t>(iTlsSize));
+            i32const(static_cast<std::int32_t>(iTlsGlobal));
+            call("tls", { type::I64, type::I64, type::I32 }, type::Void);
         }
         // (the constructor functions called; the destructor functions registered (as atexit's: called after those registered later, 
         // in the reverse order))
@@ -1076,6 +1124,11 @@ namespace neos::compilers::c
 
     void function_generator::load(qtype aType, std::uint32_t aOffset)
     {
+        if (atomic_object(aType))
+        {
+            atomic_load(aType, aOffset);
+            return;
+        }
         if (aType->is_aggregate() || aType->is_function())
         {
             if (aOffset != 0u)
@@ -1109,6 +1162,112 @@ namespace neos::compilers::c
         u32(language::c::layout::Memory);
         u32(aOffset);
         // (a bit-precise integer narrower than its storage, and bool: as stored (normalized when stored))
+    }
+
+    // --- atomic accesses
+
+    bool function_generator::atomic_object(qtype aType) const
+    {
+        return (aType.qualifiers & QAtomic) != 0u && aType->is_scalar();
+    }
+
+    type function_generator::bits_of(qtype aType) const
+    {
+        return iProgram.size_of(aType) == 8u ? type::I64 : type::I32;
+    }
+
+    void function_generator::to_bits(qtype aType)
+    {
+        if (aType->kind == type_kind::Float)
+            op(opcode::I32ReinterpretF32);
+        else if (aType->is_floating())
+            op(opcode::I64ReinterpretF64);
+    }
+
+    void function_generator::from_bits(qtype aType)
+    {
+        if (aType->kind == type_kind::Float)
+            op(opcode::F32ReinterpretI32);
+        else if (aType->is_floating())
+            op(opcode::F64ReinterpretI64);
+        else if (iProgram.size_of(aType) < 4u)
+            normalize(aType);   // (a narrower integer: zero extended by the access)
+    }
+
+    void function_generator::atomic(std::uint32_t aBase, qtype aType, std::uint32_t aOffset)
+    {
+        // (the width's instruction of the group: i32, i64, i32 8 bits, i32 16 bits (i64's narrower ones are not used))
+        auto const size = iProgram.size_of(aType);
+        std::uint32_t k = 0u;
+        std::uint32_t align = 2u;
+        switch (size)
+        {
+        case 1u: k = 2u; align = 0u; break;
+        case 2u: k = 3u; align = 1u; break;
+        case 4u: k = 0u; align = 2u; break;
+        case 8u: k = 1u; align = 3u; break;
+        default:
+            throw compile_error{ nullptr, "an atomic object of " + std::to_string(size) + " bytes (that is not lock free) is not supported" };
+        }
+        iCode.push_back(0xFEu);
+        u32(aBase + k);
+        u32(0x40u | align);
+        u32(language::c::layout::Memory);
+        u32(aOffset);
+    }
+
+    void function_generator::atomic_load(qtype aType, std::uint32_t aOffset)
+    {
+        atomic(0x10u, aType, aOffset);
+        from_bits(aType);
+    }
+
+    void function_generator::atomic_store(qtype aType)
+    {
+        to_bits(aType);
+        atomic(0x17u, aType);
+    }
+
+    void function_generator::atomic_update(qtype aType, std::uint32_t aWhere, std::function<void()> const& aCompute, bool aValueUsed, bool aOld)
+    {
+        // (old = *where; loop: new = compute(old); seen = cmpxchg(where, old, new); if seen != old: old = seen, again)
+        auto const bits = bits_of(aType);
+        auto const old = temporary(bits);
+        auto const neu = temporary(bits);
+        auto const seen = temporary(bits);
+        get(aWhere);
+        atomic(0x10u, aType);
+        if (iProgram.size_of(aType) < 4u)
+            normalize(aType);
+        set(old);
+        begin(control_kind::Loop);
+        auto const top = iControls.size() - 1u;
+        get(old);
+        from_bits(aType);
+        aCompute();
+        to_bits(aType);
+        set(neu);
+        get(aWhere);
+        get(old);
+        get(neu);
+        atomic(0x48u, aType);
+        if (iProgram.size_of(aType) < 4u)
+            normalize(aType);
+        tee(seen);
+        get(old);
+        op(bits == type::I64 ? opcode::I64Ne : opcode::I32Ne);
+        get(seen);
+        set(old);
+        branch_to(top, true);
+        end();
+        if (aValueUsed)
+        {
+            get(aOld ? old : neu);
+            from_bits(aType);
+        }
+        release(seen);
+        release(neu);
+        release(old);
     }
 
     void function_generator::store(qtype aType, std::uint32_t aOffset)
@@ -1342,6 +1501,18 @@ namespace neos::compilers::c
             }
             if (e->address == 0u)
                 throw compile_error{ e->decl, "undefined reference to '" + e->name + "'" };
+            if (e->threadLocal)
+            {
+                // (a thread-local object: in the thread's block (%c.tls), at its offset in the template)
+                op(opcode::GlobalGet);
+                u32(iProgram.tls_global());
+                if (auto const offset = e->address - iProgram.tls_template(); offset != 0u)
+                {
+                    i64(static_cast<std::int64_t>(offset));
+                    op(opcode::I64Add);
+                }
+                break;
+            }
             i64(static_cast<std::int64_t>(e->address));
             break;
         case object_storage::Frame:

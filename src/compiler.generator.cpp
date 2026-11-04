@@ -480,4 +480,9 @@ namespace neos::language
     {
         iInference.functionGlobals.insert(aName.to_std_string());
     }
+
+    void compiler::thread_global(neolib::i_string const& aName)
+    {
+        iInference.threadGlobals.insert(aName.to_std_string());
+    }
 }

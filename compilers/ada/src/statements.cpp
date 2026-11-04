@@ -147,10 +147,30 @@ namespace neos::compilers::ada
             if (auto* sequence = aStatements->first(construct::Statements))
                 labels(sequence);
             statements(aStatements->first(construct::Statements), aRegion);
-            for (auto* handler : aStatements->all(construct::Handler))
+            // (the exceptions that the handlers name: each once; others alone, in the last handler (11.2))
+            std::vector<entity*> handled;
+            auto const handlers = aStatements->all(construct::Handler);
+            for (auto* handler : handlers)
             {
                 auto* r = new_region(nullptr, aRegion);
                 iStatementRegions[handler] = r;
+                std::size_t choices = 0u;
+                node* others = nullptr;
+                for (auto* c : handler->children)
+                    if (c->is(construct::Identifier) || c->is(construct::Selected) || c->is(construct::Others))
+                    {
+                        ++choices;
+                        if (c->is(construct::Others))
+                            others = c;
+                    }
+                // (a later handler with others too: the error is reported there)
+                bool const laterOthers = std::any_of(std::find(handlers.begin(), handlers.end(), handler) + 1, handlers.end(),
+                    [](node* h) { return h->first(construct::Others) != nullptr; });
+                if (others != nullptr && iInstanceBodies == 0 && (choices > 1u || (handler != handlers.back() && !laterOthers)))
+                    recover([&]() { error(others, "others must be the only choice of the last exception handler (11.2)"); });
+                else if (others != nullptr && iInstanceBodies == 0 && handler == handlers.back() && std::any_of(handlers.begin(), handlers.end() - 1,
+                    [](node* h) { return h->first(construct::Others) != nullptr; }))
+                    recover([&]() { error(others, "only one exception handler can have others (11.2)"); });
                 for (auto* c : handler->children)
                 {
                     if (c->is(construct::Defining))
@@ -161,12 +181,19 @@ namespace neos::compilers::ada
                         handler->ent = e;
                     }
                     else if (c->is(construct::Identifier) || c->is(construct::Selected))
-                    {
-                        // (in the handler's region: its choice parameter hides an exception of its name (8.3))
-                        auto* e = resolve_entity(c, iInstanceBodies == 0 ? r : aRegion);
-                        if (e == nullptr || e->kind != entity_kind::Exception)
-                            error(c, "exception name expected");
-                    }
+                        recover([&]()
+                        {
+                            // (in the handler's region: its choice parameter hides an exception of its name (8.3))
+                            auto* e = resolve_entity(c, iInstanceBodies == 0 ? r : aRegion);
+                            if (e == nullptr || e->kind != entity_kind::Exception)
+                                error(c, "exception name expected");
+                            auto* x = e;
+                            while (x->renamed != nullptr && x->renamed != x && x->kind == entity_kind::Exception)
+                                x = x->renamed;
+                            if (iInstanceBodies == 0 && std::find(handled.begin(), handled.end(), x) != handled.end())
+                                error(c, "an exception can be named only once in the handlers of a handled sequence of statements (11.2)");
+                            handled.push_back(x);
+                        });
                     else if (c->is(construct::Statements))
                         statements(c, r);
                 }
@@ -538,6 +565,13 @@ namespace neos::compilers::ada
             }
             break;
         case construct::Pragma:
+            // (Suppress, Unsuppress: only in a declarative part, a package specification or as configuration pragmas (11.5))
+            if (iInstanceBodies == 0 && !aStatement->children.empty())
+                if (auto const n = name_text(aStatement->child(0)->source); n == "suppress" || n == "unsuppress")
+                {
+                    recover([&]() { error(aStatement, "pragma " + n + " is allowed only in a declarative part or a package specification (11.5)"); });
+                    break;
+                }
             pragma(aStatement, aRegion);
             break;
         case construct::Assignment:
@@ -587,7 +621,8 @@ namespace neos::compilers::ada
                 if (abstract_type(t, aRegion))
                     recover([&]() { error(target, "the target of an assignment cannot be of an abstract type"); });
                 // (not of a limited type (7.5(8/2)))
-                else if (t != nullptr && iInstanceBodies == 0 && !t->view()->is_formal && limited_type(t, aRegion))
+                else if (t != nullptr && iInstanceBodies == 0 && (!t->view()->is_formal || t->view()->limited || t->view()->base_type()->view()->limited) &&
+                    limited_type(t, aRegion))
                     recover([&]() { error(target, "the target of an assignment cannot be of a limited type"); });
                 auto* saved = iTargetType;
                 iTargetType = t;
@@ -957,6 +992,21 @@ namespace neos::compilers::ada
                     error(aStatement->child(0), "exception name expected");
                 if (aStatement->size() >= 2u)
                     resolve(aStatement->child(1), iString, aRegion);
+            }
+            // (a reraise: within a handler, not within a body nested in it (11.3(3)))
+            else if (iInstanceBodies == 0)
+            {
+                bool inHandler = false;
+                for (auto* n = aStatement->parent; n != nullptr && !inHandler; n = n->parent)
+                {
+                    if (n->is(construct::Handler))
+                        inHandler = true;
+                    else if (n->is(construct::SubprogramBody) || n->is(construct::PackageBody) || n->is(construct::TaskBody) || n->is(construct::EntryBody) ||
+                        n->is(construct::ProtectedBody))
+                        break;
+                }
+                if (!inHandler)
+                    recover([&]() { error(aStatement, "a raise statement without an exception name must be within an exception handler (not a body nested in it) (11.3(3))"); });
             }
             break;
         case construct::Delay:

@@ -52,6 +52,11 @@ struct timespec
     long tv_nsec;
 };
 
+/* (POSIX's clocks: CLOCK_REALTIME (TIME_UTC's), CLOCK_MONOTONIC (TIME_MONOTONIC's)) */
+typedef int clockid_t;
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+
 struct tm
 {
     int tm_sec;
@@ -78,6 +83,9 @@ struct tm* gmtime(const time_t* timer);
 struct tm* gmtime_r(const time_t* timer, struct tm* buf);
 struct tm* localtime(const time_t* timer);
 struct tm* localtime_r(const time_t* timer, struct tm* buf);
+int clock_gettime(clockid_t clock_id, struct timespec* tp);
+int clock_getres(clockid_t clock_id, struct timespec* res);
+int nanosleep(const struct timespec* rqtp, struct timespec* rmtp);
 size_t strftime(char* restrict s, size_t maxsize, const char* restrict format, const struct tm* restrict timeptr);
 
 #endif

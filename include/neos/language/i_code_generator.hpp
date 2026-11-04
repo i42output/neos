@@ -146,5 +146,7 @@ namespace neos::language
         virtual void set_global_type(std::size_t aIndex, type aType) = 0;
         virtual bool entry_global(neolib::i_string_view const& aName) const = 0; ///< (only top-level code uses it: a local of the entry point)
         virtual void function_global(neolib::i_string const& aName) = 0;     ///< (a function uses it)
+        virtual void thread_global(neolib::i_string const& aName) = 0;       ///< (each thread that runs the program has its own (see 
+                                                                            ///< bytecode::GlobalPerThread))
     };
 }

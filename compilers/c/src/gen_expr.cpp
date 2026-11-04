@@ -1270,14 +1270,20 @@ namespace neos::compilers::c
         }
         address(aTarget);
         aValue();
+        bool const atomic = atomic_object(aTarget->type);
         if (aValueUsed)
         {
             auto const v = temporary(wasm_of(t));
             tee(v);
-            store(t);
+            if (atomic)
+                atomic_store(t);
+            else
+                store(t);
             get(v);
             release(v);
         }
+        else if (atomic)
+            atomic_store(t);
         else
             store(t);
     }
@@ -1370,6 +1376,68 @@ namespace neos::compilers::c
         auto* s = strip(target);
         auto const where = temporary(type::I64);
         address(target);
+        if (atomic_object(target->type))
+        {
+            // (an atomic object: E1 = E1 op E2 in a compare-exchange loop (E2 evaluated once, before it))
+            set(where);
+            std::optional<std::uint32_t> operand;
+            if (!value->value)
+            {
+                auto const vt = t->is_pointer() || operation == construct::ShiftLeft || operation == construct::ShiftRight ? tv : 
+                    iProgram.usual_arithmetic(t, tv);
+                operand = temporary(wasm_of(vt));
+                value_as(value, vt);
+                set(*operand);
+            }
+            atomic_update(t, where, [&]()
+            {
+                auto const old = temporary(wasm_of(t));
+                set(old);
+                if (operand)
+                {
+                    // (the operand evaluated: compute's value_as of it is given its value (a temporary))
+                    auto const vt = t->is_pointer() || operation == construct::ShiftLeft || operation == construct::ShiftRight ? tv : 
+                        iProgram.usual_arithmetic(t, tv);
+                    if (t->is_pointer())
+                    {
+                        get(old);
+                        get(*operand);
+                        if (kind_of(vt) == vkind::I32)
+                            op(tv->is_signed() ? opcode::I64SConvertI32 : opcode::I64UConvertI32);
+                        if (iProgram.size_of(t->base) > 1u)
+                        {
+                            i64(static_cast<std::int64_t>(iProgram.size_of(t->base)));
+                            op(opcode::I64Mul);
+                        }
+                        op(operation == construct::Subtract ? opcode::I64Sub : opcode::I64Add);
+                    }
+                    else
+                    {
+                        bool const shift = operation == construct::ShiftLeft || operation == construct::ShiftRight;
+                        auto const common = shift ? iProgram.promote(t) : vt;
+                        get(old);
+                        convert(t, common);
+                        get(*operand);
+                        if (shift)
+                        {
+                            if (kind_of(tv) == vkind::I32 && kind_of(common) == vkind::I64)
+                                op(opcode::I64UConvertI32);
+                            else if (kind_of(tv) == vkind::I64 && kind_of(common) == vkind::I32)
+                                op(opcode::I32ConvertI64);
+                        }
+                        arithmetic(operation, common);
+                        convert(common, t);
+                    }
+                }
+                else
+                    compute([&]() { get(old); });
+                release(old);
+            }, aValueUsed, false);
+            if (operand)
+                release(*operand);
+            release(where);
+            return;
+        }
         tee(where);
         if (s->bitField)
         {
@@ -1474,6 +1542,14 @@ namespace neos::compilers::c
         auto* s = strip(target);
         auto const where = temporary(type::I64);
         address(target);
+        if (atomic_object(target->type))
+        {
+            // (an atomic object: in a compare-exchange loop)
+            set(where);
+            atomic_update(t, where, step, aValueUsed, post);
+            release(where);
+            return;
+        }
         tee(where);
         get(where);
         if (s->bitField)
@@ -1899,6 +1975,23 @@ namespace neos::compilers::c
             value_as(arg(1), qtype{ iProgram.basic(type_kind::Double) });
             libc(e->builtin == static_cast<std::uint32_t>(builtin_kind::Fmin) ? "fmin" : "fmax");
             return;
+        case builtin_kind::AtomicLoad:
+            rvalue(arg(0));
+            atomic_load(e->type);
+            return;
+        case builtin_kind::AtomicStore:
+        {
+            auto const t = iProgram.value_type(arg(0))->base.unqualified();
+            rvalue(arg(0));
+            value_as(arg(1), t);
+            atomic_store(t);
+            return;
+        }
+        case builtin_kind::AtomicFence:
+            iCode.push_back(0xFEu);
+            u32(0x03u);
+            iCode.push_back(0x00u);
+            return;
         case builtin_kind::AtomicExchange:
         case builtin_kind::AtomicFetchAdd:
         case builtin_kind::AtomicFetchSub:
@@ -1906,71 +1999,68 @@ namespace neos::compilers::c
         case builtin_kind::AtomicFetchXor:
         case builtin_kind::AtomicFetchAnd:
         {
-            // (one thread: the object's old value; its new value stored)
+            // (the object's old value (its new value stored atomically): a read-modify-write)
             auto const t = e->type;
-            auto const where = temporary(type::I64);
-            auto const old = temporary(wasm_of(t));
-            rvalue(arg(0));
-            tee(where);
-            load(t);
-            set(old);
-            get(where);
             auto const kind = static_cast<builtin_kind>(e->builtin);
+            rvalue(arg(0));
             if (kind == builtin_kind::AtomicExchange)
-                value_as(arg(1), t);
-            else if (t->is_pointer())
             {
-                get(old);
+                value_as(arg(1), t);
+                to_bits(t);
+                atomic(0x41u, t);
+                from_bits(t);
+                return;
+            }
+            if (t->is_pointer())
+            {
+                // (a pointer's: by elements)
                 value_as(arg(1), qtype{ iProgram.basic(type_kind::Long) });
                 i64(static_cast<std::int64_t>(std::max<std::uint64_t>(1u, iProgram.size_of(t->base))));
                 op(opcode::I64Mul);
-                op(kind == builtin_kind::AtomicFetchSub ? opcode::I64Sub : opcode::I64Add);
             }
-            else
-            {
-                get(old);
+            else if (t->is_integer())
                 value_as(arg(1), t);
-                arithmetic(kind == builtin_kind::AtomicFetchAdd ? construct::Add : kind == builtin_kind::AtomicFetchSub ? construct::Subtract :
-                    kind == builtin_kind::AtomicFetchOr ? construct::BitOr : kind == builtin_kind::AtomicFetchXor ? construct::BitXor : construct::BitAnd, t);
-                normalize(t);
-            }
-            store(t);
-            get(old);
-            release(old);
-            release(where);
+            else
+                throw compile_error{ e, "an atomic operation on an object that is not an integer or a pointer" };
+            atomic(kind == builtin_kind::AtomicFetchAdd ? 0x1Eu : kind == builtin_kind::AtomicFetchSub ? 0x25u : kind == builtin_kind::AtomicFetchAnd ? 0x2Cu :
+                kind == builtin_kind::AtomicFetchOr ? 0x33u : 0x3Au, t);
+            from_bits(t);
             return;
         }
         case builtin_kind::AtomicCompareExchange:
         {
-            // (if *object equals *expected, *object = desired (true); else *expected = *object (false))
+            // (if *object equals *expected, *object = desired (true); else *expected = *object (false): one compare-exchange)
             auto const t = iProgram.value_type(arg(0))->base.unqualified();
-            auto const where = temporary(type::I64);
+            auto const bits = bits_of(t);
             auto const expected = temporary(type::I64);
-            auto const current = temporary(wasm_of(t));
+            auto const wanted = temporary(bits);
+            auto const seen = temporary(bits);
             rvalue(arg(0));
-            set(where);
             rvalue(arg(1));
-            set(expected);
-            get(where);
+            tee(expected);
             load(t);
-            tee(current);
-            get(expected);
-            load(t);
-            compare(construct::Equal, t.type->is_pointer() ? qtype{ iProgram.basic(type_kind::ULong) } : t);
-            begin_if(type::I32);
-            get(where);
+            to_bits(t);
+            tee(wanted);
             value_as(arg(2), t);
-            store(t);
+            to_bits(t);
+            atomic(0x48u, t);
+            if (iProgram.size_of(t) < 4u && !t->is_floating())
+                normalize(t);
+            tee(seen);
+            get(wanted);
+            op(bits == type::I64 ? opcode::I64Eq : opcode::I32Eq);
+            begin_if(type::I32);
             i32(1);
             else_();
             get(expected);
-            get(current);
+            get(seen);
+            from_bits(t);
             store(t);
             i32(0);
             end();
-            release(current);
+            release(seen);
+            release(wanted);
             release(expected);
-            release(where);
             return;
         }
         default:

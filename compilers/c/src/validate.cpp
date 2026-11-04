@@ -439,7 +439,10 @@ namespace neos::compilers::c
             default:
                 {
                     auto const sig = signature_of(entry->second.sig);
-                    bool const memory = entry->second.op.find(".load") != std::string::npos || entry->second.op.find(".store") != std::string::npos;
+                    bool const memory = entry->second.op.find(".load") != std::string::npos || entry->second.op.find(".store") != std::string::npos ||
+                        entry->second.op.find(".atomic.") != std::string::npos;
+                    if (o == opcode::AtomicFence)
+                        ++pc;   // (its reserved byte)
                     if (memory)
                     {
                         auto const align = leb();

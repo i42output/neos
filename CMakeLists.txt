@@ -442,6 +442,7 @@ add_neos_runtime_plugin(c
     runtime/c/src/lib_string.cpp
     runtime/c/src/lib_math.cpp
     runtime/c/src/lib_time.cpp
+    runtime/c/src/lib_threads.cpp
     runtime/c/src/lib_wchar.cpp)
 target_include_directories(c PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compilers/c/include")
 

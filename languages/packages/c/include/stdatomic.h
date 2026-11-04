@@ -40,7 +40,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* (a program has one thread (__STDC_NO_THREADS__): atomic operations are its ordinary operations, and lock free) */
+/* (an _Atomic object's loads and stores (and its compound assignments, increments and decrements) are atomic (sequentially consistent:
+   every order is as memory_order_seq_cst); the operations here are the compiler's __builtin_atomic_ functions; all are lock free) */
 typedef enum memory_order
 {
     memory_order_relaxed,
@@ -114,7 +115,7 @@ bool atomic_flag_test_and_set(volatile atomic_flag* object);
 bool atomic_flag_test_and_set_explicit(volatile atomic_flag* object, memory_order order);
 void atomic_flag_clear(volatile atomic_flag* object);
 void atomic_flag_clear_explicit(volatile atomic_flag* object, memory_order order);
-#define atomic_thread_fence(order) ((void)(order))
+#define atomic_thread_fence(order) ((void)(order), __builtin_atomic_fence())
 #define atomic_signal_fence(order) ((void)(order))
 #define atomic_is_lock_free(obj) ((void)(obj), true)
 #define atomic_store(object, desired) ((void)(*(object) = (desired)))

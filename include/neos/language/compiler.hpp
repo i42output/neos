@@ -311,6 +311,7 @@ namespace neos::language
             std::map<std::string, type> returned;                   ///< (this pass)
             std::set<std::string> functionGlobals;                  ///< (this pass) global variables used by functions
             std::set<std::string> entryGlobals;                     ///< global variables only used by top-level code (locals of the entry point)
+            std::set<std::string> threadGlobals;                    ///< global variables that each thread has its own of
             std::uint32_t pass = 0u;
             bool changed = false;
         };
@@ -464,6 +465,7 @@ namespace neos::language
         void set_global_type(std::size_t aIndex, type aType) final;
         bool entry_global(neolib::i_string_view const& aName) const final;
         void function_global(neolib::i_string const& aName) final;
+        void thread_global(neolib::i_string const& aName) final;
     private:
         const compilation_state& state() const;
         compilation_state& state();

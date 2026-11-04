@@ -55,7 +55,8 @@ namespace neos::c_runtime
     inline T* at(address aAddress) { return reinterpret_cast<T*>(memory() + aAddress); }
     inline char* str(address aAddress) { return aAddress == 0u ? nullptr : at<char>(aAddress); }
     inline address address_of(void const* aPointer) { return aPointer == nullptr ? 0u : static_cast<address>(static_cast<std::uint8_t const*>(aPointer) - memory()); }
-    inline int& errno_value() { return *at<int>(language::c::layout::Errno); }
+    address thread_errno();     ///< (the calling thread's errno (the program's thread's: at layout::Errno; see lib_threads.cpp))
+    inline int& errno_value() { return *at<int>(thread_errno()); }
 
     // the heap (allocated storage is zeroed)
     address allocate(std::uint64_t aSize);
@@ -63,6 +64,9 @@ namespace neos::c_runtime
     void deallocate(address aAddress);
     address reallocate(address aAddress, std::uint64_t aSize);
     std::uint64_t allocated_size(address aAddress);
+    // the memory's pages (whole granules: e.g. a thread's stack)
+    address take_pages(std::uint64_t aSize);
+    void give_pages(address aAddress, std::uint64_t aSize);
     address copy_string(std::string const& aText);      ///< (a new NUL terminated copy in the C memory (heap allocated))
 
     // the standard streams (the program's, as its host gives them (see neos_rt_host::std_write))
@@ -77,6 +81,8 @@ namespace neos::c_runtime
     std::int64_t call_function(address aDescriptor, std::initializer_list<std::int64_t> aArguments, neos_rt_type aResult = NEOS_RT_I32, 
         std::initializer_list<neos_rt_type> aTypes = {});
     void trap(char const* aMessage);
+    long const* trap_pending();     ///< (see NEOS_RUNTIME_PLUGIN_ERROR_PENDING)
+    char const* trapped();          ///< (the calling thread's trap's error (cleared), if trap was called; else null)
 
     // the native functions' tables (each lib_*.cpp's)
     std::vector<neos_rt_function>& functions();
@@ -92,6 +98,10 @@ namespace neos::c_runtime
     void streams_init();
     // the functions that atexit (and at_quick_exit) registered
     void exit_handlers(bool aQuick);
+    // threads (lib_threads.cpp): the globals of a thread's stack (see rt_init); the program ending: if threads other than the calling one
+    // are running, the process ends (as a C program's does when it ends: they stop), its output flushed
+    void stack_globals(unsigned& aSp, unsigned& aLimit);
+    void end_threads(int aStatus);
 }
 
 #if defined(_WIN32)

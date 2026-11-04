@@ -81,6 +81,7 @@ namespace neos
                             for (int op = 0x28; op <= 0x3E; ++op)
                                 counts[op] = 2u;
                             counts[0x11] = 2u;
+                            counts[0xFE] = 3u;      // (atomic accesses: the instruction, its memarg's flags and offset)
                             counts[0x0E] = 0xFFu;
                             return counts;
                         }();
@@ -1079,7 +1080,7 @@ namespace neos
                                             for (auto q = p; q < loopEnd;)
                                             {
                                                 auto const o = static_cast<std::uint8_t>(iTokens[q]);
-                                                if ((o >= 0x36u && o <= 0x3Eu) || o == 0x24u || o == 0x10u || o == 0x11u)
+                                                if ((o >= 0x36u && o <= 0x3Eu) || o == 0x24u || o == 0x10u || o == 0x11u || o == 0xFEu)
                                                 {
                                                     effect();
                                                     break;
@@ -1357,7 +1358,9 @@ namespace neos
                                                 break;
                                             }
                                             std::optional<std::uint32_t> id;
-                                            if (auto* c = speculating(); c != nullptr && type != F32 && type != F64 && (id = speculation({ 1u, g })))
+                                            // (not a global that each thread has its own of: the module's value is not the thread's)
+                                            bool const perThread = iModule.threadGlobals != nullptr && g < iModule.threadGlobals->size() && (*iModule.threadGlobals)[g] != 0u;
+                                            if (auto* c = speculating(); c != nullptr && !perThread && type != F32 && type != F64 && (id = speculation({ 1u, g })))
                                             {
                                                 // (its value now: a guard checks that it has it)
                                                 auto const value = (*iModule.globals)[g] & mask_of(type);
@@ -1395,6 +1398,24 @@ namespace neos
                                         break;
                                     case 0x44:
                                         push_constant(F64, imm(0));
+                                        break;
+                                    case 0xFE:
+                                        {
+                                            // (an atomic access: as it is, an effect (memory that it reads or writes is not known again after it))
+                                            auto const sub = imm(0);
+                                            if (sub != 0x03u && (sub < 0x10u || sub > 0x4Eu))
+                                                throw cannot_optimize{ "instruction" };
+                                            std::size_t const operands = sub == 0x03u ? 0u : sub < 0x17u ? 1u : sub < 0x48u ? 2u : 3u;
+                                            for (std::size_t i = 0u; i < operands; ++i)
+                                                pop();
+                                            emit(op);
+                                            emit(imm(0));
+                                            emit(imm(1));
+                                            emit(imm(2));
+                                            effect();
+                                            if (sub != 0x03u && (sub < 0x17u || sub >= 0x1Eu))
+                                                push((sub - 0x10u) % 7u == 1u || (sub - 0x10u) % 7u >= 4u ? I64 : I32);
+                                        }
                                         break;
                                     default:
                                         if (op >= 0x28u && op <= 0x35u)

@@ -466,6 +466,10 @@ namespace neos::compilers::ada
         // the operations inheriting it)
         auto const abstractOperation = [&](entity* aOp)
         {
+            // (inherited from a nonabstract formal derived type: not abstract (its actual's is not, 12.5.1(21/3)))
+            if (auto* from = aOp->sub->derived_from; aOp->sub->is_abstract && from != nullptr && from->view()->base_type()->view()->is_formal &&
+                !from->view()->base_type()->view()->abstract && from->view()->base_type()->view()->kind != type_kind::Interface)
+                return false;
             if (aOp->sub->is_abstract)
                 return true;
             if (aOp->kind != entity_kind::Function || aOp->sub->result == nullptr || aOp->sub->parent_operation == nullptr)
@@ -2965,7 +2969,9 @@ namespace neos::compilers::ada
         // (an expression of a limited type where a new object is initialized (an object's or component's initial value, a component 
         // association's, an initialized allocator's, a return expression ...): each operative constituent newly constructed (an
         // aggregate, a function call ...) (7.5(2.1/5)))
-        if (aExpression == nullptr || iInstanceBodies != 0 || iSpeculation != 0 || aType == nullptr || aType->view()->is_formal || !limited_type(aType, aRegion))
+        // (a formal type: limited if declared limited)
+        if (aExpression == nullptr || iInstanceBodies != 0 || iSpeculation != 0 || aType == nullptr ||
+            (aType->view()->is_formal && !aType->view()->limited && !aType->view()->base_type()->view()->limited) || !limited_type(aType, aRegion))
             return;
         std::function<node*(node*)> built = [&](node* n) -> node*
         {
@@ -4181,6 +4187,17 @@ namespace neos::compilers::ada
             if (name == "elaborate_body" || name == "pure" || name == "preelaborate" || name == "inline" || name == "shared_passive" ||
                 name == "remote_types" || name == "remote_call_interface" || name == "all_calls_remote")
                 recover([&]() { program_unit_pragma_check(aPragma, name, arguments, aRegion); });
+            // (Suppress, Unsuppress: of a check name (11.5))
+            if ((name == "suppress" || name == "unsuppress") && iInstanceBodies == 0 && !arguments.empty())
+            {
+                static std::set<std::string> const checks{ "access_check", "discriminant_check", "division_check", "index_check", "length_check",
+                    "overflow_check", "range_check", "tag_check", "accessibility_check", "allocation_check", "elaboration_check", "storage_check",
+                    "all_checks", "program_error_check", "tasking_check", "duplicated_tag_check", "alignment_check", "container_checks",
+                    "tampering_check", "predicate_check", "atomic_synchronization", "validity_check", "overflow_checks" };
+                auto* first = value(0);
+                if (first != nullptr && first->is(construct::Identifier) && !checks.contains(name_text(first->source)))
+                    recover([&]() { error(first, "\"" + name_text(first->source) + "\" is not the name of a check (11.5)"); });
+            }
         }
         else
             pragma_extra(aPragma, name, arguments, aRegion);

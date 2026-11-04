@@ -117,7 +117,8 @@ namespace neos::compilers::c
         CkdAdd, CkdSub, CkdMul,
         ConstantP,
         Sqrt, Sqrtf, Fabs, Fabsf, Floor, Ceil, Trunc, Nearbyint, Copysign, Fmin, Fmax,
-        AtomicExchange, AtomicCompareExchange, AtomicFetchAdd, AtomicFetchSub, AtomicFetchOr, AtomicFetchXor, AtomicFetchAnd
+        AtomicExchange, AtomicCompareExchange, AtomicFetchAdd, AtomicFetchSub, AtomicFetchOr, AtomicFetchXor, AtomicFetchAnd,
+        AtomicLoad, AtomicStore, AtomicFence
     };
 
     class function_generator;
@@ -236,6 +237,8 @@ namespace neos::compilers::c
         bool returns_record(c_type const* aFunctionType) const;
         std::uint32_t sp_global() const { return iSpGlobal; }
         std::uint32_t limit_global() const { return iLimitGlobal; }
+        std::uint32_t tls_global() const { return iTlsGlobal; }
+        std::uint64_t tls_template() const { return iTlsTemplate; }
         std::uint32_t jump_global() const { return iJumpGlobal; }
         std::uint32_t jump_value_global() const { return iJumpValueGlobal; }
         bool uses_longjmp() const { return iUsesLongjmp; }
@@ -299,6 +302,11 @@ namespace neos::compilers::c
         std::uint32_t iLimitGlobal = 0u;
         std::uint32_t iJumpGlobal = 0u;
         std::uint32_t iJumpValueGlobal = 0u;
+        std::uint32_t iTlsGlobal = 0u;                  ///< (%c.tls: the thread's block of thread-local objects' address)
+        std::uint64_t iTlsTemplate = 0u;                ///< (the block's template (its objects' initial values): 0 if none)
+        std::uint64_t iTlsSize = 0u;
+        std::uint64_t iTlsAlignment = 16u;
+        std::uint64_t iTlsMain = 0u;                    ///< (the program's own thread's block)
         bool iUsesLongjmp = false;
         std::uint32_t iFunctionCount = 0u;
         std::vector<entity*> iToGenerate;

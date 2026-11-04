@@ -77,6 +77,8 @@ namespace neos
                                 return 2u + static_cast<std::size_t>(aTokens[aPosition + 1u]);
                             case 0x11:
                                 return 2u;
+                            case 0xFE:
+                                return 3u;
                             default:
                                 return (aOp >= 0x28u && aOp <= 0x3Eu) ? 2u : 0u;
                             }

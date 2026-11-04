@@ -123,6 +123,7 @@ namespace neos
                         TrapHostException = 6,
                         TrapOutOfBounds = 7,
                         TrapIndirectCall = 8,
+                        TrapUnalignedAtomic = 9,
                         TrapCount
                     };
 
@@ -137,6 +138,7 @@ namespace neos
                         case TrapStackExhausted: return "call stack exhausted";
                         case TrapOutOfBounds: return "out of bounds memory access";
                         case TrapIndirectCall: return "indirect call type mismatch";
+                        case TrapUnalignedAtomic: return "unaligned atomic";
                         default: return "trap";
                         }
                     }
@@ -153,6 +155,7 @@ namespace neos
                         std::uint32_t argumentCount;
                         value const* arguments;
                         value* globals;
+                        value* threadGlobals;   ///< (the calling thread's (see module_description::threadGlobals); else globals)
                         memory const* linearMemory;
                         compiled_module* module;
                         object_table* objects;
@@ -165,12 +168,61 @@ namespace neos
                     };
                     constexpr std::size_t MaxDeoptValues = 4096u;
 
+                    // (generated code's atomic read-modify-write accesses (see atomic_access; code_generator::atomic): aOp, the instruction | 
+                    // its memory index << 8 | its offset << 16; an access out of bounds, or not aligned to its width, traps (the context's trap))
+                    std::uint8_t* atomic_word(context* aContext, std::uint64_t aAddress, std::uint64_t aOp)
+                    {
+                        auto const sub = aOp & 0xFFu;
+                        auto const memoryIndex = (aOp >> 8u) & 0xFFu;
+                        auto const width = atomic_width(sub);
+                        auto const& m = memoryIndex == 0u ? *aContext->linearMemory : external_memory(memoryIndex);
+                        if (memoryIndex == 0u)
+                            aAddress &= 0xFFFFFFFFull;
+                        auto const address = aAddress + (aOp >> 16u);
+                        if (address + width > m.size || address + width < address)
+                        {
+                            aContext->trap = TrapOutOfBounds;
+                            return nullptr;
+                        }
+                        auto* const at = m.base + address;
+                        if ((reinterpret_cast<std::uintptr_t>(at) & (width - 1u)) != 0u)
+                        {
+                            aContext->trap = TrapUnalignedAtomic;
+                            return nullptr;
+                        }
+                        return at;
+                    }
+                    std::uint64_t atomic_rmw(std::uint64_t aAddress, std::uint64_t aOperand, std::uint64_t aOp, context* aContext) noexcept
+                    {
+                        auto* const at = atomic_word(aContext, aAddress, aOp);
+                        return at != nullptr ? atomic_access(at, aOp & 0xFFu, aOperand, 0u) : 0u;
+                    }
+                    std::uint64_t atomic_cmpxchg(std::uint64_t aAddress, std::uint64_t aExpected, std::uint64_t aReplacement, std::uint64_t aOp, context* aContext) noexcept
+                    {
+                        auto* const at = atomic_word(aContext, aAddress, aOp);
+                        return at != nullptr ? atomic_access(at, aOp & 0xFFu, aExpected, aReplacement) : 0u;
+                    }
+
+                    // (the calling thread's exception that generated code traps for (TrapHostException): a host function's, or a compilation's)
+                    std::exception_ptr& host_exception()
+                    {
+                        thread_local std::exception_ptr tException;
+                        return tException;
+                    }
+
                     constexpr std::int32_t ContextStackLimit = static_cast<std::int32_t>(offsetof(context, stackLimit));
                     constexpr std::int32_t ContextSavedStackPointer = static_cast<std::int32_t>(offsetof(context, savedStackPointer));
                     constexpr std::int32_t ContextTrap = static_cast<std::int32_t>(offsetof(context, trap));
                     constexpr std::int32_t ContextArgumentCount = static_cast<std::int32_t>(offsetof(context, argumentCount));
                     constexpr std::int32_t ContextArguments = static_cast<std::int32_t>(offsetof(context, arguments));
                     constexpr std::int32_t ContextGlobals = static_cast<std::int32_t>(offsetof(context, globals));
+                    constexpr std::int32_t ContextThreadGlobals = static_cast<std::int32_t>(offsetof(context, threadGlobals));
+                    // (where a global is: the module's globals, or the thread's (see module_description::threadGlobals))
+                    std::int32_t globals_of(module_description const& aModule, std::uint64_t aGlobal)
+                    {
+                        return aModule.threadGlobals != nullptr && aGlobal < aModule.threadGlobals->size() && (*aModule.threadGlobals)[aGlobal] != 0u ?
+                            ContextThreadGlobals : ContextGlobals;
+                    }
                     constexpr std::int32_t ContextMemory = static_cast<std::int32_t>(offsetof(context, linearMemory));
                     constexpr std::int32_t MemoryBase = static_cast<std::int32_t>(offsetof(memory, base));
                     constexpr std::int32_t MemorySize = static_cast<std::int32_t>(offsetof(memory, size));
@@ -210,6 +262,7 @@ namespace neos
                     std::size_t codeSize = 0u;
                     std::uint32_t(*trampoline)(context*, void const*) = nullptr;
                     std::vector<std::size_t> functionOffsets;
+                    std::vector<std::size_t> entryTargets;  ///< (the offsets that the entries' addresses are set to first (see code_generator::entries))
                     // (call_indirect's table: each function's address and type (an import's: none))
                     struct indirect_entry
                     {
@@ -218,7 +271,8 @@ namespace neos
                         std::uint32_t reserved = 0u;
                     };
                     std::vector<indirect_entry> indirect;
-                    std::exception_ptr exception;
+                    // (the exception that a host function or a compilation of the calling thread's raised (generated code then traps): see 
+                    // host_exception)
                     // (the frames of generated code: the offset that each call of a function returns to and the token of the call 
                     // (sorted), and the offset that the trampoline's call returns to)
                     std::vector<std::pair<std::size_t, std::size_t>> callSites;
@@ -304,7 +358,10 @@ namespace neos
                     std::uint32_t jobsInFlight = 0u;                    ///< (being made by the worker (see tier_worker::mutex))
                     bool closing = false;                               ///< (being destroyed: no more jobs (see tier_worker::mutex))
                     std::vector<tier_chunk> chunks;
-                    std::vector<std::array<std::uint8_t, 14u>> savedEntries;    ///< (the code that an optimized function's entry had)
+                    std::vector<std::uint64_t> savedEntries;    ///< (the address that an optimized function's entry had (see set_entry))
+                    // (threads: the module's code may be run by more than one at once (see neos_rt_host::thread_attach): its compilation when
+                    // its functions are first called, and the optimizing tier's (tier_up, tier_loop, guard_failed, deopt_taken), one at a time)
+                    std::recursive_mutex tierMutex;
                     // (calls that continue in optimized code at loops (on-stack replacement, see tier_loop): each loop's (by its token) code
                     // (made when a call that runs the function's baseline code has run the loop often enough, once the function has been
                     // optimized), until it leaves for the baseline's (a deopt in the loop, or a guard): then made again (at most MaxOsrCompiles
@@ -1702,7 +1759,7 @@ namespace neos
                         }
                         catch (...)
                         {
-                            aContext->module->exception = std::current_exception();
+                            host_exception() = std::current_exception();
                             return 1u;
                         }
                     }
@@ -1721,7 +1778,7 @@ namespace neos
                         }
                         catch (...)
                         {
-                            aContext->module->exception = std::current_exception();
+                            host_exception() = std::current_exception();
                             return 1u;
                         }
                     }
@@ -1900,6 +1957,8 @@ namespace neos
                             return 2u + static_cast<std::size_t>(aTokens[aPosition + 1u]);
                         case 0x11:
                             return 2u;
+                        case 0xFE:
+                            return 3u;
                         default:
                             return (aOp >= 0x28u && aOp <= 0x3Eu) ? 2u : 0u;
                         }
@@ -1910,7 +1969,7 @@ namespace neos
                     {
                         if (aOp <= 0x05u || (aOp >= 0x0Bu && aOp <= 0x0Eu) || aOp == 0x0Fu || aOp == 0x10u || aOp == 0x11u || aOp == 0x1Au || aOp == 0x1Bu)
                             return true;
-                        return (aOp >= 0x20u && aOp <= 0x24u) || (aOp >= 0x28u && aOp <= 0x3Eu) || (aOp >= 0x41u && aOp <= 0xC1u);
+                        return (aOp >= 0x20u && aOp <= 0x24u) || (aOp >= 0x28u && aOp <= 0x3Eu) || (aOp >= 0x41u && aOp <= 0xC1u) || aOp == 0xFEu;
                     }
 
                     // (the optimizing tier's helpers, that generated code calls: a function's counter has reached 0 (its optimized 
@@ -2005,7 +2064,10 @@ namespace neos
                                 iSingleLabel = a.new_label();
                             else
                                 for (std::size_t f = 0u; f < aModule.functions.size(); ++f)
+                                {
                                     iFunctionLabels.push_back(a.new_label());
+                                    iEntryTargets.push_back(a.new_label());
+                                }
                         }
                     public:
                         void generate(compiled_module& aOutput)
@@ -2023,6 +2085,8 @@ namespace neos
                             }
                             aOutput.primaryMemory = iPrimaryMemory = primary_memory();
                             trampoline();
+                            a.barrier();
+                            entries();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 if (!iModule.functions[f].imported)
                                     function(f);
@@ -2031,6 +2095,7 @@ namespace neos
                             a.resolve();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 aOutput.functionOffsets.push_back(iModule.functions[f].imported ? 0u : a.label_offset(iFunctionLabels[f]));
+                            entry_targets(aOutput);
                             for (auto const& site : iCallSites)
                                 aOutput.callSites.emplace_back(a.label_offset(site.first), site.second);
                             std::sort(aOutput.callSites.begin(), aOutput.callSites.end());
@@ -2114,22 +2179,21 @@ namespace neos
                             a.jmp_r(RAX);
                             a.barrier();
                             auto const thunkOffset = a.label_offset(thunk);
-                            // (each entry: mov r11d, its index; jmp the thunk (then, once it is compiled: jmp [rip+2]; its code's address))
+                            // (each entry (see entries): its code's address at first that of its stub: mov r11d, its index; jmp the thunk)
+                            entries();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                             {
                                 if (iModule.functions[f].imported)
                                     continue;
                                 a.align(16u);
                                 a.barrier();
-                                a.bind(iFunctionLabels[f]);
+                                a.bind(iEntryTargets[f]);
                                 auto const start = a.offset();
                                 a.emit8(0x41u);
                                 a.emit8(0xBBu);
                                 a.emit32(f);
                                 a.emit8(0xE9u);
                                 a.emit32(static_cast<std::uint32_t>(static_cast<std::int64_t>(thunkOffset) - static_cast<std::int64_t>(start + 11u)));
-                                for (int i = 0; i < 5; ++i)
-                                    a.emit8(0xCCu);
                                 a.barrier();
                             }
                             trap_stubs();
@@ -2137,6 +2201,7 @@ namespace neos
                             a.resolve();
                             for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
                                 aOutput.functionOffsets.push_back(iModule.functions[f].imported ? 0u : a.label_offset(iFunctionLabels[f]));
+                            entry_targets(aOutput);
                             aOutput.trampolineReturn = a.label_offset(iTrampolineReturn);
                             aOutput.exitOffset = a.label_offset(iExit);
                             iCode = std::move(a.code);
@@ -2210,6 +2275,31 @@ namespace neos
                             return iFunctionLabels[aFunction];
                         }
                         // --- module level code
+                        // (each function's entry (where its calls go: see compiled_module::functionOffsets): jmp [rip+2]; int3 int3; the 
+                        // address of its code (8 bytes, aligned: set_entry changes it, while other threads may run the code that jumps to it, 
+                        // in one store), at first its target's (see entry_targets))
+                        void entries()
+                        {
+                            for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
+                            {
+                                if (iModule.functions[f].imported)
+                                    continue;
+                                a.align(16u);
+                                a.barrier();
+                                a.bind(iFunctionLabels[f]);
+                                for (auto b : { 0xFFu, 0x25u, 0x02u, 0x00u, 0x00u, 0x00u, 0xCCu, 0xCCu })
+                                    a.emit8(static_cast<std::uint8_t>(b));
+                                a.emit64(0u);
+                                a.barrier();
+                            }
+                        }
+                        // (the offsets of the entries' first targets (their code's, or their stubs': see generate_entries), that the 
+                        // entries' addresses are set to (see compile))
+                        void entry_targets(compiled_module& aOutput)
+                        {
+                            for (std::uint32_t f = 0u; f < iModule.functions.size(); ++f)
+                                aOutput.entryTargets.push_back(iModule.functions[f].imported ? 0u : a.label_offset(iEntryTargets[f]));
+                        }
                         // (the fixed external memory that all of the module's code accesses (if it accesses one, and only one): see 
                         // compiled_module::primaryMemory)
                         std::uint32_t primary_memory() const
@@ -3276,7 +3366,7 @@ namespace neos
                             iSlotsBase = locals_base() - 8 * frameLocals;
                             // prologue (aligned, so that the speed of its code (e.g. its loops' jumps) does not depend on the code before it)
                             a.align(FunctionAlignment);
-                            a.bind(function_label(aIndex));
+                            a.bind(iSingle ? function_label(aIndex) : iEntryTargets[aIndex]);
                             // (a function that the optimizing tier inlines (it has no frame of its own: a language's helper) is optimized
                             // itself too: callers that are not optimized (e.g. while they warm up) call it)
                             if (iCounters != nullptr)
@@ -5293,6 +5383,42 @@ namespace neos
                                 push_reg(x.type, m);
                             }
                         }
+                        // (an atomic access (prefix 0xFE: see atomic_access): x86's ordering makes an aligned load atomic and sequentially 
+                        // consistent with stores that a fence follows; read-modify-writes: in a helper)
+                        void atomic(std::uint64_t aSub, std::uint64_t aMemarg, std::uint64_t aOffset)
+                        {
+                            materialize_cond();
+                            auto const memoryIndex = static_cast<std::uint32_t>(aMemarg >> 32u);
+                            auto const fence = [&]() { a.emit8(0x0Fu); a.emit8(0xAEu); a.emit8(0xF0u); };    // (mfence)
+                            static constexpr std::uint8_t sLoads[7] = { 0x28u, 0x29u, 0x2Du, 0x2Fu, 0x31u, 0x33u, 0x35u };
+                            static constexpr std::uint8_t sStores[7] = { 0x36u, 0x37u, 0x3Au, 0x3Bu, 0x3Cu, 0x3Du, 0x3Eu };
+                            if (aSub == 0x03u)
+                                fence();
+                            else if (aSub >= 0x10u && aSub < 0x17u)
+                                memory_access(sLoads[aSub - 0x10u], aOffset, memoryIndex);
+                            else if (aSub >= 0x17u && aSub < 0x1Eu)
+                            {
+                                memory_access(sStores[aSub - 0x17u], aOffset, memoryIndex);
+                                fence();
+                            }
+                            else if (aSub >= 0x1Eu && aSub <= 0x4Eu)
+                            {
+                                if (memoryIndex > 0xFFu || aOffset > 0xFFFFFFFFFFFFull)
+                                    throw unsupported{ "atomic access's memarg" };
+                                entry e;
+                                e.k = kind::Const;
+                                e.type = I64;
+                                e.bits = aSub | (static_cast<std::uint64_t>(memoryIndex) << 8u) | (aOffset << 16u);
+                                push(e);
+                                auto const result = atomic_wide(aSub) ? I64 : I32;
+                                if (aSub >= 0x48u)
+                                    helper(reinterpret_cast<void const*>(&atomic_cmpxchg), 4u, I64, result, true);
+                                else
+                                    helper(reinterpret_cast<void const*>(&atomic_rmw), 3u, I64, result, true);
+                            }
+                            else
+                                throw unsupported{ "unsupported instruction" };
+                        }
                         void get_global(std::uint32_t aIndex)
                         {
                             materialize_cond();
@@ -5300,7 +5426,7 @@ namespace neos
                                 throw unsupported{ "invalid global index" };
                             auto const type = (*iModule.globalTypes)[aIndex];
                             auto const t = alloc(false);
-                            a.load(true, t, R15, ContextGlobals);
+                            a.load(true, t, R15, globals_of(iModule, aIndex));
                             if (is_float(type))
                             {
                                 auto const x = alloc(true);
@@ -5321,7 +5447,7 @@ namespace neos
                                 throw unsupported{ "invalid global index" };
                             auto v = pop();
                             auto const t = alloc(false);
-                            a.load(true, t, R15, ContextGlobals);
+                            a.load(true, t, R15, globals_of(iModule, aIndex));
                             store_entry(v, t, static_cast<std::int32_t>(aIndex * 8u));
                             release_reg(false, t);
                             release(v);
@@ -5889,6 +6015,9 @@ namespace neos
                                     push_reg(I32, r);
                                 }
                                 break;
+                            case 0xFE:
+                                atomic(aImmediate(0), aImmediate(1), aImmediate(2));
+                                break;
                             default:
                                 throw unsupported{ "unsupported instruction" };
                             }
@@ -5905,6 +6034,7 @@ namespace neos
                         std::size_t iExit = 0u;
                         std::size_t iTrampolineReturn = 0u;
                         std::vector<std::size_t> iFunctionLabels;
+                        std::vector<std::size_t> iEntryTargets;     ///< (each function's code, or its stub's (see entries))
                         std::vector<std::pair<std::size_t, std::size_t>> iCallSites; ///< (labels where calls return, and their tokens)
                         bytes iCode;
                         std::int32_t* iCounters = nullptr;              ///< (the optimizing tier's counters (see compiled_module::counters))
@@ -7938,7 +8068,7 @@ namespace neos
                                 return;
                             case 0x23:
                                 {
-                                    a.load(true, RCX, R15, ContextGlobals);
+                                    a.load(true, RCX, R15, globals_of(iModule, i.imm0));
                                     auto const disp = 8 * static_cast<std::int32_t>(i.imm0);
                                     if (is_float_type(i.type))
                                     {
@@ -7959,7 +8089,7 @@ namespace neos
                                     auto const x = i.operands[0];
                                     auto const type = f.values[x].type;
                                     auto const disp = 8 * static_cast<std::int32_t>(i.imm0);
-                                    a.load(true, RCX, R15, ContextGlobals);
+                                    a.load(true, RCX, R15, globals_of(iModule, i.imm0));
                                     if (is_float_type(type))
                                         a.movf_store(type == ssa::F64, RCX, disp, xmm(x, 0));
                                     else
@@ -8542,7 +8672,9 @@ namespace neos
                         {
                             // (NEOS_JIT_WATCHED=0: none (each test is made))
                             static bool const enabled = []() { auto const* e = std::getenv("NEOS_JIT_WATCHED"); return e == nullptr || *e != '0'; }();
-                            if (!enabled)
+                            // (not in a module whose code more than one thread may run at once (one with globals that each thread has its own
+                            // of: see module_description::threadGlobals): a patch point is changed while code runs)
+                            if (!enabled || iModule.threadGlobals != nullptr)
                                 return;
                             for (std::uint32_t b = 0u; b < f.blocks.size(); ++b)
                             {
@@ -9359,7 +9491,8 @@ namespace neos
                         return static_cast<std::size_t>((sNext.fetch_add(1u, std::memory_order_relaxed) * 37u) % 64u) * 64u;
                     }
 
-                    void* allocate_executable(bytes const& aCode, std::size_t& aSize, compiled_module::tier_version* aVersion = nullptr)
+                    void* allocate_executable(bytes const& aCode, std::size_t& aSize, compiled_module::tier_version* aVersion = nullptr,
+                        std::function<void(std::uint8_t* aCode)> const& aFixup = {})
                     {
                         aSize = aCode.size();
                         auto const offset = executable_offset();
@@ -9388,6 +9521,8 @@ namespace neos
                             return nullptr;
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
                         std::memcpy(code, source.data(), source.size());
+                        if (aFixup)
+                            aFixup(code);
                         DWORD old;
                         if (!::VirtualProtect(memory, executable, PAGE_EXECUTE_READ, &old))
                         {
@@ -9404,6 +9539,8 @@ namespace neos
                             return nullptr;
                         auto* const code = static_cast<std::uint8_t*>(memory) + offset;
                         std::memcpy(code, source.data(), source.size());
+                        if (aFixup)
+                            aFixup(code);
                         if (::mprotect(memory, executable, PROT_READ | PROT_EXEC) != 0)
                         {
                             ::munmap(memory, total);
@@ -9443,28 +9580,62 @@ namespace neos
 #endif
                     }
 
-                    // (code that runs is changed: aCount bytes at aAddress)
-                    void patch_code(void* aAddress, void const* aBytes, std::size_t aCount)
+                    // (code is changed: aCount bytes at aAddress, which no code that runs is at (e.g. a lazily compiled function's, in its
+                    // region); or, with aWord, the aligned word at aAddress (8 bytes, in one store: e.g. an entry's address (see set_entry)). 
+                    // Other threads may be running code in its pages: they stay executable while they are writable; one change at a time
+                    // (a page's protection is restored by the change that made it writable))
+                    std::mutex& patch_mutex()
                     {
+                        static std::mutex sMutex;
+                        return sMutex;
+                    }
+                    void patch_code(void* aAddress, void const* aBytes, std::size_t aCount, bool aWord = false)
+                    {
+                        std::lock_guard<std::mutex> lock{ patch_mutex() };
+                        auto const write = [&]()
+                        {
+                            if (aWord)
+                            {
+                                std::uint64_t word;
+                                std::memcpy(&word, aBytes, sizeof(word));
+                                std::atomic_ref<std::uint64_t>{ *static_cast<std::uint64_t*>(aAddress) }.store(word, std::memory_order_release);
+                            }
+                            else
+                                std::memcpy(aAddress, aBytes, aCount);
+                        };
 #if defined(_WIN32)
                         DWORD old;
                         if (!::VirtualProtect(aAddress, aCount, PAGE_EXECUTE_READWRITE, &old))
                             throw std::runtime_error("neos::jit: cannot patch code");
-                        std::memcpy(aAddress, aBytes, aCount);
+                        write();
                         ::VirtualProtect(aAddress, aCount, old, &old);
                         ::FlushInstructionCache(::GetCurrentProcess(), aAddress, aCount);
 #else
                         auto const pageSize = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
                         auto const first = reinterpret_cast<std::uintptr_t>(aAddress) & ~(pageSize - 1u);
                         auto const last = (reinterpret_cast<std::uintptr_t>(aAddress) + aCount + pageSize - 1u) & ~(pageSize - 1u);
-                        // (the code that is patched is not running (this thread runs the tier's helper; generated code is not shared by 
-                        // threads that run at the same time))
-                        if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_READ | PROT_WRITE) != 0)
+                        if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
                             throw std::runtime_error("neos::jit: cannot patch code");
-                        std::memcpy(aAddress, aBytes, aCount);
+                        write();
                         if (::mprotect(reinterpret_cast<void*>(first), last - first, PROT_READ | PROT_EXEC) != 0)
                             std::abort();
 #endif
+                    }
+
+                    // (a function's entry's address (see code_generator::entries): the word that its jump reads)
+                    std::uint64_t* entry_address(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        return reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(aModule.code) + aModule.functionOffsets[aFunction] + 8u);
+                    }
+                    std::uint64_t entry_of(compiled_module& aModule, std::uint32_t aFunction)
+                    {
+                        return std::atomic_ref<std::uint64_t>{ *entry_address(aModule, aFunction) }.load(std::memory_order_acquire);
+                    }
+                    // (calls of a function go to aTarget (its entry's address: changed in one store, so that threads that call it meanwhile
+                    // go to the old target or the new))
+                    void set_entry(compiled_module& aModule, std::uint32_t aFunction, std::uint64_t aTarget)
+                    {
+                        patch_code(entry_address(aModule, aFunction), &aTarget, sizeof(aTarget), true);
                     }
 
                     constexpr std::int32_t NotAgain = std::numeric_limits<std::int32_t>::max();
@@ -9934,12 +10105,9 @@ namespace neos
                         auto* const optimized = static_cast<std::uint8_t*>(chunk.code) + entry;
                         m.chunks.push_back(std::move(chunk));
                         // (calls of it go there: its indirect table entry and its entry (a jump: jmp [rip]; its address))
-                        auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
-                        std::memcpy(m.savedEntries[f].data(), baseline, m.savedEntries[f].size());
-                        std::uint8_t jump[14] = { 0xFFu, 0x25u, 0u, 0u, 0u, 0u };
+                        m.savedEntries[f] = entry_of(m, f);
                         auto const target = reinterpret_cast<std::uint64_t>(optimized);
-                        std::memcpy(jump + 6, &target, sizeof(target));
-                        patch_code(baseline, jump, sizeof(jump));
+                        set_entry(m, f, target);
                         m.indirect[f].target = target;
                         m.tierState[f] = 1u;
                         m.currentVersion[f] = version.get();
@@ -10092,6 +10260,11 @@ namespace neos
                         auto& m = *aContext->module;
                         try
                         {
+                            // (another thread may have compiled it meanwhile: its entry then goes to its code (or its optimized code))
+                            std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
+                            if (auto const current = entry_of(m, aFunction); current != reinterpret_cast<std::uint64_t>(static_cast<std::uint8_t*>(m.code) + 
+                                m.entryTargets[aFunction]))
+                                return reinterpret_cast<void const*>(current);
                             code_generator::lazy_function compiled;
                             {
                                 code_generator generator{ m.description, true };
@@ -10142,12 +10315,10 @@ namespace neos
                                 compiled.entry += at;
                                 compiled.entry = reinterpret_cast<std::uintptr_t>(region.code + compiled.entry);
                             }
-                            // (its entry: a jump to its code (jmp [rip+2]; int3 int3; its address))
+                            // (its entry: to its code)
                             auto* const entry = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[aFunction];
-                            std::uint8_t jump[16] = { 0xFFu, 0x25u, 0x02u, 0u, 0u, 0u, 0xCCu, 0xCCu };
                             auto const target = static_cast<std::uint64_t>(compiled.entry);
-                            std::memcpy(jump + 8, &target, sizeof(target));
-                            patch_code(entry, jump, sizeof(jump));
+                            set_entry(m, aFunction, target);
                             if (m.indirect[aFunction].target == reinterpret_cast<std::uint64_t>(entry))
                                 m.indirect[aFunction].target = target;
                             ++m.lazyCompiled;
@@ -10155,11 +10326,11 @@ namespace neos
                         }
                         catch (std::exception const& e)
                         {
-                            m.exception = std::make_exception_ptr(std::runtime_error(std::string{ "neos::jit: function " } + std::to_string(aFunction) + " cannot be compiled (" + e.what() + ")"));
+                            host_exception() = std::make_exception_ptr(std::runtime_error(std::string{ "neos::jit: function " } + std::to_string(aFunction) + " cannot be compiled (" + e.what() + ")"));
                         }
                         catch (...)
                         {
-                            m.exception = std::current_exception();
+                            host_exception() = std::current_exception();
                         }
                         return nullptr;
                     }
@@ -10167,6 +10338,7 @@ namespace neos
                     void const* tier_up(context* aContext, std::uint32_t aFunction) noexcept
                     {
                         auto& m = *aContext->module;
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         m.counters[aFunction] = NotAgain;   // (optimize_function sets it again if it is to look again)
                         try
                         {
@@ -10249,6 +10421,7 @@ namespace neos
                     void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop) noexcept
                     {
                         auto& m = *aContext->module;
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         auto const f = aFunction;
                         m.loopCounters[f] = NotAgain;
                         try
@@ -10297,6 +10470,7 @@ namespace neos
                     {
                         auto& m = *aContext->module;
                         auto const f = aVersion->function;
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         try
                         {
                             // (an inlined call whose guards fail again is not inlined)
@@ -10318,7 +10492,7 @@ namespace neos
                             // (the function's own code again (its optimized code may be running: it stays), until it is optimized again (with 
                             // the values that the guards' words have then))
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
-                            patch_code(baseline, m.savedEntries[f].data(), m.savedEntries[f].size());
+                            set_entry(m, f, m.savedEntries[f]);
                             m.indirect[f].target = reinterpret_cast<std::uint64_t>(baseline);
                             m.tierState[f] = 0u;
                             m.currentVersion[f] = nullptr;
@@ -10366,6 +10540,7 @@ namespace neos
                         // again (as guard_failed))
                         auto& m = *aContext->module;
                         auto const f = aVersion->function;
+                        std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
                         try
                         {
                             // (a guard that failed (its speculation's value changed): the function is optimized again (with the value it has
@@ -10433,7 +10608,7 @@ namespace neos
                             if (m.currentVersion[f] != aVersion || m.tierState[f] != 1u)
                                 return;
                             auto* const baseline = static_cast<std::uint8_t*>(m.code) + m.functionOffsets[f];
-                            patch_code(baseline, m.savedEntries[f].data(), m.savedEntries[f].size());
+                            set_entry(m, f, m.savedEntries[f]);
                             m.indirect[f].target = reinterpret_cast<std::uint64_t>(baseline);
                             m.tierState[f] = 0u;
                             m.currentVersion[f] = nullptr;
@@ -10521,7 +10696,19 @@ namespace neos
                         std::uint8_t jump[5] = { 0xE9u };
                         auto const rel = static_cast<std::int32_t>(aSite.target - (aSite.at + 5));
                         std::memcpy(jump + 1, &rel, sizeof(rel));
-                        patch_code(aSite.at, jump, sizeof(jump));
+                        // (in one store if it is within an aligned word (a module whose code more than one thread runs has no watched tests:
+                        // see optimizing_generator::find_watched_guards))
+                        auto const at = reinterpret_cast<std::uintptr_t>(aSite.at);
+                        if ((at & 7u) <= 3u)
+                        {
+                            auto* const word = reinterpret_cast<std::uint8_t*>(at & ~std::uintptr_t{ 7u });
+                            std::uint8_t bytes[8];
+                            std::memcpy(bytes, word, sizeof(bytes));
+                            std::memcpy(bytes + (at & 7u), jump, sizeof(jump));
+                            patch_code(word, bytes, sizeof(bytes), true);
+                        }
+                        else
+                            patch_code(aSite.at, jump, sizeof(jump));
                     }
 
                     // (an installed optimization's watched tests (its code at aCode): registered; one whose word has changed already
@@ -10727,7 +10914,16 @@ namespace neos
                                 std::fclose(file);
                             }
 #endif
-                        result->code = allocate_executable(generator.code(), result->codeSize);
+                        // (the entries' addresses: their first targets' (see code_generator::entries))
+                        result->code = allocate_executable(generator.code(), result->codeSize, nullptr, [&](std::uint8_t* aCode)
+                        {
+                            for (std::size_t f = 0u; f < result->functionOffsets.size() && f < result->entryTargets.size(); ++f)
+                                if (!result->description.functions[f].imported)
+                                {
+                                    auto const target = reinterpret_cast<std::uint64_t>(aCode + result->entryTargets[f]);
+                                    std::memcpy(aCode + result->functionOffsets[f] + 8u, &target, sizeof(target));
+                                }
+                        });
                         if (result->code == nullptr)
                             return {};
                         result->trampoline = reinterpret_cast<std::uint32_t(*)(context*, void const*)>(result->code);
@@ -10775,6 +10971,8 @@ namespace neos
                     c.arguments = aArguments.data();
                     c.argumentCount = static_cast<std::uint32_t>(aArguments.size());
                     c.globals = aModule.description.globals->data();
+                    c.threadGlobals = aModule.description.threadGlobals != nullptr && aModule.description.host.threadGlobals != nullptr ?
+                        aModule.description.host.threadGlobals(aModule.description.host.host) : c.globals;
                     c.linearMemory = aModule.description.linearMemory;
                     c.module = &aModule;
                     c.objects = aModule.description.objects;
@@ -10792,10 +10990,10 @@ namespace neos
                     auto const status = run(aModule, c, static_cast<std::uint8_t const*>(aModule.code) + aModule.functionOffsets[aFunction]);
                     if (status != NoTrap)
                     {
-                        if (status == TrapHostException && aModule.exception)
+                        if (status == TrapHostException && host_exception())
                         {
-                            auto const exception = aModule.exception;
-                            aModule.exception = nullptr;
+                            auto const exception = host_exception();
+                            host_exception() = nullptr;
                             std::rethrow_exception(exception);
                         }
                         throw std::runtime_error(trap_message(status));

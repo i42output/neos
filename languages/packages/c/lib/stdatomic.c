@@ -41,9 +41,9 @@
 
 #include <stdatomic.h>
 
-/* --- <stdatomic.h>: the functions (as well as their macros: a program has one thread) */
+/* --- <stdatomic.h>: the functions (as well as their macros) */
 
-void (atomic_thread_fence)(memory_order order) { (void)order; }
+void (atomic_thread_fence)(memory_order order) { atomic_thread_fence(order); }
 void (atomic_signal_fence)(memory_order order) { (void)order; }
 bool (atomic_flag_test_and_set)(volatile atomic_flag* object) { return atomic_flag_test_and_set(object); }
 bool (atomic_flag_test_and_set_explicit)(volatile atomic_flag* object, memory_order order) { (void)order; return atomic_flag_test_and_set(object); }

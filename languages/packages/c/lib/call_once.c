@@ -40,11 +40,21 @@
 
 #include <stdlib.h>
 
+void __neos_thread_yield(void);
+
+/* (a flag: 0 (not called), 1 (being called: the other threads that call wait), 2 (called)) */
 void call_once(once_flag* flag, void (*func)(void))
 {
-    if (*flag == 0)
+    _Atomic int* const state = (_Atomic int*)flag;
+    if (*state == 2)
+        return;
+    int expected = 0;
+    if (__builtin_atomic_compare_exchange(state, &expected, 1))
     {
-        *flag = 1;
         func();
+        *state = 2;
+        return;
     }
+    while (*state != 2)
+        __neos_thread_yield();
 }

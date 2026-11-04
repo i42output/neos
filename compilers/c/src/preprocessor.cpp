@@ -2586,7 +2586,7 @@ namespace neos::compilers::c
         for (auto const& [name, value] : std::initializer_list<std::pair<char const*, char const*>>{
             { "__STDC__", "1" }, { "__STDC_VERSION__", "202311L" }, { "__STDC_HOSTED__", "1" }, { "__STDC_UTF_16__", "1" },
             { "__STDC_UTF_32__", "1" }, { "__STDC_IEC_559__", "1" }, { "__STDC_IEC_60559_BFP__", "202311L" }, { "__STDC_NO_COMPLEX__", "1" },
-            { "__STDC_NO_THREADS__", "1" }, { "__STDC_EMBED_NOT_FOUND__", "0" }, { "__STDC_EMBED_FOUND__", "1" }, { "__STDC_EMBED_EMPTY__", "2" },
+            { "__STDC_EMBED_NOT_FOUND__", "0" }, { "__STDC_EMBED_FOUND__", "1" }, { "__STDC_EMBED_EMPTY__", "2" },
             { "__neos__", "1" }, { "__LP64__", "1" }, { "_LP64", "1" }, { "__CHAR_BIT__", "8" }, { "__SIZEOF_POINTER__", "8" }, { "__SIZEOF_INT__", "4" },
             { "__SIZEOF_LONG__", "8" }, { "__SIZEOF_LONG_LONG__", "8" }, { "__SIZEOF_SHORT__", "2" }, { "__SIZEOF_FLOAT__", "4" },
             { "__SIZEOF_DOUBLE__", "8" }, { "__SIZEOF_LONG_DOUBLE__", "8" }, { "__SIZEOF_SIZE_T__", "8" }, { "__ORDER_LITTLE_ENDIAN__", "1234" },
@@ -2616,7 +2616,7 @@ namespace neos::compilers::c
             iMacros[m.name] = m;
             iAttributeMacro = m;
         }
-        // (function-like predefined macros: GNU's offsetof and atomic operations (of a program with one thread))
+        // (function-like predefined macros: GNU's offsetof and atomic operations)
         auto const predefine_function = [&](std::string const& aName, std::vector<std::string> const& aParameters, std::string const& aBody)
         {
             predefine(aName, aBody);
@@ -2629,28 +2629,33 @@ namespace neos::compilers::c
             { "__ATOMIC_RELAXED", "0" }, { "__ATOMIC_CONSUME", "1" }, { "__ATOMIC_ACQUIRE", "2" }, { "__ATOMIC_RELEASE", "3" },
             { "__ATOMIC_ACQ_REL", "4" }, { "__ATOMIC_SEQ_CST", "5" }, { "__GCC_ATOMIC_INT_LOCK_FREE", "2" }, { "__GCC_ATOMIC_POINTER_LOCK_FREE", "2" } })
             predefine(name, value);
-        predefine_function("__atomic_load_n", { "p", "o" }, "((void)(o), *(p))");
-        predefine_function("__atomic_store_n", { "p", "v", "o" }, "((void)(o), (void)(*(p) = (v)))");
+        // (the atomic builtins (GCC's): real atomic accesses (see the compiler's builtins __builtin_atomic_*); the memory order (o) is
+        // evaluated and ignored (each is sequentially consistent))
+        predefine_function("__atomic_load_n", { "p", "o" }, "((void)(o), __builtin_atomic_load((p)))");
+        predefine_function("__atomic_store_n", { "p", "v", "o" }, "((void)(o), __builtin_atomic_store((p), (v)))");
         predefine_function("__atomic_exchange_n", { "p", "v", "o" }, "((void)(o), __builtin_atomic_exchange((p), (v)))");
         predefine_function("__atomic_compare_exchange_n", { "p", "e", "d", "w", "s", "f" },
             "((void)(w), (void)(s), (void)(f), __builtin_atomic_compare_exchange((p), (e), (d)))");
-        predefine_function("__atomic_load", { "p", "r", "o" }, "((void)(o), (void)(*(r) = *(p)))");
-        predefine_function("__atomic_store", { "p", "v", "o" }, "((void)(o), (void)(*(p) = *(v)))");
+        predefine_function("__atomic_load", { "p", "r", "o" }, "((void)(o), (void)(*(r) = __builtin_atomic_load((p))))");
+        predefine_function("__atomic_store", { "p", "v", "o" }, "((void)(o), __builtin_atomic_store((p), *(v)))");
         predefine_function("__atomic_exchange", { "p", "v", "r", "o" }, "((void)(o), (void)(*(r) = __builtin_atomic_exchange((p), *(v))))");
         predefine_function("__atomic_compare_exchange", { "p", "e", "d", "w", "s", "f" },
             "((void)(w), (void)(s), (void)(f), __builtin_atomic_compare_exchange((p), (e), *(d)))");
         for (auto const* op : { "add", "sub", "and", "or", "xor" })
         {
             std::string const o = op;
-            std::string const assign = o == "add" ? "+=" : o == "sub" ? "-=" : o == "and" ? "&=" : o == "or" ? "|=" : "^=";
+            std::string const operation = o == "add" ? "+" : o == "sub" ? "-" : o == "and" ? "&" : o == "or" ? "|" : "^";
+            // (op_fetch: the new value, from the old)
+            std::string const newValue = "({ __typeof__(*(p)) __neos_v = (v); (__typeof__(*(p)))(__builtin_atomic_fetch_" + o + "((p), __neos_v) " +
+                operation + " __neos_v); })";
             predefine_function("__atomic_fetch_" + o, { "p", "v", "o" }, "((void)(o), __builtin_atomic_fetch_" + o + "((p), (v)))");
-            predefine_function("__atomic_" + o + "_fetch", { "p", "v", "o" }, "((void)(o), *(p) " + assign + " (v))");
+            predefine_function("__atomic_" + o + "_fetch", { "p", "v", "o" }, "((void)(o), " + newValue + ")");
             predefine_function("__sync_fetch_and_" + o, { "p", "v" }, "__builtin_atomic_fetch_" + o + "((p), (v))");
-            predefine_function("__sync_" + o + "_and_fetch", { "p", "v" }, "(*(p) " + assign + " (v))");
+            predefine_function("__sync_" + o + "_and_fetch", { "p", "v" }, newValue);
         }
         predefine_function("__atomic_test_and_set", { "p", "o" }, "((void)(o), __builtin_atomic_exchange((unsigned char*)(p), 1) != 0)");
-        predefine_function("__atomic_clear", { "p", "o" }, "((void)(o), (void)(*(unsigned char*)(p) = 0))");
-        predefine_function("__atomic_thread_fence", { "o" }, "((void)(o))");
+        predefine_function("__atomic_clear", { "p", "o" }, "((void)(o), __builtin_atomic_store((unsigned char*)(p), 0))");
+        predefine_function("__atomic_thread_fence", { "o" }, "((void)(o), __builtin_atomic_fence())");
         predefine_function("__atomic_signal_fence", { "o" }, "((void)(o))");
         predefine_function("__atomic_always_lock_free", { "s", "p" }, "((void)(p), (s) <= 8)");
         predefine_function("__atomic_is_lock_free", { "s", "p" }, "((void)(p), (s) <= 8)");
@@ -2659,8 +2664,8 @@ namespace neos::compilers::c
         predefine_function("__sync_val_compare_and_swap", { "p", "o", "n" },
             "({ __typeof__(*(p)) __neos_old = (o); __builtin_atomic_compare_exchange((p), &__neos_old, (n)); __neos_old; })");
         predefine_function("__sync_lock_test_and_set", { "p", "v" }, "__builtin_atomic_exchange((p), (v))");
-        predefine_function("__sync_lock_release", { "p" }, "((void)(*(p) = 0))");
-        predefine_function("__sync_synchronize", {}, "((void)0)");
+        predefine_function("__sync_lock_release", { "p" }, "__builtin_atomic_store((p), 0)");
+        predefine_function("__sync_synchronize", {}, "__builtin_atomic_fence()");
         output result;
         push_file(aPath, aSource);
         // (the tokens of the translation unit, macros replaced)

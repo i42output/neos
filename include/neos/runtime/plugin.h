@@ -320,7 +320,8 @@ typedef struct neos_rt_host
     int (*std_flush)(int aStream);
     /* (version 10) a global of the running program (as the calling thread runs it): the address of its 64 bit word (the program's
        code reads it there (interpreted or compiled), so a plugin can keep a value there that the code reads without calling it; valid
-       while the program is loaded); NULL if there is no such global */
+       while the program is loaded; a global that each thread has its own of (bytecode::GlobalPerThread): the calling thread's); NULL if
+       there is no such global */
     unsigned long long* (*global)(unsigned aGlobal);
     /* (version 12) unload a program that load compiled (aContext: as load returned), when nothing refers to its code any longer (e.g.
        eval code that made no functions): its memory and native code are released, and aContext is no longer valid. A program that

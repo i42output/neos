@@ -4037,6 +4037,9 @@ namespace neos::compilers::ada
             subprogram_specification(spec, own, parameters);
             if (auto* declared = find_completion(own, aRegion); declared == nullptr)
             {
+                // (a stub without a declaration: not a homograph of a declaration of the region (8.3(26/2)))
+                if (iInstanceBodies == 0 && iInstantiationSites.empty())
+                    homograph_check(own, spec->child(0), aRegion);
                 aRegion->add(own);
                 bool const overridesImplicit = implicit_homograph(own, aRegion);
                 add_primitive_if(own, aRegion);
@@ -4049,6 +4052,9 @@ namespace neos::compilers::ada
                 if (iInstanceBodies == 0 && declared->sub != nullptr && (aDecl->has_flag("overriding") || aDecl->has_flag("not overriding")))
                     recover([&]() { overriding_indicator_check(declared, aDecl, implicit_homograph(declared, aRegion), aRegion); });
                 completion_aspects_check(aDecl);
+                // (fully conformant with the declaration (10.1.3(11), 6.3.1(17/3)))
+                if (iInstanceBodies == 0 && declared->sub != nullptr)
+                    recover([&]() { conformance_check(*declared->sub, *own->sub, name, aDecl); });
             }
         }
         else if (auto* d = aDecl->first(construct::Defining))

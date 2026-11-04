@@ -243,6 +243,8 @@ namespace neos::compilers::c
         bool isInline = false;
         bool noreturn = false;
         bool isConstexpr = false;
+        bool threadLocal = false;               ///< (thread_local: each thread has its own (at its address's offset in the thread's block: see 
+                                                ///< program::assign_static_addresses))
         node* decl = nullptr;                   ///< (its (first) declaration)
         node* definition = nullptr;             ///< (a function's definition; an object's initializer's declaration)
         node* initializer = nullptr;

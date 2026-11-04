@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #if defined(_WIN32)
 #include <io.h>
@@ -78,6 +79,24 @@ namespace neos::c_runtime
             static std::map<address, std::unique_ptr<stream>> sStreams;
             return sStreams;
         }
+
+        // (the streams' lock: held by each call of a stream function (the program's threads use the streams at once))
+        std::recursive_mutex& streams_mutex()
+        {
+            static std::recursive_mutex sMutex;
+            return sMutex;
+        }
+        template <auto Function>
+        struct locked;
+        template <typename Result, typename... Parameters, Result (*Function)(Parameters...)>
+        struct locked<Function>
+        {
+            static Result call(Parameters... aArguments)
+            {
+                std::lock_guard lock{ streams_mutex() };
+                return Function(aArguments...);
+            }
+        };
 
         stream* stream_of(std::int64_t aFile)
         {
@@ -675,35 +694,36 @@ namespace neos::c_runtime
 
         function_table const sStdioFunctions
         {
-            library("remove", NEOS_RT_FUNCTION(c_remove)), library("rename", NEOS_RT_FUNCTION(c_rename)),
-            library("tmpfile", NEOS_RT_FUNCTION(c_tmpfile)), library("tmpnam", NEOS_RT_FUNCTION(c_tmpnam)),
-            library("fclose", NEOS_RT_FUNCTION(c_fclose)), library("fflush", NEOS_RT_FUNCTION(c_fflush)),
-            library("fopen", NEOS_RT_FUNCTION(c_fopen)), library("freopen", NEOS_RT_FUNCTION(c_freopen)),
-            library("setbuf", NEOS_RT_FUNCTION(c_setbuf)), library("setvbuf", NEOS_RT_FUNCTION(c_setvbuf)),
-            library("fprintf", NEOS_RT_FUNCTION(c_vfprintf)), library("fscanf", NEOS_RT_FUNCTION(c_vfscanf)),
-            library("printf", NEOS_RT_FUNCTION(c_vprintf)), library("scanf", NEOS_RT_FUNCTION(c_vscanf)),
-            library("snprintf", NEOS_RT_FUNCTION(c_vsnprintf)), library("sprintf", NEOS_RT_FUNCTION(c_vsprintf)),
-            library("sscanf", NEOS_RT_FUNCTION(c_vsscanf)), library("vfprintf", NEOS_RT_FUNCTION(c_vfprintf)),
-            library("vfscanf", NEOS_RT_FUNCTION(c_vfscanf)), library("vprintf", NEOS_RT_FUNCTION(c_vprintf)),
-            library("vscanf", NEOS_RT_FUNCTION(c_vscanf)), library("vsnprintf", NEOS_RT_FUNCTION(c_vsnprintf)),
-            library("vsprintf", NEOS_RT_FUNCTION(c_vsprintf)), library("vsscanf", NEOS_RT_FUNCTION(c_vsscanf)),
-            library("fgetc", NEOS_RT_FUNCTION(c_fgetc)), library("fgets", NEOS_RT_FUNCTION(c_fgets)),
-            library("fputc", NEOS_RT_FUNCTION(c_fputc)), library("fputs", NEOS_RT_FUNCTION(c_fputs)),
-            library("getc", NEOS_RT_FUNCTION(c_fgetc)), library("getchar", NEOS_RT_FUNCTION(c_getchar)),
-            library("putc", NEOS_RT_FUNCTION(c_fputc)), library("putchar", NEOS_RT_FUNCTION(c_putchar)),
-            library("puts", NEOS_RT_FUNCTION(c_puts)), library("ungetc", NEOS_RT_FUNCTION(c_ungetc)),
-            library("fread", NEOS_RT_FUNCTION(c_fread)), library("fwrite", NEOS_RT_FUNCTION(c_fwrite)),
-            library("fgetpos", NEOS_RT_FUNCTION(c_fgetpos)), library("fseek", NEOS_RT_FUNCTION(c_fseek)),
-            library("fsetpos", NEOS_RT_FUNCTION(c_fsetpos)), library("ftell", NEOS_RT_FUNCTION(c_ftell)),
-            library("rewind", NEOS_RT_FUNCTION(c_rewind)), library("clearerr", NEOS_RT_FUNCTION(c_clearerr)),
-            library("feof", NEOS_RT_FUNCTION(c_feof)), library("ferror", NEOS_RT_FUNCTION(c_ferror)),
-            library("perror", NEOS_RT_FUNCTION(c_perror)), library("getline", NEOS_RT_FUNCTION(c_getline)),
-            library("getdelim", NEOS_RT_FUNCTION(c_getdelim)), library("fileno", NEOS_RT_FUNCTION(c_fileno))
+            library("remove", NEOS_RT_FUNCTION(locked<c_remove>::call)), library("rename", NEOS_RT_FUNCTION(locked<c_rename>::call)),
+            library("tmpfile", NEOS_RT_FUNCTION(locked<c_tmpfile>::call)), library("tmpnam", NEOS_RT_FUNCTION(locked<c_tmpnam>::call)),
+            library("fclose", NEOS_RT_FUNCTION(locked<c_fclose>::call)), library("fflush", NEOS_RT_FUNCTION(locked<c_fflush>::call)),
+            library("fopen", NEOS_RT_FUNCTION(locked<c_fopen>::call)), library("freopen", NEOS_RT_FUNCTION(locked<c_freopen>::call)),
+            library("setbuf", NEOS_RT_FUNCTION(locked<c_setbuf>::call)), library("setvbuf", NEOS_RT_FUNCTION(locked<c_setvbuf>::call)),
+            library("fprintf", NEOS_RT_FUNCTION(locked<c_vfprintf>::call)), library("fscanf", NEOS_RT_FUNCTION(locked<c_vfscanf>::call)),
+            library("printf", NEOS_RT_FUNCTION(locked<c_vprintf>::call)), library("scanf", NEOS_RT_FUNCTION(locked<c_vscanf>::call)),
+            library("snprintf", NEOS_RT_FUNCTION(locked<c_vsnprintf>::call)), library("sprintf", NEOS_RT_FUNCTION(locked<c_vsprintf>::call)),
+            library("sscanf", NEOS_RT_FUNCTION(locked<c_vsscanf>::call)), library("vfprintf", NEOS_RT_FUNCTION(locked<c_vfprintf>::call)),
+            library("vfscanf", NEOS_RT_FUNCTION(locked<c_vfscanf>::call)), library("vprintf", NEOS_RT_FUNCTION(locked<c_vprintf>::call)),
+            library("vscanf", NEOS_RT_FUNCTION(locked<c_vscanf>::call)), library("vsnprintf", NEOS_RT_FUNCTION(locked<c_vsnprintf>::call)),
+            library("vsprintf", NEOS_RT_FUNCTION(locked<c_vsprintf>::call)), library("vsscanf", NEOS_RT_FUNCTION(locked<c_vsscanf>::call)),
+            library("fgetc", NEOS_RT_FUNCTION(locked<c_fgetc>::call)), library("fgets", NEOS_RT_FUNCTION(locked<c_fgets>::call)),
+            library("fputc", NEOS_RT_FUNCTION(locked<c_fputc>::call)), library("fputs", NEOS_RT_FUNCTION(locked<c_fputs>::call)),
+            library("getc", NEOS_RT_FUNCTION(locked<c_fgetc>::call)), library("getchar", NEOS_RT_FUNCTION(locked<c_getchar>::call)),
+            library("putc", NEOS_RT_FUNCTION(locked<c_fputc>::call)), library("putchar", NEOS_RT_FUNCTION(locked<c_putchar>::call)),
+            library("puts", NEOS_RT_FUNCTION(locked<c_puts>::call)), library("ungetc", NEOS_RT_FUNCTION(locked<c_ungetc>::call)),
+            library("fread", NEOS_RT_FUNCTION(locked<c_fread>::call)), library("fwrite", NEOS_RT_FUNCTION(locked<c_fwrite>::call)),
+            library("fgetpos", NEOS_RT_FUNCTION(locked<c_fgetpos>::call)), library("fseek", NEOS_RT_FUNCTION(locked<c_fseek>::call)),
+            library("fsetpos", NEOS_RT_FUNCTION(locked<c_fsetpos>::call)), library("ftell", NEOS_RT_FUNCTION(locked<c_ftell>::call)),
+            library("rewind", NEOS_RT_FUNCTION(locked<c_rewind>::call)), library("clearerr", NEOS_RT_FUNCTION(locked<c_clearerr>::call)),
+            library("feof", NEOS_RT_FUNCTION(locked<c_feof>::call)), library("ferror", NEOS_RT_FUNCTION(locked<c_ferror>::call)),
+            library("perror", NEOS_RT_FUNCTION(locked<c_perror>::call)), library("getline", NEOS_RT_FUNCTION(locked<c_getline>::call)),
+            library("getdelim", NEOS_RT_FUNCTION(locked<c_getdelim>::call)), library("fileno", NEOS_RT_FUNCTION(locked<c_fileno>::call))
         };
     }
 
     void streams_init()
     {
+        std::lock_guard lock{ streams_mutex() };
         // (the standard streams' FILE objects (fixed addresses): their streams made again for each program)
         for (int i = 0; i < 3; ++i)
         {
@@ -720,6 +740,7 @@ namespace neos::c_runtime
 
     void streams_end()
     {
+        std::lock_guard lock{ streams_mutex() };
         // (the streams flushed and the files closed)
         for (auto& [cell, s] : streams())
         {
@@ -734,18 +755,21 @@ namespace neos::c_runtime
     // (for the wide functions (lib_wchar.cpp): a character to a stream)
     std::size_t stream_write(std::int64_t aFile, char const* aData, std::size_t aCount)
     {
+        std::lock_guard lock{ streams_mutex() };
         auto* s = stream_of(aFile);
         return s != nullptr ? write(*s, aData, aCount) : 0u;
     }
 
     int stream_get(std::int64_t aFile)
     {
+        std::lock_guard lock{ streams_mutex() };
         auto* s = stream_of(aFile);
         return s != nullptr ? get(*s) : EOF;
     }
 
     void stream_unget(std::int64_t aFile, int aCharacter)
     {
+        std::lock_guard lock{ streams_mutex() };
         if (auto* s = stream_of(aFile))
             unget(*s, aCharacter);
     }

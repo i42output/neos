@@ -1062,6 +1062,11 @@ namespace neos::compilers::ada
         if (prefixType != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 && (name == "callable" || name == "terminated") &&
             !prefixType->view()->is_formal && partial_view_here(prefixType, aRegion))
             error(prefix, "the prefix of '" + name + " must be a task (the full view of the private type is not visible)");
+        // (X'Constrained of an object of a formal private type without discriminants: not of a discriminated type (3.7.2(2)))
+        if (name == "constrained" && t != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 && t->is_formal && t->kind == type_kind::Private &&
+            t->formal_discriminants.empty() && !t->unknown_discriminants &&
+            std::none_of(t->components.begin(), t->components.end(), [](component_info const& c) { return c.discriminant; }))
+            error(prefix, "the prefix of 'Constrained must be an object of a discriminated type");
         // (the prefix's kind for the attribute (K.2))
         if (t != nullptr && !t->is_formal && !t->base_type()->view()->is_formal && t->kind != type_kind::Private)
         {
