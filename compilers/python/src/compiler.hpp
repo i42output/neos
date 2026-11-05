@@ -219,6 +219,9 @@ namespace neos::compilers::python
             std::map<std::string, std::set<std::string>> pyGlobals; ///< function -> names it declares global
             std::map<std::string, std::set<std::string>> pyBound;   ///< function -> the names it binds (its local variables)
             std::map<std::string, std::set<std::string>> pyDeleted; ///< function -> the names it deletes (del name: unbound)
+            std::map<std::string, std::set<std::uint32_t>> pyObjectParameters; ///< function -> its annotated parameters (their indices)
+                                                                    ///< that it binds to values of other types (objects, as Python's
+                                                                    ///< annotations do not constrain them)
             std::set<std::string> pyDeletedGlobals;                 ///< (the module's names that are deleted)
             std::map<std::string, std::map<std::string, interval>> pyCounters; ///< function -> its int variables that only for loops over
                                                                     ///< ranges bind -> the range of their values (found by the 
@@ -256,6 +259,7 @@ namespace neos::compilers::python
         bool late_binding() const override;
         bool functions_follow_statements() const override;
         void fragment_function(i_source_fragment const& aFragment, neolib::i_string& aName) override;
+        type parameter_type(neolib::i_string_view const& aFunction, std::uint32_t aIndex, type aType) override;
         i_fragment const* literal(i_operand_type const& aOperand) override;
         i_fragment const* unbound_name(neolib::i_string_view const& aName) override;
         i_fragment const* void_value(i_fragment const& aStatement) override;

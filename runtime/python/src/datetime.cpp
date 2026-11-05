@@ -3196,6 +3196,74 @@ namespace neos::python_runtime
             }
 
             inline bool const sDatetime = register_module("datetime", datetime_module);
+
+            // --- the module _strptime (CPython's Lib/_strptime.py): the functions that datetime.strptime and time.strptime call, whose
+            // parsing is datetime's (strptime_of) and time's here: _strptime_datetime(cls, data_string, format) (an instance of cls, of the
+            // fields and time zone that datetime.strptime finds) and _strptime_time(data_string, format) (time.strptime's)
+            builtin_entry const sStrptimeFunctions[] =
+            {
+                { "_strptime_datetime", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("_strptime_datetime", aArgs, aKwargs, { "cls", "data_string", "format" }, 2u, 3u, a))
+                            return nullptr;
+                        ref const datetimeClass{ module_attribute("datetime", "datetime") };
+                        if (!datetimeClass)
+                            return nullptr;
+                        ref const strptime{ getattr(datetimeClass.get(), "strptime") };
+                        if (!strptime)
+                            return nullptr;
+                        ref const format{ a[2] != nullptr ? borrowed(a[2]) : make_str("%a %b %d %H:%M:%S %Y") };
+                        ref const args{ make_tuple({ borrowed(a[1]), borrowed(format.get()) }) };
+                        ref parsed{ call(strptime.get(), args.get(), nullptr) };
+                        if (!parsed || a[0] == datetimeClass.get())
+                            return parsed.release_ownership();
+                        // (cls(year, month, day, hour, minute, second, microsecond[, tzinfo]), as CPython's)
+                        std::vector<object*> fields;
+                        for (auto const name : { "year", "month", "day", "hour", "minute", "second", "microsecond" })
+                        {
+                            auto const value = getattr(parsed.get(), name);
+                            if (value == nullptr)
+                            {
+                                for (auto f : fields)
+                                    release(f);
+                                return nullptr;
+                            }
+                            fields.push_back(value);
+                        }
+                        ref const tz{ getattr(parsed.get(), "tzinfo") };
+                        if (!tz)
+                        {
+                            for (auto f : fields)
+                                release(f);
+                            return nullptr;
+                        }
+                        if (kind_of(tz.get()) != NEOS_PY_NONE)
+                            fields.push_back(borrowed(tz.get()));
+                        ref const clsArgs{ make_tuple(std::move(fields)) };
+                        return call(a[0], clsArgs.get(), nullptr);
+                    } },
+                { "_strptime_time", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
+                    {
+                        std::vector<object*> a;
+                        if (!parse_arguments("_strptime_time", aArgs, aKwargs, { "data_string", "format" }, 1u, 2u, a))
+                            return nullptr;
+                        ref const strptime{ module_attribute("time", "strptime") };
+                        if (!strptime)
+                            return nullptr;
+                        ref const args{ a[1] != nullptr ? make_tuple({ borrowed(a[0]), borrowed(a[1]) }) : make_tuple({ borrowed(a[0]) }) };
+                        return call(strptime.get(), args.get(), nullptr);
+                    } }
+            };
+
+            bool strptime_module(std::vector<std::pair<std::string, object*>>& aAttributes)
+            {
+                for (auto const& f : sStrptimeFunctions)
+                    aAttributes.emplace_back(f.name, make_builtin(f));
+                return true;
+            }
+
+            inline bool const sStrptime = register_module("_strptime", strptime_module);
         }
 
         // (the classes' attributes (e.g. datetime.max, date.today))

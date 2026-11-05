@@ -590,13 +590,16 @@ namespace neos::compilers::python
                             continue;
                         start = *colon + 1u;
                     }
-                    else if (count(l) < 3u || tok(l, 0u).kind != token::Name || keywords().contains(text(l, 0u)))
+                    else if (count(l) < 3u || (tok(l, 0u).kind != token::Name && !is_op(l, 0u, "(") && !is_op(l, 0u, "[")) || 
+                        keywords().contains(text(l, 0u)))
                         continue;
                     for (auto const& statement : split(l, start, count(l), ";"))
                     {
                         auto const b = statement.first;
                         auto const e = statement.second;
-                        if (e < b + 3u || tok(l, b).kind != token::Name || keywords().contains(text(l, b)))
+                        // (a target in brackets (e.g. "(x): T = v", "[a][0]: T"): not a simple name (its annotation is not stored))
+                        bool const bracketed = is_op(l, b, "(") || is_op(l, b, "[");
+                        if (e < b + 3u || (tok(l, b).kind != token::Name && !bracketed) || keywords().contains(text(l, b)))
                             continue;
                         // (the colon after its target, and the = after its annotation)
                         std::optional<std::size_t> colon;
@@ -624,7 +627,7 @@ namespace neos::compilers::python
                             continue;
                         // (its target: a name, or a name's attributes and subscripts)
                         {
-                            auto t = b + 1u;
+                            auto t = bracketed ? matching(l, b) + 1u : b + 1u;
                             while (t < *colon)
                             {
                                 if (is_op(l, t, ".") && t + 1u < *colon && tok(l, t + 1u).kind == token::Name)
@@ -634,7 +637,8 @@ namespace neos::compilers::python
                                 else
                                     break;
                             }
-                            if (t != *colon || is_op(l, *colon - 1u, ")"))
+                            // (not a call's result, but "(x)" is)
+                            if (t != *colon || (is_op(l, *colon - 1u, ")") && !(bracketed && matching(l, b) + 1u == *colon)))
                                 continue;
                         }
                         bool const name = *colon == b + 1u;
@@ -669,10 +673,13 @@ namespace neos::compilers::python
                             if (equals)
                                 replacement += "; " + source(l, b, *colon) + " = " + source(l, *equals + 1u, e);
                         }
-                        else if (equals)
-                            replacement = source(l, b, *colon) + " = " + source(l, *equals + 1u, e);
                         else
-                            replacement = "pass";
+                        {
+                            // (a module's or a class's annotation that is not stored still creates its __annotations__)
+                            if (!function && started.insert(headers.empty() ? 0u : headers.back() + 1u).second)
+                                replacement = "__annotations__ = {}; ";
+                            replacement += equals ? source(l, b, *colon) + " = " + source(l, *equals + 1u, e) : std::string{ "pass" };
+                        }
                         replace(l, b, e, replacement);
                     }
                 }

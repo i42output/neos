@@ -217,8 +217,8 @@ ${
     return statement $ python.return ::= return , [ [ S ] , expression list ] ;
     raise statement $ python.raise ::= raise , [ S , expression , [ S , from , S , expression ] ] ;
     global statement $ python.global ::= global , S , identifier , { [ S ] , comma , [ S ] , identifier } ;
-    del statement $ python.del ::= del , S , target , { [ S ] , comma , [ S ] , target } , [ [ S ] , comma ] ;
-    assert statement $ python.assert ::= assert , S , expression , [ [ S ] , comma , [ S ] , expression ] ;
+    del statement $ python.del ::= del , [ S ] , target , { [ S ] , comma , [ S ] , target } , [ [ S ] , comma ] ;
+    assert statement $ python.assert ::= assert , [ S ] , expression , [ [ S ] , comma , [ S ] , expression ] ;
 
     try header $ python.try ::= try , [ S ] , colon , [ [ S ] , simple statements ] ;
     except header $ python.except ::= except , [ S , expression , [ S , as , S , as name ] ] , [ S ] , colon , [ [ S ] , simple statements ] ;

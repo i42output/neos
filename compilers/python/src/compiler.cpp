@@ -252,7 +252,7 @@ namespace neos::compilers::python
         {
             static std::set<std::string> const sStandard = { "math", "cmath", "sys", "os", "time", "errno", "threading", "_thread", "queue",
                 "collections", "itertools", "functools", "operator", "heapq", "bisect", "copy", "re", "string", "struct", "json", "base64", 
-                "binascii", "hashlib", "random", "decimal", "fractions", "datetime", "io", "pathlib", "typing", "types", "abc", "contextlib", 
+                "binascii", "hashlib", "random", "decimal", "fractions", "datetime", "_strptime", "io", "pathlib", "typing", "types", "abc", "contextlib", 
                 "dataclasses", "enum", "textwrap", "statistics", "numbers", "warnings", "keyword", "platform", "shutil", "tempfile", "glob", 
                 "fnmatch", "atexit", "gc", "weakref", "traceback", "inspect", "pprint", "reprlib", "array", "calendar", "zlib", "secrets", 
                 "uuid", "locale", "codecs", "unicodedata", "signal", "argparse", "csv", "logging", "timeit", "_collections_abc", "posixpath", 
@@ -706,6 +706,10 @@ namespace neos::compilers::python
             for (auto& parameter : aSignature.parameters().value())
                 if (parameter.parameter_type() == type::UNKNOWN)
                     parameter.set_parameter_type(type::Object);
+        // (and so is an annotated parameter that the function binds to a value of another type (see py_kind_change))
+        if (aSignature.parameters().has_value())
+            for (std::uint32_t i = 0u; i < aSignature.parameters().value().size(); ++i)
+                aSignature.parameters().value()[i].set_parameter_type(parameter_type(neolib::string_view{ aSignature.name().to_std_string_view() }, i, aSignature.parameters().value()[i].parameter_type()));
         auto const text = aSource.to_std_string_view();
         auto const close = text.rfind(')');
         bool const annotated = close != std::string_view::npos && text.find("->", close) != std::string_view::npos;
@@ -1967,10 +1971,19 @@ namespace neos::compilers::python
                 text[i] = ' ';
                 aChanged = true;
             }
-            else if (depth > 0 && c == '\\' && i + 1u < text.size() && (text[i + 1u] == '\n' || text[i + 1u] == '\r'))
+            else if (c == '\\' && i + 1u < text.size() && (text[i + 1u] == '\n' || text[i + 1u] == '\r'))
             {
-                // (a line continuation within brackets: whitespace)
+                // (a line continuation: whitespace; outside brackets its line break too (the lines joined, as the tokenizer joins them: 
+                // e.g. a lambda's body continued on the next line))
                 text[i] = ' ';
+                if (depth == 0)
+                {
+                    auto j = i + 1u;
+                    if (text[j] == '\r')
+                        text[j++] = ' ';
+                    if (j < text.size() && text[j] == '\n')
+                        text[j] = ' ';
+                }
                 aChanged = true;
             }
         }
@@ -4723,9 +4736,16 @@ namespace neos::compilers::python
         {
             auto const& signature = generator().signature_of(current_function());
             if (signature.parameters().has_value())
-                for (auto const& parameter : signature.parameters().value())
-                    if (parameter.parameter_name().to_std_string() == aName)
-                        throw std::runtime_error("cannot bind a value of another type to parameter '" + aName + "' (of type " + type_name(parameter.parameter_type()) + ")");
+                for (std::uint32_t i = 0u; i < signature.parameters().value().size(); ++i)
+                    if (auto const& parameter = signature.parameters().value()[i]; parameter.parameter_name().to_std_string() == aName)
+                    {
+                        // (an annotated parameter bound to a value of another type: an object (declared as such by the next pass: see
+                        // py_complete_signature and parameter_type))
+                        if (!iInference.pyObjectParameters[current_function_name()].insert(i).second)
+                            throw std::runtime_error("cannot bind a value of another type to parameter '" + aName + "' (of type " + type_name(parameter.parameter_type()) + ")");
+                        { set_changed(); if (std::getenv("NEOS_PY_DEBUG")) std::fprintf(stderr, "changed at %d\n", __LINE__); }
+                        return;
+                    }
             auto& t = iInference.pyLocals[current_function_name()][aName];
             if (t == type::Object)
                 throw std::runtime_error("cannot bind '" + aName + "'");
@@ -8620,6 +8640,15 @@ namespace neos::compilers::python
     bool compiler::functions_follow_statements() const
     {
         return true;
+    }
+
+    type compiler::parameter_type(neolib::i_string_view const& aFunction, std::uint32_t aIndex, type aType)
+    {
+        // (an annotated parameter that its function binds to a value of another type: an object (see py_kind_change))
+        if (auto const objects = iInference.pyObjectParameters.find(aFunction.to_std_string());
+            objects != iInference.pyObjectParameters.end() && objects->second.contains(aIndex))
+            return type::Object;
+        return aType;
     }
 
     i_fragment const* compiler::literal(i_operand_type const& aOperand)

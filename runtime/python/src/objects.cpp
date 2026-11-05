@@ -18788,6 +18788,7 @@ namespace neos::python_runtime
                 child = name.substr(dot + 1u);
             }
             auto& m = imported()[aName];
+            bool const made = m == nullptr;
             if (m == nullptr)
             {
                 m = make_module(aName);
@@ -18833,6 +18834,16 @@ namespace neos::python_runtime
                         }
                     }
             }
+            // (a module made before that sys.modules no longer has (e.g. test.support's import_fresh_module removed it): there again, as
+            // CPython's import puts the module it makes there (not if sys.modules has None for it: its import is blocked))
+            if (!made)
+                if (ref const modules{ imported_modules() }; modules && kind_of(builtin_value(modules.get())) == NEOS_PY_DICT)
+                {
+                    ref const key{ make_str(aName) };
+                    auto const position = dict_find(builtin_value(modules.get()), key.get());
+                    if (position == -2 || (position == -1 && dict_set(builtin_value(modules.get()), key.get(), m) != 0))
+                        return nullptr;
+                }
             retain(m);
             return m;
         }

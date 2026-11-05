@@ -300,6 +300,15 @@ namespace neos::language
                             auto const result = iInference.results.find(declaration.name);
                             signature.set_return_type(result != iInference.results.end() ? result->second : type::Void);
                         }
+                        else if (programLanguage != nullptr && declaration.signature.parameters().has_value())
+                        {
+                            // (a declared parameter: the language's type of it too (e.g. Python's annotated parameter that its function 
+                            // binds to a value of another type: an object))
+                            auto& parameters = declaration.signature.parameters().value();
+                            for (std::size_t i = 0u; i < parameters.size(); ++i)
+                                parameters[i].set_parameter_type(programLanguage->parameter_type(neolib::string_view{ declaration.name }, 
+                                    static_cast<std::uint32_t>(i), parameters[i].parameter_type()));
+                        }
                     reset();
                     iInference.pass = pass;
                     try

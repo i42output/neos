@@ -486,6 +486,9 @@ namespace neos::compilers::python
             {
                 if (iStringAnnotations)
                     return quoted(source_of(aLine, aRange.first, aRange.second));
+                // (a starred annotation (PEP 646: "*args: *Ts"): its unpacking's item, as CPython evaluates it)
+                if (is_op(aLine, aRange.first, "*"))
+                    return "(" + render_tokens(aLine, aRange.first, aRange.second, aScope) + ",)[0]";
                 return "(" + render_tokens(aLine, aRange.first, aRange.second, aScope) + ")";
             }
             // (the default value of a parameter of a function at the end of the module (its closure's are its values): a value of 
@@ -711,9 +714,16 @@ namespace neos::compilers::python
                     {
                         auto const close = matching(l, f.openParen);
                         int kind = 0;
+                        int depth = 0;  // (the names in a bound's or a default's brackets are not parameters: e.g. "[T: (int, str)]")
                         for (auto t = f.openParen + 1u; t < close; ++t)
                         {
-                            if (is_op(l, t, "*") || is_op(l, t, "**"))
+                            if (is_op(l, t, "(") || is_op(l, t, "[") || is_op(l, t, "{"))
+                                ++depth;
+                            else if (is_op(l, t, ")") || is_op(l, t, "]") || is_op(l, t, "}"))
+                                --depth;
+                            else if (depth != 0)
+                                continue;
+                            else if (is_op(l, t, "*") || is_op(l, t, "**"))
                                 kind = is_op(l, t, "*") ? 1 : 2;
                             else if (tok(l, t).kind == token::Name && (is_op(l, t - 1u, "[") || is_op(l, t - 1u, ",") || is_op(l, t - 1u, "*") || is_op(l, t - 1u, "**")))
                             {
@@ -734,9 +744,13 @@ namespace neos::compilers::python
                     }
                     f.closeParen = matching(l, f.openParen);
                     parameters(f, l, f.openParen + 1u, f.closeParen);
+                    // (the header's colon: not one within brackets (e.g. of a return annotation's dict: "-> {1: 'a'}:"))
                     f.colon = f.closeParen + 1u;
-                    while (f.colon < line.tokens.size() && !is_op(l, f.colon, ":"))
-                        ++f.colon;
+                    for (int depth = 0; f.colon < line.tokens.size() && !(depth == 0 && is_op(l, f.colon, ":")); ++f.colon)
+                        if (is_op(l, f.colon, "(") || is_op(l, f.colon, "[") || is_op(l, f.colon, "{"))
+                            ++depth;
+                        else if (is_op(l, f.colon, ")") || is_op(l, f.colon, "]") || is_op(l, f.colon, "}"))
+                            --depth;
                     if (is_op(l, f.closeParen + 1u, "->") && f.closeParen + 2u < f.colon)
                         f.returnAnnotation = std::make_pair(f.closeParen + 2u, f.colon);
                     f.inlineBody = f.colon + 1u < line.tokens.size();
@@ -1552,6 +1566,7 @@ namespace neos::compilers::python
                 bool lineStart = true;
                 char quote = 0;
                 bool triple = false;
+                std::size_t content = 0u;   // (where the string's content begins: its closing quotes follow it)
                 for (std::size_t i = 0u; i < aText.size(); ++i)
                 {
                     char const c = aText[i];
@@ -1574,7 +1589,7 @@ namespace neos::compilers::python
                     {
                         if (c == '\\' && i + 1u < aText.size())
                             result += aText[++i];
-                        else if (c == quote && (!triple || (i >= 2u && aText[i - 1u] == quote && aText[i - 2u] == quote && result.size() >= 3u)))
+                        else if (c == quote && (!triple || (i >= content + 2u && aText[i - 1u] == quote && aText[i - 2u] == quote)))
                             quote = 0;
                         else if (c == '\n' && !triple)
                             quote = 0;
@@ -1588,6 +1603,7 @@ namespace neos::compilers::python
                             result += aText[++i];
                             result += aText[++i];
                         }
+                        content = i + 1u;
                     }
                     else if (c == '#')
                     {
