@@ -504,6 +504,33 @@ namespace neos::compilers::ada
             i64const(iPriorityQueuing ? 1 : 0);
             call("tasking_policies", { type::I64, type::I64 }, type::Void);
         }
+        // (its task dispatching policies (D.2.2), Generate_Deadlines (D.2.6))
+        for (auto const& [first, last, policy] : iDispatchingPolicies)
+        {
+            i64const(first);
+            i64const(last);
+            i64const(policy);
+            call("dispatching_policy", { type::I64, type::I64, type::I64 }, type::Void);
+        }
+        if (iGenerateDeadlines)
+            call("generate_deadlines", {}, type::Void);
+        // (its restrictions checked at run time (D.7))
+        for (auto const& [name, kind] : std::initializer_list<std::pair<char const*, std::int64_t>>{ { "max_entry_queue_length", 1 }, { "max_tasks", 2 },
+            { "max_asynchronous_select_nesting", 3 }, { "no_tasks_unassigned_to_cpu", 4 }, { "no_standard_allocators_after_elaboration", 5 } })
+            if (auto const r = iRestrictions.find(name); r != iRestrictions.end())
+            {
+                i64const(kind);
+                i64const(r->second ? *r->second : 0);
+                call("restriction", { type::I64, type::I64 }, type::Void);
+            }
+        // (the environment task's processor: the main subprogram's CPU (static, D.16(13/3)))
+        if (iMain != nullptr && iMain->cpu != nullptr)
+            if (auto const v = evaluate(iMain->cpu, iMain->inner != nullptr ? iMain->inner : iMain->scope); v.is_integer())
+            {
+                i64const(1);
+                i64const(v.integer().to_int64());
+                call("task_cpu_set", { type::I64, type::I64 }, type::Void);
+            }
         if (iMain != nullptr && (iMain->priority != nullptr || iMain->interrupt_priority))
         {
             std::int64_t priority = 31;
@@ -535,6 +562,9 @@ namespace neos::compilers::ada
         }
         if (iMain != nullptr && iMain->sub != nullptr && iMain->sub->defined)
         {
+            // (the library items elaborated (No_Standard_Allocators_After_Elaboration, D.7(19.3/3)))
+            if (iRestrictions.contains("no_standard_allocators_after_elaboration"))
+                call("elaborated", {}, type::Void);
             i64const(0);
             call_index(iMain->sub->function_index);
             // (the environment task's main subprogram complete (the task no longer callable, C.7.1(17/3)); then the library level's
@@ -1096,6 +1126,14 @@ namespace neos::compilers::ada
         // (an access before elaboration (see above): propagated)
         if (form == subprogram_kind::Normal && iProgram.elaboration_checked(iSubprogram))
             check();
+        // (the main subprogram's Relative_Deadline: the environment task's relative deadline and initial deadline (D.2.6(13/5)))
+        if (iSubprogram == iProgram.iMain && iSubprogram->relative_deadline != nullptr && iSubprogram->relative_deadline->type != nullptr)
+        {
+            i64(1);
+            expression(iSubprogram->relative_deadline, iSubprogram->relative_deadline->type);
+            runtime("task_deadline", { type::I64, type::I64 }, type::Void);
+            check();
+        }
         // (its preconditions (6.1.1(31/3)): the specific ones, then the class-wide ones (any of which holding suffices (6.1.1(32/3))),
         // then its postconditions' X'Old values (6.1.1(26/4)))
         if (form == subprogram_kind::Normal)
@@ -3155,6 +3193,25 @@ namespace neos::compilers::ada
     {
         auto* target = aStatement->child(0);
         auto* value = aStatement->child(1);
+        // (P'Priority, P'Relative_Deadline of a protected object (D.5.2): the runtime's; the new priority in the range of
+        // Interrupt_Priority if P has interrupt handlers under Ceiling_Locking (6/3))
+        if (target->is(construct::Attribute) && target->ent != nullptr && target->ent->kind == entity_kind::Protected)
+        {
+            bool const priority = name_text(target->child(1)->source) == "priority";
+            unit_self_address(target->ent);
+            expression(value, target->type);
+            if (priority)
+            {
+                bool const handlers = iProgram.iCeilingLocking && std::any_of(iProgram.iInterruptHandlers.begin(), iProgram.iInterruptHandlers.end(),
+                    [&](entity* h) { return h->scope != nullptr && h->scope->owner == target->ent; });
+                i64(handlers ? 1 : 0);
+                runtime("po_priority_set", { type::I64, type::I64, type::I64 }, type::Void);
+            }
+            else
+                runtime("po_relative_deadline_set", { type::I64, type::I64 }, type::Void);
+            check();
+            return;
+        }
         auto* t = target->type;
         auto* v = t != nullptr ? t->view() : nullptr;
         if (v != nullptr && v->is_composite())
@@ -3432,6 +3489,15 @@ namespace neos::compilers::ada
         op(opcode::I64Eq);
     }
 
+    // (an iteration of a loop: a poll (the runtime's), if the program polls (see program::tasking_policies))
+    void function_generator::loop_poll()
+    {
+        if (!iProgram.iPolls)
+            return;
+        runtime("poll", {}, type::Void);
+        check();
+    }
+
     void function_generator::loop_statement(node* aStatement)
     {
         auto* loopEntity = aStatement->ent;
@@ -3517,6 +3583,7 @@ namespace neos::compilers::ada
                 statements(body);
             if (predicate != nullptr)
                 end();
+            loop_poll();
             load_object(parameter);
             get(reverse ? low : high);
             op(opcode::I64Eq);
@@ -3540,6 +3607,7 @@ namespace neos::compilers::ada
             op(opcode::I32Eqz);
             branch(exit, true);
         }
+        loop_poll();
         statements(body);
         branch(head);
         end();

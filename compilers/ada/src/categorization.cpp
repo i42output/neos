@@ -323,6 +323,16 @@ namespace neos::compilers::ada
         };
         if (category.preelaborated() || category.categorized())
         {
+            // (where a with clause's dependence is an error: the with clause; a declaration's categorization pragma within it that names
+            // the unit (the pragma that makes it categorized))
+            // (the Preelaborate or Shared_Passive pragma: there; a Pure, Remote_Types or Remote_Call_Interface unit's: its with clause)
+            node* categorizedAt = nullptr;
+            if (declaration && !aUnit.subunit)
+                for (auto* w : { category.where[categorization::Preelaborate], category.where[categorization::SharedPassive] })
+                    if (w != nullptr && w->is(construct::Pragma) && w->first(construct::PragmaArgument) != nullptr)
+                        for (auto* p = w->parent; p != nullptr && categorizedAt == nullptr; p = p->parent)
+                            if (p == item)
+                                categorizedAt = w;
             if (auto* context = aUnit.unit->first(construct::Context))
                 for (auto* clause : context->children)
                     if (clause->is(construct::With) && !clause->has_flag("limited"))
@@ -331,7 +341,7 @@ namespace neos::compilers::ada
                                 for (auto* n = name; n != nullptr; n = n->is(construct::Selected) && n->size() == 2u ? n->child(0) : nullptr)
                                     if (auto const message = dependence(unit_categorization(dotted(n)), clause->has_flag("private")))
                                     {
-                                        recover([&]() { error(name, message); });
+                                        recover([&]() { error(categorizedAt != nullptr ? categorizedAt : name, message); });
                                         break;
                                     }
             if (declaration && !aUnit.subunit)

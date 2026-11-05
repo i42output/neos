@@ -116,6 +116,9 @@ namespace neos::compilers::ada
                 if (auto const n = name_text(aspect->child(0)->source); (n == "pre" || n == "post") && aspect->size() > 2u &&
                     aspect->child(1)->is(construct::Word) && name_text(aspect->child(1)->source) == "class")
                     recover([&]() { error(aspect, "aspect " + n + "'Class cannot be specified for an entry"); });
+                // (No_Return: of a procedure only (6.5.1(3.1/3)))
+                else if (n == "no_return")
+                    recover([&]() { error(aspect, "aspect No_Return can be specified only for a procedure or generic procedure (6.5.1)"); });
         // (an entry family: not overloadable (a homograph of any declaration of its name in the region); entries: not homographs of each
         // other (8.3(26/2)))
         if (iInstanceBodies == 0)
@@ -136,6 +139,9 @@ namespace neos::compilers::ada
             e->sub->family_type = discrete_range(family->child(0), nullptr, aRegion);
             predicate_check(e->sub->family_type, family->child(0));
         }
+        // (its aspects (Pre, Post: resolved at the end of the enclosing declarative part, as a subprogram's))
+        if (aEntry->first(construct::Aspects) != nullptr)
+            aspects(aEntry, e, aRegion);
     }
 
     void program::task_declaration(node* aDecl, region* aRegion)
@@ -319,6 +325,10 @@ namespace neos::compilers::ada
         auto* unit = unit_named(name_text(d->source), aRegion, entity_kind::Task);
         if (unit == nullptr)
             error(aDecl, "task body \"" + name_text(d->source) + "\" has no declaration");
+        // (in the declarative part of its declaration (or its package's body): 3.11.1(3))
+        if (iInstanceBodies == 0 && unit->scope != nullptr && unit->scope != aRegion && !(aRegion->package_body && aRegion->parent == unit->scope) &&
+            !(iCurrentUnit != nullptr && iCurrentUnit->subunit && iCurrentUnit->item == aDecl))
+            recover([&]() { error(aDecl, "task body \"" + unit->name + "\" is not in the declarative part of its declaration (3.11.1(3))"); });
         aDecl->ent = unit;
         d->ent = unit;
         // (the task body: a subprogram (its region's parent is the task unit's region (entries and discriminants are visible)))
@@ -348,6 +358,10 @@ namespace neos::compilers::ada
         auto* unit = unit_named(name_text(d->source), aRegion, entity_kind::Protected);
         if (unit == nullptr)
             error(aDecl, "protected body \"" + name_text(d->source) + "\" has no declaration");
+        // (in the declarative part of its declaration (or its package's body): 3.11.1(3))
+        if (iInstanceBodies == 0 && unit->scope != nullptr && unit->scope != aRegion && !(aRegion->package_body && aRegion->parent == unit->scope) &&
+            !(iCurrentUnit != nullptr && iCurrentUnit->subunit && iCurrentUnit->item == aDecl))
+            recover([&]() { error(aDecl, "protected body \"" + unit->name + "\" is not in the declarative part of its declaration (3.11.1(3))"); });
         aDecl->ent = unit;
         d->ent = unit;
         auto* r = new_region(nullptr, aRegion);
@@ -452,6 +466,19 @@ namespace neos::compilers::ada
             else if (item->is(construct::Pragma))
                 pragma(item, r);
         }
+        // (each protected operation declared in the protected definition: completed in the body (3.11.1))
+        if (iInstanceBodies == 0 && unit != nullptr && unit->inner != nullptr)
+            for (auto* member : unit->inner->declarations)
+                if ((member->kind == entity_kind::Procedure || member->kind == entity_kind::Function || member->kind == entity_kind::Entry) &&
+                    member->sub != nullptr && member->sub->body == nullptr && !member->imported && member->sub->op == intrinsic::None &&
+                    !member->sub->is_null && member->sub->expression == nullptr && member->decl != nullptr && member->scope == unit->inner &&
+                    // (not an illegal homograph of one that has a body (reported where it is declared))
+                    std::none_of(unit->inner->declarations.begin(), unit->inner->declarations.end(), [&](entity* other)
+                    {
+                        return other != member && other->kind == member->kind && other->name == member->name && other->sub != nullptr &&
+                            other->sub->body != nullptr && type_conformant(*other->sub, *member->sub);
+                    }))
+                    recover([&]() { error(end_position(aDecl), "the protected operation \"" + member->name + "\" requires a body in the protected body (3.11.1)"); });
         (void)specification_of;
     }
 }

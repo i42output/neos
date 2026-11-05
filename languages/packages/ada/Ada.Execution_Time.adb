@@ -38,8 +38,10 @@ package body Ada.Execution_Time is
 
    subtype Integer_64 is Interfaces.Integer_64;
 
-   function Thread_CPU_Time return Integer_64;
-   pragma Import (Neos, Thread_CPU_Time, "ada::cpu_time");
+   --  (a task's execution time: the runtime's scheduler accounts the program's
+   --  thread's CPU time to the task that it runs)
+   function Task_CPU_Time (T : Ada.Task_Identification.Task_Id) return Integer_64;
+   pragma Import (Neos, Task_CPU_Time, "ada::task_execution_time");
 
    Billion : constant := 1_000_000_000;
 
@@ -66,7 +68,7 @@ package body Ada.Execution_Time is
       if Ada.Task_Identification.Is_Terminated (T) then
          raise Tasking_Error;
       end if;
-      return CPU_Time (Thread_CPU_Time);
+      return CPU_Time (Task_CPU_Time (T));
    end Clock;
 
    function "+" (Left : CPU_Time; Right : Time_Span) return CPU_Time is

@@ -522,12 +522,38 @@ namespace neos::language
             std::size_t spanStart = 0u;
             std::size_t spanEnd = 0u;
             std::size_t filler = 0u;
+            std::string const* tokenFill = nullptr;    // (a token's repair: the text in place of the token (meta: syntax.recovery.token))
+            auto const& tokenFillers = aUnit.schema->meta().syntaxRecoveryToken;
             bool haveSpan = false;
             std::size_t spanFrom = 0u;      // (the end of the last synchronizing terminal before the error)
             bool widened = false;
             std::size_t recoveries = 0u;
             std::size_t constexpr MaxRecoveries = 1000u;
             std::vector<std::pair<std::size_t, std::string>> found;     // (the errors recovered from: offset, message)
+            bool cascadeAtEnd = false;      // (the parse failed at the end of the text after errors recovered from: theirs)
+            // (the text after an offset's spaces and comments (meta: syntax.recovery.comment))
+            auto const& comments = aUnit.schema->meta().syntaxRecoveryComment;
+            auto const skip_blank = [&](std::size_t aFrom)
+            {
+                std::size_t i = aFrom;
+                while (i < parseText.size())
+                {
+                    if (std::isspace(static_cast<unsigned char>(parseText[i])))
+                    {
+                        ++i;
+                        continue;
+                    }
+                    bool comment = false;
+                    for (auto const& c : comments)
+                        if (!c.empty() && parseText.compare(i, c.size(), c) == 0)
+                            comment = true;
+                    if (!comment)
+                        break;
+                    while (i < parseText.size() && parseText[i] != '\n')
+                        ++i;
+                }
+                return i;
+            };
             // (the offset of the error in the parser's message ("syntax error: (line,column) ..."))
             auto const error_offset = [&](std::string const& aMessage) -> std::optional<std::size_t>
             {
@@ -558,7 +584,8 @@ namespace neos::language
             // (the end of the next synchronizing terminal at or after an offset that is not nested (meta: syntax.recovery.nesting) in
             // what begins after a base)
             auto const& nesting = aUnit.schema->meta().syntaxRecoveryNesting;
-            auto const next_sync = [&](std::size_t aFrom, std::size_t aBase) -> std::size_t
+            // (an opening terminal at or after aIgnoreFrom and before aFrom (the token the parse failed at): not counted)
+            auto const next_sync = [&](std::size_t aFrom, std::size_t aBase, std::size_t aIgnoreFrom = std::string_view::npos) -> std::size_t
             {
                 std::ptrdiff_t depth = 0;
                 for (std::size_t i = std::min(aBase, aFrom); i < parseText.size(); ++i)
@@ -576,7 +603,8 @@ namespace neos::language
                         }
                         else if (matches(i, nesting[n]))
                         {
-                            ++depth;
+                            if (!(i >= aIgnoreFrom && i < aFrom))
+                                ++depth;
                             i += nesting[n].size() - 1u;
                             break;
                         }
@@ -599,7 +627,9 @@ namespace neos::language
                 for (std::size_t i = spanStart; i < spanEnd && i < repaired.size(); ++i)
                     if (repaired[i] != '\n' && repaired[i] != '\r')
                         repaired[i] = ' ';
-                if (filler > 0u && filler <= fillers.size())
+                if (tokenFill != nullptr)
+                    std::copy(tokenFill->begin(), tokenFill->end(), repaired.begin() + static_cast<std::ptrdiff_t>(spanStart));
+                else if (filler > 0u && filler <= fillers.size())
                 {
                     auto const& f = fillers[filler - 1u];
                     // (the filler where the text began (after its leading spaces): if it fits, on that line)
@@ -620,6 +650,40 @@ namespace neos::language
                 else
                     ok = parser.parse(parseText);
                 iParseTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(parser.parse_time());
+                // (a parse that ends before the text does (the text's end reached within a construct that is not complete): a syntax error
+                // at the end of the text (a schema that says what its comments are: what follows its parse is known to be blank))
+                if (ok && last && !comments.empty() && aFragment.source_file_path())
+                {
+                    auto const& root = parser.cst();
+                    std::size_t parsedEnd = 0u;
+                    if (root.value.data() >= parseText.data() && root.value.data() <= parseText.data() + parseText.size())
+                        parsedEnd = static_cast<std::size_t>(root.value.data() - parseText.data()) + root.value.size();
+                    // (after errors recovered from: theirs (the text skipped took what would complete it))
+                    if (skip_blank(parsedEnd) < parseText.size() && !found.empty())
+                    {
+                        ok = false;
+                        cascadeAtEnd = true;
+                        break;
+                    }
+                    if (skip_blank(parsedEnd) < parseText.size())
+                    {
+                        std::size_t end = parseText.size();
+                        while (end > 0u && std::isspace(static_cast<unsigned char>(parseText[end - 1u])))
+                            --end;
+                        std::uint32_t line = 1u, column = 1u;
+                        for (std::size_t i = 0u; i < end; ++i)
+                            if (parseText[i] == '\n')
+                            {
+                                ++line;
+                                column = 1u;
+                            }
+                            else
+                                ++column;
+                        ok = false;
+                        parserOutput.str({});
+                        parserOutput << "Error: syntax error: (" << line << "," << column << ") the end of the text was unexpected here (a construct is not complete)." << std::endl;
+                    }
+                }
                 if (ok || !last || synchronize.empty() || ++recoveries > MaxRecoveries)
                     break;
                 auto const output = parserOutput.str();
@@ -630,10 +694,82 @@ namespace neos::language
                 auto const offset = error_offset(message);
                 if (!offset)
                     break;
+                // (the text's end within a construct that is not complete (no errors recovered from before): a closing filler (meta:
+                // syntax.recovery.filler, e.g. "end;") in the spaces before a line that begins with a closing terminal, the last of
+                // those that makes the text parse; reported there)
+                if (found.empty() && skip_blank(*offset) >= parseText.size() && !fillers.empty())
+                {
+                    std::string const saved = repaired.empty() ? std::string{ text } : repaired;
+                    std::optional<std::pair<std::size_t, std::string const*>> inserted;
+                    std::size_t lineEnd = parseText.size();
+                    for (int lines = 0; lines < 40 && lineEnd > 0u && !inserted; ++lines)
+                    {
+                        std::size_t lineBegin = lineEnd;
+                        while (lineBegin > 0u && parseText[lineBegin - 1u] != '\n')
+                            --lineBegin;
+                        std::size_t word = lineBegin;
+                        while (word < lineEnd && (parseText[word] == ' ' || parseText[word] == '\t'))
+                            ++word;
+                        bool closer = false;
+                        for (std::size_t n = 1u; n < nesting.size(); n += 2u)
+                            closer = closer || matches(word, nesting[n]);
+                        if (closer)
+                            for (auto const& f : fillers)
+                            {
+                                if (f.size() + 1u > word - lineBegin)
+                                    continue;
+                                std::string attempt = saved;
+                                std::copy(f.begin(), f.end(), attempt.begin() + static_cast<std::ptrdiff_t>(lineBegin));
+                                parserOutput.str({});
+                                bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), attempt) : parser.parse(attempt);
+                                auto const rootEnd = parsed && parser.cst().value.data() >= attempt.data() && parser.cst().value.data() <= attempt.data() + attempt.size() ?
+                                    static_cast<std::size_t>(parser.cst().value.data() - attempt.data()) + parser.cst().value.size() : std::size_t{ 0u };
+                                if (parsed && skip_blank(rootEnd) >= parseText.size())
+                                {
+                                    inserted.emplace(lineBegin, &f);
+                                    break;
+                                }
+                            }
+                        lineEnd = lineBegin > 0u ? lineBegin - 1u : 0u;
+                    }
+                    parserOutput.str({});
+                    if (inserted)
+                    {
+                        std::uint32_t line = 1u;
+                        for (std::size_t i = 0u; i < inserted->first; ++i)
+                            if (parseText[i] == '\n')
+                                ++line;
+                        auto const column = static_cast<std::uint32_t>(skip_blank(inserted->first) - inserted->first + 1u);
+                        found.emplace_back(skip_blank(inserted->first), "syntax error: (" + std::to_string(line) + "," + std::to_string(column) + ") \"" +
+                            *inserted->second + "\" expected before this (a construct is not complete).");
+                        repaired = saved;
+                        std::copy(inserted->second->begin(), inserted->second->end(), repaired.begin() + static_cast<std::ptrdiff_t>(inserted->first));
+                        parseText = repaired;
+                        haveSpan = true;
+                        spanStart = inserted->first;
+                        spanEnd = inserted->first + inserted->second->size();
+                        continue;
+                    }
+                }
+                // (an error in the text's last statement after errors recovered from (e.g. its end where a construct the recovery took
+                // is not closed): one of theirs, not reported)
+                if (!found.empty() && *offset > spanEnd)
+                {
+                    auto const trailing = [&](std::size_t aFrom) { return skip_blank(aFrom) >= parseText.size(); };
+                    std::size_t end = *offset;
+                    while (end < parseText.size() && !synchronize.empty() && !matches(end, synchronize.front()))
+                        ++end;
+                    if ((end < parseText.size() && trailing(end + synchronize.front().size())) || trailing(*offset))
+                    {
+                        cascadeAtEnd = true;
+                        break;
+                    }
+                }
                 // (an error that the text skipped (or its filler) made: the next filler, else the text to the next synchronizing terminal
                 // skipped too)
-                std::size_t after = spanEnd;
-                while (after < parseText.size() && std::isspace(static_cast<unsigned char>(parseText[after])))
+                std::size_t after = skip_blank(spanEnd);
+                // (or within the first word after it (e.g. a closing "end" whose opening the skip took))
+                while (after < parseText.size() && (std::isalnum(static_cast<unsigned char>(parseText[after])) || parseText[after] == '_'))
                     ++after;
                 if (haveSpan && *offset >= spanStart && *offset <= after)
                 {
@@ -687,6 +823,34 @@ namespace neos::language
                     }
                     if (std::find(starts.begin(), starts.end(), spanFrom) == starts.end())
                         starts.push_back(spanFrom);
+                    // (not back over an opening terminal (e.g. a block's "begin") before the error's line: what it opens parsed)
+                    {
+                        // (a word's (e.g. "begin", not "(") that is not closed before the error's line)
+                        auto const opens = [&](std::size_t aFrom, std::size_t aTo)
+                        {
+                            std::ptrdiff_t depth = 0;
+                            for (std::size_t i = aFrom; i < aTo; ++i)
+                                for (std::size_t n = 0u; n + 1u < nesting.size(); n += 2u)
+                                    if (!nesting[n].empty() && std::isalpha(static_cast<unsigned char>(nesting[n].front())))
+                                    {
+                                        if (matches(i, nesting[n + 1u]))
+                                        {
+                                            --depth;
+                                            i += nesting[n + 1u].size() - 1u;
+                                            break;
+                                        }
+                                        if (matches(i, nesting[n]))
+                                        {
+                                            ++depth;
+                                            i += nesting[n].size() - 1u;
+                                            break;
+                                        }
+                                    }
+                            return depth > 0;
+                        };
+                        auto const first = starts.front();
+                        std::erase_if(starts, [&](std::size_t aStart) { return aStart < first && aStart < lineStart && opens(aStart, std::min(lineStart, first)); });
+                    }
                     std::size_t bestStart = starts.front();
                     std::size_t bestFiller = 0u;
                     std::size_t bestReach = 0u;
@@ -716,9 +880,22 @@ namespace neos::language
                             repaired = saved;
                             parseText = repaired.empty() ? text : std::string_view{ repaired };
                         }
-                    if (nestedEnd != plainEnd && bestReach != parseText.size() + 1u)
+                    // (unless a statement after the plain skip parsed: then the error that follows is another's)
+                    auto const closesAfter = [&](std::size_t aAt)
+                    {
+                        auto const at = skip_blank(aAt);
+                        for (std::size_t n = 1u; n < nesting.size(); n += 2u)
+                            if (matches(at, nesting[n]))
+                                return true;
+                        return false;
+                    };
+                    if (nestedEnd != plainEnd && bestReach != parseText.size() + 1u && (bestReach <= next_sync(plainEnd, plainEnd) || closesAfter(plainEnd)))
                     {
                         auto const plainReach = bestReach;
+                        // (the text parsed beyond a skip: its measure (a skip to the end of the text parses nothing more))
+                        auto const progress = [&](std::size_t aReach, std::size_t aEnd) { return aReach > aEnd ? aReach - aEnd : std::size_t{ 0u }; };
+                        auto const plainProgress = progress(plainReach, plainEnd);
+                        std::size_t bestProgress = plainProgress;
                         spanEnd = nestedEnd;
                         for (auto const start : starts)
                             for (std::size_t f = 0u; f <= fillers.size(); ++f)
@@ -735,9 +912,10 @@ namespace neos::language
                                     auto const e = o.rfind("Error: ");
                                     reach = error_offset(e != std::string::npos ? o.substr(e + 7u) : std::string{}).value_or(0u);
                                 }
-                                if (reach > bestReach)
+                                if (reach > bestReach && progress(reach, nestedEnd) > bestProgress)
                                 {
                                     bestReach = reach;
+                                    bestProgress = progress(reach, nestedEnd);
                                     bestStart = start;
                                     bestFiller = f;
                                 }
@@ -746,6 +924,36 @@ namespace neos::language
                             }
                         if (bestReach == plainReach)
                             spanEnd = plainEnd;
+                    }
+                    // (or through the next statement or two too, if then all that follows parses (the rest of a construct whose
+                    // beginning was skipped, e.g. a declaration's "end X;"))
+                    if (bestReach != parseText.size() + 1u)
+                    {
+                        auto const savedEnd = spanEnd;
+                        std::size_t end = spanEnd;
+                        bool extended = false;
+                        for (int k = 0; k < 2 && !extended; ++k)
+                        {
+                            end = next_sync(end, end);
+                            // (not through the error the skip leads to: the text that parsed before it only)
+                            if (end >= parseText.size() || end > bestReach)
+                                break;
+                            spanStart = bestStart;
+                            spanEnd = end;
+                            filler = 0u;
+                            rewrite();
+                            parserOutput.str({});
+                            bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), parseText) : parser.parse(parseText);
+                            repaired = saved;
+                            parseText = repaired.empty() ? text : std::string_view{ repaired };
+                            if (parsed)
+                            {
+                                extended = true;
+                                bestReach = parseText.size() + 1u;
+                                bestFiller = 0u;
+                            }
+                        }
+                        spanEnd = extended ? end : savedEnd;
                     }
                     // (or only the text from the error to the closing terminal that ends what it is in (e.g. ")"), or to (not
                     // including) the next synchronizing terminal)
@@ -773,9 +981,22 @@ namespace neos::language
                                 ends.push_back(plainEnd - t.size());
                         auto const savedEnd = spanEnd;
                         bool partial = false;
+                        // (from the error, or from the start of the word it follows (the token the parser took before failing))
+                        std::size_t wordStart = std::min(*offset, parseText.size());
+                        while (wordStart > 0u && (std::isalnum(static_cast<unsigned char>(parseText[wordStart - 1u])) || parseText[wordStart - 1u] == '_'))
+                            --wordStart;
+                        std::vector<std::pair<std::size_t, std::size_t>> spans;
                         for (auto const end : ends)
                         {
-                            spanStart = *offset;
+                            spans.emplace_back(*offset, end);
+                            if (wordStart < *offset)
+                                spans.emplace_back(wordStart, end);
+                        }
+                        std::size_t bestSize = spanEnd > bestStart ? spanEnd - bestStart : std::size_t{ 0u };
+                        std::size_t bestEnd = spanEnd;
+                        for (auto const [from, end] : spans)
+                        {
+                            spanStart = from;
                             spanEnd = end;
                             filler = 0u;
                             rewrite();
@@ -790,22 +1011,93 @@ namespace neos::language
                             }
                             repaired = saved;
                             parseText = repaired.empty() ? text : std::string_view{ repaired };
-                            if (reach > bestReach)
+                            // (as far as a longer skip: this one (less of the text skipped))
+                            if (reach > bestReach || (reach == bestReach && end - from < bestSize))
                             {
+                                bestSize = end - from;
                                 bestReach = reach;
-                                bestStart = *offset;
+                                bestStart = from;
                                 bestFiller = 0u;
                                 partial = true;
-                                spanEnd = end;
+                                bestEnd = end;
                             }
-                            else
-                                spanEnd = savedEnd;
-                            if (partial)
-                                break;
                         }
-                        if (!partial)
-                            spanEnd = savedEnd;
+                        spanEnd = partial ? bestEnd : savedEnd;
                     }
+                    // (or only the token at the error (e.g. a malformed literal: from the space before it to the space after it, not
+                    // through a synchronizing or nesting terminal), replaced by a token filler (meta: syntax.recovery.token))
+                    bool tokenRepair = false;
+                    if (!tokenFillers.empty() && bestReach != parseText.size() + 1u)
+                    {
+                        auto const delimiter = [&](std::size_t i)
+                        {
+                            if (std::isspace(static_cast<unsigned char>(parseText[i])))
+                                return true;
+                            for (auto const& t : synchronize)
+                                if (matches(i, t))
+                                    return true;
+                            for (auto const& t : nesting)
+                                if (!t.empty() && !std::isalnum(static_cast<unsigned char>(t.front())) && matches(i, t))
+                                    return true;
+                            return false;
+                        };
+                        std::size_t tokenStart = std::min(*offset, parseText.size());
+                        while (tokenStart > 0u && !delimiter(tokenStart - 1u))
+                            --tokenStart;
+                        std::size_t tokenEnd = std::min(*offset, parseText.size());
+                        while (tokenEnd < parseText.size() && !delimiter(tokenEnd))
+                            ++tokenEnd;
+                        auto const savedStart = spanStart;
+                        auto const savedEnd = spanEnd;
+                        for (auto const& f : tokenFillers)
+                        {
+                            if (tokenEnd <= tokenStart || f.size() > tokenEnd - tokenStart)
+                                continue;
+                            spanStart = tokenStart;
+                            spanEnd = tokenEnd;
+                            tokenFill = &f;
+                            rewrite();
+                            tokenFill = nullptr;
+                            parserOutput.str({});
+                            bool const parsed = stage->root ? parser.parse(stage->symbolMap->at(stage->root.value()), parseText) : parser.parse(parseText);
+                            std::size_t reach = parseText.size() + 1u;
+                            if (!parsed)
+                            {
+                                auto const o = parserOutput.str();
+                                auto const e = o.rfind("Error: ");
+                                reach = error_offset(e != std::string::npos ? o.substr(e + 7u) : std::string{}).value_or(0u);
+                            }
+                            repaired = saved;
+                            parseText = repaired.empty() ? text : std::string_view{ repaired };
+                            // (a malformed literal (a token beginning with a digit) repaired: the least repair that the parse goes past (a
+                            // longer skip could take errors that follow it))
+                            bool const literal = std::isdigit(static_cast<unsigned char>(parseText[tokenStart])) && reach > skip_blank(tokenEnd) &&
+                                !tokenRepair;
+                            if (reach > bestReach || literal)
+                            {
+                                bestReach = std::max(bestReach, reach);
+                                tokenRepair = true;
+                                tokenFill = &f;
+                                spanStart = tokenStart;
+                                spanEnd = tokenEnd;
+                                if (reach == parseText.size() + 1u)
+                                    break;
+                            }
+                        }
+                        if (!tokenRepair)
+                        {
+                            spanStart = savedStart;
+                            spanEnd = savedEnd;
+                            tokenFill = nullptr;
+                        }
+                    }
+                    if (tokenRepair)
+                    {
+                        filler = 0u;
+                        widened = false;
+                    }
+                    else
+                    {
                     spanStart = bestStart;
                     filler = bestFiller;
                     widened = bestStart == spanFrom;
@@ -845,8 +1137,10 @@ namespace neos::language
                             break;
                         spanEnd = next_sync(*closer, *closer);
                     }
+                    }
                 }
                 rewrite();
+                tokenFill = nullptr;
                 if (std::getenv("NEOS_DEBUG_RECOVERY") != nullptr)
                     std::cerr << "recovery: error at " << *offset << ", skipping " << spanStart << ".." << spanEnd << " filler " << filler << std::endl;
                 parserOutput.str({});
@@ -888,6 +1182,14 @@ namespace neos::language
                 }
             }
             parser.set_debug_output(sQuiet, false, false);
+            if (!ok && cascadeAtEnd && !iRecoveredErrors.empty())
+            {
+                aFragment.set_status(compilation_status::Error);
+                if (state().language != nullptr)
+                    state().language->end_fragment();
+                iCompilationStateStack.pop_back();
+                throw compiler_error{ std::to_string(iRecoveredErrors.size()) + (iRecoveredErrors.size() == 1u ? " syntax error" : " syntax errors") };
+            }
             if (!ok)
             {
                 // (the parser's error: "Error: syntax error: (line,column) ...": a syntax error at that position of the fragment)

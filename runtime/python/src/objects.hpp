@@ -40,6 +40,7 @@
 #include <map>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -99,6 +100,47 @@ namespace neos::python_runtime
                     clear_weak_references(reinterpret_cast<neos_py_object*>(aObject));
                 delete reinterpret_cast<T*>(aObject);
             }
+        }
+
+        // (a container's destruction (aDestroy) nested beyond DeallocationDepth others (destroying an object released the last reference
+        // to another, whose destruction ...): deferred, the outermost destroys those deferred in turn (as CPython's trashcan), so that 
+        // freeing a deep chain (e.g. a list of a list of ...) does not overflow the stack. Plain counts: the GIL's (see add_reference))
+        constexpr int DeallocationDepth = 50;
+        inline int gDeallocationDepth = 0;
+        inline std::vector<std::pair<void (*)(neos_rt_object*), neos_rt_object*>> gDeferredDeallocations;
+        inline void deallocate(void (*aDestroy)(neos_rt_object*), neos_rt_object* aObject)
+        {
+            if (gDeallocationDepth >= DeallocationDepth)
+            {
+                gDeferredDeallocations.emplace_back(aDestroy, aObject);
+                return;
+            }
+            ++gDeallocationDepth;
+            aDestroy(aObject);
+            if (gDeallocationDepth == 1)
+                while (!gDeferredDeallocations.empty())
+                {
+                    auto const deferred = gDeferredDeallocations.back();
+                    gDeferredDeallocations.pop_back();
+                    deferred.first(deferred.second);
+                }
+            --gDeallocationDepth;
+        }
+
+        template <typename T>
+        inline void destroy_object(neos_rt_object* aObject)
+        {
+            if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
+                clear_weak_references(reinterpret_cast<neos_py_object*>(aObject));
+            delete reinterpret_cast<T*>(aObject);
+        }
+
+        // (a container's release (list, tuple, dict): its destruction deferred if it is nested deeply (see deallocate))
+        template <typename T>
+        inline void release_container(neos_rt_object* aObject)
+        {
+            if (remove_reference(*reinterpret_cast<header*>(aObject)) == 0)
+                deallocate(&destroy_object<T>, aObject);
         }
 
         inline void retain_static(neos_rt_object*) {}
@@ -217,7 +259,7 @@ namespace neos::python_runtime
         { 
             header h; 
             std::vector<object*> items; 
-            ~list_object() { for (auto i : items) release(i); } 
+            ~list_object() { for (auto i = items.rbegin(); i != items.rend(); ++i) release(*i); }   // (the last first, as CPython's list_dealloc) 
             static void* operator new(std::size_t aSize);
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
@@ -225,7 +267,7 @@ namespace neos::python_runtime
         { 
             header h; 
             std::vector<object*> items; 
-            ~tuple_object() { for (auto i : items) release(i); } 
+            ~tuple_object() { for (auto i = items.rbegin(); i != items.rend(); ++i) release(*i); }  // (the last first, as CPython's tupledealloc) 
             static void* operator new(std::size_t aSize);
             static void operator delete(void* aObject, std::size_t aSize) noexcept;
         };
@@ -266,9 +308,9 @@ namespace neos::python_runtime
         inline neos_py_type sFloatType = make_type("python.float", "float", retain_object, release_object<float_object>);
         inline neos_py_type sComplexType = make_type("python.complex", "complex", retain_object, release_object<complex_object>);
         inline neos_py_type sStrType = make_type("python.str", "str", retain_object, release_object<str_object>);
-        inline neos_py_type sListType = make_type("python.list", "list", retain_object, release_object<list_object>);
-        inline neos_py_type sTupleType = make_type("python.tuple", "tuple", retain_object, release_object<tuple_object>);
-        inline neos_py_type sDictType = make_type("python.dict", "dict", retain_object, release_object<dict_object>);
+        inline neos_py_type sListType = make_type("python.list", "list", retain_object, release_container<list_object>);
+        inline neos_py_type sTupleType = make_type("python.tuple", "tuple", retain_object, release_container<tuple_object>);
+        inline neos_py_type sDictType = make_type("python.dict", "dict", retain_object, release_container<dict_object>);
         inline neos_py_type sSliceType = make_type("python.slice", "slice", retain_object, release_object<slice_object>);
         inline neos_py_type sRangeType = make_type("python.range", "range", retain_object, release_object<range_object>);
         inline neos_py_type sIteratorType = make_type("python.iterator", "iterator", retain_object, release_object<iterator_object>);
@@ -402,6 +444,11 @@ namespace neos::python_runtime
         object* compare(int aOperation, object* aLhs, object* aRhs);
         bool repr_of(object* aObject, std::string& aResult);
         bool str_of(object* aObject, std::string& aResult);
+        // (a recursive call of the runtime that can nest without limit (e.g. copy.deepcopy's, which CPython's Python code makes, its frames
+        // counted): false (RecursionError: "maximum recursion depth exceeded" + aWhere) beyond the limit of such calls, or near the end of 
+        // the stack; else leave_recursive_call once it has returned)
+        bool enter_recursive_call(char const* aWhere);
+        void leave_recursive_call();
         // (a container whose repr is being made (by this thread), as CPython's Py_ReprEnter: true if its repr is being made already 
         // (its repr within its own is "[...]", "{...}", ...); else repr_leave once it has been made)
         bool repr_enter(object* aObject);
@@ -436,6 +483,11 @@ namespace neos::python_runtime
         bool collect(object* aIterable, std::vector<object*>& aItems); // (new references)
         int truth(object* aObject);
         bool slice_indices(object* aSlice, long long aLength, long long& aStart, long long& aStop, long long& aStep);
+        // (slice_indices in two steps (as CPython's PySlice_Unpack and PySlice_AdjustIndices), for a sequence that finding the indices
+        // (their __index__) can change: its start and stop as indices (none: None) and its step; then its positions in aLength items)
+        bool slice_unpack(object* aSlice, std::optional<long long>& aStart, std::optional<long long>& aStop, long long& aStep);
+        void slice_adjust(long long aLength, std::optional<long long> const& aStartIndex, std::optional<long long> const& aStopIndex, long long aStep,
+            long long& aStart, long long& aStop);
         long long bytes_hash(std::string_view aBytes);
         // (the arguments of a native function as CPython's argument clinic checks them: aNames are its parameters, of which the first 
         // aRequired are required and the first aPositionalOnly cannot be keywords; aFunction is its qualified name (e.g. "bytes.split"); 

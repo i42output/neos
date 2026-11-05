@@ -2740,6 +2740,13 @@ namespace neos::compilers::ada
             tasking_attribute(aAttribute, name);
             return;
         }
+        // (P'Priority, P'Relative_Deadline: the protected object's (D.5.2))
+        if ((name == "priority" || name == "relative_deadline") && aAttribute->ent != nullptr && aAttribute->ent->kind == entity_kind::Protected)
+        {
+            unit_self_address(aAttribute->ent);
+            runtime(name == "priority" ? "po_priority" : "po_relative_deadline", { type::I64 }, type::I64);
+            return;
+        }
         if (name == "exponent" || name == "fraction" || name == "scaling" || name == "compose" || name == "remainder" || name == "adjacent" ||
             name == "leading_part" || name == "machine" || name == "model" || name == "round")
         {
@@ -4861,7 +4868,10 @@ namespace neos::compilers::ada
             iLoopBody = std::move(body);
         }
         else
+        {
+            loop_poll();
             statements(aBody);
+        }
     }
 
     void function_generator::quantified(node* aExpression)

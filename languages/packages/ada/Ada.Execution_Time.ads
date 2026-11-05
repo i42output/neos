@@ -239,11 +239,13 @@ package Ada.Execution_Time
 
 private
    --  An execution time is a number of nanoseconds (CPU_Time_Unit). neos's
-   --  tasks all run on the program's thread (see Ada.Task_Identification) and
-   --  the execution time of each of them is that of the thread (the host's
-   --  CPU time clock of the thread, whose resolution is typically 1
-   --  nanosecond (Linux) to 100 nanoseconds (Windows); CPU_Tick is taken as 1
-   --  microsecond).
+   --  tasks all run on the program's thread (see Ada.Task_Identification):
+   --  the runtime's scheduler accounts the thread's CPU time to the task that
+   --  it runs, as it switches tasks (the environment task's is the rest of
+   --  the thread's). The host's CPU time clock of the thread has a resolution
+   --  of 1 nanosecond (Linux) or 100 nanoseconds with an accuracy of a
+   --  scheduler tick, typically 15.6 milliseconds (Windows); CPU_Tick is
+   --  taken as 1 microsecond.
    type CPU_Time is range 0 .. 2 ** 63 - 1;
    CPU_Time_First : constant CPU_Time := CPU_Time'First;
    CPU_Time_Last  : constant CPU_Time := CPU_Time'Last;

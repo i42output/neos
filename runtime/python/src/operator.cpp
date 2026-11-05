@@ -1002,10 +1002,22 @@ namespace neos::python_runtime
                 return error("TypeError", std::string{ "cannot copy '" } + type_name(aObject) + "' object");
             }
 
+            object* deep_copy_object(object* aObject, object* aMemo);
+
             object* deep_copy(object* aObject, object* aMemo)
             {
                 if (is_atomic(aObject))
                     return borrowed(aObject);
+                // (a recursive call: copy.py's deepcopy is Python code (its frames counted: RecursionError, not a crash))
+                if (!enter_recursive_call(""))
+                    return nullptr;
+                auto const result = deep_copy_object(aObject, aMemo);
+                leave_recursive_call();
+                return result;
+            }
+
+            object* deep_copy_object(object* aObject, object* aMemo)
+            {
                 ref const id{ make_int(static_cast<long long>(reinterpret_cast<std::uintptr_t>(aObject))) };
                 auto const position = dict_find(aMemo, id.get());
                 if (position >= 0)

@@ -29,36 +29,57 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos's dispatching does not depend on deadlines (its scheduler dispatches
---  by priority: see the Ada runtime's tasking): a task's deadlines are values
---  that this package keeps. The release time that Get_Last_Release_Time gives is the time at
---  which the task was last released by Delay_Until_And_Set_Deadline (other
---  releases are not recorded; Ada.Real_Time.Time_First if there has been
---  none).
-
-with Ada.Task_Attributes;
+--  The deadlines are the runtime's: its scheduler orders the ready queues of
+--  the priorities whose policy is EDF_Within_Priorities by the tasks' active
+--  deadlines (D.2.6). A task is made ready when its scheduler finds it ready
+--  (its release time: then, or the time its delay expired).
 
 package body Ada.Dispatching.EDF is
 
-   package Deadlines is new Ada.Task_Attributes (Deadline, Default_Deadline);
-   package Relative_Deadlines is
-     new Ada.Task_Attributes (Relative_Deadline, Default_Relative_Deadline);
-   package Release_Times is
-     new Ada.Task_Attributes (Ada.Real_Time.Time, Ada.Real_Time.Time_First);
+   use Ada.Task_Identification;
+
+   procedure Set (T : Task_Id; D : Deadline);
+   pragma Import (Neos, Set, "ada::deadline_set");
+   function Get (T : Task_Id) return Deadline;
+   pragma Import (Neos, Get, "ada::deadline");
+   procedure Set_Relative (T : Task_Id; D : Relative_Deadline);
+   pragma Import (Neos, Set_Relative, "ada::relative_deadline_set");
+   function Get_Relative (T : Task_Id) return Relative_Deadline;
+   pragma Import (Neos, Get_Relative, "ada::relative_deadline");
+   function Release_Time (T : Task_Id) return Ada.Real_Time.Time;
+   pragma Import (Neos, Release_Time, "ada::release_time");
+   procedure Release_Deadline (D : Deadline);
+   pragma Import (Neos, Release_Deadline, "ada::release_deadline");
+   procedure Release_Deadline_End;
+   pragma Import (Neos, Release_Deadline_End, "ada::release_deadline_end");
+
+   --  (Program_Error for Null_Task_Id, Tasking_Error for a terminated task
+   --  (D.2.6(29/2)))
+   procedure Check (T : Task_Id) is
+   begin
+      if T = Null_Task_Id then
+         raise Program_Error;
+      end if;
+      if Is_Terminated (T) then
+         raise Tasking_Error;
+      end if;
+   end Check;
 
    procedure Set_Deadline
       (D : in Deadline;
        T : in Ada.Task_Identification.Task_Id :=
        Ada.Task_Identification.Current_Task) is
    begin
-      Deadlines.Set_Value (D, T);
+      Check (T);
+      Set (T, D);
    end Set_Deadline;
 
    function Get_Deadline
       (T : Ada.Task_Identification.Task_Id :=
        Ada.Task_Identification.Current_Task) return Deadline is
    begin
-      return Deadlines.Value (T);
+      Check (T);
+      return Get (T);
    end Get_Deadline;
 
    procedure Set_Relative_Deadline
@@ -66,7 +87,8 @@ package body Ada.Dispatching.EDF is
        T : in Ada.Task_Identification.Task_Id :=
        Ada.Task_Identification.Current_Task) is
    begin
-      Relative_Deadlines.Set_Value (D, T);
+      Check (T);
+      Set_Relative (T, D);
    end Set_Relative_Deadline;
 
    function Get_Relative_Deadline
@@ -74,7 +96,8 @@ package body Ada.Dispatching.EDF is
        Ada.Task_Identification.Current_Task)
        return Relative_Deadline is
    begin
-      return Relative_Deadlines.Value (T);
+      Check (T);
+      return Get_Relative (T);
    end Get_Relative_Deadline;
 
    procedure Delay_Until_And_Set_Deadline
@@ -82,9 +105,9 @@ package body Ada.Dispatching.EDF is
        Deadline_Offset : in Ada.Real_Time.Time_Span) is
       use type Ada.Real_Time.Time;
    begin
+      Release_Deadline (Delay_Until_Time + Deadline_Offset);
       delay until Delay_Until_Time;
-      Set_Deadline (Delay_Until_Time + Deadline_Offset);
-      Release_Times.Set_Value (Ada.Real_Time.Clock);
+      Release_Deadline_End;
    end Delay_Until_And_Set_Deadline;
 
    function Get_Last_Release_Time
@@ -92,7 +115,8 @@ package body Ada.Dispatching.EDF is
        Ada.Task_Identification.Current_Task)
        return Ada.Real_Time.Time is
    begin
-      return Release_Times.Value (T);
+      Check (T);
+      return Release_Time (T);
    end Get_Last_Release_Time;
 
 end Ada.Dispatching.EDF;

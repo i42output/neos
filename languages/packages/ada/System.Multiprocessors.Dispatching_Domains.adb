@@ -29,14 +29,16 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-with Ada.Task_Attributes;
-
 package body System.Multiprocessors.Dispatching_Domains is
 
    use type Ada.Task_Identification.Task_Id;
 
-   --  (the processor that a task is assigned to)
-   package Assigned_CPU is new Ada.Task_Attributes (CPU_Range, Not_A_Specific_CPU);
+   --  (the processor that a task is assigned to: the runtime's (its CPU
+   --  aspect, D.16(14/5)))
+   procedure Assign (T : Ada.Task_Identification.Task_Id; CPU : CPU_Range);
+   pragma Import (Neos, Assign, "ada::task_cpu_set");
+   function Assigned (T : Ada.Task_Identification.Task_Id) return CPU_Range;
+   pragma Import (Neos, Assigned, "ada::task_cpu");
 
    Empty_Domain : constant Dispatching_Domain :=
      (First => CPU'First, Last => CPU_Range'First);
@@ -114,7 +116,7 @@ package body System.Multiprocessors.Dispatching_Domains is
       if Domain.Last < Domain.First or else not Is_Valid (Domain, CPU) then
          raise Dispatching_Domain_Error;
       end if;
-      Assigned_CPU.Set_Value (CPU, T);
+      Assign (T, CPU);
    end Assign_Task;
 
    procedure Set_CPU
@@ -125,7 +127,7 @@ package body System.Multiprocessors.Dispatching_Domains is
       if not Is_Valid (System_Dispatching_Domain, CPU) then
          raise Dispatching_Domain_Error;
       end if;
-      Assigned_CPU.Set_Value (CPU, T);
+      Assign (T, CPU);
    end Set_CPU;
 
    function Get_CPU
@@ -133,7 +135,10 @@ package body System.Multiprocessors.Dispatching_Domains is
                  Ada.Task_Identification.Current_Task)
            return CPU_Range is
    begin
-      return Assigned_CPU.Value (T);
+      if T = Ada.Task_Identification.Null_Task_Id then
+         raise Program_Error;
+      end if;
+      return Assigned (T);
    end Get_CPU;
 
    procedure Delay_Until_And_Set_CPU

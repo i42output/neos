@@ -731,10 +731,12 @@ namespace neos::language
                     iMeta.sourceEncodingFallback = meta.type() == neolib::json_type::String ? std::string{ meta.as<neolib::rjson_string>() } :
                         std::string{ meta.as<neolib::rjson_keyword>().text };
                 else if (meta.name() == "syntax.recovery.synchronize" || meta.name() == "syntax.recovery.filler" || meta.name() == "syntax.recovery.nesting" ||
-                    meta.name() == "syntax.recovery.blocks")
+                    meta.name() == "syntax.recovery.blocks" || meta.name() == "syntax.recovery.token" || meta.name() == "syntax.recovery.comment")
                 {
                     auto& values = meta.name() == "syntax.recovery.synchronize" ? iMeta.syntaxRecoverySynchronize :
                         meta.name() == "syntax.recovery.nesting" ? iMeta.syntaxRecoveryNesting :
+                        meta.name() == "syntax.recovery.token" ? iMeta.syntaxRecoveryToken :
+                        meta.name() == "syntax.recovery.comment" ? iMeta.syntaxRecoveryComment :
                         meta.name() == "syntax.recovery.blocks" ? iMeta.syntaxRecoveryBlocks : iMeta.syntaxRecoveryFiller;
                     if (meta.type() == neolib::json_type::String)
                         values.push_back(std::string{ meta.as<neolib::rjson_string>() });
@@ -789,4 +791,4 @@ namespace neos::language
             throw std::runtime_error(iMetaSource.to_error_text(aNode, aErrorText));
         throw std::runtime_error(aErrorText);
     }
-}
+}

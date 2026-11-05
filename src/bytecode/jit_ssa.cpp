@@ -3270,138 +3270,156 @@ namespace neos
                         }
                     }
 
+                    namespace
+                    {
+                        // (finish's, but the uses are only marked as not current (counted again when a pass needs them: see current_uses):
+                        // optimize's passes)
+                        void order_blocks(function& aFunction);
+                    }
+
                     void finish(function& aFunction)
                     {
-                        // (the blocks that can be reached, in reverse postorder (a loop's blocks follow its header))
-                        auto& blocks = aFunction.blocks;
-                        std::size_t wasReachable = 0u;
-                        for (auto& b : blocks)
+                        order_blocks(aFunction);
+                        current_uses(aFunction);
+                    }
+
+                    namespace
+                    {
+                        void order_blocks(function& aFunction)
                         {
-                            wasReachable += b.reachable ? 1u : 0u;
-                            b.reachable = false;
-                        }
-                        bool pruned = false;
-                        std::vector<std::uint32_t> postorder;
-                        // (each block being visited: its successors not yet visited (they do not change while they are))
-                        struct visit
-                        {
-                            std::uint32_t block;
-                            std::uint32_t const* next;
-                            std::uint32_t const* end;
-                        };
-                        std::vector<visit> stack;
-                        stack.reserve(64u);
-                        postorder.reserve(blocks.size());
-                        stack.push_back({ 0u, blocks[0].successors.begin(), blocks[0].successors.end() });
-                        blocks[0].reachable = true;
-                        while (!stack.empty())
-                        {
-                            auto& top = stack.back();
-                            if (top.next != top.end)
+                            // (the blocks that can be reached, in reverse postorder (a loop's blocks follow its header))
+                            auto& blocks = aFunction.blocks;
+                            std::size_t wasReachable = 0u;
+                            for (auto& b : blocks)
                             {
-                                auto const s = *top.next++;
-                                if (!blocks[s].reachable)
-                                {
-                                    blocks[s].reachable = true;
-                                    stack.push_back({ s, blocks[s].successors.begin(), blocks[s].successors.end() });
-                                }
-                                continue;
+                                wasReachable += b.reachable ? 1u : 0u;
+                                b.reachable = false;
                             }
-                            postorder.push_back(top.block);
-                            stack.pop_back();
-                        }
-                        // (predecessors that cannot be reached: not predecessors (nor their phis' operands))
-                        for (std::uint32_t b = 0u; b < blocks.size(); ++b)
-                        {
-                            if (!blocks[b].reachable)
-                                continue;
-                            auto& preds = blocks[b].predecessors;
-                            for (std::size_t p = preds.size(); p-- > 0u;)
-                                if (!blocks[preds[p]].reachable)
+                            bool pruned = false;
+                            std::vector<std::uint32_t> postorder;
+                            // (each block being visited: its successors not yet visited (they do not change while they are))
+                            struct visit
+                            {
+                                std::uint32_t block;
+                                std::uint32_t const* next;
+                                std::uint32_t const* end;
+                            };
+                            std::vector<visit> stack;
+                            stack.reserve(64u);
+                            postorder.reserve(blocks.size());
+                            stack.push_back({ 0u, blocks[0].successors.begin(), blocks[0].successors.end() });
+                            blocks[0].reachable = true;
+                            while (!stack.empty())
+                            {
+                                auto& top = stack.back();
+                                if (top.next != top.end)
                                 {
-                                    pruned = true;
-                                    preds.erase(preds.begin() + static_cast<std::ptrdiff_t>(p));
-                                    for (auto v : blocks[b].code)
+                                    auto const s = *top.next++;
+                                    if (!blocks[s].reachable)
                                     {
-                                        auto& i = aFunction.values[v];
-                                        if (i.op != Phi)
-                                            break;
-                                        if (p < i.operands.size())
-                                            i.operands.erase(i.operands.begin() + static_cast<std::ptrdiff_t>(p));
+                                        blocks[s].reachable = true;
+                                        stack.push_back({ s, blocks[s].successors.begin(), blocks[s].successors.end() });
                                     }
-                                }
-                        }
-                        // (mostly blocks that cannot be reached: those that can, numbered again)
-                        if (blocks.size() - postorder.size() > 32u && 4u * (blocks.size() - postorder.size()) > blocks.size())
-                            compact_blocks(aFunction, postorder);
-                        aFunction.order.assign(postorder.rbegin(), postorder.rend());
-                        // (the edges' hash: loop depths are found again only if they changed)
-                        std::uint64_t edges = 0xCBF29CE484222325ull ^ blocks.size();
-                        for (auto b : postorder)
-                            for (auto s : blocks[b].successors)
-                            {
-                                edges = (edges ^ ((std::uint64_t{ b } << 32u) | s)) * 0x100000001B3ull;
-                                edges ^= edges >> 29u;
-                            }
-                        // (loop depths: a block within a loop is one that can reach its header's back edge from the header; as they were if
-                        // the edges are)
-                        if (!pruned && edges == aFunction.cfgHash)
-                        {
-                            if (!aFunction.usesCurrent || aFunction.uses.size() != aFunction.values.size() || postorder.size() != wasReachable)
-                                count_uses(aFunction);
-                            return;
-                        }
-                        aFunction.cfgHash = edges;
-                        std::vector<std::uint32_t> position(blocks.size(), 0u);
-                        for (std::uint32_t i = 0u; i < aFunction.order.size(); ++i)
-                            position[aFunction.order[i]] = i;
-                        // (loop headers: the targets of back edges (from blocks that follow them in the order), as the code is now (e.g.
-                        // after jumps are threaded: a loop's first block may no longer be its header))
-                        for (auto& b : blocks)
-                        {
-                            b.loopDepth = 0u;
-                            b.loopHeader = false;
-                        }
-                        for (auto h : aFunction.order)
-                            for (auto p : blocks[h].predecessors)
-                                if (blocks[p].reachable && position[p] >= position[h])
-                                    blocks[h].loopHeader = true;
-                        std::vector<std::uint32_t> work;
-                        std::vector<std::uint32_t> members;
-                        std::vector<bool> in(blocks.size(), false);
-                        for (auto h : aFunction.order)
-                        {
-                            if (!blocks[h].loopHeader)
-                                continue;
-                            // (the loop's blocks: backwards from its back edges' sources to it)
-                            work.clear();
-                            members.clear();
-                            for (auto p : blocks[h].predecessors)
-                                if (position[p] >= position[h])
-                                    work.push_back(p);
-                            in[h] = true;
-                            members.push_back(h);
-                            while (!work.empty())
-                            {
-                                auto const x = work.back();
-                                work.pop_back();
-                                if (in[x] || !blocks[x].reachable)
                                     continue;
-                                in[x] = true;
-                                members.push_back(x);
-                                for (auto p : blocks[x].predecessors)
-                                    work.push_back(p);
+                                }
+                                postorder.push_back(top.block);
+                                stack.pop_back();
                             }
-                            for (auto x : members)
+                            // (predecessors that cannot be reached: not predecessors (nor their phis' operands))
+                            for (std::uint32_t b = 0u; b < blocks.size(); ++b)
                             {
-                                ++blocks[x].loopDepth;
-                                in[x] = false;
+                                if (!blocks[b].reachable)
+                                    continue;
+                                auto& preds = blocks[b].predecessors;
+                                for (std::size_t p = preds.size(); p-- > 0u;)
+                                    if (!blocks[preds[p]].reachable)
+                                    {
+                                        pruned = true;
+                                        preds.erase(preds.begin() + static_cast<std::ptrdiff_t>(p));
+                                        for (auto v : blocks[b].code)
+                                        {
+                                            auto& i = aFunction.values[v];
+                                            if (i.op != Phi)
+                                                break;
+                                            if (p < i.operands.size())
+                                                i.operands.erase(i.operands.begin() + static_cast<std::ptrdiff_t>(p));
+                                        }
+                                    }
                             }
+                            // (mostly blocks that cannot be reached: those that can, numbered again)
+                            if (blocks.size() - postorder.size() > 32u && 4u * (blocks.size() - postorder.size()) > blocks.size())
+                                compact_blocks(aFunction, postorder);
+                            aFunction.order.assign(postorder.rbegin(), postorder.rend());
+                            // (the edges' hash: loop depths are found again only if they changed)
+                            std::uint64_t edges = 0xCBF29CE484222325ull ^ blocks.size();
+                            for (auto b : postorder)
+                                for (auto s : blocks[b].successors)
+                                {
+                                    edges = (edges ^ ((std::uint64_t{ b } << 32u) | s)) * 0x100000001B3ull;
+                                    edges ^= edges >> 29u;
+                                }
+                            // (loop depths: a block within a loop is one that can reach its header's back edge from the header; as they were if
+                            // the edges are)
+                            // (the uses: not current if the blocks that can be reached changed (counted again when a pass needs them: see
+                            // current_uses))
+                            if (!pruned && edges == aFunction.cfgHash)
+                            {
+                                if (postorder.size() != wasReachable)
+                                    aFunction.usesCurrent = false;
+                                return;
+                            }
+                            aFunction.cfgHash = edges;
+                            std::vector<std::uint32_t> position(blocks.size(), 0u);
+                            for (std::uint32_t i = 0u; i < aFunction.order.size(); ++i)
+                                position[aFunction.order[i]] = i;
+                            // (loop headers: the targets of back edges (from blocks that follow them in the order), as the code is now (e.g.
+                            // after jumps are threaded: a loop's first block may no longer be its header))
+                            for (auto& b : blocks)
+                            {
+                                b.loopDepth = 0u;
+                                b.loopHeader = false;
+                            }
+                            for (auto h : aFunction.order)
+                                for (auto p : blocks[h].predecessors)
+                                    if (blocks[p].reachable && position[p] >= position[h])
+                                        blocks[h].loopHeader = true;
+                            std::vector<std::uint32_t> work;
+                            std::vector<std::uint32_t> members;
+                            std::vector<bool> in(blocks.size(), false);
+                            for (auto h : aFunction.order)
+                            {
+                                if (!blocks[h].loopHeader)
+                                    continue;
+                                // (the loop's blocks: backwards from its back edges' sources to it)
+                                work.clear();
+                                members.clear();
+                                for (auto p : blocks[h].predecessors)
+                                    if (position[p] >= position[h])
+                                        work.push_back(p);
+                                in[h] = true;
+                                members.push_back(h);
+                                while (!work.empty())
+                                {
+                                    auto const x = work.back();
+                                    work.pop_back();
+                                    if (in[x] || !blocks[x].reachable)
+                                        continue;
+                                    in[x] = true;
+                                    members.push_back(x);
+                                    for (auto p : blocks[x].predecessors)
+                                        work.push_back(p);
+                                }
+                                for (auto x : members)
+                                {
+                                    ++blocks[x].loopDepth;
+                                    in[x] = false;
+                                }
+                            }
+                            // (the uses: not current, unless the code is as it was (the blocks that can be reached are too, as their number
+                            // shows); counted again when a pass needs them (see current_uses))
+                            if (pruned || postorder.size() != wasReachable)
+                                aFunction.usesCurrent = false;
                         }
-                        // (the uses: counted again, unless they are current (the code is as it was: the blocks that can be reached are too,
-                        // as their number shows))
-                        if (pruned || postorder.size() != wasReachable || !aFunction.usesCurrent || aFunction.uses.size() != aFunction.values.size())
-                            count_uses(aFunction);
                     }
 
                     namespace
@@ -6772,7 +6790,7 @@ namespace neos
                         auto const changes = [&](bool aChanged) { if (aChanged) aFunction.usesCurrent = false; return aChanged; };
                         auto const cached = [&]() { return aMemoryWord && changes(fold_cached_loads(aFunction, aMemoryWord)); };
                         if (changes(fold_assumed(aFunction)))
-                            finish(aFunction);
+                            order_blocks(aFunction);
                         eliminate_dead_code(aFunction);
                         // (finish: after the blocks' edges may have changed (folding a branch; inverting one), else they are as it left them)
                         bool edges = false;
@@ -6782,7 +6800,7 @@ namespace neos
                             changed = changes(fold_known_bits(aFunction)) || changed;
                             changed = changes(fold_constants(aFunction)) || changed;
                             if (changed || edges)
-                                finish(aFunction);
+                                order_blocks(aFunction);
                             changed = changes(simplify(aFunction)) || changed;
                             edges = invert_branches(aFunction);
                             changed = edges || changed;
@@ -6794,7 +6812,7 @@ namespace neos
                         }
                         if (changes(fold_assumed(aFunction)))
                         {
-                            finish(aFunction);
+                            order_blocks(aFunction);
                             edges = false;
                         }
                         number_values(aFunction);
@@ -6806,36 +6824,36 @@ namespace neos
                         {
                             bool const changed = changes(fold_constants(aFunction));
                             if (changed || edges)
-                                finish(aFunction);
+                                order_blocks(aFunction);
                             edges = false;
                             if (!changed)
                                 break;
                         }
                         if (changes(merge_blocks(aFunction)))
                         {
-                            finish(aFunction);
+                            order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                         }
                         if (changes(thread_jumps(aFunction)))
                         {
-                            finish(aFunction);
+                            order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                         }
                         if (changes(merge_blocks(aFunction)))
-                            finish(aFunction);
+                            order_blocks(aFunction);
                         if (changes(sink_equal_operands(aFunction)))
                         {
-                            finish(aFunction);
+                            order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                             if (changes(thread_jumps(aFunction)))
-                                finish(aFunction);
+                                order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                             number_values(aFunction);
                             aFunction.usesCurrent = false;
                             for (int pass = 0; pass < 2; ++pass)
                             {
                                 bool const changed = changes(fold_constants(aFunction));
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 if (!changed)
                                     break;
                             }
@@ -6844,7 +6862,7 @@ namespace neos
                         eliminate_dead_code(aFunction);
                         if (changes(thread_jumps(aFunction)))
                         {
-                            finish(aFunction);
+                            order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                         }
                         for (int round = 0; round < 4; ++round)
@@ -6853,25 +6871,25 @@ namespace neos
                             bool threaded = changes(thread_branches(aFunction));
                             if (threaded)
                             {
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 edges = false;
                             }
                             if (changes(thread_known_values(aFunction)))
                             {
                                 threaded = true;
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 edges = false;
                             }
                             if (changes(duplicate_tails(aFunction)))
                             {
                                 threaded = true;
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 edges = false;
                             }
                             if (changes(thread_decided_joins(aFunction)))
                             {
                                 threaded = true;
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 edges = false;
                             }
                             if (changes(decide_branches(aFunction)))
@@ -6881,7 +6899,7 @@ namespace neos
                             if (changes(sink_conversions(aFunction)))
                             {
                                 threaded = true;
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 edges = false;
                             }
                             for (int pass = 0; pass < 2; ++pass)
@@ -6890,7 +6908,7 @@ namespace neos
                                 changed = changes(fold_known_bits(aFunction)) || changed;
                                 changed = changes(fold_constants(aFunction)) || changed;
                                 if (changed || edges)
-                                    finish(aFunction);
+                                    order_blocks(aFunction);
                                 edges = false;
                                 changed = changes(simplify(aFunction)) || changed;
                                 if (!changed)
@@ -6898,11 +6916,11 @@ namespace neos
                             }
                             bool const merged = changes(merge_blocks(aFunction));
                             if (merged)
-                                finish(aFunction);
+                                order_blocks(aFunction);
                             eliminate_dead_code(aFunction);
                             if (changes(thread_jumps(aFunction)))
                             {
-                                finish(aFunction);
+                                order_blocks(aFunction);
                                 eliminate_dead_code(aFunction);
                             }
                             if (!threaded && !merged)
@@ -6915,7 +6933,7 @@ namespace neos
                         aFunction.usesCurrent = false;
                         sink_values(aFunction);
                         if (duplicate_returns(aFunction))
-                            finish(aFunction);
+                            order_blocks(aFunction);
                         fold_address_offsets(aFunction);
                         eliminate_dead_stores(aFunction);
                         fold_scaled_indexes(aFunction);

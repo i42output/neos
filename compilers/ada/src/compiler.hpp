@@ -90,6 +90,7 @@ namespace neos::compilers::ada
         std::map<std::uint32_t, std::string>& frame_names() { return iFrameNames; }
         std::set<std::string>& linked_functions() { return iLinkedFunctions; }
         std::optional<std::string> const& packages_folder() const { return iPackagesFolder; }
+        bool imported(std::string const& aPath) const;  ///< (a file found on the search path (not one of the files compiled))
         static constexpr std::string_view ConfigurationUnit = "neos_configuration_pragmas";  ///< (the unit of the configuration pragmas' file)
         void emit_entry(fragment const& aStatement) { push_operand(operand_type{ aStatement }); generator().end_indented(); }   ///< (the entry point's code)
     private:
@@ -132,6 +133,7 @@ namespace neos::compilers::ada
         };
         std::optional<pending_error> iPendingError;
         std::optional<std::uint32_t> iSyntaxErrorLine;     ///< (the first syntax error's line)
+        std::vector<std::uint32_t> iSyntaxErrorLines;      ///< (the syntax errors' lines (those recovered from too))
         source_file const* iSyntaxErrorFile = nullptr;      ///< (... in this file)
     };
 }

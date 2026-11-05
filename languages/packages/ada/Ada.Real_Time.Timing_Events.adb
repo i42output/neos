@@ -30,18 +30,35 @@
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 --  The set events are queued by time, and in the order in which they were
---  set for the same time. A server task, which exists while events are
---  queued, waits until the first event's time (or until the queue changes)
---  and then executes the handlers of the events whose time has come. (A
+--  set for the same time. A server task (of priority Interrupt_Priority'Last,
+--  as if the clock's interrupt executed the handlers (D.15(25/2))), which
+--  exists while events are queued, waits until the first event's time (or
+--  until the queue changes) and then executes the handlers of the events whose
+--  time has come. (A
 --  program's library-level tasks are awaited when its main subprogram
 --  completes: a program with an event that is still set ends after its
 --  handler is executed.)
 
+with Interfaces;
+with System;
+with Ada.Unchecked_Conversion;
 with Ada.Unchecked_Deallocation;
 
 package body Ada.Real_Time.Timing_Events is
 
+   use type Interfaces.Integer_64;
+
+   --  (the ceiling priority of a handler's protected object; whether the
+   --  locking policy is Ceiling_Locking)
+   function To_Value is new Ada.Unchecked_Conversion (Timing_Event_Handler, Interfaces.Integer_64);
+   function Ceiling (Handler : Interfaces.Integer_64) return Interfaces.Integer_64;
+   pragma Import (Neos, Ceiling, "ada::handler_ceiling");
+   function Ceiling_Locking return Interfaces.Integer_64;
+   pragma Import (Neos, Ceiling_Locking, "ada::ceiling_locking");
+
    type Event_Access is access all Timing_Event;
+
+   Interrupt_Priority_Last : constant := System.Interrupt_Priority'Last;
 
    type Node;
    type Node_Access is access Node;
@@ -52,7 +69,7 @@ package body Ada.Real_Time.Timing_Events is
 
    procedure Free is new Ada.Unchecked_Deallocation (Node, Node_Access);
 
-   protected Queue is
+   protected Queue with Priority => System.Any_Priority'Last is
       --  (Event set: to execute Handler at At_Time)
       procedure Set (Event : Event_Access; At_Time : Time; Handler : Timing_Event_Handler);
       --  (Event cleared; Cancelled: whether it was set)
@@ -170,7 +187,7 @@ package body Ada.Real_Time.Timing_Events is
 
    end Queue;
 
-   task type Server;
+   task type Server with Interrupt_Priority => System.Interrupt_Priority'Last;
    type Server_Access is access Server;
 
    task body Server is
@@ -213,6 +230,11 @@ package body Ada.Real_Time.Timing_Events is
       if Handler = null then
          Queue.Clear (Event'Unchecked_Access, Cancelled);
          return;
+      end if;
+      --  (under Ceiling_Locking the handler's ceiling is Interrupt_Priority'Last
+      --  (D.15(14/2)))
+      if Ceiling_Locking /= 0 and then Ceiling (To_Value (Handler)) /= Interrupt_Priority_Last then
+         raise Program_Error;
       end if;
       Queue.Set (Event'Unchecked_Access, At_Time, Handler);
       Queue.Need_Server (Start);

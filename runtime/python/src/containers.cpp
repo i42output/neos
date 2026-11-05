@@ -279,7 +279,8 @@ namespace neos::python_runtime
                     stop = std::max(0ll, stop + n);
                 for (auto i = start; i < std::min(stop, static_cast<long long>(items.size())); ++i)
                 {
-                    auto const e = equal(items[static_cast<std::size_t>(i)], a[0]);
+                    ref const held = ref::borrowed(items[static_cast<std::size_t>(i)]);   // (as CPython's: a comparison can change the list)
+                    auto const e = equal(held.get(), a[0]);
                     if (e < 0)
                         return nullptr;
                     if (e == 1)
@@ -300,14 +301,21 @@ namespace neos::python_runtime
                 std::vector<object*> a;
                 if (!parse_arguments("sort", aArgs, aKwargs, { "key", "reverse" }, 0u, 0u, a))
                     return nullptr;
-                // (sorted's algorithm: a copy, which then replaces the items)
-                ref const copy{ make_list(as<list_object>(aSelf)->items) };
-                for (auto i : as<list_object>(copy.get())->items)
-                    retain(i);
+                // (sorted's algorithm on its items, which then replace them; as CPython's, the list is empty while they are sorted: if it 
+                // is not empty afterwards, keys or comparisons changed it (ValueError; the items added are discarded))
+                auto& items = as<list_object>(aSelf)->items;
+                ref const copy{ make_list({}) };
+                std::swap(as<list_object>(copy.get())->items, items);
                 ref const sorted{ b_sorted({ copy.get() }, aKwargs) };
+                std::vector<object*> added;
+                std::swap(added, items);
+                std::swap(items, sorted ? as<list_object>(sorted.get())->items : as<list_object>(copy.get())->items);
+                for (auto i : added)
+                    release(i);
                 if (!sorted)
                     return nullptr;
-                std::swap(as<list_object>(aSelf)->items, as<list_object>(sorted.get())->items);
+                if (!added.empty())
+                    return error("ValueError", "list modified during sort");
                 return none();
             }
 
@@ -323,10 +331,21 @@ namespace neos::python_runtime
             {
                 if (kind_of(aOther) == NEOS_PY_DICT || (kind_of(builtin_value(aOther)) == NEOS_PY_DICT && !has_keys_override(aOther)))
                 {
-                    auto const items = as<dict_object>(builtin_value(aOther))->items;
-                    for (auto const& item : items)
-                        if (dict_set(aDict, item.first, item.second) != 0)
+                    // (by position, each item held (setting it can run code that changes the dict: RuntimeError, as CPython's))
+                    auto const& items = as<dict_object>(builtin_value(aOther))->items;
+                    auto const size = items.size();
+                    for (std::size_t i = 0u; i < items.size(); ++i)
+                    {
+                        ref const key = ref::borrowed(items[i].first);
+                        ref const value = ref::borrowed(items[i].second);
+                        if (dict_set(aDict, key.get(), value.get()) != 0)
                             return false;
+                        if (items.size() != size)
+                        {
+                            error("RuntimeError", "dict mutated during update");
+                            return false;
+                        }
+                    }
                     return true;
                 }
                 ref const keys{ getattr(aOther, "keys") };
@@ -432,11 +451,15 @@ namespace neos::python_runtime
                         auto& items = as<list_object>(aSelf)->items;
                         for (std::size_t i = 0u; i < items.size(); ++i)
                         {
-                            auto const e = equal(items[i], a[0]);
+                            // (the item held while it is compared, which can change the list (as CPython's))
+                            ref const held = ref::borrowed(items[i]);
+                            auto const e = equal(held.get(), a[0]);
                             if (e < 0)
                                 return nullptr;
                             if (e == 1)
                             {
+                                if (i >= items.size())
+                                    break;
                                 auto const item = items[i];
                                 items.erase(items.begin() + static_cast<std::ptrdiff_t>(i));
                                 release(item);

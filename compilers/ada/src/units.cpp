@@ -246,11 +246,250 @@ namespace neos::compilers::ada
                 if (c > 0u && first)
                     mainFile = true;
                 info.main_file = mainFile;
+                info.compilation = c;
+                info.given = c > 0u && !iCompiler.imported(compilation->file->path);
                 iUnits.push_back(info);
             }
             if (mainFile)
                 first = false;
         }
+    }
+
+    void program::obsolete_units()
+    {
+        // (the environment (10.1.4): the units of the files compiled (not those found on the search path), in the order compiled; a
+        // library unit declaration (or a subprogram body that is its own declaration) replaces the earlier declaration of its name and
+        // the body of that; a body replaces the earlier body (10.1.4(4/1, 5)); a subprogram body is a completion only of a declaration
+        // of a (generic) subprogram that is not an instance, else its own declaration (10.1.4(4/1)))
+        std::map<std::string, unit_info*> declaration;
+        std::map<std::string, std::vector<unit_info*>> bodies;
+        // (the declarations of the environment's other units (those found on the search path): a body of a file compiled can complete one)
+        std::map<std::string, unit_info*> found;
+        for (auto& u : iUnits)
+            if (!u.given && !u.body && !u.subunit && u.item != nullptr)
+                found.emplace(u.name, &u);
+        for (auto& u : iUnits)
+        {
+            if (!u.given)
+                continue;
+            if (u.subunit)
+            {
+                for (auto* b : bodies[u.name])
+                    if (b->subunit)
+                        b->replaced = true;
+                bodies[u.name].push_back(&u);
+                continue;
+            }
+            bool completion = u.body;
+            if (u.body && u.item->is(construct::SubprogramBody))
+            {
+                auto const d = declaration.find(u.name);
+                auto const f = found.find(u.name);
+                auto const* item = d != declaration.end() ? d->second->item : f != found.end() ? f->second->item : nullptr;
+                completion = item != nullptr && (item->is(construct::SubprogramDeclaration) || (item->is(construct::Generic) &&
+                    std::none_of(item->children.begin(), item->children.end(), [](node const* c) { return c->is(construct::Package); })));
+            }
+            u.declares = !completion;
+            if (u.declares)
+            {
+                if (auto const d = declaration.find(u.name); d != declaration.end())
+                    d->second->replaced = true;
+                for (auto* b : bodies[u.name])
+                    b->replaced = true;
+                bodies[u.name].clear();
+                declaration[u.name] = &u;
+            }
+            if (u.body)
+            {
+                for (auto* b : bodies[u.name])
+                    if (b != &u)
+                        b->replaced = true;
+                bodies[u.name].push_back(&u);
+            }
+        }
+        // (the units that depend semantically on a unit replaced by one compiled after them (and are not themselves compiled again
+        // after it) are obsolete (10.1.4(7)): the program is inconsistent (not when checking legality only: a compilation, not a 
+        // partition))
+        if (std::getenv("NEOS_ADA_CHECK") != nullptr)
+            return;
+        for (std::size_t r = 0u; r < iUnits.size(); ++r)
+        {
+            auto const& replacedUnit = iUnits[r];
+            if (!replacedUnit.given || !replacedUnit.replaced)
+                continue;
+            auto const& n = replacedUnit.name;
+            auto const childOf = [&](std::string const& aName) { return aName.size() > n.size() && aName.compare(0u, n.size() + 1u, n + ".") == 0; };
+            for (std::size_t i = r + 1u; i < iUnits.size(); ++i)
+            {
+                auto& u = iUnits[i];
+                if (!u.given || u.replaced || u.name == n)
+                    continue;
+                // (not if the replacement precedes it)
+                bool const before = std::any_of(iUnits.begin() + static_cast<std::ptrdiff_t>(r + 1u), iUnits.begin() + static_cast<std::ptrdiff_t>(i),
+                    [&](unit_info const& v) { return v.given && v.name == n && (replacedUnit.declares ? v.declares : v.body == replacedUnit.body); });
+                if (before)
+                    continue;
+                bool depends = false;
+                if (replacedUnit.declares)
+                    depends = std::find(u.withs.begin(), u.withs.end(), n) != u.withs.end() || childOf(u.name) ||
+                        std::any_of(u.withs.begin(), u.withs.end(), childOf);
+                else if (replacedUnit.body)
+                    depends = u.subunit && childOf(u.name);
+                if (depends)
+                    recover([&]() { error(u.item, "\"" + u.name + "\" is obsolete: \"" + n + "\", which it depends on, was compiled again after it "
+                        "(the program is inconsistent, 10.1.4(7))"); });
+            }
+        }
+    }
+
+    void program::limited_with_scope_check(unit_info& aUnit)
+    {
+        // (a limited with clause: not within the scope of a nonlimited with clause that mentions the same package (10.1.2(8.3/2)), nor
+        // of a use clause that names an entity declared within its declarative region (10.1.2(8.4/2)): the unit's context clause's, its
+        // ancestors' (their context clauses' and the use clauses of their declarations))
+        auto* context = aUnit.unit->first(construct::Context);
+        if (context == nullptr || iInstanceBodies > 0)
+            return;
+        std::vector<node*> limited;
+        for (auto* clause : context->children)
+            if (clause->is(construct::With) && clause->has_flag("limited"))
+                for (auto* n : clause->children)
+                    if (!n->is(construct::Flag))
+                        limited.push_back(n);
+        if (limited.empty())
+            return;
+        std::vector<std::string> withs = aUnit.withs;
+        std::vector<node*> uses;
+        auto const collect_uses = [&](node* aParent)
+        {
+            if (aParent != nullptr)
+                for (auto* c : aParent->children)
+                    if (c->is(construct::Use) || c->is(construct::UseType))
+                        uses.push_back(c);
+        };
+        collect_uses(context);
+        for (auto dot = aUnit.name.rfind('.'); dot != std::string::npos; dot = dot > 0u ? aUnit.name.rfind('.', dot - 1u) : std::string::npos)
+            if (auto* ancestor = find_unit(aUnit.name.substr(0u, dot), false))
+            {
+                withs.insert(withs.end(), ancestor->withs.begin(), ancestor->withs.end());
+                collect_uses(ancestor->unit->first(construct::Context));
+                auto* item = ancestor->item;
+                if (item != nullptr && item->is(construct::Generic))
+                    item = item->first(construct::Package);
+                if (item != nullptr && item->is(construct::Package))
+                {
+                    collect_uses(item->first(construct::Declarations));
+                    if (auto* priv = item->first(construct::Private))
+                        collect_uses(priv->first(construct::Declarations) != nullptr ? priv->first(construct::Declarations) : priv);
+                }
+            }
+        auto const denoted = [&](node* aName) -> entity*
+        {
+            auto* e = aName->ent;
+            if (e == nullptr && aName->is(construct::Selected) && aName->size() == 2u)
+                e = aName->child(1)->ent;
+            while (e != nullptr && e->renamed != nullptr && e->renamed != e)
+                e = e->renamed;
+            return e;
+        };
+        for (auto* n : limited)
+        {
+            auto const named = dotted_name(n);
+            // (a with clause mentions the units it names and their ancestors; a renaming of the package (or of a unit within it) too)
+            auto const mentions = [&](std::string const& w)
+            {
+                if (w == named || w.starts_with(named + "."))
+                    return true;
+                auto* r = library_unit(w);
+                while (r != nullptr && r->renamed != nullptr && r->renamed != r)
+                    r = r->renamed;
+                auto const renamed = r != nullptr ? full_name(r) : std::string{};
+                return r != library_unit(w) && (renamed == named || renamed.starts_with(named + "."));
+            };
+            if (std::any_of(withs.begin(), withs.end(), mentions))
+            {
+                recover([&]() { error(n, "a limited with clause cannot be within the scope of a nonlimited with clause that mentions the same package (10.1.2(8.3/2))"); });
+                continue;
+            }
+            for (auto* u : uses)
+            {
+                bool inside = false;
+                for (auto* m : u->children)
+                {
+                    if (m->is(construct::Flag))
+                        continue;
+                    entity* e = denoted(m);
+                    if (e == nullptr && m->type != nullptr && m->type->decl != nullptr)
+                        e = m->type->decl;
+                    if (e != nullptr && full_name(e).starts_with(named + "."))
+                        inside = true;
+                }
+                if (inside)
+                {
+                    recover([&]() { error(n, "a limited with clause cannot be within the scope of a use clause that names an entity declared within the package (10.1.2(8.4/2))"); });
+                    break;
+                }
+            }
+        }
+    }
+
+    std::vector<unit_info*> program::dependences(unit_info const& aUnit)
+    {
+        // (as of its compilation: the declarations of the units it names in with clauses (not limited ones) and of its parents; a
+        // body's declaration; a subunit's parent body)
+        auto const* saved = iAsOf;
+        iAsOf = &aUnit;
+        std::vector<unit_info*> result;
+        auto const add = [&](unit_info* aDependence)
+        {
+            if (aDependence != nullptr && aDependence != &aUnit && std::find(result.begin(), result.end(), aDependence) == result.end())
+                result.push_back(aDependence);
+        };
+        auto const declaration = [&](std::string const& aName)
+        {
+            auto* d = find_unit(aName, false);
+            add(d != nullptr ? d : find_unit(aName, true));
+        };
+        for (auto const& w : aUnit.withs)
+            declaration(w);
+        auto const dot = aUnit.name.rfind('.');
+        if (aUnit.subunit)
+        {
+            if (dot != std::string::npos)
+                add(find_unit(aUnit.name.substr(0u, dot), true));
+        }
+        else
+        {
+            for (auto d = aUnit.name.find('.'); d != std::string::npos; d = aUnit.name.find('.', d + 1u))
+                declaration(aUnit.name.substr(0u, d));
+            if (aUnit.body)
+                add(find_unit(aUnit.name, false));
+        }
+        iAsOf = saved;
+        return result;
+    }
+
+    bool program::obsolete(unit_info const& aUnit, std::size_t aAsOf, int aDepth)
+    {
+        // (a unit is obsolete if a unit it depends on was compiled again after it (before aAsOf), or is itself obsolete (10.1.4(5)))
+        if (!aUnit.given || aDepth > 32)
+            return false;
+        auto const index = static_cast<std::size_t>(&aUnit - iUnits.data());
+        for (auto* e : dependences(aUnit))
+        {
+            if (!e->given)
+                continue;
+            // (the unit being compiled too: a unit that depends on an earlier version of it (it would depend on itself, 10.1.4(5)))
+            for (std::size_t i = index + 1u; i <= aAsOf && i < iUnits.size(); ++i)
+            {
+                auto const& v = iUnits[i];
+                if (v.given && v.name == e->name && (e->declares ? v.declares : (v.declares || (v.body && v.subunit == e->subunit))))
+                    return true;
+            }
+            if (obsolete(*e, aAsOf, aDepth + 1))
+                return true;
+        }
+        return false;
     }
 
     unit_info* program::find_unit(std::string const& aName, bool aBody)
@@ -262,10 +501,45 @@ namespace neos::compilers::ada
                 std::fprintf(stderr, " %s%s", u.name.c_str(), u.body ? "(b)" : "");
             std::fprintf(stderr, "\n");
         }
-        // (the last one found: a unit compiled later replaces one compiled earlier (e.g. the main file's units are first))
+        // (as of a unit of a file compiled: the units of the environment when it was compiled (10.1.4(4/1, 5)): the declaration of the
+        // name compiled last before it (else the first compiled after it: not one that is its own declaration); the body of that
+        // declaration (compiled after it, before the declaration that replaces it; a subprogram body that is its own declaration: no
+        // declaration but the body))
+        if (iAsOf != nullptr && iAsOf->given)
+        {
+            auto const asOf = static_cast<std::size_t>(iAsOf - iUnits.data());
+            if (asOf < iUnits.size())
+            {
+                auto const declaring = [&](std::size_t i) { return iUnits[i].given && iUnits[i].declares && iUnits[i].name == aName; };
+                std::optional<std::size_t> declared;
+                for (std::size_t i = 0u; i < asOf; ++i)
+                    if (declaring(i))
+                        declared = i;
+                if (!declared && !(iAsOf->declares && iAsOf->name == aName))
+                    for (std::size_t i = asOf; !declared && i < iUnits.size(); ++i)
+                        if (declaring(i))
+                            declared = i;
+                if (iAsOf->declares && iAsOf->name == aName)
+                    declared = asOf;
+                if (declared)
+                {
+                    if (!aBody)
+                        return iUnits[*declared].item->is(construct::SubprogramBody) ? nullptr : &iUnits[*declared];
+                    std::size_t limit = *declared + 1u;
+                    while (limit < iUnits.size() && !declaring(limit))
+                        ++limit;
+                    unit_info* found = nullptr;
+                    for (std::size_t i = *declared; i < limit; ++i)
+                        if (auto& u = iUnits[i]; u.given && u.name == aName && u.body)
+                            found = &u;
+                    return found;
+                }
+            }
+        }
+        // (else the last one found: a unit compiled later replaces one compiled earlier (e.g. the main file's units are first))
         unit_info* result = nullptr;
         for (auto& u : iUnits)
-            if (u.name == aName && u.body == aBody && (aBody || !u.subunit))
+            if (u.name == aName && u.body == aBody && (aBody || !u.subunit) && !u.replaced)
             {
                 if (result == nullptr || (u.main_file && !result->main_file))
                     result = &u;
@@ -285,23 +559,32 @@ namespace neos::compilers::ada
             if (aUnit == nullptr || state[aUnit] != 0)
                 return;
             state[aUnit] = 1;
+            // (the units of its environment (see find_unit))
+            auto const find = [&](std::string const& aName, bool aBody)
+            {
+                auto const* saved = iAsOf;
+                iAsOf = aUnit;
+                auto* result = find_unit(aName, aBody);
+                iAsOf = saved;
+                return result;
+            };
             auto const dependency = [&](std::string const& aName)
             {
                 // (a unit and its parents)
                 for (auto dot = aName.find('.'); dot != std::string::npos; dot = aName.find('.', dot + 1u))
-                    visit(find_unit(aName.substr(0u, dot), false));
-                if (auto* spec = find_unit(aName, false))
+                    visit(find(aName.substr(0u, dot), false));
+                if (auto* spec = find(aName, false))
                     visit(spec);
-                else if (auto* body = find_unit(aName, true))
+                else if (auto* body = find(aName, true))
                     visit(body);
             };
             if (aUnit->name != "standard")
-                visit(find_unit("standard", false));
+                visit(find("standard", false));
             auto const dot = aUnit->name.rfind('.');
             if (dot != std::string::npos && !aUnit->subunit)
                 dependency(aUnit->name.substr(0u, dot));
             if (aUnit->body && !aUnit->subunit)
-                visit(find_unit(aUnit->name, false));
+                visit(find(aUnit->name, false));
             for (auto const& w : aUnit->withs)
                 dependency(w);
             // (a body: its subunits' withs too (they are elaborated before it, 10.2(9)))
@@ -317,13 +600,17 @@ namespace neos::compilers::ada
             // (a library subprogram's body: not followed (it has nothing to elaborate that others need, its calls aren't checked); a
             // body it withs (e.g. a child of a unit whose body is being visited) waits until its turn)
             if (!aUnit->body && !aUnit->item->is(construct::SubprogramDeclaration))
-                if (auto* body = find_unit(aUnit->name, true); body != nullptr && state[body] == 0)
+                if (auto* body = find(aUnit->name, true); body != nullptr && state[body] == 0)
                 {
                     // (not yet if a unit whose body its pragma Elaborate requires to be elaborated first is being visited (the body
                     // then follows, see below))
                     bool deferred = false;
                     for (auto const& e : body->elaborates)
-                        if (auto* eb = find_unit(e, true); eb != nullptr && state[eb] == 1)
+                        if (auto* eb = find(e, true); eb != nullptr && state[eb] == 1)
+                            deferred = true;
+                    // (nor if a unit it withs is being visited (it then follows later, after that unit))
+                    for (auto const& w : body->withs)
+                        if (auto* ws = find(w, false); ws != nullptr && state[ws] == 1)
                             deferred = true;
                     if (!deferred)
                     {
@@ -333,7 +620,7 @@ namespace neos::compilers::ada
                         for (auto const& e : body->elaborates)
                         {
                             dependency(e);
-                            visit(find_unit(e, true));
+                            visit(find(e, true));
                         }
                         visit(body);
                     }
@@ -505,7 +792,20 @@ namespace neos::compilers::ada
                     allowed = true;
             }
             if (!allowed)
-                error(aName, "\"" + child + "\" is a private child: it cannot be named in this unit's with clause");
+            {
+                // (where: the with clause; the unit's declaration (the compilation unit is what the rule constrains, 10.1.2(8/2)) when
+                // the unit is a renaming of the private child, or a (nonprivate) with clause names a renaming)
+                auto const renaming = [](node const* aItem) { return aItem != nullptr && (aItem->is(construct::RenamingPackage) ||
+                    aItem->is(construct::RenamingGeneric) || aItem->is(construct::RenamingSubprogram)); };
+                auto const* named = find_unit(aFull, false);
+                bool renamesIt = false;
+                if (renaming(current.item))
+                    for (auto* c : current.item->children)
+                        if ((c->is(construct::Selected) || c->is(construct::Identifier)) && dotted_name(c) == aFull)
+                            renamesIt = true;
+                bool const atUnit = renamesIt || (named != nullptr && renaming(named->item) && !aClause->has_flag("private"));
+                error(atUnit ? current.item : aName, "\"" + child + "\" is a private child: it cannot be named in this unit's with clause");
+            }
         }
     }
 
@@ -659,12 +959,104 @@ namespace neos::compilers::ada
             return;
         aUnit.analysed = true;
         iCurrentUnit = &aUnit;
+        // (the units of its environment (see find_unit))
+        struct as_of
+        {
+            unit_info const*& asOf;
+            unit_info const* saved;
+            ~as_of() { asOf = saved; }
+        } const asOf{ iAsOf, iAsOf };
+        iAsOf = &aUnit;
+        // (a body (or subunit) is not a private library item: only library unit declarations and renamings are (10.1.1(2-5)); a private
+        // child subprogram has a declaration)
+        if ((aUnit.body || aUnit.subunit) && aUnit.unit->has_flag("private"))
+            recover([&]() { error(aUnit.item, "a library unit body cannot be private (only a library unit declaration or renaming can, 10.1.1(2))"); });
+        // (a limited with clause: not of a body, subunit or library unit renaming (10.1.2(8.1/2)))
+        if (auto* context = aUnit.unit->first(construct::Context); context != nullptr && (aUnit.body || aUnit.subunit ||
+            aUnit.item->is(construct::RenamingPackage) || aUnit.item->is(construct::RenamingGeneric) || aUnit.item->is(construct::RenamingSubprogram)))
+            for (auto* clause : context->children)
+                if (clause->is(construct::With) && clause->has_flag("limited"))
+                    recover([&]() { error(clause, "a limited with clause cannot be of a library unit body, subunit or renaming (10.1.2(8.1/2))"); });
+        // (a limited with clause: not naming the unit itself or an ancestor of it (10.1.2(8.2/2)); nor a package that a nonlimited with
+        // clause of the unit names (10.1.2(8.3/2)))
+        if (auto* context = aUnit.unit->first(construct::Context))
+            for (auto* clause : context->children)
+                if (clause->is(construct::With) && clause->has_flag("limited"))
+                    for (auto* n : clause->children)
+                        if (!n->is(construct::Flag))
+                        {
+                            auto const named = dotted_name(n);
+                            if (aUnit.name == named || aUnit.name.starts_with(named + "."))
+                                recover([&]() { error(n, "a limited with clause cannot name the unit itself or an ancestor of it (10.1.2(8.2/2))"); });
+                        }
+        // (the units it depends on: not obsolete (compiled before a unit that they depend on was compiled again, 10.1.4(5)))
+        if (aUnit.given)
+        {
+            auto const index = static_cast<std::size_t>(&aUnit - iUnits.data());
+            for (auto* d : dependences(aUnit))
+                if (obsolete(*d, index))
+                {
+                    // (where it is named: its with clause, else the unit)
+                    node* where = aUnit.item;
+                    if (aUnit.subunit && aUnit.item->is(construct::Subunit) && !aUnit.item->children.empty())
+                        where = aUnit.item->child(0);
+                    if (auto* context = aUnit.unit->first(construct::Context))
+                        for (auto* clause : context->children)
+                            if (clause->is(construct::With))
+                                for (auto* n : clause->children)
+                                    if (!n->is(construct::Flag) && dotted_name(n) == d->name)
+                                        where = n;
+                    recover([&]() { error(where, "\"" + d->name + "\" is obsolete: a unit it depends on was compiled again after it (10.1.4(5))"); });
+                }
+        }
+        // (a unit that replaces the declaration of its name compiled earlier (10.1.4(4/1)): that declaration is no longer the library
+        // unit (nor in its region))
+        if (aUnit.given && aUnit.declares)
+            for (auto& v : iUnits)
+            {
+                if (&v == &aUnit)
+                    break;
+                if (!v.given || v.name != aUnit.name || v.ent == nullptr || !(v.declares || v.body))
+                    continue;
+                if (auto* r = v.ent->scope)
+                {
+                    for (auto [i, end] = r->names.equal_range(v.ent->name); i != end; ++i)
+                        if (i->second == v.ent)
+                        {
+                            r->names.erase(i);
+                            break;
+                        }
+                    std::erase(r->declarations, v.ent);
+                }
+                if (auto l = iLibraryUnits.find(aUnit.name); l != iLibraryUnits.end() && l->second == v.ent)
+                    iLibraryUnits.erase(l);
+            }
         auto* item = aUnit.item;
         recover([&]() { end_name_check(item); });
         // (the region of the unit's declaration: its parent's (a child unit), else Standard's; its context clauses' names are 
         // visible in its own region's context)
         aUnit.context = new_region(nullptr, nullptr);
         apply_context(aUnit.unit->first(construct::Context), aUnit.context);
+        limited_with_scope_check(aUnit);
+        // (a subunit's with clause naming a child of an ancestor whose name a declaration enclosing the subunit's stub has: both would be
+        // directly visible (homographs, 8.3(26/2), 10.1.6(?)))
+        if (aUnit.subunit && aUnit.given && iInstanceBodies == 0)
+            if (auto stub = iStubs.find(aUnit.name); stub != iStubs.end())
+                for (auto const& w : aUnit.withs)
+                {
+                    auto const dot = w.rfind('.');
+                    // (not one of the subunit's ancestors (its parent body's unit))
+                    if (dot == std::string::npos || !aUnit.name.starts_with(w.substr(0u, dot) + ".") || aUnit.name.starts_with(w + "."))
+                        continue;
+                    auto const simple = w.substr(dot + 1u);
+                    bool conflict = false;
+                    for (auto* r = stub->second; r != nullptr && !conflict; r = r->parent)
+                        for (auto [i, end] = r->names.equal_range(simple); i != end; ++i)
+                            if (auto* other = i->second; other != nullptr && !other->overloadable() && library_unit(full_name(other)) != other)
+                                conflict = true;
+                    if (conflict)
+                        recover([&]() { error(aUnit.item, "the subunit names the child unit \"" + w + "\" in a with clause, a homograph of a declaration visible at its stub (8.3(26/2))"); });
+                }
         // (a body: its specification's context too)
         if (aUnit.body && !aUnit.subunit)
             if (auto* spec = find_unit(aUnit.name, false); spec != nullptr && spec->context != nullptr)
@@ -706,6 +1098,10 @@ namespace neos::compilers::ada
             // one (10.1.1(10/2)); a child of an instance: an instance (10.1.1(12/3)))
             if (!aUnit.body && iInstanceBodies == 0)
             {
+                // (its parent unit's name: not of a renaming (10.1.1(8)))
+                if (auto* pu = find_unit(aUnit.name.substr(0u, dot), false); pu != nullptr && pu->item != nullptr &&
+                    (pu->item->is(construct::RenamingPackage) || pu->item->is(construct::RenamingGeneric)))
+                    recover([&]() { error(item, "the parent unit name of a library unit cannot denote a renaming (10.1.1(8))"); });
                 auto* p = parent;
                 while (p->renamed != nullptr && p->renamed != p && p->is_package())
                     p = p->renamed;
@@ -719,6 +1115,20 @@ namespace neos::compilers::ada
                     recover([&]() { error(item, "a child of an instance must be an instance (10.1.1(12/3))"); });
             }
             parentRegion = parent->inner;
+            // (a child unit's declaration (not a subprogram's, which overloads): not a homograph of a declaration of its parent's
+            // specification (both are in the parent's declarative region, 8.3(26/2)))
+            if (!aUnit.body && iInstanceBodies == 0 && aUnit.given && !item->is(construct::SubprogramDeclaration) && !item->is(construct::RenamingSubprogram) &&
+                !(item->is(construct::Generic) && item->first(construct::Package) == nullptr) && !(item->is(construct::Instantiation) && item->has_flag("procedure")) &&
+                !(item->is(construct::Instantiation) && item->has_flag("function")))
+            {
+                auto const simple = aUnit.name.substr(dot + 1u);
+                for (auto [i, end] = parentRegion->names.equal_range(simple); i != end; ++i)
+                    if (auto* other = i->second; other != nullptr && library_unit(full_name(other)) != other)
+                    {
+                        recover([&]() { error(item, "the child unit \"" + aUnit.name + "\" is a homograph of a declaration of its parent (8.3(26/2))"); });
+                        break;
+                    }
+            }
             for (auto p = aUnit.name.substr(0u, dot);;)
             {
                 if (auto* pu = find_unit(p, false); pu != nullptr && pu->context != nullptr)
@@ -840,6 +1250,7 @@ namespace neos::compilers::ada
     void program::generate()
     {
         collect_units();
+        obsolete_units();
         order_units();
         setup_standard();
         // (the main file's identifiers: no consecutive underscores, none last (2.3(2/2)))
@@ -869,13 +1280,18 @@ namespace neos::compilers::ada
                     identifiers(compilation);
         }
         for (auto* u : iOrder)
+        {
             recover([&]() { analyse_unit(*u); });
+            // (not the unit's after an error that ended its analysis)
+            iCurrentUnit = nullptr;
+            iDeclaringUnit = nullptr;
+        }
         // (the partition: a library unit declaration that requires a body has one (10.2(5)): not when checking legality only (a 
         // compilation, not a partition))
         if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
             for (auto* u : iOrder)
-                if (!u->body && !u->subunit && u->item != nullptr && !u->item->is(construct::SubprogramBody) && !intrinsic_unit(u->item) &&
-                    std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aBody) { return aBody->body && aBody->name == u->name; }))
+                if (!u->body && !u->subunit && !u->replaced && u->item != nullptr && !u->item->is(construct::SubprogramBody) && !intrinsic_unit(u->item) &&
+                    std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aBody) { return aBody->body && !aBody->replaced && aBody->name == u->name; }))
                 {
                     node declarations;
                     declarations.kind = construct::Declarations;
@@ -885,6 +1301,7 @@ namespace neos::compilers::ada
                     recover([&]() { completion_check(&declarations, &none, true); });
                 }
         recover([&]() { restrictions_check(); });
+        recover([&]() { tasking_policies(); });
         // (an elaboration order exists (10.2(10-13)): no cycle of the order's constraints (a unit's declaration before its body, a 
         // parent's declaration before its children, the declarations of the units that a unit names in with clauses before it, the
         // bodies of those that its pragmas Elaborate name before it; a subunit is its parent body's))
@@ -907,7 +1324,7 @@ namespace neos::compilers::ada
             std::map<unit_info*, std::set<unit_info*>> after;  // (a unit: the units elaborated before it)
             for (auto* u : iOrder)
             {
-                auto* o = owner(u);
+                auto* o = u->replaced ? nullptr : owner(u);
                 if (o == nullptr)
                     continue;
                 auto& before = after[o];
@@ -960,8 +1377,8 @@ namespace neos::compilers::ada
         // library unit's)
         if (std::getenv("NEOS_ADA_CHECK") == nullptr && iDiagnostics.empty())
             for (auto* u : iOrder)
-                if (u->subunit && u->item != nullptr)
-                    if (auto const other = std::find_if(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return !aUnit->subunit && aUnit->name == u->name; }); 
+                if (u->subunit && !u->replaced && u->item != nullptr)
+                    if (auto const other = std::find_if(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return !aUnit->subunit && !aUnit->replaced && aUnit->name == u->name; }); 
                         other != iOrder.end())
                         recover([&]() { error(u->item, "the subunit \"" + u->name + "\" has the expanded name of a library unit of the partition (10.2(19))"); });
         // (and a body stub (of the bodies in the partition: generic ones too) has its subunit (10.2(5)): the subunit's name is its 
@@ -983,7 +1400,7 @@ namespace neos::compilers::ada
                     if (c->is(construct::Stub))
                     {
                         auto const name = aParent + "." + name_of(c);
-                        if (std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return aUnit->subunit && aUnit->name == name; }))
+                        if (std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* aUnit) { return aUnit->subunit && !aUnit->replaced && aUnit->name == name; }))
                             recover([&]() { error(c, "the subunit \"" + name + "\" of the body stub is not in the partition (10.2(5))"); });
                     }
                     else if (c->is(construct::PackageBody) || c->is(construct::SubprogramBody) || c->is(construct::TaskBody) || c->is(construct::ProtectedBody))
@@ -993,7 +1410,7 @@ namespace neos::compilers::ada
                 }
             };
             for (auto* u : iOrder)
-                if ((u->body || u->subunit) && u->item != nullptr)
+                if ((u->body || u->subunit) && !u->replaced && u->item != nullptr)
                     stubs(u->subunit && u->item->is(construct::Subunit) && u->item->child(1) != nullptr ? u->item->child(1) : u->item, u->name);
         }
         // (legality checking: the generic units of the main file (and those declared within them))

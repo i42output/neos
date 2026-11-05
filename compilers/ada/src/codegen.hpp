@@ -234,6 +234,8 @@ namespace neos::compilers::ada
         void if_statement(node* aStatement);
         void case_statement(node* aStatement);
         void loop_statement(node* aStatement);
+        void loop_poll();
+        void unit_self_address(entity* aUnit, entity* aMember = nullptr);
         void block_statement(node* aStatement);
         void return_statement(node* aStatement);
         void raise_statement(node* aStatement);

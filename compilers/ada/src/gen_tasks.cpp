@@ -118,8 +118,13 @@ namespace neos::compilers::ada
     void function_generator::self_address(entity* aMember)
     {
         // (the object: this function's (its parameter), or that of the task body or protected operation that encloses it (its frame))
-        auto* owner = aMember->owner != nullptr ? aMember->owner : aMember->scope->owner;
-        auto* unit = owner;
+        unit_self_address(aMember->owner != nullptr ? aMember->owner : aMember->scope->owner, aMember);
+    }
+
+    void function_generator::unit_self_address(entity* aUnit, entity* aMember)
+    {
+        // (the current instance of a task or protected unit: as self_address's)
+        auto* unit = aUnit;
         int const selfLevel = unit->inner != nullptr ? unit->inner->level + 1 : iLevel;
         if (iHasSelf && selfLevel == iLevel)
         {
@@ -137,7 +142,7 @@ namespace neos::compilers::ada
             get(iSelf);
             return;
         }
-        iProgram.error(iWhere, "internal error: \"" + aMember->name + "\" is not visible here");
+        iProgram.error(iWhere, "internal error: \"" + (aMember != nullptr ? aMember->name : aUnit->name) + "\" is not visible here");
     }
 
     void function_generator::task_object_init(ada_type* aType, std::uint32_t aAddress)
@@ -170,6 +175,28 @@ namespace neos::compilers::ada
             load64(program::TaskHandle);
             unit_priority(unit, t, aAddress);
             runtime("task_priority", { type::I64, type::I64 }, type::Void);
+            check();
+        }
+        // (its processor, if specified (D.16(11/5)): evaluated now)
+        if (unit->cpu != nullptr)
+        {
+            get(aAddress);
+            load64(program::TaskHandle);
+            iInstances.emplace_back(t, aAddress);
+            expression(unit->cpu, unit->cpu->type);
+            iInstances.pop_back();
+            runtime("task_cpu_set", { type::I64, type::I64 }, type::Void);
+            check();
+        }
+        // (its relative deadline, if specified, and its initial deadline (D.2.6(13/5)): evaluated now)
+        if (unit->relative_deadline != nullptr)
+        {
+            get(aAddress);
+            load64(program::TaskHandle);
+            iInstances.emplace_back(t, aAddress);
+            expression(unit->relative_deadline, unit->relative_deadline->type);
+            iInstances.pop_back();
+            runtime("task_deadline", { type::I64, type::I64 }, type::Void);
             check();
         }
         // (a nested task type's: its body's elaboration flag (its activation before then raises Program_Error))
@@ -309,6 +336,26 @@ namespace neos::compilers::ada
         }
         else
             drop();
+        // (its processor, if specified (D.16(11/5)): evaluated now)
+        if (t->unit != nullptr && t->unit->cpu != nullptr)
+        {
+            get(aAddress);
+            iInstances.emplace_back(t, aAddress);
+            expression(t->unit->cpu, t->unit->cpu->type);
+            iInstances.pop_back();
+            runtime("po_cpu", { type::I64, type::I64 }, type::Void);
+            check();
+        }
+        // (its relative deadline, if specified (D.3(13.2/5)): evaluated now)
+        if (t->unit != nullptr && t->unit->relative_deadline != nullptr)
+        {
+            get(aAddress);
+            iInstances.emplace_back(t, aAddress);
+            expression(t->unit->relative_deadline, t->unit->relative_deadline->type);
+            iInstances.pop_back();
+            runtime("po_relative_deadline_set", { type::I64, type::I64 }, type::Void);
+            check();
+        }
         // (its procedures attached to interrupts (C.3.1(7/3)): each interrupt's expression evaluated now (it may name the object's
         // discriminants); a handler: a descriptor (procedure, static link, object), as an access value's)
         if (auto handlers = iProgram.iAttachHandlers.find(t->unit); t->unit != nullptr && handlers != iProgram.iAttachHandlers.end())
@@ -1603,6 +1650,13 @@ namespace neos::compilers::ada
         }
         if (!iPool)
         {
+            // (No_Standard_Allocators_After_Elaboration: checked (D.7(19.3/3)))
+            if (iProgram.iRestrictions.contains("no_standard_allocators_after_elaboration"))
+            {
+                runtime("allocate_standard", { type::I64 }, type::I64);
+                check();
+                return;
+            }
             runtime("allocate", { type::I64 }, type::I64);
             return;
         }

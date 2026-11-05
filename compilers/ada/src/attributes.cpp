@@ -90,9 +90,14 @@ namespace neos::compilers::ada
             // (not of a partial view (its full view not visible here), nor a type derived from one)
             if (t != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && !t->view()->is_formal && partial_view_here(t, aRegion))
                 error(prefix, "the prefix of 'Range must be a scalar or array subtype (the full view of the private type is not visible)");
+            // (an array subtype: constrained (3.6.2(7)))
+            else if (t != nullptr && iSpeculation == 0 && iInstanceBodies == 0 && !t->view()->is_formal && t->view()->kind == type_kind::Array &&
+                !t->view()->constrained)
+                error(prefix, "the prefix of 'Range must be a constrained array subtype (3.6.2)");
         }
         else
         {
+            attribute_prefix_check(prefix, aRegion);
             t = resolve(prefix, nullptr, aRegion);
             ada_type* seen = t;
             if (t != nullptr && t->view()->kind == type_kind::Access)
@@ -479,8 +484,19 @@ namespace neos::compilers::ada
         case meaning::Slice:
             return false;   // (a slice: never aliased)
         case meaning::Conversion:
+            // (a view conversion (of tagged types): of an aliased view; a value conversion: not an object (4.6(5/2)))
             if (n->is(construct::Apply) && n->size() > 1u)
+            {
+                auto const tagged = [](ada_type* aType)
+                {
+                    auto* v = aType != nullptr ? aType->view() : nullptr;
+                    return v == nullptr || v->is_formal || v->kind == type_kind::Private || v->tagged || v->kind == type_kind::ClassWide ||
+                        v->base_type()->view()->tagged;
+                };
+                if (!tagged(n->type) || !tagged(n->child(1)->type))
+                    return false;
                 return aliased_view(n->child(1));
+            }
             return true;
         case meaning::Type:
             return true;    // (a current instance)
@@ -520,6 +536,36 @@ namespace neos::compilers::ada
             aAttribute->type = aExpected != nullptr && !aExpected->is_universal() && aExpected->view()->is_integer() ? aExpected->base_type() : iUniversalInteger;
             return aAttribute->type;
         }
+        // (P'Priority, P'Relative_Deadline (D.5.2(3/2, 3.1/5)): of a protected object P, a component (of System.Any_Priority, of
+        // Ada.Real_Time.Time_Span), named only within the body of P)
+        if ((name == "priority" || name == "relative_deadline") && arguments.empty() && (prefix->is(construct::Identifier) || prefix->is(construct::Selected)))
+        {
+            auto const entities = prefix_entities(prefix, aRegion);
+            entity* unit = nullptr;
+            if (entities.size() == 1u)
+            {
+                auto* e = entities.front();
+                if (e->kind == entity_kind::Protected)
+                    unit = e;
+                else if ((e->is_type() || e->is_object()) && e->type != nullptr && e->type->view()->base_type()->view()->kind == type_kind::Protected)
+                    unit = e->type->view()->base_type()->view()->unit;
+            }
+            if (unit != nullptr)
+            {
+                bool inside = false;
+                for (auto* r = aRegion; r != nullptr && !inside; r = r->parent)
+                    inside = r->owner == unit;
+                if (!inside && iSpeculation == 0 && iInstanceBodies == 0)
+                    error(aAttribute, "'" + std::string{ name == "priority" ? "Priority" : "Relative_Deadline" } + " of a protected object can be named only within its body (D.5.2(3/2))");
+                prefix->ent = entities.front();
+                set_meaning(prefix, meaning::Subprogram);
+                aAttribute->ent = unit;
+                aAttribute->type = name == "priority" ? library_type("system", "any_priority") : library_type("ada.real_time", "time_span");
+                if (aAttribute->type == nullptr)
+                    error(aAttribute, "'Relative_Deadline needs Ada.Real_Time (D.5.2(3.1/5))");
+                return aAttribute->type;
+            }
+        }
         // (the prefix: a subtype (or a type's attribute), or an object or value (resolved without an expected type))
         bool const typePrefix = is_subtype_name(prefix, aRegion) || (prefix->is(construct::Attribute) && arguments_of(prefix).empty() &&
             (name_text(prefix->child(1)->source) == "base" || name_text(prefix->child(1)->source) == "class"));
@@ -536,12 +582,12 @@ namespace neos::compilers::ada
                 iSpeculation == 0 && (iInstanceBodies == 0 || iInstanceBodies == iInstancePrivateParts) && !within_generic_body(aRegion))
                 error_in_private_part_too(prefix, "the current instance of a type is assumed statically deeper than a named access type (3.10.2(28/3))");
             // (the current instance: aliased only of an immutably limited type (3.10(9/3)))
-            if ((name == "access" || name == "unchecked_access") && iSpeculation == 0 && iInstanceBodies == 0 && prefixType != nullptr &&
-                !immutably_limited(prefixType) && [&]()
+            if ((name == "access" || name == "unchecked_access") && iSpeculation == 0 && iInstanceBodies == 0 &&
+                (prefixType == nullptr || !immutably_limited(prefixType)) && [&]()
                 {
                     // (a type being declared: as its declaration says (an explicitly limited record, an extension of an immutably limited
                     // parent))
-                    auto* e = prefix->ent != nullptr && prefix->ent->is_type() ? prefix->ent : prefixType->base_type()->decl;
+                    auto* e = prefix->ent != nullptr && prefix->ent->is_type() ? prefix->ent : prefixType != nullptr ? prefixType->base_type()->decl : nullptr;
                     if (e != nullptr && e->completion != nullptr && e->completion->decl != nullptr)
                         e = e->completion;
                     node const* declaration = e != nullptr && e->decl != nullptr ? e->decl->parent : nullptr;
@@ -553,10 +599,11 @@ namespace neos::compilers::ada
                                 declaration = n;
                             break;
                         }
-                    if (declaration == nullptr || declaration->is(construct::TypeIncomplete) || prefixType->incomplete || prefixType->completing)
-                        return declaration == nullptr;
-                    if (auto* record = declaration->first(construct::TypeRecord); record != nullptr && (record->has_flag("limited") || declaration->has_flag("limited")))
-                        return false;
+                    // (a record type definition: explicitly limited or not)
+                    if (auto* record = declaration != nullptr && !declaration->is(construct::TypeIncomplete) ? declaration->first(construct::TypeRecord) : nullptr)
+                        return !(record->has_flag("limited") || declaration->has_flag("limited"));
+                    if (declaration == nullptr || declaration->is(construct::TypeIncomplete) || prefixType == nullptr || prefixType->incomplete || prefixType->completing)
+                        return declaration == nullptr && prefixType != nullptr;
                     if (auto* derived = declaration->first(construct::TypeDerived); derived != nullptr && !derived->children.empty())
                     {
                         auto* mark = derived->child(0)->is(construct::SubtypeIndication) && !derived->child(0)->children.empty() ? derived->child(0)->child(0) : derived->child(0);
@@ -599,6 +646,11 @@ namespace neos::compilers::ada
                 auto* subprogram = resolve_subprogram_name(prefix, holder, aRegion);
                 prefix->ent = subprogram;
                 set_meaning(prefix, meaning::Subprogram);
+                // (a protected procedure of an object: of a variable (9.5(7.1/3)))
+                if (subprogram != nullptr && prefix->is(construct::Selected) && !prefix->children.empty() && prefix->child(0)->type != nullptr && (prefix->child(0)->type->view()->kind == type_kind::Protected || prefix->child(0)->type->view()->kind == type_kind::Access) && meaning_of(prefix->child(0)) != meaning::Type)
+                    synchronized_target_check(subprogram, prefix->child(0), prefix);
+                else if (subprogram != nullptr && prefix->is(construct::Identifier))
+                    synchronized_target_check(subprogram, nullptr, prefix);
                 // (not a prefixed view, nor a renaming of one: intrinsic (6.3.1(10.1/2), 3.10.2(32/5)))
                 if (iSpeculation == 0 && iInstanceBodies == 0)
                 {
@@ -677,10 +729,20 @@ namespace neos::compilers::ada
                 for (std::size_t n = 0u; denoted != nullptr && denoted->sub != nullptr && denoted->sub->renames != nullptr && 
                     denoted->sub->renames != denoted && n < 16u; ++n)
                     denoted = denoted->sub->renames;
+                // (a protected object's subprogram (Object.Subprogram): the object's level too (3.10.2(32/3)))
+                auto const subprogramLevel = [&]() -> std::int64_t
+                {
+                    auto level = accessibility_level(denoted->scope);
+                    if (prefix->is(construct::Selected) && !prefix->children.empty() && meaning_of(prefix->child(0)) == meaning::Object &&
+                        prefix->child(0)->type != nullptr && prefix->child(0)->type->view()->kind == type_kind::Protected)
+                        if (auto const objectLevel = static_level(prefix->child(0), aRegion))
+                            level = std::max(level, *objectLevel);
+                    return level;
+                };
                 // (also in an instance's private part (12.3(11)))
                 if (name == "access" && denoted != nullptr && !aExpected->view()->anonymous_access && iSpeculation == 0 &&
                     (iInstanceBodies == 0 || iInstanceBodies == iInstancePrivateParts) && !within_generic_body(aRegion) && denoted->scope != nullptr &&
-                    accessibility_level(denoted->scope) > type_level(aExpected))
+                    subprogramLevel() > type_level(aExpected))
                     error_in_private_part_too(prefix, "the subprogram is deeper than the access-to-subprogram type (3.10.2(32/3))");
                 // (a subprogram declared within a generic unit, P'Access within its body: of a nonformal type declared within the generic
                 // unit, or an access parameter's (3.10.2(32/3)))
@@ -738,7 +800,7 @@ namespace neos::compilers::ada
             if (name != "unrestricted_access" && iSpeculation == 0 && iInstanceBodies == 0 && !aliased_view(prefix))
                 error(prefix, "the prefix of '" + name + " must be an aliased view of an object");
             // (not a subcomponent depending on discriminants of an object not known to be constrained (3.10.2(26/3)))
-            else if (name != "unrestricted_access" && iSpeculation == 0 && iInstanceBodies == 0 && discriminant_dependent(prefix))
+            else if (name != "unrestricted_access" && iSpeculation == 0 && iInstanceBodies == 0 && discriminant_dependent(prefix, aRegion))
                 error(prefix, "the prefix of '" + name + " cannot be a subcomponent that depends on discriminants of an unconstrained object (3.10.2(26/3))");
             // (the view's type: covered by a tagged designated type D; else D's type, D statically matching the view's nominal subtype unless
             // D is discriminated and unconstrained (3.10.2(27/2)))
@@ -860,6 +922,11 @@ namespace neos::compilers::ada
                     aAttribute->type = library_type("ada.exceptions", "exception_id");
                     return aAttribute->type;
                 }
+                // (not ambiguous: resolved independently of the attribute (4.1.4(4)))
+                if (entities.size() > 1u && iSpeculation == 0 && iInstanceBodies == 0 && iInstantiationSites.empty() &&
+                    (entities.front()->kind == entity_kind::Entry || entities[1]->kind == entity_kind::Entry) &&
+                    std::all_of(entities.begin(), entities.end(), [](entity* e) { return e->overloadable(); }))
+                    error(prefix, "the prefix of an attribute is ambiguous (it is resolved independently of the attribute, 4.1.4(4))");
                 // (a subprogram's 'Address; else a function's name here is a call (e.g. F'First: of its result))
                 if (entities.size() >= 1u && (entities.front()->kind == entity_kind::Entry || (entities.front()->is_subprogram() && name == "address") ||
                     entities.front()->kind == entity_kind::Task || entities.front()->kind == entity_kind::Protected || entities.front()->is_package()))
@@ -869,7 +936,10 @@ namespace neos::compilers::ada
                     prefixType = entities.front()->type;
                 }
                 else
+                {
+                    attribute_prefix_check(prefix, aRegion);
                     prefixType = resolve(prefix, aExpected != nullptr && (name == "old" || name == "loop_entry") ? aExpected : nullptr, aRegion);
+                }
             }
             else if (prefix->is(construct::Apply) && name == "count")
             {
@@ -879,7 +949,11 @@ namespace neos::compilers::ada
                     prefix->type = prefixType;
             }
             else
+            {
+                if (name != "old" && name != "loop_entry")
+                    attribute_prefix_check(prefix, aRegion);
                 prefixType = resolve(prefix, aExpected != nullptr && (name == "old" || name == "loop_entry") ? aExpected : nullptr, aRegion);
+            }
             // (E'Count: within the body of E's task or protected unit; a task's: not within a program unit inner to it (9.9(5)))
             if (name == "count" && iSpeculation == 0 && iInstanceBodies == 0)
             {
@@ -1047,6 +1121,10 @@ namespace neos::compilers::ada
             else if (iInstanceBodies == 0 && prefixType->kind != type_kind::Private && partial_view_here(prefixType, aRegion))
                 error(prefix, "the prefix of '" + name + " must be a scalar subtype (the full view of the private type is not visible)");
         }
+        // (Storage_Size of a partial view (its full view not visible here): neither an access nor a task type (7.3(4), 13.11(14), 13.3(60)))
+        if (prefixType != nullptr && name == "storage_size" && iSpeculation == 0 && iInstanceBodies == 0 && !prefixType->view()->is_formal &&
+            partial_view_here(prefixType, aRegion))
+            error(prefix, "the prefix of 'Storage_Size must be an access or task subtype (the full view of the private type is not visible)");
         // (an object of a partial view (its full view not visible here): not an array (7.3(4)))
         if (prefixType != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 &&
             (name == "first" || name == "last" || name == "length" || name == "range") &&
@@ -1066,6 +1144,20 @@ namespace neos::compilers::ada
         if (name == "constrained" && t != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 && t->is_formal && t->kind == type_kind::Private &&
             t->formal_discriminants.empty() && !t->unknown_discriminants &&
             std::none_of(t->components.begin(), t->components.end(), [](component_info const& c) { return c.discriminant; }))
+            error(prefix, "the prefix of 'Constrained must be an object of a discriminated type");
+        // (X'Constrained of an object of a partial view without discriminants (its full view not visible here): not of a discriminated
+        // type (3.7.2(3/3)))
+        // (a dereference: of the access type's designated subtype (as declared, not its full view))
+        auto* const objectType = prefix->is(construct::All) && !prefix->children.empty() && prefix->child(0)->type != nullptr &&
+            prefix->child(0)->type->view()->kind == type_kind::Access && prefix->child(0)->type->view()->designated != nullptr ?
+            prefix->child(0)->type->view()->designated : prefixType;
+        if (name == "constrained" && objectType != nullptr && !typePrefix && iSpeculation == 0 && iInstanceBodies == 0 && !objectType->view()->is_formal &&
+            partial_view_here(objectType, aRegion) && [&]()
+            {
+                auto* partial = objectType->base_type()->partial != nullptr ? objectType->base_type()->partial : objectType->base_type();
+                return partial->kind == type_kind::Private && !partial->known_discriminants && !partial->unknown_discriminants &&
+                    std::none_of(partial->components.begin(), partial->components.end(), [](component_info const& c) { return c.discriminant; });
+            }())
             error(prefix, "the prefix of 'Constrained must be an object of a discriminated type");
         // (the prefix's kind for the attribute (K.2))
         if (t != nullptr && !t->is_formal && !t->base_type()->view()->is_formal && t->kind != type_kind::Private)
@@ -1088,6 +1180,8 @@ namespace neos::compilers::ada
                 require(typePrefix && b->is_discrete(), "a discrete subtype");
             else if (name == "succ" || name == "pred")
                 require(typePrefix && b->is_scalar(), "a scalar subtype");
+            else if (name == "tag" && untagged_view_here(prefixType, aRegion))
+                require(false, "a tagged subtype or object (the full view of the private type is not visible)");
             else if (name == "callable" || name == "terminated")
             {
                 require(b->kind == type_kind::Task || b->kind == type_kind::ClassWide || b->kind == type_kind::Interface ||
@@ -1111,7 +1205,11 @@ namespace neos::compilers::ada
             {
                 // (an object of a discriminated type (3.7.2(3/3)); a private subtype (J.4))
                 bool discriminated = false;
-                for (auto const& c : b->components)
+                // (an access value: its designated object (an implicit dereference, 4.1(9)))
+                auto* object = b;
+                if (!typePrefix && b->kind == type_kind::Access && designated_of(prefixType) != nullptr)
+                    object = designated_of(prefixType)->view()->base_type()->view();
+                for (auto const& c : object->components)
                     discriminated = discriminated || (c.discriminant && !c.stored);
                 // (a private subtype (or one derived from a partial view): any (J.4))
                 auto const privateView = [](ada_type const* x)
@@ -1119,19 +1217,28 @@ namespace neos::compilers::ada
                     return x != nullptr && (x->kind == type_kind::Private || (x->base != nullptr && x->base->kind == type_kind::Private));
                 };
                 bool const privateSubtype = privateView(prefixType) || privateView(prefixType->base_type()->parent) || privateView(b->parent);
-                require(typePrefix ? (privateSubtype || (!b->is_scalar() && b->kind != type_kind::Array && b->kind != type_kind::Access)) :
+                // (a type's name: a private subtype (J.4), or the current instance of a task or protected type)
+                require(typePrefix ? (privateSubtype || b->kind == type_kind::Task || b->kind == type_kind::Protected) :
                     (discriminated || b->kind == type_kind::Private || b->kind == type_kind::ClassWide), "an object of a discriminated type");
             }
             else if (name == "first" || name == "last" || name == "length" || name == "range")
             {
                 // (an array (object or subtype), or a scalar subtype (3.5(10), 3.6.2(3)); a dimension for an array only)
-                bool const array = b->kind == type_kind::Array || (b->kind == type_kind::Access && designated_of(prefixType) != nullptr &&
+                // (an access value: its designated array (an implicit dereference: not of an access subtype's name, 4.1(9)))
+                bool const array = b->kind == type_kind::Array || (b->kind == type_kind::Access && !typePrefix && designated_of(prefixType) != nullptr &&
                     designated_of(prefixType)->view()->kind == type_kind::Array);
                 if (!arguments.empty())
+                {
                     require(array, "an array");
+                    if (array && typePrefix && iSpeculation == 0 && iInstanceBodies == 0 && !prefixType->view()->constrained)
+                        error(prefix, "the prefix of '" + name + " must be a constrained array subtype (3.6.2)");
+                }
                 else if (typePrefix)
                 {
-                    require(array || b->is_scalar(), "a scalar or array subtype");
+                    require(array || (b->is_scalar() && name != "length"), name == "length" ? "an array" : "a scalar or array subtype");
+                    // (an array subtype: constrained (3.6.2(2-10)))
+                    if (array && iSpeculation == 0 && iInstanceBodies == 0 && !prefixType->view()->constrained)
+                        error(prefix, "the prefix of '" + name + " must be a constrained array subtype (3.6.2)");
                     // (not of a scalar subtype with a predicate (3.2.4(29.2/4)))
                     if (b->is_scalar() && name != "length")
                         predicate_check(prefixType, prefix);
@@ -1282,6 +1389,12 @@ namespace neos::compilers::ada
         }
         else if (name == "image" || name == "wide_image" || name == "wide_wide_image" || name == "img")
         {
+            // (Ada 2012 (a conformity assessment under its rules, NEOS_ADA_VERSION=2012): of a scalar subtype only (3.5(35/3)); Ada 2022:
+            // of any (4.10(1/5)))
+            static bool const ada2012 = std::getenv("NEOS_ADA_VERSION") != nullptr && std::string_view{ std::getenv("NEOS_ADA_VERSION") } == "2012";
+            if (ada2012 && name != "img" && prefixType != nullptr && iSpeculation == 0 && iInstanceBodies == 0 &&
+                (partial_view_here(prefixType, aRegion) || !prefixType->view()->is_scalar()))
+                error(prefix, "the prefix of '" + name + " must be a scalar subtype (Ada 2012, 3.5(35/3))");
             if (!arguments.empty())
                 resolve(arguments[0], prefixType != nullptr ? prefixType->base_type() : nullptr, aRegion);
             result = name == "wide_image" ? string_type_named("wide_string") : name == "wide_wide_image" ? string_type_named("wide_wide_string") : iString;
@@ -1362,8 +1475,7 @@ namespace neos::compilers::ada
             result = aExpected->base_type();
         // (of the expected type)
         if (aExpected != nullptr && aExpected != iVoid && result != iVoid && iSpeculation == 0 && iInstanceBodies == 0 &&
-            !aExpected->view()->is_formal && !result->view()->is_formal && !aExpected->base_type()->view()->is_formal &&
-            !result->base_type()->view()->is_formal && aExpected->view()->kind != type_kind::Private && result->view()->kind != type_kind::Private &&
+            aExpected->view()->kind != type_kind::Private && result->view()->kind != type_kind::Private &&
             !covers(aExpected, result) && !covers(result, aExpected))
             error(aAttribute, "the attribute is not of the expected type");
         aAttribute->type = result;
@@ -1795,4 +1907,54 @@ namespace neos::compilers::ada
         }
         return {};
     }
+
+    void program::attribute_prefix_check(node* aPrefix, region* aRegion)
+    {
+        // (an attribute's prefix: resolved independently of the attribute (its interpretation determined without it, 4.1.4(4), 8.6(?)): not
+        // ambiguous (a function name with several interpretations, a selected component of several prefixes))
+        if (iSpeculation > 0 || iInstanceBodies > 0 || !iInstantiationSites.empty())
+            return;
+        if (!(aPrefix->is(construct::Identifier) || aPrefix->is(construct::Apply) || aPrefix->is(construct::Selected)))
+            return;
+        // (a call of an operator by its name ("-" (X)): its interpretations not filtered by its operands here)
+        if (aPrefix->is(construct::Apply) && !aPrefix->children.empty() && !aPrefix->child(0)->is(construct::Identifier) &&
+            !aPrefix->child(0)->is(construct::Selected))
+            return;
+        if (aPrefix->is(construct::Apply) && !aPrefix->children.empty() && !aPrefix->child(0)->source.empty() && aPrefix->child(0)->source.front() == '"')
+            return;
+        std::vector<interpretation> options;
+        {
+            speculation guard{ *this };
+            try
+            {
+                // (a selected component: its prefix's interpretations that have the component)
+                if (aPrefix->is(construct::Selected) && aPrefix->size() == 2u)
+                {
+                    auto const selector = name_text(aPrefix->child(1)->source);
+                    for (auto const& o : interpretations(aPrefix->child(0), aRegion))
+                    {
+                        auto* t = o.type != nullptr ? o.type->view() : nullptr;
+                        if (t != nullptr && t->kind == type_kind::Access)
+                            t = designated_of(t);
+                        if (t == nullptr)
+                            continue;
+                        t = t->view()->base_type()->view();
+                        if (std::any_of(t->components.begin(), t->components.end(), [&](component_info const& c) { return c.ent != nullptr && c.ent->name == selector; }))
+                            options.push_back(o);
+                    }
+                }
+                else
+                    options = interpretations(aPrefix, aRegion);
+            }
+            catch (compile_error const&) { return; }
+        }
+        std::vector<interpretation> distinct;
+        for (auto const& o : options)
+            if (o.type != nullptr && o.ent != nullptr && o.ent->overloadable() &&
+                std::none_of(distinct.begin(), distinct.end(), [&](interpretation const& d) { return d.ent == o.ent || (d.ent != nullptr && o.ent->decl != nullptr && d.ent->decl == o.ent->decl); }))
+                distinct.push_back(o);
+        if (distinct.size() > 1u)
+            error(aPrefix, "the prefix of an attribute is ambiguous (it is resolved independently of the attribute, 4.1.4(4))");
+    }
+
 }

@@ -48,6 +48,7 @@
 
 #include <cstdlib>
 #include <functional>
+#include <tuple>
 #include <list>
 #include <set>
 #include "compiler.hpp"
@@ -71,6 +72,10 @@ namespace neos::compilers::ada
         bool body = false;
         bool subunit = false;
         bool main_file = false;
+        std::size_t compilation = 0u;       ///< (its compilation's (file's) place in the order compiled)
+        bool given = false;                 ///< (of a file compiled (not one found on the search path))
+        bool replaced = false;              ///< (a unit compiled later replaces it (10.1.4(4, 5)))
+        bool declares = false;              ///< (a library unit declaration, or a subprogram body that is its declaration too (10.1.4(4/1)))
         std::vector<std::string> withs;
         std::vector<std::string> limited_withs;     ///< (limited with clauses: not dependences)
         std::vector<std::string> elaborates;        ///< (the units its context's pragmas Elaborate and Elaborate_All name: their bodies are elaborated first)
@@ -179,6 +184,10 @@ namespace neos::compilers::ada
         // --- units
     private:
         void collect_units();
+        void obsolete_units();
+        void limited_with_scope_check(unit_info& aUnit);
+        std::vector<unit_info*> dependences(unit_info const& aUnit);   ///< (the units it depends on semantically, of its environment (10.1.1(26/2)))
+        bool obsolete(unit_info const& aUnit, std::size_t aAsOf, int aDepth = 0);  ///< (a unit that depends on one compiled again after it (before aAsOf), 10.1.4(5))
         void order_units();
         void analyse_unit(unit_info& aUnit);
         unit_info* find_unit(std::string const& aName, bool aBody);
@@ -258,7 +267,8 @@ namespace neos::compilers::ada
         std::optional<bigint> high_bound(ada_type* aType);
         // --- names and expressions
     public:
-        std::vector<entity*> visible(std::string const& aName, region* aRegion);    ///< (the entities that a direct name denotes)
+        std::vector<entity*> visible(std::string const& aName, region* aRegion);
+        std::vector<entity*> visible_all(std::string const& aName, region* aRegion);    ///< (the entities that a direct name denotes)
         std::vector<entity*> selected(entity* aPrefix, std::string const& aName, region* aRegion);
         std::vector<entity*> selected_declared(entity* aPrefix, std::string const& aName, region* aRegion);
         struct declaring        ///< (entities hidden from all visibility while it lives: within their declarations (8.3(16)))
@@ -330,6 +340,11 @@ namespace neos::compilers::ada
         bool iNormalizeScalars = false;                         ///< (pragma Normalize_Scalars or Initialize_Scalars in the partition (H.1))
         bool iCeilingLocking = false;                           ///< (pragma Locking_Policy (Ceiling_Locking) in the partition (D.3))
         bool iPriorityQueuing = false;                          ///< (pragma Queuing_Policy (Priority_Queuing) in the partition (D.4))
+        std::vector<std::tuple<std::int64_t, std::int64_t, std::int64_t>> iDispatchingPolicies;    ///< (the partition's task dispatching policies: priority ranges and the runtime's policies (D.2.2))
+        bool iGenerateDeadlines = false;                        ///< (pragma Generate_Deadlines in the partition (D.2.6))
+        std::map<std::string, std::optional<std::int64_t>> iRestrictions;     ///< (the partition's restrictions (see restrictions_check): their values)
+        std::map<node*, std::pair<std::int64_t, std::int64_t>> iPriorityRanges;   ///< (the pragmas Priority_Specific_Dispatching: their priorities' values)
+        bool iPolls = false;                                    ///< (the program polls at its loops' iterations (the runtime's poll: its dispatching policy, execution-time events))
         std::vector<entity*> iInterruptHandlers;                ///< (the protected procedures that can be interrupt handlers (C.3.1))
         std::map<entity*, std::vector<std::pair<entity*, node*>>> iAttachHandlers;  ///< (by protected unit: its procedures attached to interrupts (C.3.1))
         std::optional<std::int64_t> invalid_value(ada_type* aType);   ///< (a scalar subtype's invalid representation (an out of range one), if any)  ///< (a tagged type's deep Adjust or Finalize: its controlled parts' (see TagAdjust))    ///< (a task or protected type's entry implementing an interface's operation: a procedure that calls it)
@@ -436,6 +451,9 @@ namespace neos::compilers::ada
         void c_convention(ada_type* aType);             ///< (a type that Convention C specifies)
         bool intrinsic_unit(node* aItem);
         void restrictions_check();                      ///< (the partition's units obey its Restrictions (13.12, D.7, H.4))
+        void tasking_policies();                        ///< (the partition's task dispatching and locking policies (D.2.2, D.3, D.13))
+        void relative_deadline_resolve(node* aExpression, region* aRegion);    ///< (a Relative_Deadline: of Ada.Real_Time.Time_Span (D.2.6(9.2/3)))
+        void cpu_resolve(entity* aEntity, node* aExpression, region* aRegion); ///< (a CPU: of System.Multiprocessors.CPU_Range (D.16(8/3)))
         categorization const& unit_categorization(std::string const& aUnit);    ///< (a library unit's categorization (10.2.1, E.2))
         void categorization_check(unit_info& aUnit);    ///< (a compilation unit of a categorized library unit obeys its category's rules)
         bool remote_access_type(ada_type* aType);         ///< (a named access type declared in the visible part of a remote types or RCI unit, or derived from one (E.2.2(9/3, 9.3/1)))
@@ -512,6 +530,7 @@ namespace neos::compilers::ada
         std::vector<entity*> iElaboration;  ///< (the library units' elaboration procedures, in order)
         entity* iMain = nullptr;
         unit_info* iCurrentUnit = nullptr;
+        unit_info const* iAsOf = nullptr;   ///< (the unit whose environment (the units compiled before it) find_unit finds units of)
         unit_info* iDeclaringUnit = nullptr;            ///< (the library unit whose declaration is being analysed (until it registers))
         std::vector<entity*> iSubprogramsToGenerate;    ///< (the subprograms whose bodies have code, in order)
         std::vector<entity*> iExports;                  ///< (the subprograms and objects that Export specifies (B.1))
@@ -531,6 +550,7 @@ namespace neos::compilers::ada
         void register_library_unit(entity* aEntity);
         entity* declare(entity_kind aKind, node* aDefining, region* aRegion);     ///< (a declaration's defining name: its entity)
         node* clone(node* aNode);
+        node* clone_tree(node* aNode);
         bool indexed_attribute(node* aAttribute);
         bool indexed_result_fits(ada_type* aResult, std::vector<node*> const& aArguments, ada_type* aExpected, region* aRegion);   ///< (a function's array result indexed by the arguments: they fit)   ///< (X'Old (I) ...: rewritten as an Apply of the attribute)
         entity* find_completion(entity* aSubprogram, region* aRegion);
@@ -538,6 +558,7 @@ namespace neos::compilers::ada
         bool type_conformant(subprogram_info const& a, subprogram_info const& b);
         bool subtype_conformant(subprogram_info const& a, subprogram_info const& b, bool aResultOnly = false);
         bool withed_here(std::string const& aUnit);
+        bool generic_child_mentioned(entity* aChild);
         void incomplete_prefix_check(node* aPrefix, ada_type* aType, bool aDereference);  ///< (3.10.1(10/3))
         void prefixed_view_check(node* aObject, entity* aOperation);   ///< (4.1.3(13.1/2))
         bool private_with_hidden(entity* aUnit, region* aRegion);  ///< (a library unit named only by private with clauses, here in a visible part (10.1.2(12/3-16/2)))
@@ -570,10 +591,16 @@ namespace neos::compilers::ada
         void protected_body(node* aDecl, region* aRegion);
     private:
         std::map<ada_type*, std::vector<entity*>> iOperators;
+        std::set<ada_type*> iProvisionalOperators;
+        std::map<entity*, region*> iInstanceFormalRegions;
+        bool iAllPlaces = false;    ///< (checking "not overriding" (8.3.1(6/2)): the views at any place of the declarative region (its private part and body))
+        std::vector<std::tuple<entity*, node*, region*>> iNotOverriding;     ///< (the operations declared "not overriding": checked at the end of their region)     ///< (an instance: its formals' region (the actuals' denotations))     ///< (an array type's operators made before its component's full view was declared: completed later)
         std::deque<node> iClones;
+        std::unordered_map<node const*, node*> iCloneOrigins;  ///< (a clone (its root): the node it is a copy of)
         std::deque<std::string> iSyntheticSources;      ///< (the text of nodes made by the analysis (e.g. a user-defined literal's string))
         std::map<node*, region*> iBodyRegions;
         entity* iCurrentSubprogram = nullptr;
+        entity* iClassWideInvariant = nullptr;  ///< (resolving a class-wide type invariant: its current instance)
         entity* iClassWideContract = nullptr;   ///< (resolving a class-wide precondition or postcondition: its subprogram)
         std::set<ada_type const*> iNullPoolTypes;   ///< (access types declared where the default pool is null (no allocators, 13.11.3))
         node const* iControllingActual = nullptr;   ///< (resolving the actual of a controlling formal: it may be dynamically tagged (3.9.2(9/1)))
@@ -585,11 +612,18 @@ namespace neos::compilers::ada
         std::string full_name(entity* aEntity) const;       ///< (its expanded name, e.g. "ada.text_io.put_line")
         bool private_part_visible(entity* aPackage, region* aFrom) const;
         bool private_part_visible_here(entity* aPackage, region* aFrom) const;
-        bool discriminant_dependent(node* aName);
+        bool discriminant_dependent(node* aName, region* aRegion = nullptr);      ///< (aRegion: where (within a generic body: formal types assumed the worst))
         bool partial_view_here(ada_type* aType, region* aRegion);
         void overriding_check(region* aRegion);
         bool requires_overriding(entity* aOp, ada_type* aType);
-        void null_exclusion_check(ada_type* aType, node* aMark);
+        bool precondition_conflict(entity* aInherited, ada_type* aType);
+        bool predefined_operator_hidden(entity* aOperator, region* aRegion);
+        bool renamed_limited_view_usable(entity* aRenaming, region* aRegion);
+        void dereference_freeze_check(node* aName, region* aRegion);
+        bool subprogram_frozen_before(entity* aSubprogram, node const* aAt);
+        void deferred_constant_freeze_check(node* aAt, ada_type* aType, node* aExpression, region* aRegion, entity* aCompleting = nullptr);
+        void universal_access_equality_check(entity* aOperator, node* aAt, std::vector<node*> const& aOperands, region* aRegion);
+        void null_exclusion_check(ada_type* aType, node* aMark, region* aRegion = nullptr);   ///< (aRegion: where (a partial view there: not an access subtype))
         void predicate_check(ada_type* aType, node* aWhere, bool aDynamicOnly = false);
         bool limited_type(ada_type* aType, region* aRegion = nullptr, region* aComposite = nullptr) const;
         ada_type* progenitor(node* aMark, region* aRegion);
@@ -626,7 +660,13 @@ namespace neos::compilers::ada
         bool match_call(entity* aCallee, std::vector<node*> const& aArguments, node* aObject, region* aRegion, std::vector<node*>* aActuals, bool aExact);
         ada_type* finish_call(node* aCall, entity* aCallee, std::vector<node*> const& aArguments, node* aObject, region* aRegion);
         std::vector<entity*> prefix_entities(node* aPrefix, region* aRegion);    ///< (the entities that a prefix (a direct name or expanded name) denotes; empty: a value)
-        ada_type* designated_of(ada_type* aType);           ///< (an access type's designated subtype (its full view))
+        ada_type* designated_of(ada_type* aType);
+        ada_type* designated_view(ada_type* aType, region* aRegion);
+        bool component_on_partial_view(ada_type* aView, entity const* aComponent, int aDepth = 0);
+        void attribute_prefix_check(node* aPrefix, region* aRegion);
+        bool untagged_view_here(ada_type* aType, region* aRegion);
+        std::string synchronization_of(node* aDecl);
+        void synchronization_check(entity* aSubprogram, node* aDecl, entity* aImplemented);           ///< (an access type's designated subtype (its full view))
         bool is_discrete_range(node* aNode, region* aRegion);
         ada_type* resolve_operator(node* aOperator, ada_type* aExpected, region* aRegion);
         std::optional<std::int64_t> static_level(node* aObject, region* aRegion);
@@ -654,7 +694,7 @@ namespace neos::compilers::ada
         std::vector<entity*> operator_candidates(std::string const& aDesignator, std::vector<node*> const& aOperands, region* aRegion);
         region* selected_operator_scope(node* aPrefix, region* aRegion);
         bool within(entity* aUnit, region* aRegion) const;
-        std::vector<entity*> prefixed_candidates(ada_type* aType, std::string const& aName);
+        std::vector<entity*> prefixed_candidates(ada_type* aType, std::string const& aName, region* aRegion = nullptr);     ///< (aRegion: where (an untagged partial view there: none))
         void note_reference(entity* aObject, region* aRegion);
         void resolve_conversion_operand(node* aOperand, ada_type* aTarget, region* aRegion);
         ada_type* resolve_indexing(node* aApply, node* aPrefix, std::vector<node*> const& aArguments, ada_type* aExpected, region* aRegion);
@@ -681,6 +721,7 @@ namespace neos::compilers::ada
         bool iTemplateCheck = false;                ///< (instantiating a generic for check_generic)
         node const* iCheckedGeneric = nullptr;      ///< (check_generic's generic's declaration: its template is checked where it is declared (later full type declarations have not occurred))
         std::set<entity const*> iTemplateInstances;
+        std::set<entity const*> iFormalPackageTemplates;      ///< (check_generic's instances for formal packages: standing for the formal packages within the generic)
         std::set<entity const*> iFormalPackagesWithActuals;    ///< (check_generic's instances for formal packages with explicit actual parts: their formals not visible by selection (12.7(10/2))) ///< (check_generic's instances: standing for their generic units (their templates))
         std::map<entity const*, entity*> iTemplateInstanceOf;   ///< (a generic unit's check_generic instance (where its generic children are checked))
         std::vector<region*> iInstantiationRegions;  ///< (their regions)
@@ -778,6 +819,8 @@ namespace neos::compilers::ada
         std::vector<instance_info> iInstances;
         std::map<std::string, region*> iStubs;
         std::map<std::string, node*> iStubNodes;            ///< (a subunit's name: its stub)
+        std::map<node const*, std::pair<entity*, entity*>> iStubEntities;  ///< (a subprogram body stub: the subprogram it completes (or declares), and its own profile)
+        std::pair<entity*, entity*> iSubunitOf{};           ///< (a subunit's proper subprogram body being analysed: its stub's (see iStubEntities))
         std::map<node const*, node*> iStubBodies;           ///< (a stub: its subunit's proper body)
     public:
         node* stub_body(node const* aStub) const { auto b = iStubBodies.find(aStub); return b != iStubBodies.end() ? b->second : nullptr; }

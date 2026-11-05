@@ -87,4 +87,7 @@ namespace neos::ada_runtime
     void deallocate(address aAddress);
     address allocate_segment(std::uint64_t aSize);  ///< (a large block, e.g. a task's stack (page aligned))
     void deallocate_segment(address aAddress, std::uint64_t aSize);
+
+    // the CPU time of the program's thread (which runs all of an Ada program's tasks), in nanoseconds
+    std::int64_t thread_cpu_time();
 }

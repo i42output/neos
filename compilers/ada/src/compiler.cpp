@@ -147,6 +147,7 @@ namespace neos::compilers::ada
                 iSyntaxErrorLine = aLine;
                 iSyntaxErrorFile = !iFragments.empty() ? iFragments.back().file : nullptr;
             }
+            iSyntaxErrorLines.push_back(aLine);
             return;
         }
         aLine = iPendingError->line;
@@ -272,6 +273,12 @@ namespace neos::compilers::ada
             }
             return result;
         }
+    }
+
+    bool compiler::imported(std::string const& aPath) const
+    {
+        std::error_code ec;
+        return iImported.contains(std::filesystem::absolute(std::filesystem::path{ aPath }, ec).lexically_normal().generic_string());
     }
 
     void compiler::find_units(std::string const& aMainFile, std::string const& aMainSource)
@@ -489,21 +496,69 @@ namespace neos::compilers::ada
                 if (message.find("requires a completion") != std::string_view::npos || message.find("has no declaration") != std::string_view::npos)
                     return true;
                 auto const& file = *aError.where->file;
-                for (node const* n = aError.where; n != nullptr && n->parent != nullptr; n = n->parent)
+                for (auto const syntaxLine : iSyntaxErrorLines)
                 {
-                    if (!n->source.empty() && file.line_of(n->source) <= *iSyntaxErrorLine &&
-                        file.line_of(n->source.substr(n->source.size() - 1u)) >= *iSyntaxErrorLine)
+                    for (node const* n = aError.where; n != nullptr && n->parent != nullptr; n = n->parent)
+                    {
+                        if (!n->source.empty() && file.line_of(n->source) <= syntaxLine && file.line_of(n->source.substr(n->source.size() - 1u)) >= syntaxLine)
+                            return true;
+                        // (up to the statement or declaration: the lists that contain them)
+                        if (n->parent->is(construct::Declarations) || n->parent->is(construct::Statements) || n->parent->is(construct::Private) ||
+                            n->parent->is(construct::Compilation) || n->parent->is(construct::Unit))
+                            break;
+                    }
+                    // (just after it: a name that the text skipped declared, or an end whose beginning it skipped)
+                    auto const line = file.line_of(aError.where->source);
+                    if (line > syntaxLine && line <= syntaxLine + 7u && message.find("is not declared") != std::string_view::npos)
                         return true;
-                    // (up to the statement or declaration: the lists that contain them)
-                    if (n->parent->is(construct::Declarations) || n->parent->is(construct::Statements) || n->parent->is(construct::Private) ||
-                        n->parent->is(construct::Compilation) || n->parent->is(construct::Unit))
-                        break;
+                    // (an end whose construct began before it (its beginning skipped, or another's end taken for its))
+                    if (line > syntaxLine && message.find("does not match the name") != std::string_view::npos && aError.where->parent != nullptr &&
+                        !aError.where->parent->source.empty() && file.line_of(aError.where->parent->source) <= syntaxLine)
+                        return true;
                 }
+                return false;
+            };
+            // (a missing completion in a compilation unit with other errors: not reported (a unit with errors is not completed; its
+            // completions are checked once it compiles))
+            // (the compilation unit whose text a node's is in (a node of a generic's copy: its text the generic's))
+            auto const unit_of = [&](node const* n) -> node const*
+            {
+                if (n == nullptr || n->source.data() == nullptr)
+                    return nullptr;
+                for (auto const* c : iCompilations)
+                    for (auto const* u : c->children)
+                        if (u->is(construct::Unit) && !u->source.empty() && n->source.data() >= u->source.data() &&
+                            n->source.data() < u->source.data() + u->source.size())
+                            return u;
+                return nullptr;
+            };
+            auto const completionAmongErrors = [&](compile_error const& aError)
+            {
+                if (iProgram == nullptr || std::string_view{ aError.what() }.find("requires a completion") == std::string_view::npos)
+                    return false;
+                // (the declaration that requires it: an error within its text)
+                node const* declaration = aError.where;
+                while (declaration != nullptr && declaration->parent != nullptr && !declaration->parent->is(construct::Declarations) &&
+                    !declaration->parent->is(construct::Private) && !declaration->parent->is(construct::Unit))
+                    declaration = declaration->parent;
+                // (reported at the end of a body (its declarative part's completions): not its errors)
+                if (declaration == nullptr || declaration->source.empty() || unit_of(aError.where) == nullptr || declaration->is(construct::PackageBody) ||
+                    declaration->is(construct::SubprogramBody) || declaration->is(construct::TaskBody) || declaration->is(construct::ProtectedBody) ||
+                    declaration->is(construct::Block))
+                    return false;
+                auto const other = [&](compile_error const& x) { return x.where != nullptr && x.where->source.data() >= declaration->source.data() &&
+                    x.where->source.data() < declaration->source.data() + declaration->source.size() &&
+                    std::string_view{ x.what() }.find("requires a completion") == std::string_view::npos; };
+                if (other(e))
+                    return true;
+                for (auto const& x : iProgram->diagnostics())
+                    if (other(x))
+                        return true;
                 return false;
             };
             if (iProgram != nullptr)
                 for (auto const& d : iProgram->diagnostics())
-                    if ((d.where != e.where || std::string{ d.what() } != e.what()) && !afterSyntaxError(d))
+                    if ((d.where != e.where || std::string{ d.what() } != e.what()) && !afterSyntaxError(d) && !completionAmongErrors(d))
                     {
                         std::string location;
                         if (d.where != nullptr && d.where->file != nullptr)
@@ -513,6 +568,14 @@ namespace neos::compilers::ada
                     }
             if (afterSyntaxError(e))
                 return;     // (the syntax error is the compilation's error)
+            // (a missing completion among other errors: the first of those reported instead)
+            if (completionAmongErrors(e) && iProgram != nullptr)
+                for (auto const& x : iProgram->diagnostics())
+                    if (!completionAmongErrors(x) && !afterSyntaxError(x))
+                    {
+                        report(x);
+                        return;
+                    }
             report(e);
         }
     }

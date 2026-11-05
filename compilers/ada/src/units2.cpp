@@ -125,9 +125,91 @@ namespace neos::compilers::ada
             // (an aspect: specified once (13.1(10/3)))
             if (!specified.insert(name).second && iInstanceBodies == 0)
                 recover([&]() { error(aspect, "the aspect " + name + " is already specified"); });
+            // (also not by an attribute definition clause or pragma (13.1(10/3)): see the clauses and pragmas)
+            {
+                static std::set<std::string> const items{ "size", "object_size", "value_size", "alignment", "component_size", "small", "storage_size",
+                    "bit_order", "machine_radix", "read", "write", "input", "output", "read'class", "write'class", "input'class", "output'class",
+                    "external_tag", "stream_size", "address", "pack", "inline" };
+                if (iInstanceBodies == 0 && (items.contains(name) || name == "storage_pool"))
+                    iRepresentationItems.insert({ aEntity, name == "storage_pool" ? std::string{ "storage_size" } : name });
+            }
             // (Default_Value, Default_Component_Value: an explicit expression (3.5(56.3/3), 3.6(22.3/3)))
             if ((name == "default_value" || name == "default_component_value") && value == nullptr && iInstanceBodies == 0)
                 recover([&]() { error(aspect, "the aspect " + name + " requires an expression"); });
+            // (an aspect name: a language-defined (or implementation-defined) aspect; its definition required unless the aspect is
+            // Boolean-valued (13.1.1))
+            if (iInstanceBodies == 0)
+            {
+                static std::set<std::string> const booleanAspects{ "pack", "inline", "no_return", "atomic", "volatile", "independent", "atomic_components",
+                    "volatile_components", "independent_components", "discard_names", "import", "export", "unchecked_union", "asynchronous",
+                    "interrupt_handler", "preelaborable_initialization", "all_calls_remote", "pure", "preelaborate", "elaborate_body", "shared_passive",
+                    "remote_types", "remote_call_interface", "nonblocking", "full_access_only", "no_controlled_parts", "exclusive_functions", "yield",
+                    "parallel_calls", "allows_exit", "lock_free", "inline_always", "no_inline", "pure_function", "suppress_initialization", "unreferenced",
+                    "warnings", "ghost", "volatile_full_access", "async_readers", "async_writers", "effective_reads", "effective_writes", "no_elaboration_code_all",
+                    "spark_mode", "default_initial_condition", "dispatching", "use_formal", "persistent_bss", "shared", "no_tagged_streams", "simple_storage_pool_type",
+                    "constant_after_elaboration", "favor_top_level", "export_procedure", "obsolescent", "thread_local_storage", "universal_aliasing", "unmodified",
+                    "unreferenced_objects", "linker_section", "annotate", "contract_cases", "depends", "global", "initializes", "abstract_state", "refined_state",
+                    "refined_global", "refined_depends", "refined_post", "test_case", "invariant", "invariant'class", "predicate", "max_queue_length",
+                    "subprogram_variant", "loop_invariant", "extensions_visible", "no_caching", "relaxed_initialization", "side_effects", "always_terminates",
+                    "exceptional_cases", "no_raise", "aggregate", "integer_literal", "real_literal", "string_literal", "put_image", "stable_properties",
+                    "stable_properties'class", "global'class", "default_storage_pool", "storage_model_type", "designated_storage_model", "iterator_view",
+                    "max_entry_queue_length", "static", "simple_storage_pool" };
+                static std::set<std::string> const valuedAspects{ "size", "object_size", "value_size", "alignment", "component_size", "bit_order", "storage_size",
+                    "storage_pool", "small", "stream_size", "read", "write", "input", "output", "read'class", "write'class", "input'class", "output'class",
+                    "external_tag", "external_name", "link_name", "address", "pre", "post", "pre'class", "post'class", "type_invariant", "type_invariant'class",
+                    "static_predicate", "dynamic_predicate", "predicate_failure", "default_value", "default_component_value", "constant_indexing",
+                    "variable_indexing", "default_iterator", "iterator_element", "implicit_dereference", "attach_handler", "cpu", "dispatching_domain",
+                    "priority", "interrupt_priority", "relative_deadline", "synchronization", "machine_radix", "scalar_storage_order", "secondary_stack_size",
+                    "linker_section", "initial_condition", "convention" };
+                if (!booleanAspects.contains(name) && !valuedAspects.contains(name))
+                    recover([&]() { error(aspect->child(0), "\"" + name + "\" is not the name of an aspect (13.1.1)"); });
+                else if (value == nullptr && valuedAspects.contains(name) && name != "default_value" && name != "default_component_value")
+                    recover([&]() { error(aspect, "the aspect " + name + " requires a definition (13.1.1)"); });
+                // (a language-defined Boolean representation (or operational) aspect's value: static (13.1.1(17/3)))
+                static std::set<std::string> const staticBoolean{ "pack", "atomic", "volatile", "independent", "atomic_components", "volatile_components",
+                    "independent_components", "discard_names", "unchecked_union", "asynchronous", "interrupt_handler", "full_access_only", "no_controlled_parts",
+                    "exclusive_functions" };
+                if (value != nullptr && staticBoolean.contains(name))
+                    recover([&]()
+                    {
+                        resolve(value, boolean(), aRegion);
+                        if (!static_expression(value))
+                            error(value, "the value of aspect " + name + " must be static (13.1.1)");
+                    });
+                // (Default_Iterator: of a tagged type that has Constant_Indexing or Variable_Indexing (5.5.1(11/3), 4.1.6(5/3)))
+                if ((name == "default_iterator" || name == "iterator_element") && aEntity->is_type() && aEntity->type != nullptr)
+                {
+                    auto const aspectName = name == "default_iterator" ? std::string{ "Default_Iterator" } : std::string{ "Iterator_Element" };
+                    bool const tagged = aEntity->type->kind == type_kind::Private ? aEntity->type->tagged && !aEntity->type->untagged_partial :
+                        aEntity->type->base_type()->tagged;
+                    if (!tagged && aEntity->type->view()->kind != type_kind::Interface)
+                        recover([&]() { error(aspect, "aspect " + aspectName + " can be specified only for a tagged type (5.5.1)"); });
+                    else if (!specified.contains("constant_indexing") && !specified.contains("variable_indexing") && [&]()
+                        {
+                            for (auto* a : aspects->children)
+                                if (!a->children.empty())
+                                    if (auto const n = name_text(a->child(0)->source); n == "constant_indexing" || n == "variable_indexing")
+                                        return false;
+                            return type_aspect(aEntity->type, "constant_indexing") == nullptr && type_aspect(aEntity->type, "variable_indexing") == nullptr;
+                        }())
+                        recover([&]() { error(aspect, "aspect " + aspectName + " requires Constant_Indexing or Variable_Indexing (5.5.1)"); });
+                    // (Iterator_Element: a subtype (5.5.1(9/3)); a name declared already that is not one)
+                    // (Default_Iterator: exactly one function declared in the type's region, whose first parameter is of the type (or its
+                    // class, or an access parameter designating either), other parameters with defaults, an iterator result (5.5.1(11/3)))
+                    if (name == "default_iterator" && aspect->size() >= 2u && iInstanceBodies == 0)
+                        iDeferredAspects[aRegion].push_back(deferred_aspect{ aEntity->type, "check'default_iterator", aspect->children.back(), aEntity, aEntity });
+                    if (name == "iterator_element" && aspect->size() >= 2u && iInstanceBodies == 0)
+                        if (auto* v = aspect->children.back(); v->is(construct::Identifier) || v->is(construct::Selected))
+                            iDeferredAspects[aRegion].push_back(deferred_aspect{ aEntity->type, "check'iterator_element", v, aEntity, aEntity });
+                }
+                // (Type_Invariant'Class: of a tagged type (7.3.2))
+                if (name == "type_invariant'class" && aEntity->is_type() && aEntity->type != nullptr && !aEntity->type->base_type()->tagged &&
+                    aEntity->type->view()->kind != type_kind::Interface)
+                    recover([&]() { error(aspect, "aspect Type_Invariant'Class can be specified only for a tagged type (7.3.2)"); });
+                // (Default_Component_Value: of an array type, by a full type declaration)
+                if (name == "default_component_value" && aEntity->is_type() && aEntity->type != nullptr && aEntity->type->kind == type_kind::Private)
+                    recover([&]() { error(aspect, "aspect Default_Component_Value can be specified only for an array type (3.6(22.2/3))"); });
+            }
             // (a type's representation aspects: checked at the end of the declarative part (representation_aspect_check))
             if ((name == "size" || name == "alignment" || name == "component_size" || name == "small") && aEntity->is_type() && value != nullptr)
                 iDeferredAspects[aRegion].push_back({ aEntity->type, "check'" + name, value, nullptr, aEntity });
@@ -139,6 +221,24 @@ namespace neos::compilers::ada
                 aEntity->priority = value;
                 if (value != nullptr)
                     resolve(value, integer(), aEntity->inner != nullptr ? aEntity->inner : aRegion);
+            }
+            else if (name == "relative_deadline" && aEntity->is_type() && aEntity->type != nullptr && aEntity->type->view()->kind == type_kind::Interface)
+                recover([&]() { error(aspect, "aspect Relative_Deadline cannot be specified for an interface type (D.2.6(9.6/5))"); });
+            else if ((name == "cpu" || name == "dispatching_domain") && aEntity->is_type() && aEntity->type != nullptr && aEntity->type->view()->kind == type_kind::Interface)
+                recover([&]() { error(aspect, "aspect " + std::string{ name == "cpu" ? "CPU" : "Dispatching_Domain" } + " cannot be specified for an interface type (D.16(10/5), D.16.1(17/5))"); });
+            else if (name == "cpu" && (aEntity->kind == entity_kind::Task || aEntity->kind == entity_kind::Protected || aEntity->sub != nullptr))
+            {
+                // (as the pragma: see pragma)
+                aEntity->cpu = value;
+                if (value != nullptr)
+                    cpu_resolve(aEntity, value, aEntity->inner != nullptr ? aEntity->inner : aRegion);
+            }
+            else if (name == "relative_deadline" && (aEntity->kind == entity_kind::Task || aEntity->kind == entity_kind::Protected || aEntity->sub != nullptr))
+            {
+                // (as the pragma: see pragma)
+                aEntity->relative_deadline = value;
+                if (value != nullptr)
+                    relative_deadline_resolve(value, aEntity->inner != nullptr ? aEntity->inner : aRegion);
             }
             else if ((name == "interrupt_handler" || name == "attach_handler") && aEntity->scope != nullptr && aEntity->scope->owner != nullptr &&
                 aEntity->scope->owner->kind == entity_kind::Protected && aEntity->kind == entity_kind::Procedure)
@@ -311,7 +411,44 @@ namespace neos::compilers::ada
             else if (name == "unchecked_union")
             {
                 if (aEntity->is_type())
-                    aEntity->type->view()->base_type()->view()->unchecked_union = true;
+                {
+                    // (of a discriminated record type with a variant part, not the completion of a view with known discriminants (B.3.3))
+                    auto* t = aEntity->type->view();
+                    if (iInstanceBodies == 0)
+                    {
+                        bool const discriminated = std::any_of(t->components.begin(), t->components.end(),
+                            [](component_info const& c) { return c.discriminant && !c.stored; });
+                        if (t->kind != type_kind::Record || t->tagged || !discriminated || t->variants.empty())
+                            recover([&]() { error(aspect, "aspect Unchecked_Union can be specified only for a discriminated record type with a variant part (B.3.3)"); });
+                        else if (t->partial != nullptr && t->partial->known_discriminants)
+                            recover([&]() { error(aDecl, "aspect Unchecked_Union cannot be specified for the completion of a view with known discriminants (B.3.3)"); });
+                        else
+                        {
+                            // (a component subject to a per-object constraint: of an unchecked union subtype (B.3.3(10/2)))
+                            std::function<bool(node*)> namesDiscriminant = [&](node* aExpression) -> bool
+                            {
+                                if (aExpression == nullptr)
+                                    return false;
+                                if (aExpression->is(construct::Identifier) && aExpression->ent != nullptr && aExpression->ent->kind == entity_kind::Discriminant)
+                                    return true;
+                                for (auto* c : aExpression->children)
+                                    if (namesDiscriminant(c))
+                                        return true;
+                                return false;
+                            };
+                            for (auto const& c : t->components)
+                            {
+                                if (c.discriminant || c.type == nullptr || c.ent == nullptr || c.ent->decl == nullptr)
+                                    continue;
+                                auto* ct = c.type->view();
+                                bool const perObject = c.depends || std::any_of(ct->discriminant_constraint.begin(), ct->discriminant_constraint.end(), namesDiscriminant);
+                                if (perObject && !ct->base_type()->view()->unchecked_union)
+                                    recover([&]() { error(c.ent->decl, "a component subject to a per-object constraint of an unchecked union type must be of an unchecked union subtype (B.3.3)"); });
+                            }
+                        }
+                    }
+                    t->base_type()->view()->unchecked_union = true;
+                }
             }
             else if (name == "preelaborable_initialization")
             {
@@ -380,6 +517,13 @@ namespace neos::compilers::ada
                 aEntity->type->predicate = &predicate;
                 iDeferredAspects[aRegion].push_back({ aEntity->type, name, value, nullptr, aEntity });
             }
+            // (Type_Invariant: of a private type or extension, or of the full declaration of one; Type_Invariant'Class: of a private type
+            // or extension, or of an interface type (7.3.2(2/3)))
+            else if ((name == "type_invariant" || name == "type_invariant'class") && iInstanceBodies == 0 && (!aEntity->is_type() ||
+                aEntity->kind == entity_kind::Subtype || aEntity->type == nullptr || !((aEntity->type->kind == type_kind::Private ||
+                aEntity->type->base_type()->kind == type_kind::Private) || (name == "type_invariant" && (aEntity->type->partial != nullptr ||
+                aEntity->type->base_type()->partial != nullptr)) || (name == "type_invariant'class" && aEntity->type->view()->kind == type_kind::Interface))))
+                recover([&]() { error(aspect, "aspect " + name + " can be specified only for a private type, a private extension or the full view of one (7.3.2(2/3))"); });
             else if ((name == "type_invariant" || name == "type_invariant'class" || name == "invariant") && aEntity->is_type() && value != nullptr)
             {
                 // (a specific type invariant: not of an abstract type (7.3.2(6/3)))
@@ -547,12 +691,142 @@ namespace neos::compilers::ada
         }
     }
 
+    void program::cpu_resolve(entity* aEntity, node* aExpression, region* aRegion)
+    {
+        // (of System.Multiprocessors.CPU_Range (D.16(8/3)); a subprogram's static (9/3))
+        auto* cpuRange = library_type("system.multiprocessors", "cpu_range");
+        if (cpuRange == nullptr)
+        {
+            recover([&]() { error(aExpression, "a CPU must be of type System.Multiprocessors.CPU_Range (D.16(8/3))"); });
+            return;
+        }
+        resolve(aExpression, cpuRange, aRegion);
+        if (aEntity->sub != nullptr && iInstanceBodies == 0 && !static_expression(aExpression))
+            recover([&]() { error(aExpression, "the CPU of a subprogram must be static (D.16(9/3))"); });
+    }
+
+    void program::relative_deadline_resolve(node* aExpression, region* aRegion)
+    {
+        auto* timeSpan = library_type("ada.real_time", "time_span");
+        if (timeSpan == nullptr)
+        {
+            recover([&]() { error(aExpression, "a relative deadline must be of type Ada.Real_Time.Time_Span (D.2.6(9.2/3))"); });
+            return;
+        }
+        resolve(aExpression, timeSpan, aRegion);
+    }
+
+    void program::tasking_policies()
+    {
+        // the partition's task dispatching policies (pragmas Task_Dispatching_Policy and Priority_Specific_Dispatching, and those of
+        // the Ravenscar and Jorvik profiles (D.13)), its locking policy, Generate_Deadlines: configuration pragmas in any unit's
+        // context or in the configuration pragmas' file
+        static bool const ada2012 = std::getenv("NEOS_ADA_VERSION") != nullptr && std::string_view{ std::getenv("NEOS_ADA_VERSION") } == "2012";
+        auto const policy_code = [](std::string const& aName) -> std::int64_t
+        {
+            if (aName == "fifo_within_priorities")
+                return 1;
+            if (aName == "non_preemptive_fifo_within_priorities")
+                return 2;
+            if (aName == "round_robin_within_priorities")
+                return 3;
+            if (aName == "edf_within_priorities" || aName == "edf_across_priorities")
+                return 4;
+            return 0;
+        };
+        node* single = nullptr;
+        std::int64_t singlePolicy = 0;
+        struct range_pragma { node* pragma; std::int64_t first; std::int64_t last; std::int64_t policy; };
+        std::vector<range_pragma> ranges;
+        node* edf = nullptr;
+        for (auto* u : iOrder)
+            if (u->unit != nullptr)
+                if (auto* context = u->unit->first(construct::Context))
+                    for (auto* p : context->children)
+                    {
+                        if (!p->is(construct::Pragma) || p->children.empty())
+                            continue;
+                        auto const pragmaName = name_text(p->child(0)->source);
+                        std::vector<node*> arguments;
+                        for (auto* a : p->children)
+                            if (a->is(construct::PragmaArgument) && !a->children.empty())
+                                arguments.push_back(a->children.back());
+                        std::int64_t policy = 0;
+                        if (pragmaName == "profile" && !arguments.empty() && (name_text(arguments[0]->source) == "ravenscar" ||
+                            name_text(arguments[0]->source) == "jorvik"))
+                        {
+                            // (the profiles: FIFO_Within_Priorities and Ceiling_Locking (D.13(4/3, 10/5)))
+                            iCeilingLocking = true;
+                            policy = 1;
+                        }
+                        else if (pragmaName == "task_dispatching_policy" && arguments.size() == 1u)
+                            policy = policy_code(name_text(arguments[0]->source));
+                        else if (pragmaName == "priority_specific_dispatching" && arguments.size() == 3u)
+                        {
+                            policy = policy_code(name_text(arguments[0]->source));
+                            auto const bounds = iPriorityRanges.find(p);
+                            if (policy == 0 || bounds == iPriorityRanges.end())
+                                continue;
+                            auto const r = range_pragma{ p, bounds->second.first, bounds->second.second, policy };
+                            // (the ranges of different pragmas not overlapping (D.2.2(5.1/2)))
+                            for (auto const& other : ranges)
+                                if (r.first <= other.last && other.first <= r.last)
+                                    recover([&]() { error(p, "the priorities of pragma Priority_Specific_Dispatching overlap those of another (D.2.2(5.1/2))"); });
+                            ranges.push_back(r);
+                            if (policy == 4)
+                                edf = p;
+                            continue;
+                        }
+                        else if (pragmaName == "generate_deadlines")
+                            iGenerateDeadlines = true;
+                        if (policy == 0)
+                            continue;
+                        if (single != nullptr && singlePolicy != policy)
+                            recover([&]() { error(p, "the partition's task dispatching policy is specified already, as another (D.2.2(4.3/2))"); });
+                        if (single == nullptr || singlePolicy == policy)
+                        {
+                            single = p;
+                            singlePolicy = policy;
+                        }
+                        if (policy == 4)
+                            edf = p;
+                    }
+        // (not both pragmas (D.2.2(5.2/2)); EDF_Within_Priorities with Ceiling_Locking (D.2.6(10/5, 11/5)))
+        if (!ranges.empty() && single != nullptr && name_text(single->child(0)->source) == "task_dispatching_policy")
+            recover([&]() { error(single, "pragma Task_Dispatching_Policy cannot be given in a partition with pragma Priority_Specific_Dispatching (D.2.2(5.2/2))"); });
+        if (edf != nullptr && !iCeilingLocking && !ada2012)
+            recover([&]() { error(edf, "the EDF_Within_Priorities policy needs the Ceiling_Locking policy in the partition (D.2.6(10/5))"); });
+        // (the runtime's: a single policy for all priorities (Round_Robin_Within_Priorities: not of Interrupt_Priority (D.2.5(5/2))); the
+        // ranges, FIFO_Within_Priorities for the others (D.2.2(4.5/3)))
+        iDispatchingPolicies.clear();
+        if (!ranges.empty())
+        {
+            iDispatchingPolicies.emplace_back(0, 31, 1);
+            for (auto const& r : ranges)
+                iDispatchingPolicies.emplace_back(r.first, r.last, r.policy);
+        }
+        else if (single != nullptr)
+        {
+            iDispatchingPolicies.emplace_back(0, 31, singlePolicy);
+            if (singlePolicy == 3)
+                iDispatchingPolicies.emplace_back(31, 31, 1);
+        }
+        // (polls: when a policy is specified (preemption by a task that becomes ready meanwhile, exhausted budgets), or execution-time or
+        // timing events are used (their handlers run when they occur))
+        iPolls = !iDispatchingPolicies.empty() || std::any_of(iOrder.begin(), iOrder.end(), [](unit_info const* u)
+            {
+                return u->name == "ada.execution_time.timers" || u->name == "ada.execution_time.group_budgets" || u->name == "ada.real_time.timing_events";
+            });
+    }
+
     void program::restrictions_check()
     {
         // the partition's restrictions (pragma Restrictions and Profile: configuration pragmas (13.12(8/3)), in any unit's context or 
         // in the configuration pragmas' file): each restriction's value (a restriction without one: none)
         std::map<std::string, std::optional<std::int64_t>> restrictions;
         std::set<std::string> dependences;  // (No_Dependence's units)
+        std::map<std::size_t, std::set<std::string>> compilationRestrictions;  // (a compilation's own: its place: the restrictions)
+        std::size_t currentCompilation = 0u;
         auto const restrict = [&](std::string const& aName, std::optional<std::int64_t> aValue = std::nullopt)
         {
             auto const existing = restrictions.find(aName);
@@ -575,11 +849,13 @@ namespace neos::compilers::ada
                                 continue;
                             for (auto const* r : { "no_abort_statements", "no_dynamic_attachment", "no_dynamic_cpu_assignment", "no_dynamic_priorities", 
                                 "no_local_protected_objects", "no_local_timing_events", "no_protected_type_allocators", "no_requeue_statements",
-                                "no_specific_termination_handlers", "no_task_allocators", "no_task_hierarchy", "no_task_termination" })
+                                "no_select_statements", "no_specific_termination_handlers", "no_task_allocators", "no_task_hierarchy", "no_task_termination" })
                                 restrict(r);
+                            if (profile == "jorvik")
+                                restrict("pure_barriers");
                             if (profile == "ravenscar")
                             {
-                                for (auto const* r : { "no_implicit_heap_allocations", "no_relative_delay", "no_select_statements", "simple_barriers" })
+                                for (auto const* r : { "no_implicit_heap_allocations", "no_relative_delay", "simple_barriers" })
                                     restrict(r);
                                 restrict("max_entry_queue_length", 1);
                                 restrict("max_protected_entries", 1);
@@ -610,7 +886,9 @@ namespace neos::compilers::ada
                                         dependences.insert(name_text(text));
                                     }
                                     else
-                                        restrict(name + ":" + name_text(a->children.back()->source));
+                                        // (No_Use_Of_Pragma, No_Use_Of_Attribute, No_Specification_Of_Aspect: of the compilation's units only
+                                        // (13.12.1(6.1/3)-(6.4/3)))
+                                        compilationRestrictions[u->compilation].insert(name + ":" + name_text(a->children.back()->source));
                                     continue;
                                 }
                                 std::optional<std::int64_t> value;
@@ -622,8 +900,17 @@ namespace neos::compilers::ada
                                 restrict(name_text(a->children.back()->source));
                         }
                     }
-        if (restrictions.empty() && dependences.empty())
+        iRestrictions = restrictions;
+        if (restrictions.empty() && dependences.empty() && compilationRestrictions.empty())
             return;
+        // (a restriction of the partition, or of the compilation of the unit being checked)
+        auto const restrictedHere = [&](std::string const& aName)
+        {
+            if (restrictions.contains(aName))
+                return true;
+            auto const c = compilationRestrictions.find(currentCompilation);
+            return c != compilationRestrictions.end() && c->second.contains(aName);
+        };
         auto const restricted = [&](char const* aName) { return restrictions.contains(aName); };
         auto const maximum = [&](char const* aName) -> std::optional<std::int64_t>
         {
@@ -690,6 +977,137 @@ namespace neos::compilers::ada
             }
             return result;
         };
+        // (a name that denotes one of a library package's subprograms (by their names))
+        auto const denotes = [&](node* aName, std::string const& aPackage, std::initializer_list<char const*> aNames) -> bool
+        {
+            auto* e = aName->ent;
+            while (e != nullptr && e->renamed != nullptr && e->renamed->is_subprogram())
+                e = e->renamed;
+            if (e == nullptr || !e->is_subprogram())
+                return false;
+            auto const full = full_name(e);
+            for (auto const* n : aNames)
+                if (full == aPackage + "." + n)
+                    return true;
+            return false;
+        };
+        // (a name that statically names a subcomponent of the enclosing protected object (4.9(26.1/3)): a component, a selected component
+        // of one (no dereference), an indexed component with static indexes)
+        std::function<bool(node*)> protected_component = [&](node* aName) -> bool
+        {
+            if (aName == nullptr || (aName->mark & MarkDeref) != 0u)
+                return false;
+            if (aName->is(construct::Identifier))
+                return aName->ent != nullptr && aName->ent->kind == entity_kind::Component && aName->ent->scope != nullptr &&
+                    aName->ent->scope->owner != nullptr && aName->ent->scope->owner->kind == entity_kind::Protected;
+            if (aName->is(construct::Selected))
+                return aName->ent != nullptr && aName->ent->kind == entity_kind::Component && protected_component(aName->child(0));
+            if (aName->is(construct::Apply) && meaning_of(aName) == meaning::Index && protected_component(aName->child(0)))
+            {
+                for (std::size_t i = 1u; i < aName->size(); ++i)
+                    if (!static_expression(aName->child(i)))
+                        return false;
+                return true;
+            }
+            return false;
+        };
+        // (pure-barrier-eligible (D.7(1.1/5-1.9/5)))
+        std::function<bool(node*)> pure_barrier = [&](node* aExpression) -> bool
+        {
+            auto* n = aExpression;
+            if (n == nullptr)
+                return false;
+            if (static_expression(n))
+                return true;
+            auto const predefined = [&](node* aOperator)
+            {
+                auto* e = aOperator->ent;
+                return e == nullptr || (e->sub != nullptr && e->sub->op != intrinsic::None && e->sub->op != intrinsic::Import &&
+                    e->sub->op != intrinsic::Attribute);
+            };
+            switch (n->kind)
+            {
+            case construct::Parenthesized:
+                return pure_barrier(n->child(0));
+            case construct::Identifier:
+            case construct::Selected:
+            case construct::Apply:
+                return protected_component(n) && n->type != nullptr && n->type->view()->is_scalar();
+            case construct::Attribute:
+                return n->size() >= 2u && name_text(n->child(1)->source) == "count" && n->child(0)->ent != nullptr &&
+                    n->child(0)->ent->kind == entity_kind::Entry;
+            case construct::Eq:
+            case construct::Ne:
+            case construct::Lt:
+            case construct::Le:
+            case construct::Gt:
+            case construct::Ge:
+            case construct::And:
+            case construct::Or:
+            case construct::Xor:
+            case construct::Not:
+            case construct::AndThen:
+            case construct::OrElse:
+                if (!predefined(n))
+                    return false;
+                for (auto* c : n->children)
+                    if (!c->is(construct::Flag) && !pure_barrier(c))
+                        return false;
+                return true;
+            case construct::In:
+                if (n->children.empty() || !pure_barrier(n->child(0)))
+                    return false;
+                for (std::size_t i = 1u; i < n->size(); ++i)
+                    if (auto* c = n->child(i); !c->is(construct::Flag) && !static_expression(c) && !(c->is(construct::Range) &&
+                        c->size() == 2u && static_expression(c->child(0)) && static_expression(c->child(1))) &&
+                        !(is_subtype_name(c, nullptr) && c->type != nullptr && static_subtype(c->type)))
+                        return false;
+                return true;
+            case construct::IfExpression:
+            case construct::CaseExpression:
+                {
+                    std::function<bool(node*)> all = [&](node* aPart) -> bool
+                    {
+                        for (auto* c : aPart->children)
+                        {
+                            if (c->is(construct::Flag) || c->is(construct::Choices) || c->is(construct::Others))
+                                continue;
+                            if (c->is(construct::Elsif) || c->is(construct::Else) || c->is(construct::Alternative))
+                            {
+                                if (!all(c))
+                                    return false;
+                            }
+                            else if (!pure_barrier(c))
+                                return false;
+                        }
+                        return true;
+                    };
+                    return all(n);
+                }
+            default:
+                return false;
+            }
+        };
+        // (a type that is, or has a component of, Ada.Real_Time.Timing_Events.Timing_Event)
+        auto* timingEvent = library_type("ada.real_time.timing_events", "timing_event");
+        std::function<bool(ada_type*, int)> has_timing_event = [&](ada_type* aType, int aDepth) -> bool
+        {
+            if (aType == nullptr || timingEvent == nullptr || aDepth > 16)
+                return false;
+            auto* v = aType->view()->base_type()->view();
+            if (v == timingEvent->view()->base_type()->view())
+                return true;
+            if (v->kind == type_kind::Array)
+                return has_timing_event(v->component, aDepth + 1);
+            if (v->kind == type_kind::Record)
+                for (auto const& c : v->components)
+                    if (has_timing_event(c.type, aDepth + 1))
+                        return true;
+            for (auto* p = v->parent; p != nullptr; p = p->view()->parent)
+                if (p->view()->base_type()->view() == timingEvent->view()->base_type()->view())
+                    return true;
+            return false;
+        };
         // (the constructs that restrictions forbid)
         std::function<void(node*, bool)> walk = [&](node* aNode, bool aLocal)
         {
@@ -713,6 +1131,8 @@ namespace neos::compilers::ada
             case construct::SelectAsynchronous:
                 if (restricted("no_select_statements"))
                     violation(aNode, "No_Select_Statements");
+                if (auto const m = maximum("max_asynchronous_select_nesting"); m && *m == 0 && aNode->is(construct::SelectAsynchronous))
+                    violation(aNode, "Max_Asynchronous_Select_Nesting => 0");
                 break;
             case construct::Requeue:
                 if (restricted("no_requeue_statements"))
@@ -721,6 +1141,36 @@ namespace neos::compilers::ada
             case construct::Delay:
                 if (restricted("no_delay"))
                     violation(aNode, "No_Delay");
+                if (!aNode->has_flag("until") && restricted("no_relative_delay"))
+                    violation(aNode, "No_Relative_Delay");
+                break;
+            case construct::Barrier:
+                if (!aNode->children.empty())
+                {
+                    auto* condition = aNode->child(0);
+                    auto* c = condition;
+                    while (c->is(construct::Parenthesized) && !c->children.empty())
+                        c = c->child(0);
+                    if (restricted("simple_barriers") && !static_expression(condition) && !protected_component(c))
+                        violation(condition, "Simple_Barriers");
+                    if (restricted("pure_barriers") && !pure_barrier(condition))
+                        violation(condition, "Pure_Barriers");
+                }
+                break;
+            case construct::Identifier:
+            case construct::Selected:
+                if (restricted("no_abort_statements") && denotes(aNode, "ada.task_identification", { "abort_task" }))
+                    violation(aNode, "No_Abort_Statements");
+                if (restricted("no_dynamic_attachment") && denotes(aNode, "ada.interrupts", { "is_reserved", "is_attached", "current_handler",
+                    "attach_handler", "exchange_handler", "detach_handler", "reference" }))
+                    violation(aNode, "No_Dynamic_Attachment");
+                if (restricted("no_specific_termination_handlers") && denotes(aNode, "ada.task_termination", { "set_specific_handler", "specific_handler" }))
+                    violation(aNode, "No_Specific_Termination_Handlers");
+                // (the Set_Handler that has a Time_Span parameter (D.7(10.6/3)))
+                if (restricted("no_relative_delay") && denotes(aNode, "ada.real_time.timing_events", { "set_handler" }) && aNode->ent->sub != nullptr &&
+                    aNode->ent->sub->parameters.size() >= 2u && aNode->ent->sub->parameters[1].ent != nullptr &&
+                    aNode->ent->sub->parameters[1].ent->name == "in_time")
+                    violation(aNode, "No_Relative_Delay");
                 break;
             case construct::Raise:
             case construct::RaiseExpression:
@@ -730,6 +1180,18 @@ namespace neos::compilers::ada
                 break;
             case construct::TaskType:
             case construct::TaskSingle:
+                // (a task unit's CPU: static (No_Dynamic_CPU_Assignment, D.7(10.1/4)), not Not_A_Specific_CPU (No_Tasks_Unassigned_To_CPU,
+                // D.7(10.10/4)))
+                if (auto* e = aNode->ent; e != nullptr && e->cpu != nullptr)
+                {
+                    if (restricted("no_dynamic_cpu_assignment") && !static_expression(e->cpu))
+                        violation(e->cpu, "No_Dynamic_CPU_Assignment");
+                    if (restricted("no_tasks_unassigned_to_cpu") && static_expression(e->cpu))
+                        if (auto const v = evaluate(e->cpu, e->inner != nullptr ? e->inner : e->scope); v.is_integer() && v.integer() == bigint{ 0 })
+                            violation(e->cpu, "No_Tasks_Unassigned_To_CPU");
+                }
+                if (auto const m = maximum("max_tasks"); m && *m == 0 && aNode->is(construct::TaskSingle))
+                    violation(aNode, "Max_Tasks => 0");
                 if (auto const m = maximum("max_task_entries"))
                 {
                     std::int64_t entries = 0;
@@ -756,13 +1218,91 @@ namespace neos::compilers::ada
                         violation(aNode, "Max_Protected_Entries => " + std::to_string(*m));
                 }
                 break;
+            case construct::Instantiation:
+                // (an instance declared locally of a generic containing an allocator: the instance's allocators are local)
+                if (aLocal && restricted("no_local_allocators"))
+                {
+                    // (the generic an instantiation names: its instance's, or (in a generic body, analysed as its instances) its name's)
+                    auto const genericOf = [&](node* aInstantiation) -> entity*
+                    {
+                        if (aInstantiation->ent != nullptr && aInstantiation->ent->generic != nullptr)
+                            return aInstantiation->ent->generic;
+                        for (auto* c : aInstantiation->children)
+                            if (!c->is(construct::Defining) && !c->is(construct::DefiningOperator) && !c->is(construct::Flag) && !c->is(construct::Aspects))
+                            {
+                                auto* n = c->is(construct::Apply) && !c->children.empty() ? c->child(0) : c;
+                                auto* g = n->ent != nullptr ? n->ent : library_unit(name_text(n->source));   // (a library generic, by its name)
+                                while (g != nullptr && g->renamed != nullptr && g->renamed->is_generic())
+                                    g = g->renamed;
+                                return g != nullptr && g->is_generic() ? g : nullptr;
+                            }
+                        return nullptr;
+                    };
+                    std::set<entity*> seen;
+                    std::function<bool(entity*)> allocates;
+                    std::function<bool(node*)> contains = [&](node* aText) -> bool
+                    {
+                        if (aText == nullptr)
+                            return false;
+                        if (aText->is(construct::Allocator))
+                            return true;
+                        if (aText->is(construct::Instantiation))
+                            if (auto* g = genericOf(aText); g != nullptr && allocates(g))
+                                return true;
+                        for (auto* c : aText->children)
+                            if (contains(c))
+                                return true;
+                        return false;
+                    };
+                    allocates = [&](entity* aGeneric) -> bool
+                    {
+                        return seen.insert(aGeneric).second && (contains(aGeneric->decl) || contains(generic_body(aGeneric)));
+                    };
+                    if (auto* g = genericOf(aNode); g != nullptr && allocates(g))
+                        violation(aNode, "No_Local_Allocators");
+                }
+                break;
             case construct::Allocator:
                 if (restricted("no_allocators"))
                     violation(aNode, "No_Allocators");
                 if (aLocal && restricted("no_local_allocators"))
                     violation(aNode, "No_Local_Allocators");
+                // (of an access type that is not at library level, of a type that needs finalization (No_Nested_Finalization, D.7(4/3)))
+                if (t != nullptr && t->kind == type_kind::Access && t->designated != nullptr && restricted("no_nested_finalization") &&
+                    type_level(aNode->type) > 0 && needs_finalization(t->designated))
+                    violation(aNode, "No_Nested_Finalization");
+                // (of a standard storage pool, in a parameterless library subprogram or a task body's statements (D.7(19.2/3)))
+                if (t != nullptr && t->kind == type_kind::Access && restricted("no_standard_allocators_after_elaboration") && [&]()
+                    {
+                        // (no Storage_Pool specified (its ancestors'): a standard storage pool)
+                        for (auto* a = t->base_type()->view(); a != nullptr;
+                            a = a->parent != nullptr && a->parent->view()->base_type()->view() != a ? a->parent->view()->base_type()->view() : nullptr)
+                            if (type_aspect(a, "storage_pool") != nullptr || a->is_formal)
+                                return false;
+                        return true;
+                    }() &&
+                    [&]()
+                    {
+                        for (auto* p = aNode->parent; p != nullptr; p = p->parent)
+                        {
+                            if (p->is(construct::TaskBody))
+                                return true;
+                            if (p->is(construct::Handled) && p->parent != nullptr && p->parent->is(construct::TaskBody))
+                                return true;
+                            if (p->is(construct::SubprogramBody))
+                            {
+                                auto* e = p->ent;
+                                return e != nullptr && e->scope != nullptr && e->scope->level == 0 && e->scope->owner == nullptr && e->sub != nullptr &&
+                                    e->sub->parameters.empty() && (p->parent == nullptr || p->parent->is(construct::Unit) || p->parent->is(construct::Compilation));
+                            }
+                        }
+                        return false;
+                    }())
+                    violation(aNode, "No_Standard_Allocators_After_Elaboration");
                 if (t != nullptr && t->kind == type_kind::Access && t->designated != nullptr && needs_tasks(t->designated))
                 {
+                    if (auto const m = maximum("max_tasks"); m && *m == 0)
+                        violation(aNode, "Max_Tasks => 0");
                     if (restricted("no_task_allocators"))
                         violation(aNode, "No_Task_Allocators");
                     if (aLocal && restricted("no_task_hierarchy"))
@@ -775,6 +1315,13 @@ namespace neos::compilers::ada
             case construct::Object:
                 if (aLocal && aNode->ent != nullptr && aNode->ent->type != nullptr && needs_tasks(aNode->ent->type) && restricted("no_task_hierarchy"))
                     violation(aNode, "No_Task_Hierarchy");
+                if (aNode->ent != nullptr && aNode->ent->type != nullptr && needs_tasks(aNode->ent->type))
+                    if (auto const m = maximum("max_tasks"); m && *m == 0)
+                        violation(aNode, "Max_Tasks => 0");
+                if (aLocal && aNode->ent != nullptr && aNode->ent->type != nullptr && restricted("no_nested_finalization") && needs_finalization(aNode->ent->type))
+                    violation(aNode, "No_Nested_Finalization");
+                if (aLocal && aNode->ent != nullptr && aNode->ent->type != nullptr && restricted("no_local_timing_events") && has_timing_event(aNode->ent->type, 0))
+                    violation(aNode, "No_Local_Timing_Events");
                 if (aLocal && aNode->ent != nullptr && aNode->ent->type != nullptr && aNode->ent->type->view()->kind == type_kind::Protected &&
                     restricted("no_local_protected_objects"))
                     violation(aNode, "No_Local_Protected_Objects");
@@ -800,7 +1347,10 @@ namespace neos::compilers::ada
                         violation(aNode, "No_Unchecked_Access");
                     if (attribute == "class" && restricted("no_dispatch"))
                         violation(aNode, "No_Dispatch");
-                    if (restrictions.contains("no_use_of_attribute:" + attribute))
+                    // (no occurrences of the attribute Priority (D.7(9/2)))
+                    if (attribute == "priority" && restricted("no_dynamic_priorities"))
+                        violation(aNode, "No_Dynamic_Priorities");
+                    if (restrictedHere("no_use_of_attribute:" + attribute))
                         violation(aNode, "No_Use_Of_Attribute => " + attribute);
                 }
                 break;
@@ -808,22 +1358,22 @@ namespace neos::compilers::ada
                 if (!aNode->children.empty())
                 {
                     auto const p = name_text(aNode->child(0)->source);
-                    if (restrictions.contains("no_use_of_pragma:" + p))
+                    if (restrictedHere("no_use_of_pragma:" + p))
                         violation(aNode, "No_Use_Of_Pragma => " + p);
                     // (a representation pragma specifying the aspect (13.12.1(6.4/3)))
-                    else if (restrictions.contains("no_specification_of_aspect:" + p))
+                    else if (restrictedHere("no_specification_of_aspect:" + p))
                         violation(aNode, "No_Specification_Of_Aspect => " + p);
                 }
                 break;
             case construct::Aspects:
                 for (auto* a : aNode->children)
                     if (!a->children.empty())
-                        if (auto const n = name_text(a->child(0)->source); restrictions.contains("no_specification_of_aspect:" + n))
+                        if (auto const n = name_text(a->child(0)->source); restrictedHere("no_specification_of_aspect:" + n))
                             violation(a, "No_Specification_Of_Aspect => " + n);
                 break;
             case construct::RepresentationAttribute:
                 if (!aNode->children.empty() && aNode->child(0)->is(construct::Attribute) && aNode->child(0)->size() > 1u)
-                    if (auto const n = name_text(aNode->child(0)->child(1)->source); restrictions.contains("no_specification_of_aspect:" + n))
+                    if (auto const n = name_text(aNode->child(0)->child(1)->source); restrictedHere("no_specification_of_aspect:" + n))
                         violation(aNode, "No_Specification_Of_Aspect => " + n);
                 break;
             default:
@@ -850,20 +1400,47 @@ namespace neos::compilers::ada
         {
             if (predefined(u))
                 continue;
+            currentCompilation = u->compilation;
             // (its dependences)
             std::vector<std::string> named = u->withs;
             if (auto const dot = u->name.rfind('.'); dot != std::string::npos && !u->subunit)
                 named.push_back(u->name.substr(0u, dot));
             if (u->body && !u->subunit)
                 named.push_back(u->name);
+            // (reported at the with clause that names the dependence, once for each)
+            auto const withNode = [&](std::string const& aName) -> node*
+            {
+                if (auto* context = u->unit != nullptr ? u->unit->first(construct::Context) : nullptr)
+                    for (auto* clause : context->children)
+                        if (clause->is(construct::With))
+                            for (auto* name : clause->children)
+                                if (!name->is(construct::Flag) && name_text(name->source) == aName)
+                                    return name;
+                return nullptr;
+            };
             std::set<std::string> reported;
             for (auto const& n : named)
                 for (auto const& d : closure(n))
                     if (auto const* r = forbids(d))
                         for (auto const& restriction : *r)
-                            if (reported.insert(restriction).second)
-                                recover([&]() { error(u->unit, "this unit depends on " + d + ", which violates the partition's restriction " + restriction + " (13.12)"); });
+                            if (reported.insert(restriction + "|" + n).second)
+                            {
+                                auto* where = withNode(n);
+                                recover([&]() { error(where != nullptr ? where : u->unit, "this unit depends on " + d + ", which violates the partition's restriction " +
+                                    restriction + " (13.12)"); });
+                            }
             walk(u->item, false);
+        }
+        // (the environment task's CPU: specified (No_Tasks_Unassigned_To_CPU, D.7(10.10/4)): the main subprogram's (the last library
+        // subprogram body of the main file))
+        if (restricted("no_tasks_unassigned_to_cpu"))
+        {
+            unit_info* main = nullptr;
+            for (auto* u : iOrder)
+                if (u->main_file && u->item != nullptr && u->item->is(construct::SubprogramBody) && u->ent != nullptr)
+                    main = u;
+            if (main != nullptr && main->ent->cpu == nullptr)
+                violation(main->item, "No_Tasks_Unassigned_To_CPU");
         }
     }
 
@@ -962,6 +1539,15 @@ namespace neos::compilers::ada
                     if (c->is(construct::Word) && c != a->children.back())
                         kind += (words++ > 0u ? "'" : "") + name_text(c->source);
                 auto const policy = name_text(a->children.back()->source);
+                // (a policy identifier: Check, Ignore or an implementation-defined one (11.4.2(6/2, 9/3)); an assertion aspect mark (11.4.2(6.1/3)))
+                if (iInstanceBodies == 0 && policy != "check" && policy != "ignore" && policy != "disable" && policy != "suppressible")
+                    recover([&]() { error(a->children.back(), "\"" + policy + "\" is not an assertion policy (11.4.2)"); });
+                static std::set<std::string> const assertionKinds{ "assert", "static_predicate", "dynamic_predicate", "pre", "pre'class", "post",
+                    "post'class", "type_invariant", "type_invariant'class", "default_initial_condition", "assertion", "predicate", "invariant",
+                    "invariant'class", "precondition", "postcondition", "loop_invariant", "loop_variant", "assume", "contract_cases", "statement_assertions",
+                    "subprogram_variant", "check", "assert_and_cut", "ghost", "refined_post", "initial_condition", "predicate_failure" };
+                if (iInstanceBodies == 0 && !kind.empty() && !assertionKinds.contains(kind))
+                    recover([&]() { error(a, "\"" + kind + "\" is not an assertion aspect (11.4.2)"); });
                 bool const ignore = policy == "ignore" || policy == "disable";
                 if (kind.empty())
                     policies.clear();
@@ -1801,9 +2387,14 @@ namespace neos::compilers::ada
         for (auto* holder : { aDecl, e != nullptr && e->sub != nullptr ? e->sub->spec : nullptr })
             if (auto* aspects = holder != nullptr ? holder->first(construct::Aspects) : nullptr)
                 for (auto* aspect : aspects->children)
-                    if (name_text(aspect->child(0)->source) == "no_return" && e != nullptr && e->sub != nullptr &&
-                        (aspect->size() < 2u || aspect->children.back() == aspect->child(0) || name_text(aspect->children.back()->source) == "true"))
-                        e->sub->no_return = true;
+                    if (name_text(aspect->child(0)->source) == "no_return" && e != nullptr && e->sub != nullptr)
+                    {
+                        // (of a generic procedure, not a generic function (6.5.1(3.1/3)))
+                        if (e->kind == entity_kind::GenericFunction && iInstanceBodies == 0)
+                            recover([&]() { error(aspect, "aspect No_Return can be specified only for a procedure or generic procedure (6.5.1)"); });
+                        else if (aspect->size() < 2u || aspect->children.back() == aspect->child(0) || name_text(aspect->children.back()->source) == "true")
+                            e->sub->no_return = true;
+                    }
         if (e == nullptr)
             return;
         e->decl = aDecl;
@@ -1860,7 +2451,7 @@ namespace neos::compilers::ada
                                 speculation guard{ *this };
                                 try { mt = subtype_mark(mark, aRegion); } catch (compile_error const&) {}
                             }
-                            null_exclusion_check(mt, mark);
+                            null_exclusion_check(mt, mark, aRegion);
                         }
                     }
                     // (a formal array type's component subtype: a subtype mark (12.5.3(2)))
@@ -2167,8 +2758,12 @@ namespace neos::compilers::ada
         auto* const savedUnit = iCurrentUnit;
         struct restore_unit { unit_info*& target; unit_info* value; ~restore_unit() { target = value; } } restoreUnit{ iCurrentUnit, savedUnit };
         if (aGeneric->library && iCurrentUnit == nullptr)
-            if (auto* u = find_unit(full_name(aGeneric), false))
-                iCurrentUnit = iTemplateUnit = u;
+        {
+            // (the unit that declares it (not a unit of its name compiled later that replaces it))
+            auto u = std::find_if(iUnits.begin(), iUnits.end(), [&](unit_info const& v) { return v.ent == aGeneric && !v.body; });
+            if (auto* d = u != iUnits.end() ? &*u : find_unit(full_name(aGeneric), false))
+                iCurrentUnit = iTemplateUnit = d;
+        }
         struct clear_template { unit_info*& target; ~clear_template() { target = nullptr; } } clearTemplate{ iTemplateUnit };
         auto* const savedChecked = iCheckedGeneric;
         struct restore_checked { node const*& target; node const* value; ~restore_checked() { target = value; } } restoreChecked{ iCheckedGeneric, savedChecked };
@@ -2188,8 +2783,17 @@ namespace neos::compilers::ada
             return g->sub->body;
         // (a library generic's body unit)
         if (g->library)
-            if (auto* u = find_unit(full_name(g), true); u != nullptr)
+        {
+            // (as of the unit that declares it (the body of that declaration: not one of a unit of its name compiled later that
+            // replaces it))
+            auto const* savedAsOf = iAsOf;
+            if (auto d = std::find_if(iUnits.begin(), iUnits.end(), [&](unit_info const& v) { return v.ent == g && !v.body; }); d != iUnits.end())
+                iAsOf = &*d;
+            auto* u = find_unit(full_name(g), true);
+            iAsOf = savedAsOf;
+            if (u != nullptr)
                 return u->item->is(construct::Subunit) ? u->item->child(1) : u->item;
+        }
         // (a body declared later in the declarative part that the generic is in, or its stub's subunit)
         if (g->scope != nullptr)
         {
@@ -2307,8 +2911,9 @@ namespace neos::compilers::ada
                 return p.is_integer() && q.is_integer() ? p.integer() == q.integer() : p.real() == q.real();
             };
             // (bounds not static: the same subtype (its bounds' hidden constants))
+            // (the same elaboration of a constraint: not another constraint of the same bounds (e.g. S range T'Range), 4.9.1(1.2/2))
             if (x->low_object != nullptr && x->low_object == y->low_object && x->high_object == y->high_object)
-                return true;
+                return x->range_node == nullptr || y->range_node == nullptr || x->range_node == y->range_node;
             return same(x->low, y->low) && same(x->high, y->high);
         }
         // (access subtypes: both or neither excluding null, of statically matching designated subtypes (4.9.1(2/3)))
@@ -2320,7 +2925,8 @@ namespace neos::compilers::ada
                 return true;
             auto* dx = x->designated->view();
             auto* dy = y->designated->view();
-            if (dx->kind == type_kind::Array || dy->kind == type_kind::Array || !dx->discriminant_values.empty() || !dy->discriminant_values.empty())
+            if (dx->kind == type_kind::Array || dy->kind == type_kind::Array || !dx->discriminant_values.empty() || !dy->discriminant_values.empty() ||
+                (dx->is_scalar() && dy->is_scalar()))
                 return statically_matching(x->designated, y->designated);
             return true;
         }
@@ -2798,8 +3404,8 @@ namespace neos::compilers::ada
         // (Pre and Post: not of an instance (6.1.1))
         if (auto* aspects = aDecl->first(construct::Aspects); aspects != nullptr && iInstanceBodies == 0)
             for (auto* aspect : aspects->children)
-                if (auto const a = name_text(aspect->child(0)->source); a == "pre" || a == "post")
-                    recover([&]() { error(aspect, "aspect " + a + " cannot be specified for an instance"); });
+                if (auto const a = name_text(aspect->child(0)->source); a == "pre" || a == "post" || a == "no_return")
+                    recover([&]() { error(aspect, "aspect " + (a == "no_return" ? std::string{ "No_Return" } : a) + " cannot be specified for an instance"); });
         auto* defining = aDecl->first(construct::Defining);
         if (defining == nullptr)
             defining = aDecl->first(construct::DefiningOperator);
@@ -2831,9 +3437,22 @@ namespace neos::compilers::ada
         // (a generic child unit named through an instance of its parent: instantiated as the instance's child (10.1.1(19)))
         entity* parentInstance = nullptr;
         if (genericName->is(construct::Selected))
-            if (auto* p = resolve_entity(genericName->child(0), aRegion); p != nullptr && p->generic != nullptr && generic->scope != nullptr &&
-                generic->scope->owner == p->generic)
-                parentInstance = p;
+            if (auto* p = resolve_entity(genericName->child(0), aRegion); p != nullptr && generic->scope != nullptr)
+            {
+                if (p->generic != nullptr && generic->scope->owner == p->generic)
+                    parentInstance = p;
+                // (the check instance of the generic parent (checking a generic within it: its name denotes the current instance))
+                else if (auto const t = iTemplateInstanceOf.find(generic->scope->owner); t != iTemplateInstanceOf.end() && t->second->inner != nullptr &&
+                    (t->second == p || p->renamed == t->second))
+                    parentInstance = t->second;
+                // (the generic parent's name within an instance of it: the current instance (8.6(18)))
+                else if (p->is_generic() && generic->scope->owner == p)
+                    for (region* jump = nullptr, *r = aRegion; r != nullptr && parentInstance == nullptr; r = outward(r, jump))
+                    {
+                        if (r->owner != nullptr && r->owner->is_package() && r->owner->generic == p)
+                            parentInstance = r->owner;
+                    }
+            }
         // (named by its simple name within an instance of its parent: that instance)
         if (parentInstance == nullptr && genericName->is(construct::Identifier) && generic->scope != nullptr && generic->scope->owner != nullptr &&
             generic->scope->owner->is_generic())
@@ -2866,6 +3485,10 @@ namespace neos::compilers::ada
         // (a subprogram instance can be a primitive operation (overriding an inherited one))
         if (instance->is_subprogram() && instance->sub != nullptr)
         {
+            // (not a homograph of an explicit declaration of the region (8.3(26/2)))
+            if (iInstanceBodies == 0 && iInstantiationSites.empty())
+                if (auto* defining = aDecl->first(construct::Defining) != nullptr ? aDecl->first(construct::Defining) : aDecl->first(construct::DefiningOperator))
+                    homograph_check(instance, defining, aRegion);
             bool const overridesImplicit = implicit_homograph(instance, aRegion);
             add_primitive_if(instance, aRegion);
             implicit_inequality(instance, aRegion);
@@ -2963,6 +3586,7 @@ namespace neos::compilers::ada
         auto* formalRegion = new_region(aInstance, genericParent);
         formalRegion->level = aRegion->level;
         formalRegion->generic_formals = true;
+        iInstanceFormalRegions[aInstance] = formalRegion;
         formalRegion->visibility_cutoff = aParentInstance == nullptr ? declaration : nullptr;
         // (its Default_Storage_Pool aspect: the default pool of the access types within it (13.11.3(5.1/4)))
         if (auto* aspects = aInstantiation->first(construct::Aspects))
@@ -3083,6 +3707,18 @@ namespace neos::compilers::ada
                     {
                         auto* d = f->first(construct::Defining);
                         auto const formalName = name_text(d->source);
+                        // (not a representation aspect of a formal type (13.1(9.2/5)))
+                        if (templateCheck && iInstanceBodies == 0)
+                            if (auto* formalAspects = f->first(construct::Aspects))
+                                for (auto* aspect : formalAspects->children)
+                                {
+                                    static std::set<std::string> const representation{ "pack", "size", "object_size", "value_size", "alignment",
+                                        "component_size", "small", "bit_order", "storage_size", "storage_pool", "default_value", "default_component_value",
+                                        "stream_size", "machine_radix", "scalar_storage_order", "unchecked_union" };
+                                    if (!aspect->children.empty())
+                                        if (auto const n = name_text(aspect->child(0)->source); representation.contains(n))
+                                            recover([&]() { error(aspect, "the aspect " + n + " cannot be specified for a generic formal type (13.1)"); });
+                                }
                         auto* actual = actual_for(formalName);
                         if (actual == nullptr)
                             actual = next_positional();
@@ -3432,18 +4068,36 @@ namespace neos::compilers::ada
                         {
                             target = resolve_subprogram_name(actual, e, aRegion);
                             e->sub->renamed_name = actual;
+                            // (a protected procedure or entry of an object: of a variable (9.5(7.1/3)))
+                            if (target != nullptr && actual->is(construct::Selected) && !actual->children.empty() && actual->child(0)->type != nullptr && (actual->child(0)->type->view()->kind == type_kind::Protected || actual->child(0)->type->view()->kind == type_kind::Access) && meaning_of(actual->child(0)) != meaning::Type)
+                                synchronized_target_check(target, actual->child(0), actual);
+                            else if (target != nullptr && actual->is(construct::Identifier))
+                                synchronized_target_check(target, nullptr, actual);
                             // (null exclusions of the formal's parameters and result: the actual's too (12.6(8.6/3)))
-                            if (target != nullptr && target->sub != nullptr && !templateCheck && iInstanceBodies == 0 &&
-                                target->sub->parameters.size() == e->sub->parameters.size())
+                            // (in a generic body (checked as its instance), an actual that is a formal subprogram of the generic: its null
+                            // exclusions only those its declaration states explicitly (assume the worst of its subtypes'))
+                            if (target != nullptr && target->sub != nullptr && !templateCheck && iSpeculation == 0 &&
+                                (iInstanceBodies == 0 || within_generic_body(aRegion)) && target->sub->parameters.size() == e->sub->parameters.size())
                             {
+                                bool const worst = within_generic_body(aRegion) && [&]()
+                                {
+                                    int n = 0;
+                                    for (node* x = target->decl; x != nullptr && n < 6; x = x->parent, ++n)
+                                        if (x->is(construct::FormalSubprogram))
+                                            return true;
+                                    return false;
+                                }();
+                                auto const excludesType = [&](ada_type* aType) { return aType != nullptr && (!worst || aType->anonymous_access) &&
+                                    (aType->not_null || aType->view()->not_null); };
                                 auto const excludes = [](parameter_info const& p) { return p.not_null || (p.type != nullptr && (p.type->not_null || p.type->view()->not_null)); };
+                                auto const actualExcludes = [&](parameter_info const& p) { return p.not_null || excludesType(p.type); };
                                 bool mismatch = false;
                                 for (std::size_t k = 0u; k < e->sub->parameters.size(); ++k)
-                                    if (excludes(e->sub->parameters[k]) && !excludes(target->sub->parameters[k]))
+                                    if (excludes(e->sub->parameters[k]) && !actualExcludes(target->sub->parameters[k]))
                                         mismatch = true;
                                 auto const resultExcludes = [](subprogram_info const& s) { return s.result_not_null || (s.result != nullptr && (s.result->not_null ||
                                     s.result->view()->not_null)); };
-                                if (resultExcludes(*e->sub) && target->sub->result != nullptr && !resultExcludes(*target->sub))
+                                if (resultExcludes(*e->sub) && target->sub->result != nullptr && !(target->sub->result_not_null || excludesType(target->sub->result)))
                                     mismatch = true;
                                 if (mismatch)
                                     recover([&]() { error(actual, "the actual subprogram's parameters and result must exclude null where the formal's do (12.6(8.6/3))"); });
@@ -3572,6 +4226,7 @@ namespace neos::compilers::ada
                             bool const box = [&]() { auto* apply = f->first(construct::Apply); return apply == nullptr || (apply->size() == 2u && apply->child(1)->is(construct::Box)); }();
                             instantiate(box ? generic->decl : f, generic, target, formalRegion, nullptr);
                             target->generic = generic;
+                            iFormalPackageTemplates.insert(target);
                             // (an explicit actual part (not (<>)): the template's formals are not part of its visible part (12.7(10/2)))
                             if (auto* apply = f->first(construct::Apply); apply != nullptr && !(apply->size() == 2u && apply->child(1)->is(construct::Box)))
                                 iFormalPackagesWithActuals.insert(target);
@@ -3833,11 +4488,13 @@ namespace neos::compilers::ada
                 auto* own = new_entity(aInstance->kind, aInstance->name, bodySpec->child(0), instanceRegion);
                 subprogram_specification(bodySpec, own, bodyParameters);
                 // (checking the generic itself: its body conforms to its declaration (6.3.1))
+                bool conformant = true;
                 if (templateCheck)
-                    recover([&]() { conformance_check(*aInstance->sub, *own->sub, aGeneric->name, bodySpec->child(0)); });
+                    recover([&]() { conformant = false; conformance_check(*aInstance->sub, *own->sub, aGeneric->name, bodySpec->child(0)); conformant = true; });
                 aInstance->sub->parameters = own->sub->parameters;
                 aInstance->inner = bodyParameters;
-                bodyParameters->owner = aInstance;
+                // (a body that does not conform: its statements are of its own profile (not a cascade of the error))
+                bodyParameters->owner = conformant ? aInstance : own;
                 aInstance->sub->body = bodyCopy;
                 aInstance->sub->spec = bodySpec;
                 bodyCopy->ent = aInstance;
@@ -3940,6 +4597,19 @@ namespace neos::compilers::ada
                     if (auto* u = library_unit(prefix); u != nullptr && u->is_generic())
                         return;
                 }
+            // (its parent body: in the environment, with its stub (10.1.3(13)) (not a parent body replaced by a unit compiled later))
+            if (iCurrentUnit != nullptr && iCurrentUnit->given)
+                if (auto const dot = iCurrentUnit->name.rfind('.'); dot != std::string::npos)
+                {
+                    auto* parentBody = find_unit(iCurrentUnit->name.substr(0u, dot), true);
+                    node const* stubUnit = nullptr;
+                    if (auto s = iStubNodes.find(iCurrentUnit->name); s != iStubNodes.end() && stub != iStubs.end())
+                        for (stubUnit = s->second; stubUnit != nullptr && !stubUnit->is(construct::Unit); stubUnit = stubUnit->parent)
+                            ;
+                    if (parentBody == nullptr || (parentBody->analysed && parentBody->given && stubUnit != parentBody->unit))
+                        error(aDecl->child(0), "the parent body of the subunit \"" + iCurrentUnit->name + "\" " + (parentBody == nullptr ?
+                            "is not in the environment" : "has no body stub for it") + " (10.1.3(13))");
+                }
             if (auto s = iStubNodes.find(iCurrentUnit != nullptr ? iCurrentUnit->name : std::string{}); s != iStubNodes.end())
                 iStubBodies[s->second] = proper;
             switch (proper->kind)
@@ -3967,7 +4637,19 @@ namespace neos::compilers::ada
                         break;
                     }
                 }
-                subprogram_body(proper, r);
+                // (it completes its stub's subprogram (fully conformant with the stub, 10.1.3(?)); a subunit compiled again replaces the
+                // earlier (10.1.4(5)))
+                if (auto s = iStubNodes.find(iCurrentUnit != nullptr ? iCurrentUnit->name : std::string{}); s != iStubNodes.end())
+                    if (auto st = iStubEntities.find(s->second); st != iStubEntities.end())
+                    {
+                        iSubunitOf = st->second;
+                        if (auto* completed = st->second.first; completed->sub != nullptr && completed->sub->body != nullptr && completed->sub->body != proper)
+                            completed->sub->body = nullptr;
+                    }
+                {
+                    struct clear { std::pair<entity*, entity*>& p; ~clear() { p = {}; } } const clearSubunit{ iSubunitOf };
+                    subprogram_body(proper, r);
+                }
                 break;
             case construct::PackageBody:
                 package_body(proper, r);
@@ -3989,6 +4671,10 @@ namespace neos::compilers::ada
         if (iInstanceBodies == 0 && iInstantiationSites.empty())
         {
             auto* body = aDecl->parent != nullptr && aDecl->parent->is(construct::Declarations) ? aDecl->parent->parent : nullptr;
+            // (a copy of a generic's body (checking the generic): the body copied)
+            for (auto o = body != nullptr && body->parent == nullptr ? iCloneOrigins.find(body) : iCloneOrigins.end(); o != iCloneOrigins.end();
+                o = body->parent == nullptr ? iCloneOrigins.find(body) : iCloneOrigins.end())
+                body = o->second;
             bool const outermost = body != nullptr && (body->is(construct::SubprogramBody) || body->is(construct::PackageBody) ||
                 body->is(construct::TaskBody) || body->is(construct::ProtectedBody)) && body->parent != nullptr &&
                 (body->parent->is(construct::Unit) || body->parent->is(construct::Subunit));
@@ -4035,7 +4721,9 @@ namespace neos::compilers::ada
             auto* parameters = new_region(own, aRegion);
             parameters->level = aRegion->level + 1;
             subprogram_specification(spec, own, parameters);
-            if (auto* declared = find_completion(own, aRegion); declared == nullptr)
+            auto* declared = find_completion(own, aRegion);
+            iStubEntities[aDecl] = { declared != nullptr ? declared : own, own };
+            if (declared == nullptr)
             {
                 // (a stub without a declaration: not a homograph of a declaration of the region (8.3(26/2)))
                 if (iInstanceBodies == 0 && iInstantiationSites.empty())
@@ -4092,6 +4780,15 @@ namespace neos::compilers::ada
                     instance = r->owner;
                     parent = full_name(r->owner->generic);
                 }
+                // (the instance that checks a generic (its subunits checked in it too))
+                else if (iTemplateInstances.contains(r->owner))
+                    for (auto const& [g, i] : iTemplateInstanceOf)
+                        if (i == r->owner)
+                        {
+                            instance = r->owner;
+                            parent = full_name(const_cast<entity*>(g));
+                            break;
+                        }
                 break;
             }
         // (a stub in an instance's body: its subunit's proper body analysed here, in this instance (the generic's subunit))

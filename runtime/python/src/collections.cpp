@@ -433,7 +433,17 @@ namespace neos::python_runtime
                         if (!factory)
                             return nullptr;
                         std::string factoryText, dictText;
-                        if (!repr_of(factory.get(), factoryText) || !repr_of(builtin_value(aArgs[0]), dictText))
+                        // (a factory whose repr is being made already (e.g. a bound method of the dict): "..." (as CPython's))
+                        if (repr_enter(factory.get()))
+                            factoryText = "...";
+                        else
+                        {
+                            bool const made = repr_of(factory.get(), factoryText);
+                            repr_leave(factory.get());
+                            if (!made)
+                                return nullptr;
+                        }
+                        if (!repr_of(builtin_value(aArgs[0]), dictText))
                             return nullptr;
                         return make_str(class_name_of(aArgs[0]) + "(" + factoryText + ", " + dictText + ")");
                     } },

@@ -73,6 +73,11 @@ namespace neos::language
                                             ///< without its opening one is extended through it
         std::vector<std::string> syntaxRecoveryFiller; ///< (meta: syntax.recovery.filler) syntax error recovery: the texts tried in place
                                             ///< of a skipped text, in order, if skipping it (leaving spaces) makes the parse fail there
+        std::vector<std::string> syntaxRecoveryToken; ///< (meta: syntax.recovery.token) syntax error recovery: the texts tried in place
+                                            ///< of the token at an error (e.g. a malformed literal), so that the parse resumes after it
+        std::vector<std::string> syntaxRecoveryComment; ///< (meta: syntax.recovery.comment) syntax error recovery: the terminals that
+                                            ///< begin a comment to the end of the line (skipped, as the parser skips it, in finding the text
+                                            ///< that follows a skip)
     };
 
     namespace code_parser
@@ -133,4 +138,4 @@ namespace neos::language
         const concept_libraries_t& iConceptLibraries;
         std::chrono::steady_clock::duration iParseTime = {};
     };
-}
+}

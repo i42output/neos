@@ -333,6 +333,9 @@ namespace neos
                                                                         ///< (it left there often))
                     std::vector<std::map<std::size_t, std::uint32_t>> guardFailures;
                     std::vector<std::map<std::size_t, std::uint32_t>> deoptStrikes;   ///< (the times that inlined calls' deopts made the function optimized again)
+                    std::vector<std::vector<std::size_t>> struck;       ///< (each function's inlined calls that its last deopt struck (their strikes then
+                                                                        ///< fewer than DeoptStrikes): for its next optimization (see tier_job::strikeIfSame))
+                    std::vector<std::uint64_t> tokensHash;              ///< (each function's optimized code's: the optimizer's code's hash (see tier_job))
                     std::vector<std::vector<bool>> parametersRead;      ///< (each function's parameters that its code reads (see optimizer::parameters_read):
                                                                         ///< made (once) before the first optimization; optimized code's calls pass only those)
                     std::vector<std::optional<std::set<std::pair<std::uint64_t, std::uint64_t>>>> usefulSpeculations;  ///< (each function's last
@@ -481,6 +484,13 @@ namespace neos
                     optimizer::options options;
                     std::optional<std::set<std::pair<std::uint64_t, std::uint64_t>>> hint;   ///< (see options::usefulHint)
                     bool rewritten = false;             ///< (the optimizer optimized it (else it is not optimized))
+                    // (an optimization after deopts (not guards') that struck inlined calls (compiled_module::struck): if the optimizer's code is
+                    // the same as the code that left (its hash: previousHash), it would leave there again, so those calls are struck again now
+                    // (they call rather than deopt: see DeoptStrikes) and the optimizer runs again (struckAgain: those calls))
+                    std::uint64_t previousHash = 0u;
+                    std::vector<std::size_t> strikeIfSame;
+                    std::vector<std::size_t> struckAgain;
+                    std::uint64_t tokensHash = 0u;      ///< (the optimizer's code's hash)
                     // (the words of the program's memory that its optimizer and its SSA optimizer read (the values that its code may
                     // use: e.g. a property cache's entry's fields, which the runtime changes as the program runs). Made in the background,
                     // they may be of different moments (e.g. an entry's fields as the runtime changes it): it is installed only if each 
@@ -9765,6 +9775,9 @@ namespace neos
                         options.noInline = m.noInline[f];
                         options.largeRejects = m.largeRejects.get();
                         options.noDeopt = m.noDeopt[f];
+                        job->previousHash = m.tokensHash[f];
+                        job->strikeIfSame = std::move(m.struck[f]);
+                        m.struck[f].clear();
                         options.speculation = m.speculation && m.recompiles[f] < MaxRecompiles;
                         options.inlining = m.inlining;
                         // (deopts: where the baseline's code has a frame to leave for (else none))
@@ -9820,6 +9833,15 @@ namespace neos
                         return job;
                     }
 
+                    // (an optimizer's code's hash (FNV-1a of its tokens))
+                    std::uint64_t tokens_hash(std::vector<std::uint64_t> const& aTokens)
+                    {
+                        std::uint64_t hash = 0xCBF29CE484222325ull;
+                        for (auto const t : aTokens)
+                            hash = (hash ^ t) * 0x100000001B3ull;
+                        return hash;
+                    }
+
                     // (an optimization's optimizer (on any thread: see run_optimizer): whether it optimized the function (its result, and
                     // the job's version and description: the function's code the optimizer's))
                     bool rewrite_optimization(compiled_module::tier_job& aJob)
@@ -9830,14 +9852,30 @@ namespace neos
                         auto& r = aJob.result;
                         options.usefulHint = aJob.hint ? &*aJob.hint : nullptr;
                         aJob.reads.clear();
-                        r = run_optimizer(m, f, options, &aJob.reads);
-                        if (!r.deopts.empty() && !deopts_valid(m, f, r))
+                        auto const optimize = [&]()
+                        {
+                            r = run_optimizer(m, f, options, &aJob.reads);
+                            if (!r.deopts.empty() && !deopts_valid(m, f, r))
+                            {
+                                if (m.verbose != 0u)
+                                    std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
+                                options.deopt = false;
+                                aJob.reads.clear();
+                                r = run_optimizer(m, f, options, &aJob.reads);
+                            }
+                            aJob.tokensHash = tokens_hash(r.tokens);
+                        };
+                        optimize();
+                        // (the same code as the code that left (see tier_job::strikeIfSame): its struck calls are struck again, and it is
+                        // optimized again)
+                        if (!aJob.strikeIfSame.empty() && aJob.tokensHash == aJob.previousHash && !r.tokens.empty())
                         {
                             if (m.verbose != 0u)
-                                std::fprintf(stderr, "[tier2] f%u: no deopts (the baseline's frame does not match)\n", f);
-                            options.deopt = false;
+                                std::fprintf(stderr, "[tier2] f%u: the same code (its deopts' calls struck again)\n", f);
+                            options.noDeopt.insert(aJob.strikeIfSame.begin(), aJob.strikeIfSame.end());
+                            aJob.struckAgain = std::move(aJob.strikeIfSame);
                             aJob.reads.clear();
-                            r = run_optimizer(m, f, options, &aJob.reads);
+                            optimize();
                         }
                         options.usefulHint = nullptr;
                         aJob.hint.reset();
@@ -10042,6 +10080,12 @@ namespace neos
                         auto& version = aJob.version;
                         if (aJob.options.speculation)
                             m.usefulSpeculations[f] = std::move(r.useful);
+                        // (calls struck again by its optimizer (see tier_job::strikeIfSame): as if its code had left there again)
+                        for (auto const call : aJob.struckAgain)
+                        {
+                            m.deoptStrikes[f][call] = std::max(m.deoptStrikes[f][call], DeoptStrikes);
+                            m.noDeopt[f].insert(call);
+                        }
                         if (!aJob.rewritten)
                         {
                             // (not optimized)
@@ -10110,6 +10154,7 @@ namespace neos
                         set_entry(m, f, target);
                         m.indirect[f].target = target;
                         m.tierState[f] = 1u;
+                        m.tokensHash[f] = aJob.tokensHash;
                         m.currentVersion[f] = version.get();
                         m.versions.push_back(std::move(version));
                         for (std::size_t i = 0u; i < 3u; ++i)
@@ -10595,9 +10640,12 @@ namespace neos
                                 ++aVersion->deoptCounts[aDeopt];
                                 m.noDeopt[f].insert(d.call);
                             }
+                            m.struck[f].clear();
                             for (auto const call : struck)
                                 if (++m.deoptStrikes[f][call] >= DeoptStrikes)
                                     m.noDeopt[f].insert(call);
+                                else if (m.noDeopt[f].find(call) == m.noDeopt[f].end())
+                                    m.struck[f].push_back(call);
                             if (aVersion->osrLoop != NoOsrLoop)
                             {
                                 osr_left(m, aVersion);
@@ -10880,6 +10928,8 @@ namespace neos
                             m.noDeopt.resize(n);
                             m.guardFailures.resize(n);
                             m.deoptStrikes.resize(n);
+                            m.struck.resize(n);
+                            m.tokensHash.assign(n, 0u);
                             m.currentVersion.assign(n, nullptr);
                             m.savedEntries.resize(n);
                             m.jobs.resize(n);

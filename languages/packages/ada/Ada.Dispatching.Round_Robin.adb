@@ -29,34 +29,61 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
---  neos does not support the Round_Robin_Within_Priorities policy (its
---  scheduler has no time slices): FIFO_Within_Priorities applies at every
---  priority.
+--  The quanta are the runtime's (its scheduler accounts each task's execution
+--  time against its budget, see D.2.5): any positive quantum is supported, as
+--  set; a budget's exhaustion is detected at the running task's next
+--  dispatching point or poll (at most 100 microseconds apart while it executes
+--  a loop), with the accuracy of the execution time clocks (D.14).
+
+with Interfaces;
 
 package body Ada.Dispatching.Round_Robin is
+
+   use type Interfaces.Integer_64;
+
+   Round_Robin_Within_Priorities : constant := 3;   --  (the runtime's policy)
+
+   function Policy (Pri : System.Any_Priority) return Interfaces.Integer_64;
+   pragma Import (Neos, Policy, "ada::policy");
+   procedure Set (Low, High : System.Any_Priority; Quantum : Ada.Real_Time.Time_Span);
+   pragma Import (Neos, Set, "ada::quantum_set");
+   function Get (Pri : System.Any_Priority) return Ada.Real_Time.Time_Span;
+   pragma Import (Neos, Get, "ada::quantum");
+
+   --  (Dispatching_Policy_Error unless each priority in the range is covered by
+   --  Round_Robin_Within_Priorities (D.2.5(9/2)))
+   procedure Check (Low, High : System.Priority) is
+   begin
+      for P in Low .. High loop
+         if not Is_Round_Robin (P) then
+            raise Dispatching_Policy_Error;
+         end if;
+      end loop;
+   end Check;
 
    procedure Set_Quantum (Pri     : in System.Priority;
                           Quantum : in Ada.Real_Time.Time_Span) is
    begin
-      raise Dispatching_Policy_Error;
+      Set_Quantum (Pri, Pri, Quantum);
    end Set_Quantum;
 
    procedure Set_Quantum (Low, High : in System.Priority;
                           Quantum   : in Ada.Real_Time.Time_Span) is
    begin
-      raise Dispatching_Policy_Error;
+      Check (Low, High);
+      Set (Low, High, Quantum);
    end Set_Quantum;
 
    function Actual_Quantum (Pri : System.Priority)
               return Ada.Real_Time.Time_Span is
    begin
-      raise Dispatching_Policy_Error;
-      return Default_Quantum;
+      Check (Pri, Pri);
+      return Get (Pri);
    end Actual_Quantum;
 
    function Is_Round_Robin (Pri : System.Priority) return Boolean is
    begin
-      return False;
+      return Policy (Pri) = Round_Robin_Within_Priorities;
    end Is_Round_Robin;
 
 end Ada.Dispatching.Round_Robin;

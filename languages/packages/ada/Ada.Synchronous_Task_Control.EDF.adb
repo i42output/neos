@@ -29,17 +29,22 @@
 --  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 --  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-with Ada.Dispatching.EDF;
-
 package body Ada.Synchronous_Task_Control.EDF is
+
+   --  (the deadline when the task is next made ready (released): the clock
+   --  then plus an offset; then (it was not blocked) the clock now plus it)
+   procedure Release_Offset (TS : Ada.Real_Time.Time_Span);
+   pragma Import (Neos, Release_Offset, "ada::release_offset");
+   procedure Release_Deadline_End;
+   pragma Import (Neos, Release_Deadline_End, "ada::release_deadline_end");
 
    procedure Suspend_Until_True_And_Set_Deadline
       (S  : in out Suspension_Object;
        TS : in     Ada.Real_Time.Time_Span) is
-      use type Ada.Real_Time.Time;
    begin
+      Release_Offset (TS);
       Suspend_Until_True (S);
-      Ada.Dispatching.EDF.Set_Deadline (Ada.Real_Time.Clock + TS);
+      Release_Deadline_End;
    end Suspend_Until_True_And_Set_Deadline;
 
 end Ada.Synchronous_Task_Control.EDF;

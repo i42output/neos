@@ -34,8 +34,8 @@
 // The Ada runtime: the native primitives of the standard library (Annexes B to F: Interfaces.C, tasking control, execution
 // time, ...): see ada.hpp
 //
-// Ada.Execution_Time imports cpu_time: the CPU time of the program's thread (which runs all of an Ada program's tasks), in
-// nanoseconds.
+// thread_cpu_time: the CPU time of the program's thread (which runs all of an Ada program's tasks), in nanoseconds (the tasking
+// runtime accounts it to the tasks, see tasking.cpp).
 
 #include <chrono>
 #include <cstdint>
@@ -47,27 +47,32 @@
 #endif
 #include "ada.hpp"
 
+std::int64_t neos::ada_runtime::thread_cpu_time()
+{
+#ifdef _WIN32
+    FILETIME creation, exit, kernel, user;
+    if (!::GetThreadTimes(::GetCurrentThread(), &creation, &exit, &kernel, &user))
+        return 0;
+    auto const ticks = (static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32u | kernel.dwLowDateTime) +
+        (static_cast<std::uint64_t>(user.dwHighDateTime) << 32u | user.dwLowDateTime);
+    return static_cast<std::int64_t>(ticks * 100u);
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
+    timespec now{};
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now) != 0)
+        return 0;
+    return static_cast<std::int64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
+#else
+    return static_cast<std::int64_t>(std::clock()) * (1000000000 / CLOCKS_PER_SEC);
+#endif
+}
+
 namespace
 {
     using namespace neos::ada_runtime;
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_cpu_time()
     {
-#ifdef _WIN32
-        FILETIME creation, exit, kernel, user;
-        if (!::GetThreadTimes(::GetCurrentThread(), &creation, &exit, &kernel, &user))
-            return 0;
-        auto const ticks = (static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32u | kernel.dwLowDateTime) +
-            (static_cast<std::uint64_t>(user.dwHighDateTime) << 32u | user.dwLowDateTime);
-        return static_cast<std::int64_t>(ticks * 100u);
-#elif defined(CLOCK_THREAD_CPUTIME_ID)
-        timespec now{};
-        if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now) != 0)
-            return 0;
-        return static_cast<std::int64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
-#else
-        return static_cast<std::int64_t>(std::clock()) * (1000000000 / CLOCKS_PER_SEC);
-#endif
+        return thread_cpu_time();
     }
 
     [[maybe_unused]] constexpr auto I64 = NEOS_RT_I64;

@@ -193,11 +193,13 @@
 --
 --
 --  Alterations (neos):
---  The with clause for System (in the RM's text of the clause) is included. The
+--  The with clause for System (in the RM's text of the clause) is included. A
+--  with clause for Ada.Finalization is added (for the private part). The
 --  implementation-defined value is neos's. The private part is neos's.
 --  (See languages/packages/ada/NOTICE.)
 
 with System;
+private with Ada.Finalization;
 package Ada.Execution_Time.Timers
    with Nonblocking is
 
@@ -227,9 +229,15 @@ package Ada.Execution_Time.Timers
    Timer_Resource_Error : exception;
 
 private
-   --  neos supports no execution-time timers (D.14.1(28)): setting a timer
-   --  raises Timer_Resource_Error, and a timer is always clear.
+   --  A timer is set if its handler is not null. Its expiry is the runtime's
+   --  (an execution-time event of the task, keyed by the timer's address);
+   --  a task executes the handlers of the timers that expire (see the body).
    type Timer (T : not null access constant
                        Ada.Task_Identification.Task_Id) is
-      tagged limited null record;
+      new Ada.Finalization.Limited_Controlled with record
+         Handler : Timer_Handler := null;
+         Created : Boolean := False;   --  (its runtime event exists)
+      end record;
+
+   overriding procedure Finalize (TM : in out Timer);
 end Ada.Execution_Time.Timers;

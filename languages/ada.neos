@@ -60,6 +60,8 @@
         syntax.recovery.nesting: [ "(" ")" "record" "end record" "loop" "end loop" "if" "end if" "case" "end case" "select" "end select" "begin" "end" ]
         syntax.recovery.blocks: [ "(" ")" "record" "end record" "loop" "end loop" "if" "end if" "case" "end case" "select" "end select" ]
         syntax.recovery.filler: [ "null;" "end if;" "end loop;" "end case;" "end select;" "end;" ]
+        syntax.recovery.token: [ "0" ]
+        syntax.recovery.comment: [ "--" ]
     }
 
     stages: {
@@ -222,7 +224,8 @@
     decimal literal ::= numeral , [ '.' , numeral ] , [ exponent ] ;
     numeric literal $ ada.number ::= based literal / decimal literal ;
 
-    graphic character ::= U+0020 .. '\xFF' | U+0009 ;
+    (* (a graphic character (2.1(14/3)): not a control character, DEL or a format effector; the bytes of a UTF-8 encoded character) *)
+    graphic character ::= U+0020 .. '\x7E' | '\x80' .. '\xFF' ;
     string character ::= ( graphic character - '\"' ) | "\"\"" ;
     character literal $ ada.character ::= '\'' , graphic character , '\'' ;
     (* (a UTF-8 encoded character: its lead byte and its continuation bytes) *)
@@ -250,7 +253,7 @@
     argument value ::= if expression / case expression / quantified expression / declare expression / accuracy constrained subtype / discrete range / expression ;
     (* (an attribute: its designator (a reserved word for 'Access, 'Delta, 'Digits, 'Mod and 'Range), then its arguments) *)
     attribute reference $ ada.attribute ::= '\'' , WS , ( reduction attribute / ( attribute designator , [ WS , attribute arguments ] ) ) ;
-    attribute designator $ ada.word ::= potential keyword ;
+    attribute designator $ ada.word ::= word ;
     attribute arguments $ ada.arguments ::= '(' , WS , argument , { WS , ',' , WS , argument } , WS , ')' ;
     (* (a reduction ('Reduce, 'Parallel_Reduce): its reducer (a name or an operator symbol) and its initial value) *)
     reduction attribute ::= reduction designator , WS , reduction arguments ;
@@ -578,7 +581,7 @@
     (* --- pragmas and use clauses *)
 
     pragma $ ada.pragma ::= pragma , WS , designator name , [ WS , '(' , WS , pragma argument , { WS , ',' , WS , pragma argument } , WS , ')' ] , WS , ';' ;
-    pragma argument $ ada.pragma.argument ::= [ designator name , [ '\'' , designator name ] , WS , "=>" , WS ] , ( unparenthesized expression / expression ) ;
+    pragma argument $ ada.pragma.argument ::= [ designator name , [ '\'' , designator name ] , WS , "=>" , WS ] , ( unparenthesized expression / expression / designator name ) ;
 
     use clause ::= use type clause / use package clause ;
     use package clause $ ada.use ::= use , WS , name , { WS , ',' , WS , name } , WS , ';' ;
@@ -655,8 +658,8 @@
 
     (* --- compilation units *)
 
-    compilation $ ada.compilation ::= { WS , compilation unit } , WS ;
-    compilation unit $ ada.unit ::= context clause , WS , ( subunit / library item ) ;
+    compilation $ ada.compilation ::= { WS , compilation unit } , WS , { pragma , WS } ;
+    compilation unit $ ada.unit ::= context clause , WS , ( subunit / ( flag private , WS , subunit ) / library item ) ;
     context clause $ ada.context ::= { WS , ( with clause / use clause / pragma ) } ;
     with clause $ ada.with ::= [ flag limited , WS ] , [ flag private , WS ] , with , WS , name , { WS , ',' , WS , name } , WS , ';' ;
     library item ::= [ flag private , WS ] , ( subprogram body / package body / package declaration / generic declaration / generic instantiation /

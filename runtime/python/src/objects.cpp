@@ -69,6 +69,7 @@
 #include <unordered_map>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1946,6 +1947,16 @@ namespace neos::python_runtime
             };
         }
 
+        bool enter_recursive_call(char const* aWhere)
+        {
+            return enter_recursive_call(tRecursion, aWhere);
+        }
+
+        void leave_recursive_call()
+        {
+            --tRecursion.depth;
+        }
+
         bool repr_enter(object* aObject)
         {
             auto& reprs = tRecursion.reprs;
@@ -1969,7 +1980,10 @@ namespace neos::python_runtime
                 if (i != 0u)
                     aResult += ", ";
                 std::string item;
-                if (!repr_of(aItems[i], item))
+                // (an item whose repr can run code (that can change the container): held while its repr is made)
+                auto const x = aItems[i];
+                ref const held = can_recurse(x) ? ref::borrowed(x) : ref{};
+                if (!repr_of(x, item))
                     return false;
                 aResult += item;
             }
@@ -2052,12 +2066,19 @@ namespace neos::python_runtime
                     return true;
                 }
                 aResult = "{";
-                for (auto const& item : as<dict_object>(aObject)->items)
+                // (by position: a repr can change the dict; each item is held while its repr is made (as CPython's))
+                for (std::size_t i = 0u; i < as<dict_object>(aObject)->items.size(); ++i)
                 {
+                    auto const& item = as<dict_object>(aObject)->items[i];
+                    object* const key0 = item.first;
+                    object* const value0 = item.second;
+                    bool const held = can_recurse(key0) || can_recurse(value0);
+                    ref const k = held ? ref::borrowed(key0) : ref{};
+                    ref const v = held ? ref::borrowed(value0) : ref{};
                     if (aResult.size() > 1u)
                         aResult += ", ";
                     std::string key, value;
-                    if (!repr_of(item.first, key) || !repr_of(item.second, value))
+                    if (!repr_of(key0, key) || !repr_of(value0, value))
                         return false;
                     aResult += key + ": " + value;
                 }
@@ -2590,6 +2611,16 @@ namespace neos::python_runtime
                 error("MemoryError", "");
                 return true;
             }
+            // (the result's room first: MemoryError if it cannot be had (as CPython's), before any reference is added)
+            try
+            {
+                aResult.reserve(aResult.size() + static_cast<std::size_t>(count) * aItems.size());
+            }
+            catch (std::exception const&)
+            {
+                error("MemoryError", "");
+                return true;
+            }
             // (each item's references: added at once (as CPython's), if they are counted in its header)
             for (auto item : aItems)
                 if (item != nullptr && item->type->retain == &retain_object)
@@ -2600,7 +2631,6 @@ namespace neos::python_runtime
                 else
                     for (long long i = 0; i < count; ++i)
                         retain(item);
-            aResult.reserve(aResult.size() + static_cast<std::size_t>(count) * aItems.size());
             if (aItems.size() == 1u)
                 aResult.insert(aResult.end(), static_cast<std::size_t>(count), aItems[0]);
             else
@@ -2704,8 +2734,23 @@ namespace neos::python_runtime
                         if (is_big(aCount))
                             return big_negative(big_of(aCount)) ? make_str("") : error("OverflowError", "cannot fit 'int' into an index-sized integer");
                         std::string result;
-                        for (long long i = 0; i < int_value(aCount); ++i)
-                            result += as<str_object>(aSequence)->value;
+                        auto const& text = as<str_object>(aSequence)->value;
+                        auto const count = std::max(0ll, int_value(aCount));
+                        // (longer than sys.maxsize characters: OverflowError; then its room: MemoryError if it cannot be had (as CPython's))
+                        if (auto const length = as<str_object>(aSequence)->len(); length != 0 && count > std::numeric_limits<long long>::max() / length)
+                            return error("OverflowError", "repeated string is too long");
+                        try
+                        {
+                            if (!text.empty() && static_cast<unsigned long long>(count) > result.max_size() / text.size())
+                                throw std::length_error{ "repeat" };
+                            result.reserve(static_cast<std::size_t>(count) * text.size());
+                        }
+                        catch (std::exception const&)
+                        {
+                            return error("MemoryError", "");
+                        }
+                        for (long long i = 0; i < count; ++i)
+                            result += text;
                         return make_str(std::move(result));
                     }
                     std::vector<object*> items;
@@ -2781,10 +2826,23 @@ namespace neos::python_runtime
                     for (auto i : original)
                         release(i);
                 }
-                else
+                else if (!original.empty())
+                {
+                    // (its room first: MemoryError if it cannot be had (as CPython's))
+                    try
+                    {
+                        if (static_cast<unsigned long long>(n) > target.max_size() / original.size())
+                            throw std::length_error{ "repeat" };
+                        target.reserve(static_cast<std::size_t>(n) * original.size());
+                    }
+                    catch (std::exception const&)
+                    {
+                        return error("MemoryError", "");
+                    }
                     for (long long r = 1; r < n; ++r)
                         for (auto i : original)
                             target.push_back((retain(i), i));
+                }
                 return (retain(aLhs), aLhs);
             }
             if (kind_of(aLhs) == NEOS_PY_DICT && aOperation == NEOS_PY_OR && (aInplace || kind_of(builtin_value(aRhs)) == NEOS_PY_DICT))
@@ -2907,15 +2965,23 @@ namespace neos::python_runtime
             {
                 if (a[i] == b[i])
                     continue;   // (identity: equal (as CPython's containers compare their items))
-                // (items that can contain others: a recursive call (as PyObject_RichCompare's))
+                // (items that can contain others, or run code: a recursive call (as PyObject_RichCompare's), and each held while it
+                // is compared (code can change the containers, as CPython's))
+                object* const x = a[i];
+                object* const y = b[i];
                 std::optional<recursive_call> call;
-                if (can_recurse(a[i]) || can_recurse(b[i]))
+                ref heldX, heldY;
+                if (can_recurse(x) || can_recurse(y))
+                {
                     if (call.emplace(" in comparison"); !call->entered)
                     {
                         aError = 1;
                         return 0;
                     }
-                ref const equal{ compare(NEOS_PY_EQ, a[i], b[i]) };
+                    heldX = ref::borrowed(x);
+                    heldY = ref::borrowed(y);
+                }
+                ref const equal{ compare(NEOS_PY_EQ, x, y) };
                 if (!equal) { aError = 1; return 0; }
                 auto const t = truth(equal.get());
                 if (t < 0) { aError = 1; return 0; }
@@ -2923,7 +2989,7 @@ namespace neos::python_runtime
                 {
                     if (aEquality)
                         return 4;
-                    ref const less{ compare(NEOS_PY_LT, a[i], b[i]) };
+                    ref const less{ compare(NEOS_PY_LT, x, y) };
                     if (!less) { aError = 1; return 0; }
                     auto const l = truth(less.get());
                     if (l < 0) { aError = 1; return 0; }
@@ -3036,7 +3102,8 @@ namespace neos::python_runtime
                             aError = 1;
                             return 0;
                         }
-                    auto const e = equal(value.get(), b[static_cast<std::size_t>(position)].second);
+                    ref const other = ref::borrowed(b[static_cast<std::size_t>(position)].second);
+                    auto const e = equal(value.get(), other.get());
                     if (e < 0) { aError = 1; return 0; }
                     if (e == 0)
                         return 4;
@@ -3217,7 +3284,7 @@ namespace neos::python_runtime
         }
 
         // Python's slice.indices()
-        bool slice_indices(object* aSlice, long long aLength, long long& aStart, long long& aStop, long long& aStep)
+        bool slice_unpack(object* aSlice, std::optional<long long>& aStart, std::optional<long long>& aStop, long long& aStep)
         {
             auto const& s = *as<slice_object>(aSlice);
             // (an index: a small int's value (the commonest), else to_index's)
@@ -3230,15 +3297,30 @@ namespace neos::python_runtime
                 error("ValueError", "slice step cannot be zero");
                 return false;
             }
-            auto const bound = [&](object* aPart, long long aDefault, long long& aResult)
+            auto const part = [&](object* aPart, std::optional<long long>& aResult)
             {
                 if (aPart == none() || kind_of(aPart) == NEOS_PY_NONE)
+                    return true;
+                long long value = 0;
+                if (!index(aPart, value))
+                    return false;
+                aResult = value;
+                return true;
+            };
+            return part(s.start, aStart) && part(s.stop, aStop);
+        }
+
+        void slice_adjust(long long aLength, std::optional<long long> const& aStartIndex, std::optional<long long> const& aStopIndex, long long aStep,
+            long long& aStart, long long& aStop)
+        {
+            auto const bound = [&](std::optional<long long> const& aIndex, long long aDefault, long long& aResult)
+            {
+                if (!aIndex)
                 {
                     aResult = aDefault;
-                    return true;
+                    return;
                 }
-                if (!index(aPart, aResult))
-                    return false;
+                aResult = *aIndex;
                 if (aResult < 0)
                 {
                     aResult += aLength;
@@ -3247,9 +3329,18 @@ namespace neos::python_runtime
                 }
                 else if (aResult >= aLength)
                     aResult = aStep < 0 ? aLength - 1 : aLength;
-                return true;
             };
-            return bound(s.start, aStep < 0 ? aLength - 1 : 0, aStart) && bound(s.stop, aStep < 0 ? -1 : aLength, aStop);
+            bound(aStartIndex, aStep < 0 ? aLength - 1 : 0, aStart);
+            bound(aStopIndex, aStep < 0 ? -1 : aLength, aStop);
+        }
+
+        bool slice_indices(object* aSlice, long long aLength, long long& aStart, long long& aStop, long long& aStep)
+        {
+            std::optional<long long> start, stop;
+            if (!slice_unpack(aSlice, start, stop, aStep))
+                return false;
+            slice_adjust(aLength, start, stop, aStep, aStart, aStop);
+            return true;
         }
 
         // (the number of positions of a slice (see slice_indices))
@@ -3306,9 +3397,12 @@ namespace neos::python_runtime
                 auto const& items = k == NEOS_PY_LIST ? as<list_object>(aObject)->items : as<tuple_object>(aObject)->items;
                 if (kind_of(aKey) == NEOS_PY_SLICE)
                 {
+                    // (the slice's positions within the list as it is once its indices have been found (their __index__ can change it))
                     long long start = 0, stop = 0, step = 0;
-                    if (!slice_indices(aKey, static_cast<long long>(items.size()), start, stop, step))
+                    std::optional<long long> startIndex, stopIndex;
+                    if (!slice_unpack(aKey, startIndex, stopIndex, step))
                         return nullptr;
+                    slice_adjust(static_cast<long long>(items.size()), startIndex, stopIndex, step, start, stop);
                     auto const count = slice_count(start, stop, step);
                     // (a tuple's whole: itself (as CPython's))
                     if (k == NEOS_PY_TUPLE && step == 1 && count == items.size())
@@ -3536,8 +3630,11 @@ namespace neos::python_runtime
                 auto& items = as<list_object>(aObject)->items;
                 if (kind_of(aKey) == NEOS_PY_SLICE)
                 {
+                    // (the slice's indices, then the values, then its positions within the list as it is then (as CPython's: the indices' 
+                    // __index__ and the values' iteration can change it))
                     long long start = 0, stop = 0, step = 0;
-                    if (!slice_indices(aKey, static_cast<long long>(items.size()), start, stop, step))
+                    std::optional<long long> startIndex, stopIndex;
+                    if (!slice_unpack(aKey, startIndex, stopIndex, step))
                         return -1;
                     // (the values: a list's or tuple's items (a reference of their own, now: the list may be the value), else collect's)
                     small_vector<object*, 16u> values;
@@ -3555,6 +3652,7 @@ namespace neos::python_runtime
                             return -1;
                         values.assign(collected.begin(), collected.end());
                     }
+                    slice_adjust(static_cast<long long>(items.size()), startIndex, stopIndex, step, start, stop);
                     if (step == 1)
                     {
                         stop = std::max(stop, start);
@@ -3888,9 +3986,11 @@ namespace neos::python_runtime
                 return nullptr;
             auto const& items = kind_of(aSelf) == NEOS_PY_LIST ? as<list_object>(aSelf)->items : as<tuple_object>(aSelf)->items;
             long long n = 0;
-            for (auto item : items)
+            // (by position: a comparison can change the list; each item is held while it is compared (as CPython's))
+            for (std::size_t i = 0u; i < items.size(); ++i)
             {
-                ref const equal{ compare(NEOS_PY_EQ, item, aArgs[0]) };
+                ref const item = ref::borrowed(items[i]);
+                ref const equal{ compare(NEOS_PY_EQ, item.get(), aArgs[0]) };
                 if (!equal)
                     return nullptr;
                 n += truth(equal.get()) == 1 ? 1 : 0;
@@ -10752,6 +10852,38 @@ namespace neos::python_runtime
         object* fn_any_items(object* aIterable) { return checked(any_all({ aIterable }, nullptr, false)); }
         object* fn_all_items(object* aIterable) { return checked(any_all({ aIterable }, nullptr, true)); }
 
+        // (a stable merge sort of positions that stays within its ranges whatever its comparison answers: CPython's timsort tolerates 
+        // comparisons that are not consistent (e.g. random), std::stable_sort's insertion sort runs past its range's start)
+        template <typename Less>
+        void merge_sort(std::size_t* aItems, std::size_t* aBuffer, std::size_t aCount, Less& aLess)
+        {
+            if (aCount <= 16u)
+            {
+                for (std::size_t i = 1u; i < aCount; ++i)
+                {
+                    auto const x = aItems[i];
+                    auto j = i;
+                    for (; j > 0u && aLess(x, aItems[j - 1u]); --j)
+                        aItems[j] = aItems[j - 1u];
+                    aItems[j] = x;
+                }
+                return;
+            }
+            auto const half = aCount / 2u;
+            merge_sort(aItems, aBuffer, half, aLess);
+            merge_sort(aItems + half, aBuffer, aCount - half, aLess);
+            if (!aLess(aItems[half], aItems[half - 1u]))
+                return;     // (in order already)
+            std::size_t i = 0u, j = half, k = 0u;
+            while (i < half && j < aCount)
+                aBuffer[k++] = aLess(aItems[j], aItems[i]) ? aItems[j++] : aItems[i++];
+            while (i < half)
+                aBuffer[k++] = aItems[i++];
+            while (j < aCount)
+                aBuffer[k++] = aItems[j++];
+            std::copy(aBuffer, aBuffer + aCount, aItems);
+        }
+
         object* b_sorted(std::vector<object*> const& aArgs, object* aKwargs)
         {
             object* key = nullptr;
@@ -10795,21 +10927,28 @@ namespace neos::python_runtime
                 sortedNatively = false;
             bool failure = false;
             // (stable: equal items keep their order, also when descending)
+            std::vector<std::size_t> order(keyed.size());
+            for (std::size_t i = 0u; i < order.size(); ++i)
+                order[i] = i;
             if (!sortedNatively)
-                std::stable_sort(keyed.begin(), keyed.end(), [&](auto const& a, auto const& b)
+            {
+                auto less = [&](std::size_t a, std::size_t b)
                 {
                     if (failure)
                         return false;
-                    auto const t = descending ? less_than(b.first.get(), a.first.get()) : less_than(a.first.get(), b.first.get());
+                    auto const t = descending ? less_than(keyed[b].first.get(), keyed[a].first.get()) : less_than(keyed[a].first.get(), keyed[b].first.get());
                     if (t < 0)
                         failure = true;
                     return t == 1;
-                });
+                };
+                std::vector<std::size_t> buffer(order.size());
+                merge_sort(order.data(), buffer.data(), order.size(), less);
+            }
             if (failure)
                 return nullptr;
             std::vector<object*> result;
-            for (auto& k : keyed)
-                result.push_back(k.second.release_ownership());
+            for (auto const i : order)
+                result.push_back(keyed[i].second.release_ownership());
             return make_list(std::move(result));
         }
 
@@ -12965,10 +13104,15 @@ namespace neos::python_runtime
                     if (remove_reference(instance.h) != 0)
                         return;
                 }
-            if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
-                clear_weak_references(&instance.h.base);
-            native_disown(instance.cls, instance.value);
-            delete &instance;
+            // (its destruction: deferred if it is nested deeply (see deallocate))
+            deallocate([](neos_rt_object* aInstance)
+            {
+                auto& i = *reinterpret_cast<instance_object*>(aInstance);
+                if (gWeaklyReferenced.load(std::memory_order_relaxed) != 0u)
+                    clear_weak_references(&i.h.base);
+                native_disown(i.cls, i.value);
+                delete &i;
+            }, aObject);
         }
 
         neos_py_type make_instance_type()

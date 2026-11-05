@@ -169,6 +169,7 @@ namespace neos::compilers::ada
         bool limited = false;
         bool tagged = false;
         bool untagged_partial = false;
+        bool parent_partial = false;        ///< (a derived type: its parent a partial view whose full view is not visible where it is declared (AI05-0115-1))
         bool completing = false;            ///< (an incomplete view whose completion is being declared)      ///< (a partial view declared untagged (its full view may be tagged))
         bool abstract = false;
         bool is_formal = false;             ///< (a generic formal type)
@@ -338,6 +339,7 @@ namespace neos::compilers::ada
         bool is_abstract = false;
         bool is_null = false;               ///< (a null procedure)
         bool no_return = false;             ///< (a nonreturning procedure (6.5.1): returning raises Program_Error)
+        std::string synchronization;        ///< (its Synchronization aspect (9.5(12/3)): by_entry, by_protected_procedure, optional)
         node* expression = nullptr;         ///< (an expression function's expression)
         node* body = nullptr;               ///< (its body (subprogram body construct))
         node* spec = nullptr;               ///< (its specification)
@@ -415,6 +417,8 @@ namespace neos::compilers::ada
         node* initial = nullptr;            ///< (an object's initial value)
         node* priority = nullptr;           ///< (a task or protected unit's, or the main subprogram's: its Priority or Interrupt_Priority (D.1, D.3))
         bool interrupt_priority = false;    ///< (Interrupt_Priority (its default: Interrupt_Priority'Last))
+        node* relative_deadline = nullptr;  ///< (a task or protected unit's, or the main subprogram's: its Relative_Deadline (D.2.6))
+        node* cpu = nullptr;                ///< (a task or protected unit's, or the main subprogram's: its CPU (D.16))
         bool volatile_object = false;       ///< (an object specified Volatile or Atomic (C.6))
         bool volatile_components = false;   ///< (an object specified Volatile_Components or Atomic_Components (C.6))
         bool atomic_object = false;         ///< (an object specified Atomic (C.6))
@@ -515,6 +519,8 @@ namespace neos::compilers::ada
         std::vector<ada_type*> used_types;  ///< (use type clauses)
         std::vector<ada_type*> used_all_types;  ///< (use all type clauses)
         std::size_t private_start = static_cast<std::size_t>(-1);  ///< (a package: the first declaration of its private part)
+        std::size_t private_used = static_cast<std::size_t>(-1);        ///< (a package: the first use clause (package) of its private part)
+        std::size_t private_used_types = static_cast<std::size_t>(-1);  ///< (a package: the first use type clause of its private part)
         bool private_visible = false;       ///< (a package's private part is visible (its body, its private part, or a private child))
         bool is_package = false;
         bool package_body = false;          ///< (a package body's declarations (its parent: the package's))

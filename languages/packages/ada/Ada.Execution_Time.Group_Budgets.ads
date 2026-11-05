@@ -242,16 +242,17 @@ package Ada.Execution_Time.Group_Budgets
   Group_Budget_Error : exception;
 
 private
-  --  neos's tasks all run on the program's thread, and the execution time
-  --  of each of them is that of the thread (see Ada.Execution_Time), so no
-  --  execution time is accounted to a group: its budget changes only by
-  --  Replenish and Add. A group's members are recorded (with the group's
-  --  address) in a list that the package body keeps.
+  --  A group's budget is the runtime's: an execution-time event of its
+  --  members (keyed by the group's address), whose limit is the budget as of
+  --  the members' execution times when it was last loaded (Replenish, Add).
+  --  A group's members are recorded (with the group's address) in a list
+  --  that the package body keeps; a task executes the handlers of the
+  --  budgets that are exhausted (see the body).
   type Group_Budget(CPU : System.Multiprocessors.CPU :=
                              System.Multiprocessors.CPU'First)
     is new Ada.Finalization.Limited_Controlled with record
-      Budget  : Time_Span := Time_Span_Zero;
       Handler : Group_Budget_Handler;
+      Created : Boolean := False;   --  (its runtime event exists)
   end record;
 
   overriding procedure Finalize (GB : in out Group_Budget);
