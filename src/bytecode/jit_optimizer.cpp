@@ -1247,10 +1247,34 @@ namespace neos
                                             auto const type = static_cast<std::size_t>(imm(0));
                                             if (type >= iModule.types.size())
                                                 throw cannot_optimize{ "invalid type" };
+                                            // (a call_indirect that the function's own code has never made (see options::coldCall), of an index that 
+                                            // is not a function's of the type: the function's own code makes it (its arguments and index, and the 
+                                            // operand stack below them, are the deopt's), as a call's slow path (see call))
+                                            auto const called = [&](slot const& aIndex)
+                                            {
+                                                return aIndex.constant && aIndex.bits < iModule.functions.size() && !iModule.functions[aIndex.bits].imported &&
+                                                    iModule.functions[aIndex.bits].type == type;
+                                            };
+                                            if (auto const arguments = static_cast<std::uint32_t>(iModule.types[type].first->size() + 1u);
+                                                aInline == nullptr && iInlines.empty() && iOptions.deopt && iOptions.coldCall && !iOptions.noDeopt.contains(position) &&
+                                                iDeopts.size() < 60000u && iStack.size() >= iFrames.back().height + arguments && !called(iStack.back()) &&
+                                                iOptions.coldCall(position))
+                                            {
+                                                auto const& f = iModule.functions[iFunction];
+                                                iDeopts.push_back(deopt{ position, iFunction, arguments, static_cast<std::uint32_t>(iStack.size() - arguments),
+                                                    static_cast<std::uint32_t>(f.parameters->size() + f.locals->size()), false });
+                                                emit(0x41u);
+                                                emit(iDeopts.size() - 1u);
+                                                emit(0x10u);
+                                                emit(intrinsics::deopt(iModule));
+                                                emit(0x00u);
+                                                unwind();
+                                                iReachable = false;
+                                                break;
+                                            }
                                             auto const index = pop();
                                             // (the table is the functions: a constant index of a function of the type is a call of it)
-                                            if (index.constant && index.bits < iModule.functions.size() && !iModule.functions[index.bits].imported &&
-                                                iModule.functions[index.bits].type == type)
+                                            if (called(index))
                                             {
                                                 erase(index.begin, index.end);
                                                 used(index.from);

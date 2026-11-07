@@ -302,11 +302,13 @@ namespace neos::python_runtime
                 if (!parse_arguments("sort", aArgs, aKwargs, { "key", "reverse" }, 0u, 0u, a))
                     return nullptr;
                 // (sorted's algorithm on its items, which then replace them; as CPython's, the list is empty while they are sorted: if it 
-                // is not empty afterwards, keys or comparisons changed it (ValueError; the items added are discarded))
+                // has storage afterwards (as CPython's allocated check: an item added then removed still counts), keys or comparisons 
+                // changed it (ValueError; the items added are discarded))
                 auto& items = as<list_object>(aSelf)->items;
                 ref const copy{ make_list({}) };
                 std::swap(as<list_object>(copy.get())->items, items);
                 ref const sorted{ b_sorted({ copy.get() }, aKwargs) };
+                bool const modified = items.capacity() != 0u;
                 std::vector<object*> added;
                 std::swap(added, items);
                 std::swap(items, sorted ? as<list_object>(sorted.get())->items : as<list_object>(copy.get())->items);
@@ -314,7 +316,7 @@ namespace neos::python_runtime
                     release(i);
                 if (!sorted)
                     return nullptr;
-                if (!added.empty())
+                if (modified)
                     return error("ValueError", "list modified during sort");
                 return none();
             }

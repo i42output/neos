@@ -730,6 +730,7 @@ namespace neos::python_runtime
                 header h;
                 object* origin;
                 object* args;   ///< (a tuple)
+                bool starred = false;   ///< (an unpacked alias (PEP 646): *tuple[int], an item of iter(tuple[int]))
                 ~generic_alias_object() { release(origin); release(args); }
             };
 
@@ -770,6 +771,8 @@ namespace neos::python_runtime
                     std::string text;
                     if (!type_repr(g.origin, text))
                         return nullptr;
+                    if (g.starred)
+                        text = "*" + text;
                     text += "[";
                     auto const& args = as<tuple_object>(g.args)->items;
                     for (std::size_t i = 0u; i < args.size(); ++i)
@@ -792,6 +795,8 @@ namespace neos::python_runtime
                         return (retain(g.origin), g.origin);
                     if (std::strcmp(aName, "__args__") == 0)
                         return (retain(g.args), g.args);
+                    if (std::strcmp(aName, "__unpacked__") == 0)
+                        return make_bool(g.starred);
                     if (std::strcmp(aName, "__parameters__") == 0)
                     {
                         // (the type variables of its arguments (theirs, if they are generic; a tuple's or a list's items'): CPython's 
@@ -858,7 +863,18 @@ namespace neos::python_runtime
                     ref const args{ types_generic_alias_subs(aSelf, aKey) };
                     if (!args)
                         return nullptr;
-                    return make_generic_alias(reinterpret_cast<generic_alias_object*>(aSelf)->origin, args.get());
+                    auto const result = make_generic_alias(reinterpret_cast<generic_alias_object*>(aSelf)->origin, args.get());
+                    reinterpret_cast<generic_alias_object*>(result)->starred = reinterpret_cast<generic_alias_object*>(aSelf)->starred;
+                    return result;
+                };
+                // (iter(alias): its unpacked alias (*alias), once (as CPython's ga_iter))
+                type.iter = [](neos_py_context*, object* aSelf) -> object*
+                {
+                    auto const& g = *reinterpret_cast<generic_alias_object*>(aSelf);
+                    auto const starred = make_generic_alias(g.origin, g.args);
+                    reinterpret_cast<generic_alias_object*>(starred)->starred = true;
+                    ref const items{ make_tuple({ starred }) };
+                    return make_iterator(items.get());
                 };
                 type.compare = [](neos_py_context*, int aOperation, object* aLhs, object* aRhs) -> object*
                 {
@@ -866,6 +882,8 @@ namespace neos::python_runtime
                         return not_implemented();
                     auto const& a = *reinterpret_cast<generic_alias_object*>(aLhs);
                     auto const& b = *reinterpret_cast<generic_alias_object*>(aRhs);
+                    if (a.starred != b.starred)
+                        return make_bool(aOperation == NEOS_PY_NE);
                     auto const origins = equal(a.origin, b.origin);
                     auto const args = origins == 1 ? equal(a.args, b.args) : origins;
                     if (args < 0)

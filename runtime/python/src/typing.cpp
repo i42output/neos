@@ -1367,6 +1367,10 @@ namespace neos::python_runtime::detail
                         auto const& other = a[1];
                         if (!is_instance_of(other, "ForwardRef"))
                             return not_implemented_value();
+                        // (its value can be itself (a recursive alias): RecursionError, as CPython's (its comparison is Python code))
+                        if (!enter_recursive_call(" in comparison"))
+                            throw raised{};
+                        struct leave { ~leave() { leave_recursive_call(); } } const guard;
                         if (self.attr("__forward_evaluated__").truthy() && other.attr("__forward_evaluated__").truthy())
                             return boolean(self.attr("__forward_arg__") == other.attr("__forward_arg__") && self.attr("__forward_value__") == other.attr("__forward_value__"));
                         return boolean(self.attr("__forward_arg__") == other.attr("__forward_arg__") && self.attr("__forward_module__") == other.attr("__forward_module__"));

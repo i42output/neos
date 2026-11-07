@@ -7562,7 +7562,7 @@ namespace neos::compilers::python
             put_local(result, opcode::LocalSet, dict);
             for (auto const& name : py_function().pyBindingOrder)
             {
-                if (name == "__bases__" || name == "__kw__" || name == "__class__" || synthetic_name(name))
+                if (name == "_cb_bases" || name == "_cb_kw" || name == "__class__" || synthetic_name(name))
                     continue;
                 auto* const symbol = find_symbol(current_scope(), neolib::string_view{ neolib::string{ name } }, true);
                 if (symbol == nullptr || is_global(*symbol))
@@ -8322,6 +8322,16 @@ namespace neos::compilers::python
             directories.push_back(std::filesystem::path{ iPyModules[*parent].path }.parent_path());
         }
         auto const last = dot == std::string::npos ? aName : aName.substr(dot + 1u);
+        // (a directory without __init__.py: a namespace package (PEP 420), if no directory has the package or the module (its
+        // first portion; its source is empty))
+        std::optional<std::filesystem::path> portion;
+        for (auto const& directory : directories)
+        {
+            std::error_code ec;
+            if (!portion && !std::filesystem::is_regular_file(directory / last / "__init__.py", ec) &&
+                !std::filesystem::is_regular_file(directory / (last + ".py"), ec) && std::filesystem::is_directory(directory / last, ec))
+                portion = directory / last;
+        }
         for (auto const& directory : directories)
         {
             std::error_code ec;
@@ -8348,6 +8358,20 @@ namespace neos::compilers::python
             module.source = contents.str();
             if (!module.source.empty() && module.source.back() != '\n')
                 module.source += '\n';
+            module.number = iPyModules.size() + 1u;
+            iPyParameters[module.init()] = {};
+            iPyModules.push_back(std::move(module));
+            return iPyModules.size() - 1u;
+        }
+        if (portion)
+        {
+            std::error_code ec;
+            py_module module;
+            module.name = aName;
+            // (its submodules are in its directory (the path's parent))
+            module.path = (std::filesystem::absolute(*portion, ec).lexically_normal() / "__init__.py").generic_string();
+            module.package = true;
+            module.source = "\n";
             module.number = iPyModules.size() + 1u;
             iPyParameters[module.init()] = {};
             iPyModules.push_back(std::move(module));

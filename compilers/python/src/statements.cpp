@@ -52,7 +52,7 @@
 //   True; other patterns are __match(_mN_, '<descriptor>', <values>) (the runtime's support.cpp: the descriptor's syntax)
 //   whose captures are bound from its result: "(_cN_ := __match(...)) and [(x := _cN_[0]), (y := _cN_[1])]".
 //
-// Class statements (rewrite_classes): "class C(B, metaclass=M):" is "def _bN_C(__bases__=(B,), __kw__=dict(metaclass=M),
+// Class statements (rewrite_classes): "class C(B, metaclass=M):" is "def _bN_C(_cb_bases=(B,), _cb_kw=dict(metaclass=M),
 // __class__=None):": a function whose body is the class's body and which returns its namespace (the compiler's implicit 
 // return of a class body); closures.cpp defines it at the end of the module (_aN_C) and its closure is made into the class
 // where the class statement is ("C = __build_class(__closure(_aN_C, ...))").
@@ -545,7 +545,8 @@ namespace neos::compilers::python
                 }
             }
             // --- annotated assignments: "x: T = v" at a module's or a class's top level is "__annotations__['x'] = (T); x = v"
-            // (the first of its scope creates __annotations__); in a function, "x = v" ("x: T": pass)
+            // (its scope creates __annotations__ (as CPython's SETUP_ANNOTATIONS): at its first statement after its docstring and 
+            // __future__ imports, if that is a simple statement, else at its first annotation); in a function, "x = v" ("x: T": pass)
             void variable_annotations()
             {
                 bool future = false;
@@ -557,6 +558,7 @@ namespace neos::compilers::python
                 struct block { std::size_t indent; bool function; std::string className; };
                 std::vector<block> blocks;
                 std::set<std::size_t> started;      // (the scopes (by their header's line + 1; 0: the module) whose __annotations__ exists)
+                std::map<std::size_t, std::size_t> creators;    // (scope -> the offset of the annotation that creates its __annotations__)
                 std::vector<std::size_t> headers;   // (the lines of the blocks)
                 for (std::size_t l = 0u; l < iLines.size(); ++l)
                 {
@@ -668,7 +670,10 @@ namespace neos::compilers::python
                                 annotation = quoted + "'";
                             }
                             if (started.insert(scope).second)
+                            {
                                 replacement = "__annotations__ = {}; ";
+                                creators[scope] = tok(l, b).begin;
+                            }
                             replacement += "__annotations__['" + key + "'] = (" + annotation + ")";
                             if (equals)
                                 replacement += "; " + source(l, b, *colon) + " = " + source(l, *equals + 1u, e);
@@ -677,11 +682,53 @@ namespace neos::compilers::python
                         {
                             // (a module's or a class's annotation that is not stored still creates its __annotations__)
                             if (!function && started.insert(headers.empty() ? 0u : headers.back() + 1u).second)
+                            {
                                 replacement = "__annotations__ = {}; ";
+                                creators[headers.empty() ? 0u : headers.back() + 1u] = tok(l, b).begin;
+                            }
                             replacement += equals ? source(l, b, *colon) + " = " + source(l, *equals + 1u, e) : std::string{ "pass" };
                         }
                         replace(l, b, e, replacement);
                     }
+                }
+                // (a scope's __annotations__ is created at its first statement (after its docstring and __future__ imports), if that 
+                // is a simple statement (not at its first annotation: it can be read, or its first annotation not run, before it))
+                for (auto const& creator : creators)
+                {
+                    auto const scope = creator.first;
+                    if (scope >= iLines.size() || (scope != 0u && iLines[scope].indent <= iLines[scope - 1u].indent))
+                        continue;
+                    auto l = scope;
+                    auto const indent = iLines[l].indent;
+                    auto const docstring = [&](std::size_t aLine)
+                    {
+                        for (std::size_t t = 0u; t < count(aLine); ++t)
+                            if (tok(aLine, t).kind != token::String)
+                                return false;
+                        return true;
+                    };
+                    if (l < iLines.size() && docstring(l))
+                        ++l;
+                    while (scope == 0u && l < iLines.size() && is_name(l, 0u, "from") && is_name(l, 1u, "__future__"))
+                        ++l;
+                    if (l >= iLines.size() || iLines[l].indent != indent || count(l) == 0u || is_op(l, 0u, "@") || 
+                        tok(l, 0u).begin == creator.second ||
+                        header_of(l, { "if", "for", "while", "try", "with", "def", "class" }) ||
+                        ((is_name(l, 0u, "match") || is_name(l, 0u, "async")) && is_op(l, count(l) - 1u, ":")))
+                        continue;
+                    auto const at = tok(l, 0u).begin;
+                    for (auto& e : iEdits)
+                        if (e.begin == creator.second && e.text.starts_with("__annotations__ = {}; "))
+                            e.text.erase(0u, std::string_view{ "__annotations__ = {}; " }.size());
+                    bool merged = false;
+                    for (auto& e : iEdits)
+                        if (e.begin == at && !merged)
+                        {
+                            e.text = "__annotations__ = {}; " + e.text;
+                            merged = true;
+                        }
+                    if (!merged)
+                        iEdits.push_back({ at, at, "__annotations__ = {}; " });
                 }
             }
             // --- type statements and type parameters: "type X[T] = v" is "X = __type_alias('X', lambda T: (v), (__type_param('T', 0),))";
@@ -1365,7 +1412,7 @@ namespace neos::compilers::python
                         }
                     }
                     auto const function = "_b" + std::to_string(++number) + "_" + name;
-                    std::string header = "def " + function + "(__bases__=(" + bases + "), __kw__=" + (keywords.empty() ? std::string{ "None" } : "dict(" + keywords + ")") +
+                    std::string header = "def " + function + "(_cb_bases=(" + bases + "), _cb_kw=" + (keywords.empty() ? std::string{ "None" } : "dict(" + keywords + ")") +
                         ", __class__=None):";
                     replace(l, 0u, colon + 1u, header);
                     iClassLines.insert(l);
@@ -1456,7 +1503,7 @@ namespace neos::compilers::python
         {
             auto const& header = lines[l];
             if (header.tokens.size() < 3u || text(l, 0u) != "def" || !text(l, 1u).starts_with("_a") || text(l, 2u) != "(" || 
-                header.tokens.size() < 4u || text(l, 3u) != "__bases__")
+                header.tokens.size() < 4u || text(l, 3u) != "_cb_bases")
                 continue;
             auto const name = text(l, 1u);
             if (name.size() < 4u || !std::isdigit(static_cast<unsigned char>(name[2])))

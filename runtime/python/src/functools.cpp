@@ -119,24 +119,41 @@ namespace neos::python_runtime
                 };
                 type.repr = [](neos_py_context*, object* aSelf) -> object*
                 {
+                    // (one that contains itself: "..." within its own repr (as CPython's))
+                    if (repr_enter(aSelf))
+                        return make_str("...");
                     auto const& p = as_partial(aSelf);
                     std::string text;
-                    if (!repr_of(p.function, text))
-                        return nullptr;
-                    for (auto a : as<tuple_object>(p.args)->items)
-                    {
-                        std::string item;
-                        if (!repr_of(a, item))
-                            return nullptr;
-                        text += ", " + item;
-                    }
+                    // (its items held: their __repr__ and __str__ can change its args and keywords (as CPython's partial_repr))
+                    ref const function{ borrowed(p.function) };
+                    ref const args{ borrowed(p.args) };
+                    std::vector<std::pair<ref, ref>> keywords;
                     for (auto const& item : as<dict_object>(p.keywords)->items)
+                        keywords.emplace_back(ref{ borrowed(item.first) }, ref{ borrowed(item.second) });
+                    bool const made = [&]()
                     {
-                        std::string value;
-                        if (!repr_of(item.second, value))
-                            return nullptr;
-                        text += ", " + as<str_object>(item.first)->value + "=" + value;
-                    }
+                        if (!repr_of(function.get(), text))
+                            return false;
+                        for (auto a : as<tuple_object>(args.get())->items)
+                        {
+                            std::string item;
+                            if (!repr_of(a, item))
+                                return false;
+                            text += ", " + item;
+                        }
+                        for (auto const& item : keywords)
+                        {
+                            std::string key;
+                            std::string value;
+                            if (!str_of(item.first.get(), key) || !repr_of(item.second.get(), value))
+                                return false;
+                            text += ", " + key + "=" + value;
+                        }
+                        return true;
+                    }();
+                    repr_leave(aSelf);
+                    if (!made)
+                        return nullptr;
                     return make_str("functools.partial(" + text + ")");
                 };
                 type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
@@ -1234,6 +1251,11 @@ namespace neos::python_runtime
                 aAttributes.emplace_back("WRAPPER_ASSIGNMENTS", make_tuple({ make_str("__module__"), make_str("__name__"), make_str("__qualname__"),
                     make_str("__doc__"), make_str("__annotations__"), make_str("__type_params__") }));
                 aAttributes.emplace_back("WRAPPER_UPDATES", make_tuple({ make_str("__dict__") }));
+                // (_CacheInfo: cache_info()'s class (CPython's functools.py names it so))
+                if (auto const cacheInfo = cache_info_class())
+                    aAttributes.emplace_back("_CacheInfo", cacheInfo);
+                else
+                    return false;
                 auto const classes = py_guarded([&]()
                 {
                     static py const sPartialMethod = make_partialmethod_class();

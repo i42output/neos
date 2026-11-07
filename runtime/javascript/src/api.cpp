@@ -1443,8 +1443,13 @@ namespace neos::javascript_runtime
             struct site_tables
             {
                 std::unordered_map<void*, region_vector<site>> tables;
+                // (each program's sites that the runtime has used (site_of): only their entries can refer to values (see sSiteRoots))
+                std::unordered_map<void*, std::vector<std::uint32_t>> used;
+                std::unordered_map<void*, std::vector<bool>> listed;
                 void* lastProgram = nullptr;
                 region_vector<site>* lastTable = nullptr;
+                std::vector<std::uint32_t>* lastUsed = nullptr;
+                std::vector<bool>* lastListed = nullptr;
             };
             site_tables& the_site_tables()
             {
@@ -1453,16 +1458,20 @@ namespace neos::javascript_runtime
             }
             root_tracer const sSiteRoots{ [](tracer& aTracer)
             {
-                for (auto const& [program, table] : the_site_tables().tables)
-                    for (auto const& s : table)
-                    {
-                        if (s.kind != jsl::SiteNone)
-                            for (auto const& p : s.prototypes)
-                                if (p.object != 0u)
-                                    aTracer.mark(p.object);
-                        if (s.function != 0u)
-                            aTracer.mark(s.function);
-                    }
+                // (the sites that the runtime has used (the others' entries are empty): their entries)
+                auto& t = the_site_tables();
+                for (auto const& [program, table] : t.tables)
+                    for (auto const site : t.used[program])
+                        for (std::size_t e = 0u; e < jsl::SiteEntries; ++e)
+                        {
+                            auto const& s = table[static_cast<std::size_t>(site) * jsl::SiteEntries + e];
+                            if (s.kind != jsl::SiteNone)
+                                for (auto const& p : s.prototypes)
+                                    if (p.object != 0u)
+                                        aTracer.mark(p.object);
+                            if (s.function != 0u)
+                                aTracer.mark(s.function);
+                        }
             } };
 
             // (the running program's site (null: none (its table is not made yet)))
@@ -1477,9 +1486,20 @@ namespace neos::javascript_runtime
                         return nullptr;
                     t.lastProgram = program;
                     t.lastTable = &existing->second;
+                    t.lastUsed = &t.used[program];
+                    t.lastListed = &t.listed[program];
                 }
                 auto const index = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite)) * jsl::SiteEntries;
-                return index < t.lastTable->size() ? &(*t.lastTable)[index] : nullptr;
+                if (index >= t.lastTable->size())
+                    return nullptr;
+                // (used: its entries may come to refer to values)
+                auto const number = static_cast<std::size_t>(static_cast<std::uint32_t>(aSite));
+                if (!(*t.lastListed)[number])
+                {
+                    (*t.lastListed)[number] = true;
+                    t.lastUsed->push_back(static_cast<std::uint32_t>(aSite));
+                }
+                return &(*t.lastTable)[index];
             }
 
             // (an entry remembered: it replaces the site's entry for the same receiver's shape and key, else it is the first (the
@@ -1888,6 +1908,8 @@ namespace neos::javascript_runtime
                 auto& table = t.tables[current_program()];
                 table.clear();
                 table.resize(static_cast<std::size_t>(std::max(aCount, 1)) * jsl::SiteEntries, site{ 0u, 0u, jsl::SiteNone, 0u, 0u, 0u, {}, 0u, 0u, -1, 0u });
+                t.used[current_program()].clear();
+                t.listed[current_program()].assign(static_cast<std::size_t>(std::max(aCount, 1)), false);
                 t.lastProgram = nullptr;
                 t.lastTable = nullptr;
                 *program_word(aGlobal) = region_offset(table.data());

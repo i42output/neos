@@ -13456,6 +13456,80 @@ namespace neos::python_runtime
             return result.release_ownership();
         }
 
+        // --- getset_descriptor (a class's __weakref__: <attribute '__weakref__' of 'C' objects>)
+
+        struct getset_object
+        {
+            header h;
+            object* owner;      ///< (the class that defines it)
+            std::string name;
+            ~getset_object() { release(owner); }
+        };
+
+        neos_py_type make_getset_type();
+        neos_py_type sGetsetType = make_getset_type();
+
+        neos_py_type make_getset_type()
+        {
+            auto type = make_type("python.getset_descriptor", "getset_descriptor", retain_object, release_object<getset_object>);
+            type.repr = [](neos_py_context*, object* aSelf) -> object*
+            {
+                auto const& d = *reinterpret_cast<getset_object*>(aSelf);
+                return make_str("<attribute '" + d.name + "' of '" + as<class_object>(d.owner)->name + "' objects>");
+            };
+            type.getattr = [](neos_py_context*, object* aSelf, char const* aName) -> object*
+            {
+                auto const& d = *reinterpret_cast<getset_object*>(aSelf);
+                std::string_view const name{ aName };
+                if (name == "__name__")
+                    return make_str(d.name);
+                if (name == "__qualname__")
+                {
+                    auto const& owner = *as<class_object>(d.owner);
+                    return make_str((owner.qualname.empty() ? owner.name : owner.qualname) + "." + d.name);
+                }
+                if (name == "__objclass__")
+                    return (retain(d.owner), d.owner);
+                if (name == "__doc__")
+                    return none();
+                if (name == "__get__")
+                    return make_function("__get__", [](neos_py_context*, void*, object* aArgs, object*) -> object*
+                    {
+                        // (__get__(instance, owner=None): the instance's attribute; of no instance: the descriptor)
+                        auto const& args = tuple_items(aArgs);
+                        if (args.size() < 2u || args.size() > 3u)
+                            return error("TypeError", "expected 1 or 2 arguments, got " + std::to_string(args.empty() ? 0u : args.size() - 1u));
+                        if (kind_of(args[1]) == NEOS_PY_NONE)
+                            return (retain(args[0]), args[0]);
+                        return getattr(args[1], reinterpret_cast<getset_object*>(args[0])->name.c_str());
+                    }, nullptr, aSelf);
+                return error("AttributeError", "'getset_descriptor' object has no attribute '" + std::string{ aName } + "'");
+            };
+            return type;
+        }
+
+        // (a class's __weakref__: the descriptor of the class that adds it (its furthest base with instances' weak references, as
+        // CPython's), or null if its instances have none (its __slots__ do not name it))
+        object* weakref_descriptor(object* aClass)
+        {
+            auto const weak = [](object* aCandidate)
+            {
+                auto const& slots = as<class_object>(aCandidate)->slots;
+                return !slots || std::find(slots->begin(), slots->end(), "__weakref__") != slots->end();
+            };
+            if (!weak(aClass))
+                return nullptr;
+            auto owner = aClass;
+            for (auto m : as<class_object>(aClass)->mro)
+                if (is_class(m) && weak(m))
+                    owner = m;
+                else
+                    break;
+            return &(new getset_object{ { { &sGetsetType.base } }, (retain(owner), owner), "__weakref__" })->h.base;
+        }
+
+        int class_setattr_raw(object* aSelf, char const* aName, object* aValue);
+
         object* class_getattr(neos_py_context*, object* aSelf, char const* aName)
         {
             auto const& cls = *as<class_object>(aSelf);
@@ -13527,6 +13601,16 @@ namespace neos::python_runtime
                 mro.push_back(type_object_for("object", "object"));
                 return make_tuple(std::move(mro));
             }
+            // (its own __annotations__ (not its bases'): an empty dict, made and stored once read, if its body has made none (as
+            // CPython's type_get_annotations))
+            if (name == "__annotations__" && std::none_of(cls.attributes.begin(), cls.attributes.end(), [](auto const& a) { return a.first == "__annotations__"; }) &&
+                (cls.metaclass == nullptr || class_lookup(cls.metaclass, name) == nullptr))
+            {
+                ref annotations{ make_dict() };
+                if (class_setattr_raw(aSelf, aName, annotations.get()) < 0)
+                    return nullptr;
+                return annotations.release_ownership();
+            }
             if (auto const attribute = class_lookup(aSelf, name))
                 return bind_attribute(attribute, nullptr, aSelf);
             if (name == "__new__")
@@ -13551,6 +13635,9 @@ namespace neos::python_runtime
             // (object's methods, unbound)
             if (auto const function = class_function("object", aName))
                 return function;
+            if (name == "__weakref__")
+                if (auto const descriptor = weakref_descriptor(aSelf))
+                    return descriptor;
             return error("AttributeError", "type object '" + cls.name + "' has no attribute '" + aName + "'");
         }
 
@@ -14385,7 +14472,8 @@ namespace neos::python_runtime
         }
 
         // __build_class(body): a class statement's class (body: the closure of its body's function (see the Python compiler's 
-        // statements.cpp), whose default values are its bases (__bases__) and keywords (__kw__))
+        // statements.cpp), whose default values are its bases (_cb_bases) and keywords (_cb_kw): not __bases__ and __kw__, which a class's
+        // body can bind)
         // (the namespaces of the class bodies being run (innermost last), and the names bound through them)
         struct class_namespace
         {
@@ -14423,9 +14511,9 @@ namespace neos::python_runtime
             object* bases = nullptr;
             object* keywords = nullptr;
             for (auto const& p : body.parameters)
-                if (p.name == "__bases__")
+                if (p.name == "_cb_bases")
                     bases = p.defaultValue;
-                else if (p.name == "__kw__")
+                else if (p.name == "_cb_kw")
                     keywords = p.defaultValue;
             ref const empty{ make_tuple() };
             if (bases == nullptr || kind_of(bases) != NEOS_PY_TUPLE)
@@ -14904,6 +14992,43 @@ namespace neos::python_runtime
             return 0;
         }
 
+        // (an object that is not a class, as a class (CPython's abstract_get_bases): its __bases__ if it is a tuple; else null (with 
+        // an exception if getting it raised one other than AttributeError))
+        object* abstract_bases(object* aObject)
+        {
+            auto const bases = getattr(aObject, "__bases__");
+            if (bases == nullptr)
+            {
+                if (std::string_view{ error_text() }.starts_with("AttributeError"))
+                    clear_error();
+                return nullptr;
+            }
+            if (kind_of(bases) != NEOS_PY_TUPLE)
+            {
+                release(bases);
+                return nullptr;
+            }
+            return bases;
+        }
+
+        // (CPython's abstract_issubclass: aClass is aDerived or one of its __bases__' (recursively): 1, 0, or -1 (an exception))
+        int abstract_issubclass(object* aDerived, object* aClass)
+        {
+            if (aDerived == aClass)
+                return 1;
+            ref const bases{ abstract_bases(aDerived) };
+            if (!bases)
+                return failed() ? -1 : 0;
+            if (!enter_recursive_call(" in __subclasscheck__"))
+                return -1;
+            int result = 0;
+            for (auto b : as<tuple_object>(bases.get())->items)
+                if ((result = abstract_issubclass(b, aClass)) != 0)
+                    break;
+            leave_recursive_call();
+            return result;
+        }
+
         object* b_issubclass(std::vector<object*> const& aArgs, object* aKwargs)
         {
             if (!no_keywords(aKwargs, "issubclass") || !arity(aArgs, 2u, 2u, "issubclass"))
@@ -14913,6 +15038,31 @@ namespace neos::python_runtime
                 return r < 0 ? nullptr : make_bool(true);
             for (auto c : classes)
             {
+                // (either is not a class (nor a tuple or union of them, without __subclasscheck__ (e.g. a TypeVar)): an "abstract class"'s 
+                // (one with __bases__) subclass check, or TypeError, as CPython's recursive_issubclass (its first argument checked first))
+                if (is_generic_alias(c))
+                    return error("TypeError", "issubclass() argument 2 cannot be a parameterized generic");
+                if ((!is_class(c) && !is_type_object(c)) || (!is_class(aArgs[0]) && !is_type_object(aArgs[0])))
+                {
+                    if (!is_class(aArgs[0]) && !is_type_object(aArgs[0]))
+                    {
+                        ref const bases{ abstract_bases(aArgs[0]) };
+                        if (!bases)
+                            return failed() ? nullptr : error("TypeError", "issubclass() arg 1 must be a class");
+                    }
+                    if (!is_class(c) && !is_type_object(c))
+                    {
+                        ref const bases{ abstract_bases(c) };
+                        if (!bases)
+                            return failed() ? nullptr : error("TypeError", "issubclass() arg 2 must be a class, a tuple of classes, or a union");
+                    }
+                    auto const r = abstract_issubclass(aArgs[0], c);
+                    if (r < 0)
+                        return nullptr;
+                    if (r == 1)
+                        return make_bool(true);
+                    continue;
+                }
                 if (is_class(aArgs[0]) && is_class(c) && is_subclass(aArgs[0], c))
                     return make_bool(true);
                 if (is_type_object(c) && as<type_object>(c)->name == "object")
@@ -14951,7 +15101,12 @@ namespace neos::python_runtime
                 }
             }
             if (!is_class(aArgs[0]) && !is_type_object(aArgs[0]))
-                return error("TypeError", "issubclass() arg 1 must be a class");
+            {
+                // (an "abstract class" (it has __bases__): not a subclass)
+                ref const bases{ abstract_bases(aArgs[0]) };
+                if (!bases)
+                    return failed() ? nullptr : error("TypeError", "issubclass() arg 1 must be a class");
+            }
             return make_bool(false);
         }
 
@@ -15546,7 +15701,7 @@ namespace neos::python_runtime
             { "abs", b_abs }, { "all", b_all }, { "any", b_any }, { "bin", b_bin }, { "callable", b_callable }, { "chr", b_chr },
             { "divmod", b_divmod }, { "enumerate", b_enumerate }, { "filter", b_filter }, { "format", b_format }, { "getattr", b_getattr }, { "hasattr", b_hasattr }, 
             { "hex", b_hex }, { "input", b_input }, { "isinstance", b_isinstance }, { "iter", b_iter }, { "len", b_len }, { "map", b_map },
-            { "max", b_max }, { "min", b_min }, { "next", b_next }, { "oct", b_oct }, { "ord", b_ord }, { "pow", b_pow }, { "print", b_print },
+            { "max", b_max }, { "min", b_min }, { "next", b_next }, { "aiter", b_aiter }, { "anext", b_anext }, { "oct", b_oct }, { "ord", b_ord }, { "pow", b_pow }, { "print", b_print },
             { "repr", b_repr }, { "reversed", b_reversed }, { "round", b_round_of }, { "setattr", b_setattr }, { "delattr", b_delattr }, { "vars", b_vars }, { "dir", b_dir }, { "ascii", b_ascii }, { "sorted", b_sorted }, { "sum", b_sum },
             { "zip", b_zip }, { "__class", b_class }, { "__build_class", b_build_class }, { "__ns_bind", b_ns_bind },
             { "super", b_super }, { "issubclass", b_issubclass }, { "hash", b_hash }, { "id", b_id }, { "__bytes", b_bytes_literal }, { "__cell", b_cell },
@@ -19010,8 +19165,11 @@ namespace neos::python_runtime
             if (aArgs.empty())
                 return error("SystemError", "dir() without arguments is compiled as the names of the scope");
             auto const target = aArgs[0];
+            // (object.__dir__'s: the names, without the class's __dir__ (not for the dir() calls of the code that it runs))
+            bool const objectDir = tObjectDir;
+            tObjectDir = false;
             // (a __dir__ of the object's class (a user class's, or a class's metaclass's): its names, sorted (not for object.__dir__))
-            if (!tObjectDir)
+            if (!objectDir)
             {
                 ref method;
                 if (is_class(target))
@@ -19079,7 +19237,7 @@ namespace neos::python_runtime
             };
             if (auto const cls = user_class_of(target))
             {
-                if (auto const method = class_lookup(cls, "__dir__"))
+                if (auto const method = objectDir ? nullptr : class_lookup(cls, "__dir__"))
                 {
                     ref const bound{ bind_attribute(method, target, cls) };
                     ref const noArgs{ make_tuple() };

@@ -56,6 +56,7 @@
 #include <string_view>
 #include <vector>
 #include "objects.hpp"
+#include "values.hpp"
 
 namespace neos::python_runtime
 {
@@ -1162,6 +1163,80 @@ namespace neos::python_runtime
                     return nullptr;
             }
             return &(new async_iter_object{ { { &sAsyncIterType.base } }, iterator.release_ownership() })->h.base;
+        }
+
+        // aiter(async_iterable) (as CPython's: its __aiter__(), which must be an async iterator)
+        object* b_aiter(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            if (!no_keywords(aKwargs, "aiter") || (aArgs.size() != 1u && !arity_error(aArgs, 1u, 1u, "aiter")))
+                return nullptr;
+            if (is_async_generator(aArgs[0]))
+            {
+                retain(aArgs[0]);
+                return aArgs[0];
+            }
+            ref const aiter{ getattr(aArgs[0], "__aiter__") };
+            if (!aiter)
+            {
+                clear_error();
+                return error("TypeError", std::string{ "'" } + type_name(aArgs[0]) + "' object is not an async iterable");
+            }
+            ref const args{ make_tuple() };
+            ref iterator{ call(aiter.get(), args.get(), nullptr) };
+            if (!iterator)
+                return nullptr;
+            if (!is_async_generator(iterator.get()))
+            {
+                ref const anext{ getattr(iterator.get(), "__anext__") };
+                if (!anext)
+                {
+                    clear_error();
+                    return error("TypeError", std::string{ "aiter() returned not an async iterator of type '" } + type_name(iterator.get()) + "'");
+                }
+            }
+            return iterator.release_ownership();
+        }
+
+        // anext(async_iterator[, default]) (as CPython's: its __anext__(); with a default, an awaitable whose StopAsyncIteration is the 
+        // default)
+        object* b_anext(std::vector<object*> const& aArgs, object* aKwargs)
+        {
+            if (!no_keywords(aKwargs, "anext") || ((aArgs.empty() || aArgs.size() > 2u) && !arity_error(aArgs, 1u, 2u, "anext")))
+                return nullptr;
+            ref awaitable;
+            if (is_async_generator(aArgs[0]))
+                awaitable = ref{ make_asend(aArgs[0], asend_object::Send, nullptr, nullptr) };
+            else
+            {
+                ref const anext{ getattr(aArgs[0], "__anext__") };
+                if (!anext)
+                {
+                    clear_error();
+                    return error("TypeError", std::string{ "'" } + type_name(aArgs[0]) + "' object is not an async iterator");
+                }
+                ref const args{ make_tuple() };
+                awaitable = ref{ call(anext.get(), args.get(), nullptr) };
+            }
+            if (!awaitable || aArgs.size() == 1u)
+                return awaitable.release_ownership();
+            py const pending{ awaitable.release_ownership() };
+            py const value = py::borrowed(aArgs[1]);
+            return py_guarded([&]()
+                {
+                    return make_native_coroutine("anext", "anext", "builtins", [pending, value]() -> py
+                        {
+                            try
+                            {
+                                return py_await(pending);
+                            }
+                            catch (raised const&)
+                            {
+                                if (!caught({ "StopAsyncIteration" }))
+                                    throw;
+                                return value;
+                            }
+                        });
+                });
         }
 
         // __async_with(manager): async with's context manager

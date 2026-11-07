@@ -465,8 +465,9 @@ namespace neos::compilers::python
                     if (p.annotation && (!grammar_annotation(aFunction.header, *p.annotation) || p.kind == scope::parameter::VarArgs || p.kind == scope::parameter::VarKeywords))
                         result.emplace_back(p.annotation->first - 1u, p.annotation->second);
                 // (a def whose body is "pass" (or "...") returns None: its return annotation is not its type (a stub's, e.g. an overload's or 
-                // a protocol's, "def f(x: int) -> int: ..."))
-                if (aFunction.returnAnnotation && (!grammar_annotation(aFunction.header, *aFunction.returnAnnotation) || (body_is(aFunction, "pass") && !iStubReturnTypes)))
+                // a protocol's, "def f(x: int) -> int: ..."); nor is a generator's or a coroutine's (it returns a generator or coroutine object))
+                if (aFunction.returnAnnotation && (!grammar_annotation(aFunction.header, *aFunction.returnAnnotation) || (body_is(aFunction, "pass") && !iStubReturnTypes) ||
+                    aFunction.generator))
                     result.emplace_back(aFunction.returnAnnotation->first - 1u, aFunction.returnAnnotation->second);
                 return result;
             }
@@ -924,6 +925,7 @@ namespace neos::compilers::python
                 if (first == "import" || first == "from")
                 {
                     // (the names bound: a module's first name (import a.b) or its alias; or the imported names (from m import a as b))
+                    auto& statement = iImports.emplace_back(import_statement{ aLine, aBegin, aEnd, {} });
                     auto t = aBegin + 1u;
                     if (first == "from")
                     {
@@ -948,6 +950,7 @@ namespace neos::compilers::python
                         if (t > aBegin && is_name(aLine, t - 1u, "as"))
                         {
                             owner.bound.insert(std::string{ text(aLine, t) });
+                            statement.names.emplace_back(text(aLine, t));
                             if (&owner == &iModule)
                                 iRebound.insert(std::string{ text(aLine, t) });
                         }
@@ -965,6 +968,7 @@ namespace neos::compilers::python
                             if (!aliased)
                             {
                                 owner.bound.insert(std::string{ text(aLine, t) });
+                                statement.names.emplace_back(text(aLine, t));
                                 if (&owner == &iModule)
                                     iRebound.insert(std::string{ text(aLine, t) });
                             }
@@ -1531,8 +1535,9 @@ namespace neos::compilers::python
                 // (the function)
                 bool const any = parameters.find_first_not_of(" \t") != std::string::npos;
                 std::string function = "def " + aFunction.hoisted + "(" + cells + (!cells.empty() && any ? ", " : "") + parameters + ")";
-                // (its return annotation (if it is the grammar's type) and colon)
-                if (aFunction.returnAnnotation && !grammar_annotation(l, *aFunction.returnAnnotation))
+                // (its return annotation (if it is the grammar's type, and not a generator's or a coroutine's: it returns a generator
+                // or coroutine object) and colon)
+                if (aFunction.returnAnnotation && (!grammar_annotation(l, *aFunction.returnAnnotation) || aFunction.generator))
                     function += ":";
                 else
                     function += render_tokens(l, aFunction.closeParen + 1u, aFunction.colon + 1u, aFunction.parent);
@@ -1893,6 +1898,51 @@ namespace neos::compilers::python
                             }
                         if (nonlocal)
                             continue;
+                        // (an import statement that binds a cell's name: the cell is set after it ("import x; _k_x.v = x"))
+                        if (k.kind == token::Name && (text(k) == "import" || text(k) == "from") && owner->kind != scope::Module)
+                            for (auto const& i : iImports)
+                                if (i.line == l && i.begin == t)
+                                {
+                                    std::string cells;
+                                    for (auto const& n : i.names)
+                                        if (owner->cells.contains(n) || owner->frees.contains(n))
+                                            cells += "; " + cell(n) + ".v = " + n;
+                                    if (!cells.empty())
+                                        iClosers.emplace_back(std::make_pair(l, i.end), cells);
+                                }
+                        // (a walrus whose target is a cell's name: "(setattr(_k_x, 'v', value) or _k_x.v)" (a walrus cannot bind _k_x.v))
+                        if (k.kind == token::Name && t + 1u < line.tokens.size() && is_op(l, t + 1u, ":=") && owner->kind != scope::Module &&
+                            (owner->cells.contains(std::string{ text(k) }) || owner->frees.contains(std::string{ text(k) })))
+                        {
+                            auto const name = cell(std::string{ text(k) });
+                            auto end = t + 2u;
+                            int depth = 0;
+                            for (; end < line.tokens.size(); ++end)
+                            {
+                                // (a comprehension's element: up to its for clause)
+                                if (depth == 0 && (is_name(l, end, "for") || (is_name(l, end, "async") && is_name(l, end + 1u, "for"))))
+                                    break;
+                                if (tok(l, end).kind != token::Op)
+                                    continue;
+                                auto const op = text(l, end);
+                                if (opening(op))
+                                    ++depth;
+                                else if (closing(op))
+                                {
+                                    if (depth == 0)
+                                        break;
+                                    --depth;
+                                }
+                                else if (depth == 0 && (op == ";" || op == "," || (op == ":" && iOwners[l][end]->kind != scope::Lambda)))
+                                    break;
+                            }
+                            emit(k.begin);
+                            result += "(setattr(" + name + ", 'v', ";
+                            position = tok(l, t + 1u).end;
+                            iClosers.emplace_back(std::make_pair(l, end), ") or " + name + ".v)");
+                            ++t;
+                            continue;
+                        }
                         // (a cell's name)
                         if (k.kind == token::Name && !iSkip[l][t] && !keywords().contains(text(k)) && owner->kind != scope::Module)
                         {
@@ -1943,6 +1993,14 @@ namespace neos::compilers::python
             std::set<std::string> iRebound;     ///< (the names that the module's statements (not its defs) bind or delete)           ///< (an annotations dict is being rendered: its tokens are not removed)
             std::map<std::size_t, std::vector<std::pair<std::size_t, std::size_t>>> iStripped;  ///< (by line: tokens of annotations removed)
             std::vector<std::pair<std::pair<std::size_t, std::size_t>, std::string>> iClosers; ///< (yield expressions' closing brackets: before a line's token)
+            struct import_statement
+            {
+                std::size_t line;
+                std::size_t begin;
+                std::size_t end;
+                std::vector<std::string> names;     ///< (the names that it binds)
+            };
+            std::vector<import_statement> iImports;   ///< (import statements: the names that they bind)
         };
     }
 

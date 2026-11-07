@@ -325,6 +325,9 @@ namespace neos
                                                                         ///< installed (the program's memory had changed): then made here)
                     std::vector<std::uint8_t> loopTriggered;            ///< (an optimization that its loops started: its calls not yet made 
                                                                         ///< are not cold (its code after the loop has not run yet))
+                    std::uint64_t triggeringLoop = NoOsrLoop;           ///< (the loop (its token) whose iterations started the optimization
+                                                                        ///< being prepared (see loopTriggered): its calls not yet made are
+                                                                        ///< cold)
                     std::vector<std::uint8_t> tierState;                ///< (0: not optimized, 1: optimized, 2: not to be optimized)
                     std::vector<std::uint32_t> recompiles;
                     std::vector<std::set<std::size_t>> noInline;        ///< (calls (their positions) not to inline (their guards failed))
@@ -419,13 +422,14 @@ namespace neos
                         std::uint32_t arguments = 0u;
                         std::int32_t argumentsAt = 0;   ///< (its arguments' offset in the outgoing area (an import's: after the shadow space))
                         std::vector<deopt_slot> stack;
-                        std::uint32_t const* made = nullptr;    ///< (a call of a function with a frame of its own: set once the code has
+                        std::uint32_t const* made = nullptr;    ///< (a call of a function with a frame of its own: the times the code has
                                                                 ///< made it (see callFlags))
                     };
                     std::vector<deopt_frame> deoptFrames;
                     std::unordered_map<std::size_t, deopt_point> deoptPoints;
-                    // (the calls (deopt points) of functions with frames of their own that their code has made: optimized code leaves
-                    // (deopts) at a call that has never been made (once its function has been called often enough, see warm_function),
+                    // (the calls (deopt points) of functions with frames of their own that their code has made (the times): optimized code
+                    // leaves (deopts) at a call that has never been made (or once, see ColdMade; once its function has been called often
+                    // enough, see warm_function),
                     // rather than inline it (as V8's optimizing compiler leaves where its feedback says that code has not run))
                     std::deque<std::uint32_t> callFlags;
                     std::int32_t tierCalls = 0;                         ///< (the calls before a function is optimized)
@@ -1988,7 +1992,7 @@ namespace neos
                     // (a function's loop counter has reached 0; aLoop: a loop (its token) that the call can continue in optimized code from
                     // (else NoOsrLoop): that code's address (see code_generator::loop_counter), or null to go on with its code)
                     constexpr std::size_t MaxOsrLocals = 64u;       ///< (a function's parameters and locals: the most that a loop's optimized code takes)
-                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop) noexcept;
+                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop, std::uint64_t aCounted) noexcept;
                     // (a function compiled when it is first called (see compiled_module::lazy): its code's address (null if it cannot be
                     // compiled: the module's exception))
                     void const* lazy_compile(context* aContext, std::uint32_t aFunction) noexcept;
@@ -3268,6 +3272,7 @@ namespace neos
                                 a.mov_rr(true, NativeIntegerArguments[0], R15);
                                 a.mov_ri(NativeIntegerArguments[1], iFunctionIndex, false);
                                 a.mov_ri(NativeIntegerArguments[2], osr ? aLoop : NoOsrLoop, true);
+                                a.mov_ri(NativeIntegerArguments[3], aLoop, true);
                                 a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(&tier_loop), true);
                                 a.call_r(RAX);
                                 if (osr)
@@ -4662,8 +4667,9 @@ namespace neos
                                     push_loaded(results[i], RSP, ShadowSpace + 8 * static_cast<std::int32_t>(i));
                             }
                         }
-                        // (a deopt point's call, in a function with a frame of its own: its flag is set when it is made (here: where a deopt
-                        // resumes too), see compiled_module::callFlags; rax is free (the call's arguments are in the outgoing area))
+                        // (a deopt point's call, in a function with a frame of its own: its count is incremented (to at most its greatest) when
+                        // it is made (here: where a deopt resumes too), see compiled_module::callFlags; rax is free (the call's arguments are in
+                        // the outgoing area))
                         void call_made(compiled_module::deopt_point& aPoint)
                         {
                             if (iCallFlags == nullptr || iFunction == nullptr || iFunction->frameless)
@@ -4671,7 +4677,8 @@ namespace neos
                             iCallFlags->push_back(0u);
                             aPoint.made = &iCallFlags->back();
                             a.mov_ri(RAX, reinterpret_cast<std::uint64_t>(aPoint.made), true);
-                            a.store_imm(false, RAX, 0, 1);
+                            a.alu_mi(7, false, RAX, 0, -1);     // (cmp dword [rax], ~0: carry unless it is its greatest)
+                            a.alu_mi(2, false, RAX, 0, 0);      // (adc dword [rax], 0)
                         }
                         // call_indirect (of a function of the program (the table is its functions) of a type; its index is the last 
                         // operand): its index and type checked against the table (see compiled_module::indirect), then called as call calls
@@ -9651,6 +9658,8 @@ namespace neos
                     constexpr std::int32_t NotAgain = std::numeric_limits<std::int32_t>::max();
                     constexpr std::uint32_t MaxRecompiles = 16u;        ///< (then without speculation)
                     constexpr std::int32_t WarmCalls = 64;              ///< (a function's calls before a call it has never made is cold (see callFlags))
+                    constexpr std::uint32_t ColdMade = 1u;              ///< (a call made at most this often is one it has never made, but for the call
+                                                                        ///< that first took its path (e.g. the call that filled a call site's entry))
                     constexpr std::int32_t RecompileCalls = 1000;       ///< (calls before a function whose guard failed is optimized again)
                     constexpr std::int32_t RecompileCallsAfterDeopts = 200; ///< (... whose code left often for its own (not a guard's))
                     constexpr std::uint32_t DeoptsBeforeReoptimizing = 16u; ///< (a deopt that is not a guard's: its code left for the baseline's)
@@ -9793,9 +9802,8 @@ namespace neos
                             };
                             // (a call that has never been made, in a function that has been called often enough: optimized code leaves 
                             // there (see compiled_module::callFlags))
-                            // (the call's flag and the functions' counters and states are the program's (the optimizer may run while it 
+                            // (the call's count and the functions' counters and states are the program's (the optimizer may run while it 
                             // runs): words read as they are (a call made, or a function optimized, since: its code calls, or deopts once))
-                            // (an optimization that the function's loops started: none (its code after its loops has not run yet))
                             options.slowCall = [&m](std::uint32_t aCallee, std::size_t aPosition)
                             {
                                 if (aCallee >= m.description.functions.size() || !slow_plugin(m.description.functions[aCallee]))
@@ -9803,19 +9811,36 @@ namespace neos
                                 auto const* const point = deopt_point_at(m, aPosition);
                                 return point != nullptr && point->made != nullptr && *point->made == 0u;
                             };
-                            if (!fromLoop)
-                                options.coldCall = [&m](std::size_t aPosition)
-                                {
-                                    auto const* const point = deopt_point_at(m, aPosition);
-                                    if (point == nullptr || point->made == nullptr || *point->made != 0u)
-                                        return false;
-                                    auto const g = point->function;
-                                    if (g >= m.counters.size())
-                                        return false;
-                                    if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
-                                        return true;
-                                    return m.counters[g] <= m.tierCalls - std::min(m.tierCalls, WarmCalls);
-                                };
+                            // (an optimization that the function's loop started: its code outside the loop (but not that of the functions it
+                            // calls) has not run (often) yet: none of its calls there are cold; a loop that is not known (within another): none
+                            // of its own)
+                            std::size_t ownBegin = 0u, ownEnd = 0u, loopBegin = 0u, loopEnd = 0u;
+                            if (fromLoop)
+                            {
+                                auto const& fd = m.description.functions[f];
+                                ownBegin = fd.codeBegin;
+                                ownEnd = fd.codeEnd;
+                                if (m.triggeringLoop != NoOsrLoop && m.triggeringLoop >= fd.codeBegin && m.triggeringLoop < fd.codeEnd)
+                                    if (auto const end = block_ends_of(m, f)[m.triggeringLoop - fd.codeBegin]; end != 0u)
+                                    {
+                                        loopBegin = static_cast<std::size_t>(m.triggeringLoop);
+                                        loopEnd = fd.codeBegin + end;
+                                    }
+                            }
+                            options.coldCall = [&m, ownBegin, ownEnd, loopBegin, loopEnd](std::size_t aPosition)
+                            {
+                                if (aPosition >= ownBegin && aPosition < ownEnd && (aPosition < loopBegin || aPosition >= loopEnd))
+                                    return false;
+                                auto const* const point = deopt_point_at(m, aPosition);
+                                if (point == nullptr || point->made == nullptr || *point->made > ColdMade)
+                                    return false;
+                                auto const g = point->function;
+                                if (g >= m.counters.size())
+                                    return false;
+                                if (m.tierState[g] != 0u || m.recompiles[g] != 0u)
+                                    return true;
+                                return m.counters[g] <= m.tierCalls - std::min(m.tierCalls, WarmCalls);
+                            };
                         }
                         options.maxDeoptValues = MaxDeoptValues;
                         options.blockEnds = [&m](std::uint32_t aFunction) { return block_ends_of(m, aFunction); };
@@ -10462,8 +10487,9 @@ namespace neos
 
                     // (a function's loops have run often enough (see code_generator::loop_counter): it is optimized (its later calls run
                     // its optimized code); the call whose loop it is continues in optimized code from the loop (aLoop, unless NoOsrLoop), 
-                    // once the function has been optimized (see osr_entry), else in its own code)
-                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop) noexcept
+                    // once the function has been optimized (see osr_entry), else in its own code; aCounted: the loop (its token) whose
+                    // iteration it was (see compiled_module::triggeringLoop))
+                    void const* tier_loop(context* aContext, std::uint32_t aFunction, std::uint64_t aLoop, std::uint64_t aCounted) noexcept
                     {
                         auto& m = *aContext->module;
                         std::lock_guard<std::recursive_mutex> lock{ m.tierMutex };
@@ -10475,7 +10501,9 @@ namespace neos
                             if (m.tierState[f] == 0u)
                             {
                                 m.loopTriggered[f] = 1u;
+                                m.triggeringLoop = aCounted;
                                 optimize_function(m, f);
+                                m.triggeringLoop = NoOsrLoop;
                                 m.loopTriggered[f] = 0u;
                             }
                             else if (m.tierState[f] == 3u)
@@ -10505,6 +10533,7 @@ namespace neos
                         catch (...)
                         {
                             m.loopTriggered[f] = 0u;
+                            m.triggeringLoop = NoOsrLoop;
                             if (m.tierState[f] != 1u)
                                 m.tierState[f] = 2u;
                         }

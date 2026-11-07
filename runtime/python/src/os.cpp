@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -1865,6 +1866,60 @@ namespace neos::python_runtime
                         std::string p;
                         if (!parse_arguments("utime", aArgs, aKwargs, { "path", "times", "ns", "dir_fd", "follow_symlinks" }, 1u, 0u, a) || !path_of(a, 0u, p, "utime"))
                             return nullptr;
+                        bool const times = a[1] != nullptr && a[1] != none();
+                        if (times && a[2] != nullptr)
+                            return error("ValueError", "utime: you may specify either 'times' or 'ns' but not both");
+                        if (times && (kind_of(a[1]) != NEOS_PY_TUPLE || as<tuple_object>(a[1])->items.size() != 2u))
+                            return error("TypeError", "utime: 'times' must be either a tuple of two ints or None");
+                        if (a[2] != nullptr && (kind_of(a[2]) != NEOS_PY_TUPLE || as<tuple_object>(a[2])->items.size() != 2u))
+                            return error("TypeError", "utime: 'ns' must be a tuple of two ints");
+#if !defined(_WIN32)
+                        // (as CPython's: utimensat, an int exact seconds, a float floored to nanoseconds; neither: now)
+                        struct timespec when[2];
+                        for (std::size_t i = 0u; i < 2u; ++i)
+                        {
+                            if (a[2] != nullptr)
+                            {
+                                long long n = 0;
+                                if (!to_index(as<tuple_object>(a[2])->items[i], n))
+                                    return nullptr;
+                                when[i].tv_sec = static_cast<time_t>(n / 1000000000ll - (n % 1000000000ll < 0 ? 1 : 0));
+                                when[i].tv_nsec = static_cast<long>(n % 1000000000ll + (n % 1000000000ll < 0 ? 1000000000ll : 0));
+                            }
+                            else if (times && kind_of(as<tuple_object>(a[1])->items[i]) == NEOS_PY_FLOAT)
+                            {
+                                double d = 0.0;
+                                if (!to_double(as<tuple_object>(a[1])->items[i], d))
+                                    return nullptr;
+                                auto const whole = std::floor(d);
+                                auto nanoseconds = static_cast<long>(std::floor((d - whole) * 1e9));
+                                auto seconds = static_cast<time_t>(whole);
+                                if (nanoseconds >= 1000000000l)
+                                {
+                                    nanoseconds -= 1000000000l;
+                                    ++seconds;
+                                }
+                                when[i].tv_sec = seconds;
+                                when[i].tv_nsec = nanoseconds;
+                            }
+                            else if (times)
+                            {
+                                long long n = 0;
+                                if (!to_index(as<tuple_object>(a[1])->items[i], n))
+                                    return nullptr;
+                                when[i].tv_sec = static_cast<time_t>(n);
+                                when[i].tv_nsec = 0;
+                            }
+                            else
+                            {
+                                when[i].tv_sec = 0;
+                                when[i].tv_nsec = UTIME_NOW;
+                            }
+                        }
+                        if (::utimensat(AT_FDCWD, p.c_str(), when, a[4] == nullptr || truth(a[4]) == 1 ? 0 : AT_SYMLINK_NOFOLLOW) != 0)
+                            return raise_os_error(errno, a[0]);
+                        return none();
+#else
                         std::error_code ec;
                         auto when = std::filesystem::file_time_type::clock::now();
                         if (a[1] != nullptr && kind_of(a[1]) == NEOS_PY_TUPLE && as<tuple_object>(a[1])->items.size() == 2u)
@@ -1880,6 +1935,7 @@ namespace neos::python_runtime
                         if (ec)
                             return raise_os_error(ENOENT, a[0]);
                         return none();
+#endif
                     } },
                 { "walk", [](std::vector<object*> const& aArgs, object* aKwargs) -> object*
                     {
@@ -2992,7 +3048,9 @@ namespace neos::python_runtime
                     { "S_IFIFO", 0010000 }, { "S_IFSOCK", 0140000 }, { "S_ISUID", 04000 }, { "S_ISGID", 02000 }, { "S_ISVTX", 01000 }, { "S_IRWXU", 0700 },
                     { "S_IRUSR", 0400 }, { "S_IWUSR", 0200 }, { "S_IXUSR", 0100 }, { "S_IRWXG", 070 }, { "S_IRGRP", 040 }, { "S_IWGRP", 020 }, { "S_IXGRP", 010 },
                     { "S_IRWXO", 07 }, { "S_IROTH", 04 }, { "S_IWOTH", 02 }, { "S_IXOTH", 01 }, { "ST_MODE", 0 }, { "ST_INO", 1 }, { "ST_DEV", 2 }, { "ST_NLINK", 3 },
-                    { "ST_UID", 4 }, { "ST_GID", 5 }, { "ST_SIZE", 6 }, { "ST_ATIME", 7 }, { "ST_MTIME", 8 }, { "ST_CTIME", 9 } })
+                    { "ST_UID", 4 }, { "ST_GID", 5 }, { "ST_SIZE", 6 }, { "ST_ATIME", 7 }, { "ST_MTIME", 8 }, { "ST_CTIME", 9 },
+                    // (the names CPython defines on every platform: S_IREAD, S_IWRITE and S_IEXEC (Windows's), S_ENFMT; Solaris's and BSD's types: 0)
+                    { "S_IREAD", 0400 }, { "S_IWRITE", 0200 }, { "S_IEXEC", 0100 }, { "S_ENFMT", 02000 }, { "S_IFDOOR", 0 }, { "S_IFPORT", 0 }, { "S_IFWHT", 0 } })
                     aAttributes.emplace_back(c.first, make_int(c.second));
                 return true;
             }

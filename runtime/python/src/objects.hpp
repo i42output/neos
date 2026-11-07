@@ -477,6 +477,7 @@ namespace neos::python_runtime
         // (a module's namespace's item set: the module's name of that key bound to the value (false: an exception))
         bool namespace_bind(object* aGetter, object* aKey, object* aValue);
         bool no_keywords(object* aKwargs, char const* aFunction);
+        bool arity_error(std::vector<object*> const& aArgs, std::size_t aMin, std::size_t aMax, char const* aName);   // (the TypeError of a builtin given too few or too many arguments)
 
         bool is_int_like(object* aObject);                       // (int or bool)
         bool to_index(object* aObject, long long& aResult);       // (__index__)
@@ -974,6 +975,8 @@ namespace neos::python_runtime
         object* b_async_generator(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_await(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_async_iter(std::vector<object*> const& aArgs, object* aKwargs);
+        object* b_aiter(std::vector<object*> const& aArgs, object* aKwargs);
+        object* b_anext(std::vector<object*> const& aArgs, object* aKwargs);
         object* b_async_with(std::vector<object*> const& aArgs, object* aKwargs);
         object* fn_awaitable_iterator(object* aAwaitable);   // (an awaitable's iterator (a new reference))
         int fn_await_step(object* aIterator, object* aSent, object* aThrown, object*& aValue);
