@@ -46,6 +46,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <stdexcept>
 #include <map>
 #include <cstdint>
 #include <cstring>
@@ -179,7 +180,16 @@ namespace neos::python_runtime
                         error("ValueError", "negative count");
                         return false;
                     }
-                    aResult.assign(static_cast<std::size_t>(n), '\0');
+                    // (its room: MemoryError if it cannot be had (as CPython's))
+                    try
+                    {
+                        aResult.assign(static_cast<std::size_t>(n), '\0');
+                    }
+                    catch (std::exception const&)
+                    {
+                        error("MemoryError", "");
+                        return false;
+                    }
                     return true;
                 }
                 auto const type = python_type(aSource);
@@ -198,7 +208,15 @@ namespace neos::python_runtime
                             error("ValueError", "negative count");
                             return false;
                         }
-                        aResult.assign(static_cast<std::size_t>(n), '\0');
+                        try
+                        {
+                            aResult.assign(static_cast<std::size_t>(n), '\0');
+                        }
+                        catch (std::exception const&)
+                        {
+                            error("MemoryError", "");
+                            return false;
+                        }
                         return true;
                     }
                     error("TypeError", std::string{ "cannot convert '" } + type_name(aSource) + "' object to " + aName);
@@ -356,7 +374,8 @@ namespace neos::python_runtime
                         spec += aFormat[i];
                     }
                     long long width = -1, precision = -1;
-                    auto const number = [&](long long& aResult) -> bool
+                    // (as CPython's: a width a Py_ssize_t, a precision a C int ('*': OverflowError beyond; digits: ValueError))
+                    auto const number = [&](long long& aResult, bool aPrecision) -> bool
                     {
                         if (i < n && aFormat[i] == '*')
                         {
@@ -366,18 +385,27 @@ namespace neos::python_runtime
                                 return false;
                             if (!is_int_like(v))
                                 return (error("TypeError", "* wants int"), false);
-                            if (!to_index(v, aResult)) return false;
+                            if (!to_index(v, aResult) || (aPrecision && (aResult > INT_MAX || aResult < INT_MIN)))
+                            {
+                                clear_error();
+                                return (error("OverflowError", aPrecision ? "Python int too large to convert to C int" : "Python int too large to convert to C ssize_t"), false);
+                            }
                             return true;
                         }
                         if (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
                         {
                             aResult = 0;
+                            auto const limit = aPrecision ? static_cast<long long>(INT_MAX) : std::numeric_limits<long long>::max();
                             while (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
+                            {
+                                if (aResult > (limit - (aFormat[i] - '0')) / 10)
+                                    return (error("ValueError", aPrecision ? "precision too big" : "width too big"), false);
                                 aResult = aResult * 10 + (aFormat[i++] - '0');
+                            }
                         }
                         return true;
                     };
-                    if (!number(width))
+                    if (!number(width, false))
                         return nullptr;
                     if (width < -1)
                     {
@@ -391,7 +419,7 @@ namespace neos::python_runtime
                     {
                         ++i;
                         precision = 0;
-                        if (!number(precision))
+                        if (!number(precision, true))
                             return nullptr;
                         spec += "." + std::to_string(precision);
                     }
@@ -487,12 +515,20 @@ namespace neos::python_runtime
                             return error("ValueError", buffer);
                         }
                     }
-                    if (!padded && width > static_cast<long long>(body.size()))
+                    // (its room: MemoryError if it cannot be had (as CPython's, e.g. a width of sys.maxsize))
+                    try
                     {
-                        auto const padding = std::string(static_cast<std::size_t>(width) - body.size(), ' ');
-                        body = left ? body + padding : padding + body;
+                        if (!padded && width > static_cast<long long>(body.size()))
+                        {
+                            auto const padding = std::string(static_cast<std::size_t>(width) - body.size(), ' ');
+                            body = left ? body + padding : padding + body;
+                        }
+                        result += body;
                     }
-                    result += body;
+                    catch (std::exception const&)
+                    {
+                        return error("MemoryError", "");
+                    }
                 }
                 if (!mapping && next < values.size())
                     return error("TypeError", "not all arguments converted during bytes formatting");
@@ -1018,7 +1054,7 @@ namespace neos::python_runtime
                         long long start = 0, stop = 0, step = 0;
                         if (!slice_indices(aKey, n, start, stop, step))
                             return nullptr;
-                        long long const count = step > 0 ? (stop > start ? (stop - start + step - 1) / step : 0) : (start > stop ? (start - stop - step - 1) / -step : 0);
+                        auto const count = static_cast<long long>(slice_count(start, stop, step));
                         return make_view(view, static_cast<std::size_t>(static_cast<long long>(view.start) + start * view.stride), static_cast<std::size_t>(count), 
                             view.stride * step);
                     }
@@ -1059,7 +1095,7 @@ namespace neos::python_runtime
                         long long start = 0, stop = 0, step = 0;
                         if (!slice_indices(aKey, n, start, stop, step))
                             return -1;
-                        long long const count = step > 0 ? (stop > start ? (stop - start + step - 1) / step : 0) : (start > stop ? (start - stop - step - 1) / -step : 0);
+                        auto const count = static_cast<long long>(slice_count(start, stop, step));
                         std::string format, bytes;
                         std::size_t itemsize = 0u, items = 0u;
                         if (!other_buffer(aValue, format, itemsize, items, bytes))
@@ -2079,13 +2115,7 @@ namespace neos::python_runtime
                         data.replace(static_cast<std::size_t>(start), static_cast<std::size_t>(stop - start), values);
                         return 0;
                     }
-                    std::vector<std::size_t> positions;
-                    if (step > 0)
-                        for (long long i = start; i < stop; i += step)
-                            positions.push_back(static_cast<std::size_t>(i));
-                    else
-                        for (long long i = start; i > stop; i += step)
-                            positions.push_back(static_cast<std::size_t>(i));
+                    auto positions = slice_positions(start, stop, step);
                     if (aValue == nullptr)
                     {
                         std::sort(positions.begin(), positions.end());
@@ -2158,12 +2188,9 @@ namespace neos::python_runtime
                         std::string result;
                         if (step == 1)
                             result.assign(data, static_cast<std::size_t>(start), static_cast<std::size_t>(std::max(stop - start, 0LL)));
-                        else if (step > 0)
-                            for (long long i = start; i < stop; i += step)
-                                result += data[static_cast<std::size_t>(i)];
                         else
-                            for (long long i = start; i > stop; i += step)
-                                result += data[static_cast<std::size_t>(i)];
+                            for (auto i : slice_positions(start, stop, step))
+                                result += data[i];
                         return same_type(aSelf, std::move(result));
                     }
                     if (!is_int_like(aKey) && (python_type(aKey) == nullptr || python_type(aKey)->index == nullptr))
@@ -2216,6 +2243,23 @@ namespace neos::python_runtime
                         if (!to_index(count, n))
                             return nullptr;
                         std::string result;
+                        // (longer than sys.maxsize bytes: bytes' OverflowError, bytearray's MemoryError; then its room: MemoryError if it 
+                        // cannot be had (as CPython's))
+                        if (n > 0 && !a.empty())
+                        {
+                            if (n > std::numeric_limits<long long>::max() / static_cast<long long>(a.size()))
+                                return is_bytearray(self) ? error("MemoryError", "") : error("OverflowError", "repeated bytes are too long");
+                            try
+                            {
+                                if (static_cast<unsigned long long>(n) > result.max_size() / a.size())
+                                    throw std::length_error{ "repeat" };
+                                result.reserve(static_cast<std::size_t>(n) * a.size());
+                            }
+                            catch (std::exception const&)
+                            {
+                                return error("MemoryError", "");
+                            }
+                        }
                         for (long long i = 0; i < n; ++i)
                             result += a;
                         if (aInplace != 0 && is_bytearray(aLhs) && self == aLhs)

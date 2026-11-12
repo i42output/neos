@@ -1791,21 +1791,26 @@ namespace neos::python_runtime
                         }
                         if (!a || !b)
                         {
-                            // (a Fraction: compared by its value)
+                            // (a Fraction (as CPython's multiply_by_denominator): the Decimal times its denominator, exactly, compared with 
+                            // its numerator (the Decimal's own ratio could be a vast integer, e.g. 1E+425000000's))
                             auto const other = !a ? aLhs : aRhs;
-                            if (std::string_view{ other->type->name } == "fractions.Fraction")
+                            if (std::string_view{ other->type->name } != "fractions.Fraction")
+                                return borrowed(not_implemented());
+                            ref const numerator{ getattr(other, "numerator") };
+                            ref const denominator{ getattr(other, "denominator") };
+                            if (!numerator || !denominator)
                             {
-                                ref const ratio{ call_method_named(is_decimal(aLhs) ? aLhs : aRhs, "as_integer_ratio", {}) };
-                                if (!ratio)
-                                {
-                                    clear_error();
-                                    return borrowed(not_implemented());
-                                }
-                                ref const fractionType{ getattr(ref{ fn_import("fractions") }.get(), "Fraction") };
-                                ref const exact{ call(fractionType.get(), ratio.get(), nullptr) };
-                                return is_decimal(aLhs) ? compare(aOperation, exact.get(), aRhs) : compare(aOperation, aLhs, exact.get());
+                                clear_error();
+                                return borrowed(not_implemented());
                             }
-                            return borrowed(not_implemented());
+                            auto const n = operand(numerator.get());
+                            auto const d = operand(denominator.get());
+                            if (!n || !d)
+                                return borrowed(not_implemented());
+                            auto& self = a ? a : b;
+                            if (!self->is_special() && self->truth())
+                                self = triple(self->sign, self->coefficient() * d->coefficient(), self->exp);
+                            (a ? b : a) = n;
                         }
                         if (a->is_nan() || b->is_nan())
                         {

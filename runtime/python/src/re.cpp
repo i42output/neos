@@ -868,6 +868,47 @@ namespace neos::python_runtime
 #else
 #define RE_NOINLINE __attribute__((noinline))
 #endif
+            // (a node that captures (a capturing group within it))
+            bool captures(node const& n)
+            {
+                if (n.kind == node::Group && n.group >= 0)
+                    return true;
+                for (auto const& c : n.children)
+                    if (captures(*c))
+                        return true;
+                return false;
+            }
+
+            // (a node that matches exactly one character and captures nothing, whatever follows it: a single character, in non-capturing 
+            // groups, with lookarounds (atomic, as sre's) (e.g. configparser's (?:(?!=)\s)+): a repetition of it is a run, counted 
+            // without recursion (sre's is iterative: a long run cannot exhaust the stack))
+            bool one_character(node const& n)
+            {
+                switch (n.kind)
+                {
+                case node::Literal:
+                case node::Any:
+                case node::Set:
+                    return true;
+                case node::Group:
+                    return n.group < 0 && n.children.size() == 1u && one_character(*n.children[0]);
+                case node::Sequence:
+                    {
+                        std::size_t characters = 0u;
+                        for (auto const& c : n.children)
+                            if (c->kind == node::Look && !captures(*c))
+                                continue;
+                            else if (one_character(*c))
+                                ++characters;
+                            else
+                                return false;
+                        return characters == 1u;
+                    }
+                default:
+                    return false;
+                }
+            }
+
             // (the matcher's rarer nodes (lookarounds, atomic groups, ...) are its functions out of line: match's frame stays small)
             struct matcher
             {
@@ -876,6 +917,7 @@ namespace neos::python_runtime
                 std::vector<long long> marks;       ///< (each group's start and end: -1 if not matched)
                 int lastindex = -1;
                 std::size_t steps = 0u;
+                bool overflow = false;              ///< (the stack neared its end: abandoned)
 
                 bool single(node const& n, std::size_t aPosition) const
                 {
@@ -1049,6 +1091,13 @@ namespace neos::python_runtime
                 bool match(node const& n, std::size_t aPosition, continuation const& k)
                 {
                     ++steps;
+                    // (backtracking that nears the stack's end (sre's is iterative; this one recurses): abandoned (RecursionError, not a 
+                    // crash))
+                    if (overflow || ((steps & 31u) == 0u && stack_low()))
+                    {
+                        overflow = true;
+                        return false;
+                    }
                     // (a node that must begin with a character it cannot begin with here: no match)
                     if (!n.nullable)
                     {
@@ -1132,6 +1181,29 @@ namespace neos::python_runtime
                                         return true;
                                 return false;
                             }
+                            if (one_character(child))
+                            {
+                                // (one character, with lookarounds: the same (each position tested by itself))
+                                auto const accept = [](std::size_t) { return true; };
+                                std::size_t count = 0u;
+                                while (count < n.maximum && aPosition + count < end && match(child, aPosition + count, make_continuation(accept)))
+                                    ++count;
+                                if (count < n.minimum)
+                                    return false;
+                                if (n.mode == 2)
+                                    return k(aPosition + count);
+                                if (n.mode == 1)
+                                {
+                                    for (auto c = n.minimum; c <= count; ++c)
+                                        if (k(aPosition + c))
+                                            return true;
+                                    return false;
+                                }
+                                for (auto c = count + 1u; c-- > n.minimum;)
+                                    if (k(aPosition + c))
+                                        return true;
+                                return false;
+                            }
                             if (n.mode == 2)
                                 return possessive(n, aPosition, k);
                             return repeat(n, 0u, aPosition, k);
@@ -1171,6 +1243,8 @@ namespace neos::python_runtime
                 };
                 if (!m.match(*aProgram.root, aStart, make_continuation(accept)))
                 {
+                    if (m.overflow)
+                        error("RecursionError", "maximum recursion depth exceeded while matching a regular expression");
                     aMarks = std::move(m.marks);
                     return false;
                 }
@@ -1331,6 +1405,8 @@ namespace neos::python_runtime
                 {
                     if (match_at(p, *aText, s, end, aMode == 1, aMustAdvance && s == start, marks, lastindex, matchEnd))
                         return make_match(aPattern, aString, aText, std::move(marks), lastindex, aPos < 0 ? 0 : aPos, static_cast<long long>(end));
+                    if (failed())
+                        return nullptr;
                     if (aMode != 2)
                         break;
                 }

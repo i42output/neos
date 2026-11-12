@@ -2572,6 +2572,9 @@ namespace neos::python_runtime
 #else
                         if (::kill(static_cast<pid_t>(pid), static_cast<int>(signal)) != 0)
                             return raise_os_error(errno);
+                        // (a signal to itself: its handler called before kill returns (as CPython's, which checks at once))
+                        if (!signals_check())
+                            return nullptr;
 #endif
                         return none();
                     } },

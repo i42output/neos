@@ -53,6 +53,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 #include "objects.hpp"
 #include "values.hpp"
 
@@ -192,7 +195,12 @@ namespace neos::python_runtime
 
             long long thread_ident()
             {
+#if defined(_WIN32)
                 return static_cast<long long>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0x7FFFFFFFFFFFull);
+#else
+                // (as CPython's: pthread_self() (signal.pthread_kill takes it))
+                return static_cast<long long>(reinterpret_cast<std::uintptr_t>(reinterpret_cast<void*>(::pthread_self())));
+#endif
             }
 
             std::string address(object* aObject) { return object_address(aObject); }

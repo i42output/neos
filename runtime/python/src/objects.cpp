@@ -1947,6 +1947,18 @@ namespace neos::python_runtime
             };
         }
 
+        bool stack_low()
+        {
+            constexpr std::uint64_t StackMargin = 128u * 1024u;
+            if (auto const* h = python_runtime::host(); h != nullptr && h->version >= 19u && h->stack_limit != nullptr)
+            {
+                char probe = 0;
+                auto const limit = h->stack_limit();
+                return limit != 0u && reinterpret_cast<std::uint64_t>(&probe) < limit + StackMargin;
+            }
+            return false;
+        }
+
         bool enter_recursive_call(char const* aWhere)
         {
             return enter_recursive_call(tRecursion, aWhere);
@@ -2136,6 +2148,10 @@ namespace neos::python_runtime
                         aResult = "<" + name + " object at " + object_address(aObject) + ">";
                         return true;
                     }
+                    // (a recursive call (as PyObject_Repr's: RecursionError beyond the limit; e.g. an object whose repr contains its own))
+                    recursive_call const guard{ " while getting the repr of an object" };
+                    if (!guard.entered)
+                        return false;
                     ref const text{ type->repr(context(), aObject) };
                     if (!text)
                         return false;
@@ -3212,9 +3228,7 @@ namespace neos::python_runtime
             case NEOS_PY_RANGE:
                 {
                     auto const& r = *as<range_object>(aObject);
-                    if (r.step > 0)
-                        return r.stop > r.start ? (r.stop - r.start + r.step - 1) / r.step : 0;
-                    return r.stop < r.start ? (r.start - r.stop - r.step - 1) / -r.step : 0;
+                    return static_cast<long long>(slice_count(r.start, r.stop, r.step));
                 }
             case NEOS_PY_OTHER:
                 if (auto const type = python_type(aObject); type != nullptr && type->length != nullptr)
@@ -3297,6 +3311,9 @@ namespace neos::python_runtime
                 error("ValueError", "slice step cannot be zero");
                 return false;
             }
+            // (as CPython's: at least -sys.maxsize, so that -step cannot overflow)
+            if (aStep < -std::numeric_limits<long long>::max())
+                aStep = -std::numeric_limits<long long>::max();
             auto const part = [&](object* aPart, std::optional<long long>& aResult)
             {
                 if (aPart == none() || kind_of(aPart) == NEOS_PY_NONE)
@@ -3346,20 +3363,23 @@ namespace neos::python_runtime
         // (the number of positions of a slice (see slice_indices))
         std::size_t slice_count(long long aStart, long long aStop, long long aStep)
         {
+            // (unsigned: no overflow, even for a span beyond sys.maxsize)
             if (aStep > 0)
-                return aStart < aStop ? static_cast<std::size_t>((static_cast<unsigned long long>(aStop - aStart) - 1u) / static_cast<unsigned long long>(aStep) + 1u) : 0u;
-            return aStart > aStop ? static_cast<std::size_t>((static_cast<unsigned long long>(aStart - aStop) - 1u) / (0u - static_cast<unsigned long long>(aStep)) + 1u) : 0u;
+                return aStart < aStop ? static_cast<std::size_t>((static_cast<unsigned long long>(aStop) - static_cast<unsigned long long>(aStart) - 1u) / 
+                    static_cast<unsigned long long>(aStep) + 1u) : 0u;
+            return aStart > aStop ? static_cast<std::size_t>((static_cast<unsigned long long>(aStart) - static_cast<unsigned long long>(aStop) - 1u) / 
+                (0u - static_cast<unsigned long long>(aStep)) + 1u) : 0u;
         }
 
+        // (the positions of a slice (see slice_indices), by their count (as CPython's: start + i * step; stepping past the last 
+        // could overflow, e.g. a step of sys.maxsize))
         std::vector<std::size_t> slice_positions(long long aStart, long long aStop, long long aStep)
         {
             std::vector<std::size_t> positions;
-            if (aStep > 0)
-                for (long long i = aStart; i < aStop; i += aStep)
-                    positions.push_back(static_cast<std::size_t>(i));
-            else
-                for (long long i = aStart; i > aStop; i += aStep)
-                    positions.push_back(static_cast<std::size_t>(i));
+            auto const count = slice_count(aStart, aStop, aStep);
+            positions.reserve(count);
+            for (std::size_t i = 0u; i < count; ++i)
+                positions.push_back(static_cast<std::size_t>(aStart + static_cast<long long>(i) * aStep));
             return positions;
         }
 
@@ -3463,6 +3483,33 @@ namespace neos::python_runtime
             if (k == NEOS_PY_RANGE)
             {
                 auto const& r = *as<range_object>(aObject);
+                // (a slice: a range of the positions' values (as CPython's compute_slice: start + i * step, step * step); a step that 
+                // would overflow has at most one item, so its sign is enough)
+                if (kind_of(aKey) == NEOS_PY_SLICE)
+                {
+                    long long start = 0, stop = 0, step = 0;
+                    if (!slice_indices(aKey, length(aObject), start, stop, step))
+                        return nullptr;
+                    long long product = 0;
+                    if (std::abs(step) > std::numeric_limits<long long>::max() / std::abs(r.step))
+                        product = (step < 0) != (r.step < 0) ? -std::numeric_limits<long long>::max() : std::numeric_limits<long long>::max();
+                    else
+                        product = step * r.step;
+                    // (its start and stop modulo 2**64: exact if they fit (the product alone can overflow); else (a stop beyond the 
+                    // values' range) its last item's next)
+                    auto const at = [](long long aStart, long long aIndex, long long aStep)
+                    {
+                        return static_cast<long long>(static_cast<unsigned long long>(aStart) + static_cast<unsigned long long>(aIndex) * static_cast<unsigned long long>(aStep));
+                    };
+                    auto const count = slice_count(start, stop, step);
+                    auto const first = at(r.start, start, r.step);
+                    auto last = at(r.start, stop, r.step);
+                    if (count == 0u)
+                        last = first;
+                    else if (slice_count(first, last, product) != count)
+                        last = at(first, static_cast<long long>(count - 1u), product) + (product > 0 ? 1 : -1);
+                    return make_range(first, last, product);
+                }
                 std::size_t i = 0u;
                 if (!normalize_index(aKey, static_cast<std::size_t>(length(aObject)), i, "range object"))
                     return nullptr;
@@ -3809,6 +3856,27 @@ namespace neos::python_runtime
                     }
                 default:
                     {
+                        // (a user class's sequence (as CPython's seqiter): __getitem__ with 0, 1, ... until IndexError or StopIteration, 
+                        // after which it is exhausted: the sequence released (an empty tuple in its place))
+                        if (user_class_of(sequence) != nullptr)
+                        {
+                            ref const index{ make_int(static_cast<long long>(it.index)) };
+                            auto const item = getitem(sequence, index.get());
+                            if (item == nullptr)
+                            {
+                                if (failed() && error_text() != nullptr && (std::string_view{ error_text() }.starts_with("IndexError") || 
+                                    std::string_view{ error_text() }.starts_with("StopIteration")))
+                                {
+                                    clear_error();
+                                    it.sequence = make_tuple();
+                                    it.index = 0u;
+                                    release(sequence);
+                                }
+                                return nullptr;
+                            }
+                            ++it.index;
+                            return item;
+                        }
                         // (a sequence with __len__ and __getitem__)
                         auto const n = length(sequence);
                         if (n < 0)
@@ -4404,6 +4472,9 @@ namespace neos::python_runtime
                             return make_tuple({ new_reference(iterFunction.get()), make_tuple({ make_list(std::move(rest)) }) });
                         }
                     default:
+                        // (a user class's sequence (as CPython's seqiter): (iter, (sequence,), index))
+                        if (user_class_of(sequence) != nullptr)
+                            return make_tuple({ new_reference(iterFunction.get()), make_tuple({ new_reference(sequence) }), make_int(static_cast<long long>(it.index)) });
                         return error("TypeError", std::string{ "cannot pickle '" } + type_name(aArgs[0]) + "' object");
                     }
                 } };
@@ -4452,7 +4523,8 @@ namespace neos::python_runtime
                     return new_reference(none());
                 } };
             auto const kind = kind_of(as<iterator_object>(aObject)->sequence);
-            if (kind != NEOS_PY_LIST && kind != NEOS_PY_TUPLE && kind != NEOS_PY_STR && kind != NEOS_PY_RANGE && kind != NEOS_PY_DICT)
+            if (kind != NEOS_PY_LIST && kind != NEOS_PY_TUPLE && kind != NEOS_PY_STR && kind != NEOS_PY_RANGE && kind != NEOS_PY_DICT && 
+                user_class_of(as<iterator_object>(aObject)->sequence) == nullptr)
                 return nullptr;
             builtin_entry const* entry = std::strcmp(aName, "__reduce__") == 0 ? &sReduce : std::strcmp(aName, "__reduce_ex__") == 0 ? &sReduceEx :
                 std::strcmp(aName, "__setstate__") == 0 && kind != NEOS_PY_RANGE && kind != NEOS_PY_DICT ? &sSetstate : nullptr;
@@ -5591,7 +5663,8 @@ namespace neos::python_runtime
                     else break;
                 }
                 long long width = -1, precision = -1;
-                auto const number = [&](long long& aResult) -> bool
+                // (as CPython's: a width a Py_ssize_t, a precision a C int ('*': OverflowError beyond; digits: ValueError))
+                auto const number = [&](long long& aResult, bool aPrecision) -> bool
                 {
                     if (i < n && aFormat[i] == '*')
                     {
@@ -5604,18 +5677,31 @@ namespace neos::python_runtime
                             error("TypeError", "* wants int");
                             return false;
                         }
+                        if (is_big(v) || (aPrecision && (int_value(v) > INT_MAX || int_value(v) < INT_MIN)))
+                        {
+                            error("OverflowError", aPrecision ? "Python int too large to convert to C int" : "Python int too large to convert to C ssize_t");
+                            return false;
+                        }
                         aResult = int_value(v);
                         return true;
                     }
                     if (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
                     {
                         aResult = 0;
+                        auto const limit = aPrecision ? static_cast<long long>(INT_MAX) : std::numeric_limits<long long>::max();
                         while (i < n && aFormat[i] >= '0' && aFormat[i] <= '9')
+                        {
+                            if (aResult > (limit - (aFormat[i] - '0')) / 10)
+                            {
+                                error("ValueError", aPrecision ? "precision too big" : "width too big");
+                                return false;
+                            }
                             aResult = aResult * 10 + (aFormat[i++] - '0');
+                        }
                     }
                     return true;
                 };
-                if (!number(width))
+                if (!number(width, false))
                     return nullptr;
                 if (width < -1)
                 {
@@ -5626,7 +5712,7 @@ namespace neos::python_runtime
                 {
                     ++i;
                     precision = 0;
-                    if (!number(precision))
+                    if (!number(precision, true))
                         return nullptr;
                 }
                 while (i < n && (aFormat[i] == 'h' || aFormat[i] == 'l' || aFormat[i] == 'L'))
@@ -5783,18 +5869,26 @@ namespace neos::python_runtime
                     }
                 }
                 auto const length = static_cast<long long>(code_point_count(sign) + code_point_count(body));
-                if (width > length)
+                // (its room: MemoryError if it cannot be had (as CPython's, e.g. a width of sys.maxsize))
+                try
                 {
-                    auto const padding = static_cast<std::size_t>(width - length);
-                    if (left)
-                        body = sign + body + std::string(padding, ' ');
-                    else if (zero && numeric)
-                        body = sign + std::string(padding, '0') + body;
-                    else
-                        body = std::string(padding, ' ') + sign + body;
-                    sign.clear();
+                    if (width > length)
+                    {
+                        auto const padding = static_cast<std::size_t>(width - length);
+                        if (left)
+                            body = sign + body + std::string(padding, ' ');
+                        else if (zero && numeric)
+                            body = sign + std::string(padding, '0') + body;
+                        else
+                            body = std::string(padding, ' ') + sign + body;
+                        sign.clear();
+                    }
+                    result += sign + body;
                 }
-                result += sign + body;
+                catch (std::exception const&)
+                {
+                    return error("MemoryError", "");
+                }
             }
             if (!mapping && next < values.size())
                 return error("TypeError", "not all arguments converted during string formatting");
@@ -8937,15 +9031,24 @@ namespace neos::python_runtime
         int exception_setattr(neos_py_context*, object* aSelf, char const* aName, object* aValue)
         {
             auto& e = *as<exception_object>(aSelf);
+            // (args, __cause__ and __context__ may not be deleted (as CPython's))
+            if (aValue == nullptr && (std::strcmp(aName, "args") == 0 || std::strcmp(aName, "__cause__") == 0 || std::strcmp(aName, "__context__") == 0))
+                return (error("TypeError", std::string{ aName } + " may not be deleted"), -1);
             if (std::strcmp(aName, "args") == 0)
             {
+                // (any iterable (as CPython's: a tuple of its items))
+                std::vector<object*> items;
+                if (!collect(aValue, items))
+                    return -1;
                 for (auto a : e.args)
                     release(a);
-                e.args = tuple_items(aValue);
-                for (auto a : e.args)
-                    retain(a);
+                e.args = std::move(items);
                 return 0;
             }
+            // (a cause or context: None or an exception (as CPython's))
+            if ((std::strcmp(aName, "__cause__") == 0 || std::strcmp(aName, "__context__") == 0) && aValue != none() && exception_type_name(aValue) == nullptr)
+                return (error("TypeError", std::string{ "exception " } + (aName[2] == 'c' && aName[3] == 'a' ? "cause" : "context") + 
+                    " must be None or derive from BaseException"), -1);
             if (std::strcmp(aName, "__traceback__") == 0)
             {
                 if (aValue == nullptr)
@@ -9403,16 +9506,31 @@ namespace neos::python_runtime
             // (raised while another is being handled: that one is its context)
             if (aContext && tCaught != nullptr && tCaught != aException && aException->type == &sExceptionType.base)
             {
-                auto& attributes = as<exception_object>(aException)->attributes;
-                bool cycle = false;
-                for (auto c = tCaught; c != nullptr && c->type == &sExceptionType.base; c = as<exception_object>(c)->attributes.find("__context__"))
-                    if (c == aException)
+                // (as CPython's _PyErr_SetObject: the context chain's link to the exception is cut (no cycle is made), and a cycle 
+                // already in the chain ends the walk (Floyd's: a slow pointer, every other step))
+                auto const context_of = [](object* aObject) -> object*
+                {
+                    auto const c = aObject->type == &sExceptionType.base ? as<exception_object>(aObject)->attributes.find("__context__") : nullptr;
+                    return c != nullptr && c->type == &sExceptionType.base ? c : nullptr;
+                };
+                object* o = tCaught;
+                object* slow = o;
+                bool toggle = false;
+                while (auto const context = context_of(o))
+                {
+                    if (context == aException)
                     {
-                        cycle = true;
+                        as<exception_object>(o)->attributes.set("__context__", none());
                         break;
                     }
-                if (!cycle)
-                    attributes.set("__context__", tCaught);
+                    o = context;
+                    if (o == slow)
+                        break;
+                    if (toggle)
+                        slow = context_of(slow);
+                    toggle = !toggle;
+                }
+                as<exception_object>(aException)->attributes.set("__context__", tCaught);
             }
             if (aException->type == &sExceptionType.base && as<exception_object>(aException)->traceback == nullptr)
             {
@@ -12811,6 +12929,10 @@ namespace neos::python_runtime
                     return call(value, aArgs, aKwargs);
                 return error("TypeError", "'" + std::string{ type_name(aSelf) } + "' object is not callable");
             }
+            // (a recursive call (as CPython's: RecursionError beyond the limit; e.g. a class whose __call__ is one of its instances))
+            recursive_call const guard{ " while calling a Python object" };
+            if (!guard.entered)
+                return nullptr;
             return call(method.get(), aArgs, aKwargs);
         }
 
@@ -12879,26 +13001,8 @@ namespace neos::python_runtime
                 // (a sequence: __getitem__ with 0, 1, ...)
                 if (!has_special_method(aSelf, "__getitem__"))
                     return error("TypeError", "'" + std::string{ type_name(aSelf) } + "' object is not iterable");
-                std::vector<object*> items;
-                for (long long i = 0;; ++i)
-                {
-                    bool ignored = false;
-                    auto const item = call_special(aSelf, "__getitem__", { make_int(i) }, ignored);
-                    if (item == nullptr)
-                    {
-                        if (failed() && error_text() != nullptr && std::string_view{ error_text() }.starts_with("IndexError"))
-                        {
-                            clear_error();
-                            break;
-                        }
-                        for (auto x : items)
-                            release(x);
-                        return nullptr;
-                    }
-                    items.push_back(item);
-                }
-                ref const l{ make_list(std::move(items)) };
-                return iter(l.get());
+                // (lazily, as CPython's iterator of a sequence: next() calls __getitem__ (an unbounded sequence is not made a list))
+                return make_iterator(aSelf);
             }
             return r;
         }
@@ -13777,6 +13881,10 @@ namespace neos::python_runtime
                     retain(aValue);
                     release(a->second);
                     a->second = aValue;
+                    // (a hook replaced (class_hook's cache holds its value, not its position: the old one may now be freed))
+                    if (name == "__getattribute__" || name == "__setattr__" || name == "__delattr__" || name == "__init__" || name == "__new__" || 
+                        name == "__del__" || name == "__abstractmethods__")
+                        class_changed(aSelf);
                     return 0;
                 }
             if (aValue == nullptr)
@@ -14278,6 +14386,18 @@ namespace neos::python_runtime
             }
             for (auto const& item : as<dict_object>(aNamespace)->items)
             {
+                // (a key that is not a str: CPython's RuntimeWarning (gh-55664); a class's attributes are named by strs, so it is left out)
+                if (kind_of(item.first) != NEOS_PY_STR)
+                {
+                    ref const warn{ module_attribute("warnings", "warn") };
+                    if (!warn)
+                        return nullptr;
+                    ref const warned{ invoke(warn.get(), { make_str(std::string{ "non-string key in the __dict__ of class " } + aName), 
+                        exception_class("RuntimeWarning"), make_int(1) }) };
+                    if (!warned)
+                        return nullptr;
+                    continue;
+                }
                 auto const& key = as<str_object>(item.first)->value;
                 // (__init_subclass__ and __class_getitem__ are class methods; __new__ is a static method)
                 if ((key == "__init_subclass__" || key == "__class_getitem__") && item.second->type == &sScriptFunctionType.base)

@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include "objects.hpp"
@@ -463,9 +464,10 @@ namespace neos::python_runtime
 
             long long slice_length(long long aStart, long long aStop, long long aStep)
             {
+                // (as CPython's PySlice_AdjustIndices: (stop - start - 1) / step + 1, which cannot overflow (e.g. a step of sys.maxsize))
                 if (aStep > 0)
-                    return aStop > aStart ? (aStop - aStart + aStep - 1) / aStep : 0;
-                return aStart > aStop ? (aStart - aStop - aStep - 1) / -aStep : 0;
+                    return aStop > aStart ? static_cast<long long>((static_cast<unsigned long long>(aStop - aStart) - 1u) / static_cast<unsigned long long>(aStep) + 1u) : 0;
+                return aStart > aStop ? static_cast<long long>((static_cast<unsigned long long>(aStart - aStop) - 1u) / (0u - static_cast<unsigned long long>(aStep)) + 1u) : 0;
             }
 
             // (array_ass_subscr: aValue null: del)
@@ -1159,6 +1161,20 @@ namespace neos::python_runtime
                             return nullptr;
                         auto& self = as_array(selfObject);
                         std::string data;
+                        // (the result's room first: MemoryError if it cannot be had (as CPython's array_repeat))
+                        if (n > 0 && !self.data.empty())
+                        {
+                            if (static_cast<unsigned long long>(n) > data.max_size() / self.data.size())
+                                return error("MemoryError", "");
+                            try
+                            {
+                                data.reserve(static_cast<std::size_t>(n) * self.data.size());
+                            }
+                            catch (std::exception const&)
+                            {
+                                return error("MemoryError", "");
+                            }
+                        }
                         for (long long i = 0; i < n; ++i)
                             data += self.data;
                         if (aInplace != 0 && selfObject == aLhs)

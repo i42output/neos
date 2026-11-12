@@ -449,6 +449,7 @@ namespace neos::python_runtime
         // the stack; else leave_recursive_call once it has returned)
         bool enter_recursive_call(char const* aWhere);
         void leave_recursive_call();
+        bool stack_low();                               // (the calling thread's stack is near its end (as enter_recursive_call checks))
         // (a container whose repr is being made (by this thread), as CPython's Py_ReprEnter: true if its repr is being made already 
         // (its repr within its own is "[...]", "{...}", ...); else repr_leave once it has been made)
         bool repr_enter(object* aObject);
@@ -489,6 +490,8 @@ namespace neos::python_runtime
         bool slice_unpack(object* aSlice, std::optional<long long>& aStart, std::optional<long long>& aStop, long long& aStep);
         void slice_adjust(long long aLength, std::optional<long long> const& aStartIndex, std::optional<long long> const& aStopIndex, long long aStep,
             long long& aStart, long long& aStop);
+        std::size_t slice_count(long long aStart, long long aStop, long long aStep);                    // (the number of positions of slice_indices' result)
+        std::vector<std::size_t> slice_positions(long long aStart, long long aStop, long long aStep);  // (the positions of slice_indices' result)
         long long bytes_hash(std::string_view aBytes);
         // (the arguments of a native function as CPython's argument clinic checks them: aNames are its parameters, of which the first 
         // aRequired are required and the first aPositionalOnly cannot be keywords; aFunction is its qualified name (e.g. "bytes.split"); 

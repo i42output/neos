@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include "objects.hpp"
@@ -474,55 +475,94 @@ namespace neos::python_runtime
                 }
                 else
                     aResult.little = std::endian::native == std::endian::little;
+                // (twice: its size first (as CPython's prepare_s: "total struct size too long" before anything is made), then its items)
+                auto const first = i;
                 std::size_t offset = 0u;
-                while (i < aFormat.size())
+                auto const scan = [&](bool aBuild) -> bool
                 {
-                    auto c = aFormat[i];
-                    if (std::isspace(static_cast<unsigned char>(c)))
+                    i = first;
+                    offset = 0u;
+                    while (i < aFormat.size())
                     {
-                        ++i;
-                        continue;
-                    }
-                    std::size_t count = 1u;
-                    bool hasCount = false;
-                    if (std::isdigit(static_cast<unsigned char>(c)))
-                    {
-                        count = 0u;
-                        while (i < aFormat.size() && std::isdigit(static_cast<unsigned char>(aFormat[i])))
-                            count = count * 10u + static_cast<std::size_t>(aFormat[i++] - '0');
-                        hasCount = true;
-                        if (i >= aFormat.size())
+                        auto c = aFormat[i];
+                        if (std::isspace(static_cast<unsigned char>(c)))
                         {
-                            struct_error("repeat count given without format specifier");
+                            ++i;
+                            continue;
+                        }
+                        std::size_t count = 1u;
+                        bool hasCount = false;
+                        if (std::isdigit(static_cast<unsigned char>(c)))
+                        {
+                            count = 0u;
+                            while (i < aFormat.size() && std::isdigit(static_cast<unsigned char>(aFormat[i])))
+                            {
+                                // (as CPython's: a count beyond sys.maxsize, or a size: "total struct size too long")
+                                if (count > (static_cast<std::size_t>(std::numeric_limits<long long>::max()) - static_cast<std::size_t>(aFormat[i] - '0')) / 10u)
+                                {
+                                    struct_error("total struct size too long");
+                                    return false;
+                                }
+                                count = count * 10u + static_cast<std::size_t>(aFormat[i++] - '0');
+                            }
+                            hasCount = true;
+                            if (i >= aFormat.size())
+                            {
+                                struct_error("repeat count given without format specifier");
+                                return false;
+                            }
+                            c = aFormat[i];
+                        }
+                        ++i;
+                        auto const size = aResult.native ? native_size(c) : standard_size(c);
+                        if (size == 0u || (!aResult.native && (c == 'n' || c == 'N' || c == 'P')))
+                        {
+                            struct_error("bad char in struct format");
                             return false;
                         }
-                        c = aFormat[i];
-                    }
-                    ++i;
-                    auto const size = aResult.native ? native_size(c) : standard_size(c);
-                    if (size == 0u || (!aResult.native && (c == 'n' || c == 'N' || c == 'P')))
-                    {
-                        struct_error("bad char in struct format");
-                        return false;
-                    }
-                    // (native alignment)
-                    if (aResult.native && size > 1u && c != 's' && c != 'p')
-                        offset = (offset + size - 1u) / size * size;
-                    if (c == 's' || c == 'p')
-                    {
-                        aResult.items.push_back({ c, hasCount ? count : 1u, offset });
-                        offset += hasCount ? count : 1u;
-                        ++aResult.values;
-                    }
-                    else if (c == 'x')
-                        offset += count;
-                    else
-                        for (std::size_t k = 0u; k < count; ++k)
+                        // (native alignment)
+                        if (aResult.native && size > 1u && c != 's' && c != 'p')
+                            offset = (offset + size - 1u) / size * size;
+                        if (auto const room = static_cast<std::size_t>(std::numeric_limits<long long>::max()) - offset; 
+                            offset > static_cast<std::size_t>(std::numeric_limits<long long>::max()) || count > room / (c == 's' || c == 'p' || c == 'x' ? 1u : size))
                         {
-                            aResult.items.push_back({ c, 1u, offset });
-                            offset += size;
-                            ++aResult.values;
+                            struct_error("total struct size too long");
+                            return false;
                         }
+                        if (c == 's' || c == 'p')
+                        {
+                            if (aBuild)
+                            {
+                                aResult.items.push_back({ c, hasCount ? count : 1u, offset });
+                                ++aResult.values;
+                            }
+                            offset += hasCount ? count : 1u;
+                        }
+                        else if (c == 'x')
+                            offset += count;
+                        else if (!aBuild)
+                            offset += count * size;
+                        else
+                            for (std::size_t k = 0u; k < count; ++k)
+                            {
+                                aResult.items.push_back({ c, 1u, offset });
+                                offset += size;
+                                ++aResult.values;
+                            }
+                    }
+                    return true;
+                };
+                if (!scan(false))
+                    return false;
+                try
+                {
+                    if (!scan(true))
+                        return false;
+                }
+                catch (std::exception const&)
+                {
+                    error("MemoryError", "");
+                    return false;
                 }
                 aResult.size = offset;
                 return true;
@@ -775,8 +815,9 @@ namespace neos::python_runtime
                     case 's': values.push_back(make_bytes(std::string{ aBuffer.substr(offset, item.count) })); break;
                     case 'p':
                         {
+                            // (0p: no length byte (b''))
                             auto const n = item.count == 0u ? 0u : std::min<std::size_t>(static_cast<unsigned char>(aBuffer[offset]), item.count - 1u);
-                            values.push_back(make_bytes(std::string{ aBuffer.substr(offset + 1u, n) }));
+                            values.push_back(make_bytes(item.count == 0u ? std::string{} : std::string{ aBuffer.substr(offset + 1u, n) }));
                             break;
                         }
                     case '?': values.push_back(make_bool(aBuffer[offset] != 0)); break;
