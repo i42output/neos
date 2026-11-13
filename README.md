@@ -19,6 +19,7 @@ neos is still a work in progress so don't expect a release anytime soon.
 * Language agnostic: a schema combined with a semantic concept library describes syntax and semantics of the scripting language to use (theoretically allowing any language to be used).
 * EBNF-like language schema file format.
 * Invent your own scripting language to use with "neos" by writing a new language schema! 
+* Debugger: breakpoints, stepping, variables, watches and catchpoints for every language, with gdb's commands (see [Debugger](#debugger)).
 * Runtime plugins: scripts call native C functions in plugin shared libraries through libffi (see `include/neos/runtime/plugin.h`); the C runtime plugin (`runtime/c`) makes the C standard library available to neoscript (`using c;`).
 
 # Building
@@ -96,6 +97,39 @@ Examples and benchmarks are in `languages/examples/C`.
 neos -c hello.py
 ```
 
+## Debugger
+`-g` (`--debug`) compiles the program to be debugged and runs it under the neos debugger, whose commands are gdb's (`(ndb)` is its prompt):
+
+```
+neos -g hello.py
+neos debugger: "run" (or "start") runs the program; "help" lists the commands.
+(ndb) break 4
+Breakpoint 1 at hello.py:4
+(ndb) run
+Enter your name: Leigh
+
+Breakpoint 1, #0  <module> () at hello.py:4
+4	print(f"Hello {name}!")
+(ndb) print name
+$1 = 'Leigh'  (str)
+(ndb) continue
+Hello Leigh!
+[Program exited with code 0]
+(ndb) quit
+```
+
+It debugs programs of every language (Ada, C, JavaScript, Lua, neoscript and Python) and the variables of each are shown as the language shows them (records, arrays, tables, objects, ...):
+
+* breakpoints at a line of a program's source (`break`, `tbreak`), with conditions (`break 12 if n > 100`) and ignore counts;
+* catchpoints (`catch throw [<exception>]`): the program stops where an exception is thrown (Ada, JavaScript, Lua and Python), whether or not it is caught, with the frames of the code that threw it;
+* stepping (`step`, `next`, `finish`, `continue`), and the stack (`backtrace`, `frame`, `up`, `down`);
+* variables (`info locals`, `info args`, `info globals`), and expressions of them (`print`; `display` shows one at each stop): expressions are evaluated without running any of the program's code;
+* threads: when the program stops, all of its threads stop (`info threads`, `thread`);
+* an error that the program does not handle stops it before it ends the program (`set break-on-error off` to let it end the program); to stop where an exception is thrown, use a catchpoint;
+* Ctrl+C pauses the running program, also while it waits for input.
+
+`help` lists the commands and `help <command>` describes one. While it is debugged a program runs in the interpreter (not the JIT), so it runs more slowly. In the console, `d(ebug) [<path>]` debugs the program.
+
 ## Images
 `--img` makes an executable image of the program instead of running it: a copy of the runtime stub (`neos.stub`, beside `neos`) with the program's bytecode appended. The image is written to `--img=<path>`, or by default to the current folder as `<program>.exe` on Windows and `a.out` elsewhere:
 
@@ -124,6 +158,7 @@ set NEOS_RUNTIME_PLUGIN_PATH=C:\usr\local\bin\plugins
 | `-s`, `--schema <language or path>` | Language schema (by default the one for the program's file extension) |
 | `-c`, `--console` | Start the console (with the program loaded) rather than run the program |
 | `--compile` | Compile the program when the console starts |
+| `-g`, `--debug` | Debug the program (see [Debugger](#debugger)) |
 | `--img[=<path>]` | Make an executable image of the program rather than run it |
 | `-l`, `--load <program>` | Program to load (the option name can be omitted); a linked program: its translation units, separated by commas (see [Linking](#linking)) |
 | `-t`, `--trace <0-5>` | Compiler trace |
