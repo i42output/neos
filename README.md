@@ -83,12 +83,45 @@ namespace link
 
 Examples (and scripts that run them) are in `languages/examples/link`.
 
+## Ada
+Ada programs (`.adb`, `.ads`, `.ada`, `.a`, schema `languages/ada.neos`) are Ada 2022 (`NEOS_ADA_VERSION=2012` applies Ada 2012's rules instead). neos is given the main subprogram's file; the units that it names (its with clauses, its body stubs' subunits, and theirs) are found by their GNAT file names (`ada-text_io.ads`) or by their own (`Ada.Text_IO.ads`), in any case, in the main file's folder, the current folder, the folders listed in `ADA_INCLUDE_PATH` and `NEOS_ADA_PATH`, then the predefined library's folder (`languages/packages/ada`). A `gnat.adc` file in the main file's folder holds the partition's configuration pragmas, as GNAT's does. The predefined library is in Ada (the packages of Annexes A to G); the run-time system (exceptions, finalization, tasking, input-output) is native (the Ada runtime plugin, `runtime/ada`).
+
+Tasks are coroutines that the program's thread runs one at a time (`System.Multiprocessors.Number_Of_CPUs` is 1): a task runs until it blocks or reaches a dispatching point, and Annex D's priorities, locking and queuing policies and task dispatching policies decide which task runs next. Protected objects need no locks, since a task is not switched within a protected action. Annex E (distribution) has one partition (`System.RPC` works within it). A program can have C translation units as well (`neos main.adb,util.c`): its Ada units import the C units' functions and objects (convention C, Annex B) and export theirs to them, and the two languages share their memory (an address designates the same object in either). `System.Machine_Code` and `Ada.Directories.Information` are not provided.
+
+Examples and benchmarks are in `languages/examples/Ada`.
+
 ## C
 C programs (`.c`, schema `languages/c.neos`) are C23. The standard library's headers are in `languages/packages/c/include`; most of the library is native (the C runtime plugin, `runtime/c`), and the rest is C (`languages/packages/c/libc.c`, and the files in `languages/packages/c/lib`, each compiled with a program only if the program uses a function that it provides). A program of several translation units is one program, linked by C's rules (`neos main.c,list.c,util.c`). `#include <...>` also searches the folders listed in `NEOS_C_INCLUDE_PATH`, `C_INCLUDE_PATH` and `CPATH`.
 
 Objects are in the C runtime's memory (pointers are 64-bit: LP64); `long double` is `double`; `_BitInt` is at most 64 bits; threads are truly parallel OS threads (`<threads.h>`, POSIX `<pthread.h>` and `<semaphore.h>`; `_Thread_local`/`thread_local`/`__thread` objects; `_Atomic` objects and `<stdatomic.h>`, `__atomic_*` and `__sync_*` operations are atomic, sequentially consistent), there are no complex types (`__STDC_NO_COMPLEX__`); signals are those that `raise` raises. Common GNU extensions are accepted: statement expressions, labels as values (`&&label`, `goto *p`), case ranges, `[a ... b]` designators, `typeof`/`__typeof__`, `__builtin_` functions, `#pragma pack`, and `__attribute__`, of which `aligned`, `packed`, `constructor`, `destructor`, `cleanup` and `noreturn` are implemented (as C23's `[[gnu::...]]`; others are ignored). Old-style (K&R) function definitions are accepted too.
 
 Examples and benchmarks are in `languages/examples/C`.
+
+## JavaScript
+JavaScript programs (`.js`, `.mjs`, schema `languages/javascript.neos`) are ECMAScript 2025, with Temporal and explicit resource management (`using`, `await using`, `DisposableStack`) as well. A `.js` file is a script and a `.mjs` file a module; modules are imported by relative or absolute paths (`import { f } from "./lib.mjs"`, and `import()`), and JSON modules with `with { type: "json" }`. All of the language's built-in objects are native (the JavaScript runtime plugin, `runtime/javascript`, with its own regular expression engine and a non-moving mark-sweep garbage collector). Intl (ECMA-402) needs ICU: a build without it (`-DNEOS_ICU=OFF`, or ICU not found) has no Intl, and Temporal has only the ISO 8601 calendar.
+
+The host's globals are `console` and `performance`: there are no Node.js or browser APIs (`require`, `process`, `setTimeout`, the DOM). `eval`, the `Function` constructors and `import()` compile their source when they run. ECMAScript's conformance tests (test262) need a build with `-DNEOS_TEST262_HOST=ON`, whose test host (`print` and `$262`) is defined when the `NEOS_TEST262` environment variable is set.
+
+Examples and benchmarks are in `languages/examples/JavaScript`.
+
+## Lua
+Lua programs (`.lua`, schema `languages/lua.neos`) are Lua 5.4, with its standard library (the basic functions, `coroutine`, `debug`, `io`, `math`, `os`, `package`, `string`, `table` and `utf8`: the Lua runtime plugin, `runtime/lua`). `require` searches `package.path`, which is `LUA_PATH_5_4` or `LUA_PATH` (`;;` in it stands for the default, `./?.lua;./?/init.lua`); there are no C modules (`package.cpath` is empty).
+
+The garbage collector is a non-moving mark-sweep collector that scans the native stacks conservatively, so a weak table's entry can outlive the last reference that the program knows of. The debug library has no hooks (`debug.sethook` does nothing), and `debug.getlocal` and `debug.getupvalue` return nothing (the neos debugger shows a Lua program's variables: see [Debugger](#debugger)).
+
+Examples and benchmarks are in `languages/examples/Lua`.
+
+## neoscript
+neoscript (`.neo`, schema `languages/neoscript.neos`) is neoGFX's default scripting language: statically typed, with namespaces, procedures (`proc`) and functions (`fn`), structs, classes (whose methods are virtual unless final) and interfaces. Its packages are in `languages/packages/neoscript`: `neo.stream` (`neo::print`, `neo::input`: the neoscript runtime plugin, `runtime/neo`, through the host's standard streams), `neo.string`, and `c` (the C standard library: the C runtime plugin's functions, called through libffi; `using c;`).
+
+Examples are in `languages/examples/neoscript`.
+
+## Python
+Python programs (`.py`, schema `languages/python.neos`) are Python 3.13; integers are of any size. The standard library is native (the Python runtime plugin, `runtime/python`): its modules are C++, many of them translated from CPython 3.13's own sources (see `runtime/python/NOTICE`), though not all of CPython's standard library is there yet. `languages/packages/python/builtins.py` (the prelude, compiled before every program) declares the built-in functions that the runtime provides, typed for the compiler. Other modules are imported from the program's folder and the folders listed in `PYTHONPATH`. `import numpy` loads the NumPy runtime plugin (`runtime/numpy`: NumPy 2.5.3's behaviour, with the bundled OpenBLAS for its linear algebra; see `runtime/numpy/NOTICE`).
+
+Threads (`threading`) are OS threads that take turns under a global interpreter lock, as CPython's do. `eval`, `exec` and `compile` compile their source when they run.
+
+Examples and benchmarks are in `languages/examples/Python` (NumPy's in `languages/examples/Python/numpy`).
 
 ## Console
 `-c` (`--console`) loads the program into the neos console instead of running it; `neos` with no program starts the console with nothing loaded. In the console, `c` compiles the program, `r` runs it and `h` lists the other commands.
