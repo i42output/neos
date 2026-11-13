@@ -303,7 +303,10 @@
     power tail $ ada.power ::= "**" , WS , primary ;
 
     (* (a string literal is a name: an operator symbol (the compiler finds which it is)) *)
-    primary ::= numeric literal / null literal / allocator / parenthesized primary / bracket aggregate / name ;
+    primary ::= numeric literal / null literal / allocator / parenthesized primary / reduction expression / bracket aggregate / name ;
+    (* (a reduction expression whose prefix is a value sequence ([for ... => Value]'Reduce (...), 4.5.10(2/5)): the attribute takes the
+    aggregate as its prefix (the compiler accepts only a reduction attribute there)) *)
+    reduction expression ::= bracket aggregate , WS , attribute reference ;
     null literal $ ada.null ::= null ;
     (* (an initialized allocator's subtype indication is a qualified expression) *)
     allocator $ ada.allocator ::= new , WS , [ subpool specification , WS ] , subtype indication ;

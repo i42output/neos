@@ -985,12 +985,166 @@ namespace neos::compilers::ada
         set(aValue);
     }
 
+    // --- parallel constructs
+
+    void function_generator::generate_logical_thread(node* aStatements, node* aLoop)
+    {
+        // (a logical thread of control's function: a block's sequence of statements (its parameter: the static link), or a loop's
+        // chunk (the static link, the chunk's first and last values, its number (from 0)))
+        iParameters.push_back(type::I64);
+        if (aLoop != nullptr)
+            iParameters.insert(iParameters.end(), { type::I64, type::I64, type::I64 });
+        iWhere = aLoop != nullptr ? aLoop : aStatements;
+        iLogicalThread = true;
+        prologue();
+        begin(control_kind::Exit);
+        stack_check();
+        if (aLoop != nullptr)
+        {
+            auto const abandon = static_cast<std::uint32_t>(iChunk->abandon);
+            auto const parentLevel = iChunk->parentLevel;
+            iAbandonOnExit = [this, abandon, parentLevel]()
+            {
+                frame_of_level(parentLevel);
+                i64(1);
+                store64(abandon);
+            };
+            // (a chunk parameter: the chunk's value of its subtype (they increase with the chunks' ranges, 5.5(9.1/5)))
+            if (auto* chunk = aLoop->first(construct::For)->first(construct::Chunk))
+                if (auto* defining = chunk->first(construct::Defining); defining != nullptr && defining->ent != nullptr)
+                {
+                    auto* e = defining->ent;
+                    e->where = storage::None;
+                    assign_storage(e);
+                    scalar_low(e->type);
+                    get(3u);
+                    op(opcode::I64Add);
+                    store_object(e);
+                }
+            loop_statement(aLoop);
+        }
+        else
+            handled(aStatements);
+        end();
+        epilogue();
+        finish(iParameters);
+    }
+
+    void function_generator::parallel_block(node* aStatement)
+    {
+        // (its sequences of statements: their functions (a table in the frame), run by the runtime (in parallel); an exception that
+        // one propagates is propagated (5.6.1(5/5)))
+        std::vector<node*> arms;
+        for (auto* c : aStatement->children)
+            if (c->is(construct::Handled) || c->is(construct::Statements))
+                arms.push_back(c);
+        iFrameSize = (iFrameSize + 7u) & ~std::uint64_t{ 7u };
+        auto const table = iFrameSize;
+        iFrameSize += 8u * arms.size();
+        for (std::size_t i = 0u; i < arms.size(); ++i)
+        {
+            auto const index = iProgram.define_internal("parallel", { type::I64 });
+            {
+                function_generator g{ iProgram, iSubprogram, index, iLevel + 1 };
+                g.generate_logical_thread(arms[i], nullptr);
+            }
+            get(iFrame);
+            function_index(index);
+            op(opcode::I64UConvertI32);
+            store64(static_cast<std::uint32_t>(table + 8u * i));
+        }
+        get(iFrame);
+        i64(static_cast<std::int64_t>(table));
+        op(opcode::I64Add);
+        i64(static_cast<std::int64_t>(arms.size()));
+        get(iFrame);
+        runtime("parallel_block", { type::I64, type::I64, type::I64 }, type::Void);
+        check();
+    }
+
+    void function_generator::parallel_loop(node* aStatement, node* aSpecification, std::uint32_t aLow, std::uint32_t aHigh)
+    {
+        // (its range divided into chunks (contiguous ranges), each a logical thread: its chunks' function, run by the runtime (in
+        // parallel) for each; the number of chunks: the chunk specification's (at most), else the runtime's (5.5(8.1/5, 9/5)); an exit
+        // from the loop, or an exception that a chunk propagates, abandons the others (the word in the frame that their iterations
+        // look at); the exception is propagated)
+        (void)aSpecification;
+        iFrameSize = (iFrameSize + 7u) & ~std::uint64_t{ 7u };
+        auto const abandon = iFrameSize;
+        iFrameSize += 8u;
+        get(iFrame);
+        i64(0);
+        store64(static_cast<std::uint32_t>(abandon));
+        auto const chunks = local(type::I64);
+        i64(0);
+        set(chunks);
+        if (auto* chunk = aStatement->first(construct::For)->first(construct::Chunk))
+        {
+            if (auto* defining = chunk->first(construct::Defining); defining != nullptr && defining->ent != nullptr)
+            {
+                // (a chunk parameter's subtype: a chunk for each of its values (at most))
+                auto* t = defining->ent->type;
+                scalar_high(t);
+                scalar_low(t);
+                op(opcode::I64Sub);
+                i64(1);
+                op(opcode::I64Add);
+                set(chunks);
+                get(chunks);
+                i64(1);
+                op(opcode::I64LtS);
+                begin_if();
+                raise_check(0, chunk, "chunk parameter's subtype is null");
+                end();
+            }
+            else if (auto* count = chunk->child(0))
+            {
+                expression(count, count->type != nullptr ? count->type : iProgram.integer());
+                set(chunks);
+                release_temporaries();
+                check();
+                get(chunks);
+                i64(1);
+                op(opcode::I64LtS);
+                begin_if();
+                raise_check(0, chunk, "number of chunks not positive");
+                end();
+            }
+        }
+        auto const index = iProgram.define_internal("parallel", { type::I64, type::I64, type::I64, type::I64 });
+        {
+            function_generator g{ iProgram, iSubprogram, index, iLevel + 1 };
+            g.iChunk = chunk_context{ aStatement, iLevel, abandon };
+            g.generate_logical_thread(nullptr, aStatement);
+        }
+        // (a null range: no chunks)
+        get(aLow);
+        get(aHigh);
+        op(opcode::I64LeS);
+        begin_if();
+        function_index(index);
+        op(opcode::I64UConvertI32);
+        get(iFrame);
+        get(aLow);
+        get(aHigh);
+        get(chunks);
+        get(iFrame);
+        i64(static_cast<std::int64_t>(abandon));
+        op(opcode::I64Add);
+        runtime("parallel_loop", { type::I64, type::I64, type::I64, type::I64, type::I64, type::I64 }, type::Void);
+        check();
+        end();
+    }
+
     // --- statements
 
     bool function_generator::tasking_statement(node* aStatement)
     {
         switch (aStatement->kind)
         {
+        case construct::Parallel:
+            parallel_block(aStatement);
+            return true;
         case construct::Delay:
             {
                 auto const kind = local(type::I64);

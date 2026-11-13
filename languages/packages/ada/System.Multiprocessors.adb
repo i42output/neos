@@ -31,11 +31,15 @@
 
 package body System.Multiprocessors is
 
-   --  (neos runs a program's tasks on one processor (the thread of the
-   --  program): see Ada.Task_Identification)
+   --  (the processors that the program's tasks run on: those of the
+   --  machine when its tasks are threads, else one (the program's thread,
+   --  when the partition asks for Annex D's scheduling))
+   function CPUs return CPU;
+   pragma Import (Neos, CPUs, "ada::number_of_cpus");
+
    function Number_Of_CPUs return CPU is
    begin
-      return 1;
+      return CPUs;
    end Number_Of_CPUs;
 
 end System.Multiprocessors;

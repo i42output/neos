@@ -328,6 +328,7 @@ namespace neos::compilers::ada
         std::map<std::string, entity*>& foreign_subprograms() { return iForeignSubprograms; }    ///< (the subprograms imported with 
                                                         ///< convention C, by their external names: the first of each name)
         std::uint32_t define_procedure(std::string const& aName);
+        std::uint32_t define_internal(std::string const& aName, std::vector<type> const& aParameters);  ///< (a function of the program's own (e.g. a parallel construct's logical thread))
         void generate_code();
         std::uint64_t static_bytes(std::string const& aBytes);    ///< (static data initialized with the bytes: its address)
         void add_static_bytes(std::uint64_t aAddress, std::string const& aBytes) { iStaticBytes.emplace_back(aAddress, aBytes); }
@@ -347,6 +348,7 @@ namespace neos::compilers::ada
         std::map<std::string, std::optional<std::int64_t>> iRestrictions;     ///< (the partition's restrictions (see restrictions_check): their values)
         std::map<node*, std::pair<std::int64_t, std::int64_t>> iPriorityRanges;   ///< (the pragmas Priority_Specific_Dispatching: their priorities' values)
         bool iPolls = false;                                    ///< (the program polls at its loops' iterations (the runtime's poll: its dispatching policy, execution-time events))
+        bool iThreaded = false;                                 ///< (its tasks are threads (see tasking_policies))
         std::vector<entity*> iInterruptHandlers;                ///< (the protected procedures that can be interrupt handlers (C.3.1))
         std::map<entity*, std::vector<std::pair<entity*, node*>>> iAttachHandlers;  ///< (by protected unit: its procedures attached to interrupts (C.3.1))
         std::optional<std::int64_t> invalid_value(ada_type* aType);   ///< (a scalar subtype's invalid representation (an out of range one), if any)  ///< (a tagged type's deep Adjust or Finalize: its controlled parts' (see TagAdjust))    ///< (a task or protected type's entry implementing an interface's operation: a procedure that calls it)
@@ -599,6 +601,26 @@ namespace neos::compilers::ada
         bool iAllPlaces = false;    ///< (checking "not overriding" (8.3.1(6/2)): the views at any place of the declarative region (its private part and body))
         std::vector<std::tuple<entity*, node*, region*>> iNotOverriding;     ///< (the operations declared "not overriding": checked at the end of their region)     ///< (an instance: its formals' region (the actuals' denotations))     ///< (an array type's operators made before its component's full view was declared: completed later)
         std::deque<node> iClones;
+        // a reduction expression (4.5.10): its value sequence (an iterator specification (of the value sequence, or for E of the prefix)
+        // and the value of each iteration), its accumulator and the reducer's call of it and of a value (parallel: also of a chunk's
+        // result: the chunks' results combined), in a region of their own (parallel: a level of its own, see the analysis of parallel
+        // loops)
+        struct reduction_info
+        {
+            bool parallel = false;
+            region* scope = nullptr;
+            node* specification = nullptr;
+            node* value = nullptr;
+            node* initial = nullptr;
+            entity* accumulator = nullptr;
+            entity* element = nullptr;      ///< (the value of an iteration (the reducer's second actual))
+            entity* part = nullptr;         ///< (parallel: a chunk's result (combined with the accumulator))
+            node* call = nullptr;           ///< (Reducer (Accumulator, Element))
+            node* combine = nullptr;        ///< (parallel: Reducer (Accumulator, Part))
+        };
+        std::map<node const*, reduction_info> iReductions;
+        std::deque<std::string> iSyntheticNames;    ///< (the names of the constructs that the analysis makes (their sources))
+        ada_type* reduction(node* aAttribute, node* aPrefix, std::vector<node*> const& aArguments, ada_type* aExpected, region* aRegion, bool aParallel);
         std::unordered_map<node const*, node*> iCloneOrigins;  ///< (a clone (its root): the node it is a copy of)
         std::deque<std::string> iSyntheticSources;      ///< (the text of nodes made by the analysis (e.g. a user-defined literal's string))
         std::map<node*, region*> iBodyRegions;

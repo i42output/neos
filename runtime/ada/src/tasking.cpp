@@ -59,6 +59,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstring>
 #include <deque>
@@ -66,6 +67,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <thread>
 #include <vector>
@@ -85,7 +87,6 @@ namespace
     constexpr std::int64_t TimeLast = std::numeric_limits<std::int64_t>::max();    ///< (Ada.Real_Time.Time_Last, Time_Span_Last)
     constexpr std::int64_t DefaultQuantum = 10000000;   ///< (Ada.Dispatching.Round_Robin.Default_Quantum (10 ms))
     constexpr std::int64_t PollInterval = 100000;       ///< (the least time between polls that dispatch (see poll): 100 microseconds)
-    constexpr std::int64_t NumberOfCpus = 1;            ///< (System.Multiprocessors.Number_Of_CPUs: the program's thread)
 
     // the task dispatching policies (D.2.2)
     enum : std::int64_t
@@ -123,6 +124,8 @@ namespace
         std::uint64_t sequence = 0u;        ///< (when it was queued: FIFO among calls of the same priority (Priority_Queuing))
         std::int64_t priority = 0;          ///< (its caller's active priority when it was queued (Priority_Queuing, D.4(9)))
         std::deque<call_record*>* queue = nullptr;  ///< (the queue it is on (its entry's, or the one it was requeued on))
+        struct protected_object* po = nullptr;      ///< (threads: the protected object whose queue it is on (null: a task's))
+        bool limbo = false;                         ///< (threads: requeued by an entry body on another object, not yet queued there)
         occurrence exception;
     };
 
@@ -161,6 +164,7 @@ namespace
         std::int64_t elaboration = 0;       ///< (its body's elaboration flag's address (0: none))
         bool terminateRequested = false;
         bool atTerminate = false;           ///< (waiting at a selective accept with an open terminate alternative)
+        std::int64_t incoming = 0;          ///< (threads: the calls requeued on its entries, not yet queued (see pending_requeue))
         std::vector<task*> pending;         ///< (the tasks that it created that are not activated yet)
         std::int64_t master = 0;            ///< (the task whose master it depends on (its creator's id): aborted with it)
         std::map<std::int64_t, std::deque<call_record*>> entries;
@@ -189,6 +193,7 @@ namespace
         std::vector<std::int64_t> deadlineFloors;   ///< (the protected actions that it is in: the active deadlines that they impose (D.3(13.4/5)))
         std::int64_t cpu = 0;               ///< (the processor that it is assigned to (D.16): 0: none (Not_A_Specific_CPU))
         bool cpuFailed = false;             ///< (its CPU is not a processor: its activation fails (D.16(14/5)))
+        std::thread thread;                 ///< (threads: the OS thread that runs it)
     };
 
     // a protected object: its entries' barriers and bodies (functions), and their queues
@@ -207,13 +212,14 @@ namespace
         std::int64_t cpu = 0;                   ///< (the processor that it is assigned to (D.16(15/5)): 0: none)
     };
 
-    task gEnvironment;
-    task* gCurrent = nullptr;
-    std::map<std::int64_t, std::unique_ptr<task>> gTasks;
+    // (never destroyed: with threads, a task that is blocked at the program's end may still refer to them)
+    task& gEnvironment = *new task;
+    thread_local task* gCurrent = nullptr;     ///< (the running task: with threads, the calling thread's)
+    std::map<std::int64_t, std::unique_ptr<task>>& gTasks = *new std::map<std::int64_t, std::unique_ptr<task>>;
     std::int64_t gNextTask = 2;
     std::int64_t gLastRun = 0;
-    std::map<std::int64_t, std::unique_ptr<protected_object>> gProtected;
-    call_record* gProtectedCall = nullptr;      ///< (the call whose entry body is running)
+    std::map<std::int64_t, std::unique_ptr<protected_object>>& gProtected = *new std::map<std::int64_t, std::unique_ptr<protected_object>>;
+    thread_local call_record* gProtectedCall = nullptr;     ///< (the call whose entry body is running)
     std::int64_t gNextProtected = 1;
     bool gPriorityQueuing = false;              ///< (pragma Queuing_Policy (Priority_Queuing) (D.4))
     bool gCeilingLocking = false;               ///< (pragma Locking_Policy (Ceiling_Locking) (D.3))
@@ -238,6 +244,96 @@ namespace
     std::atomic<std::uint32_t> gInterruptsPending{ 0u };    ///< (the interrupts that have occurred and not been handled: by Interrupt_Id)
     std::int64_t gInterruptsAttached = 0;                   ///< (the interrupts that have handlers)
     void deliver_interrupts();
+    void requeue_apply(call_record& aCall);
+    void requeue_discard(call_record& aCall);
+    void requeue_pending();
+    bool withdraw_queued(call_record& aCall);
+
+    // --- threads: unless the partition asks for Annex D's scheduling (a task dispatching policy, a locking policy, a profile or one
+    // of Annex D's packages: see the compiler's tasking mode), each task is an OS thread (a thread attached to the program, with its
+    // own copies of the program's globals that are a task's state), and they run in parallel. The runtime's state is guarded by one
+    // mutex: every primitive takes it (tasking_lock), and its release notifies the tasks that wait (block_until waits for a change
+    // of the state); it is not held while Ada code runs (tasking_unlock: a protected entry's barrier and body, the handlers). A
+    // protected action is its object's (its user: the task in it): another task waits for it to end. Otherwise (the scheduler) the
+    // tasks are coroutines that the program's thread runs one at a time, and the mutex is not used.
+
+    bool gThreaded = false;
+    std::int64_t gLogicalThreads = 0;   ///< (threads: the workers of parallel constructs running other than their callers (see parallel))
+    std::mutex& gTaskingMutex = *new std::mutex;
+    std::condition_variable& gTaskingChanged = *new std::condition_variable;
+    thread_local int tLockDepth = 0;
+
+    struct tasking_lock
+    {
+        bool locked = false;
+        tasking_lock()
+        {
+            if (gThreaded)
+            {
+                locked = true;
+                if (tLockDepth++ == 0)
+                    gTaskingMutex.lock();
+            }
+        }
+        ~tasking_lock()
+        {
+            if (locked && --tLockDepth == 0)
+            {
+                gTaskingMutex.unlock();
+                gTaskingChanged.notify_all();
+            }
+        }
+        tasking_lock(tasking_lock const&) = delete;
+        tasking_lock& operator=(tasking_lock const&) = delete;
+    };
+
+    // (Ada code that the runtime calls (or a thread that it joins): the mutex released meanwhile)
+    struct tasking_unlock
+    {
+        int depth = 0;
+        tasking_unlock()
+        {
+            if (gThreaded && tLockDepth > 0)
+            {
+                depth = tLockDepth;
+                tLockDepth = 0;
+                gTaskingMutex.unlock();
+                gTaskingChanged.notify_all();
+            }
+        }
+        ~tasking_unlock()
+        {
+            if (depth != 0)
+            {
+                gTaskingMutex.lock();
+                tLockDepth = depth;
+            }
+        }
+        tasking_unlock(tasking_unlock const&) = delete;
+        tasking_unlock& operator=(tasking_unlock const&) = delete;
+    };
+
+    // (the calling task waits (the mutex held) for a change of the runtime's state, or until a monotonic time (-1: none); aChanged: it
+    // has changed the state itself (e.g. queued a call): the tasks that wait are told first (a task that waits again after it is told
+    // does not tell them again, so that they do not wake each other forever))
+    void wait_changed(std::int64_t aUntil, bool aChanged = false)
+    {
+        if (aChanged)
+            gTaskingChanged.notify_all();
+        std::unique_lock<std::mutex> lock{ gTaskingMutex, std::adopt_lock };
+        if (aUntil < 0)
+            gTaskingChanged.wait(lock);
+        else
+            gTaskingChanged.wait_until(lock, std::chrono::steady_clock::time_point{
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds{ aUntil }) });
+        lock.release();
+    }
+
+    // (System.Multiprocessors.Number_Of_CPUs: the processors that the threads run on (the scheduler: one, the program's thread))
+    std::int64_t number_of_cpus()
+    {
+        return gThreaded ? std::max<std::int64_t>(static_cast<std::int64_t>(std::thread::hardware_concurrency()), 1) : 1;
+    }
 
 
     std::int64_t monotonic_now()
@@ -256,10 +352,15 @@ namespace
     {
         if (gCurrent == nullptr)
         {
-            gEnvironment.id = 1;
-            gEnvironment.state = &state();
-            gEnvironment.started = true;
-            gEnvironment.activated = true;
+            // (the environment task: the program's thread's (another thread that is not a task's (e.g. a C thread of a linked program)
+            // is seen as it is))
+            if (gEnvironment.id == 0)
+            {
+                gEnvironment.id = 1;
+                gEnvironment.state = &state();
+                gEnvironment.started = true;
+                gEnvironment.activated = true;
+            }
             gCurrent = &gEnvironment;
         }
         return gCurrent;
@@ -528,12 +629,31 @@ namespace
     void yield();
 
     // (aYield: Yield_To_Higher's, a dispatching point under Non_Preemptive_FIFO_Within_Priorities too)
+    // (an abort completion point of the running task: aborted, or its asynchronous select's triggering statement completed (by a
+    // task that preempted it perhaps): that takes effect now (not within a protected action, which is abort-deferred))
+    void abort_point(task* aSelf, bool aInProtectedAction)
+    {
+        if (!aInProtectedAction && aSelf->deferAbort == 0 && (state().excGlobal == nullptr || *state().excGlobal == 0u))
+        {
+            if (aSelf->aborted && aSelf != &gEnvironment)
+                set_pending(AbortSignal);
+            else if (!aSelf->atc.empty() && atc_triggered(*aSelf) != 0)
+                set_pending(AtcSignalBase + atc_triggered(*aSelf));
+        }
+    }
+
     void dispatch(bool aYield = false)
     {
         auto* self = current();
         // (the entry body that it is running (if any): its own (not the preempting tasks'))
         auto* const protectedCall = gProtectedCall;
         bool const inProtectedAction = !self->ceilings.empty() || protectedCall != nullptr;
+        // (threads: the OS schedules them; only an abort completion point)
+        if (gThreaded)
+        {
+            abort_point(self, inProtectedAction);
+            return;
+        }
         auto const mine = active_priority(*self);
         // (Non_Preemptive_FIFO_Within_Priorities: blocking, a delay and the Yield operations are the only dispatching points (D.2.4(9/3)))
         bool const preemptive = aYield || policy_of(mine) != NonPreemptiveFifoWithinPriorities;
@@ -570,15 +690,7 @@ namespace
                 gProtectedCall = protectedCall;
             }
         }
-        // (aborted, or its asynchronous select's triggering statement completed (by a task that preempted it perhaps): that takes
-        // effect now (not within a protected action, which is abort-deferred))
-        if (!inProtectedAction && self->deferAbort == 0 && (state().excGlobal == nullptr || *state().excGlobal == 0u))
-        {
-            if (self->aborted && self != &gEnvironment)
-                set_pending(AbortSignal);
-            else if (!self->atc.empty() && atc_triggered(*self) != 0)
-                set_pending(AtcSignalBase + atc_triggered(*self));
-        }
+        abort_point(self, inProtectedAction);
     }
 
     // (a point where the running task polls for the delays that have expired meanwhile (a protected action's end, E'Count: as if their
@@ -589,6 +701,11 @@ namespace
         if (!self->ceilings.empty() || gProtectedCall != nullptr)
             return;
         deliver_interrupts();
+        if (gThreaded)
+        {
+            abort_point(self, false);
+            return;
+        }
         if (gTasks.empty())
             return;
         auto const now = monotonic_now();
@@ -608,6 +725,12 @@ namespace
     void yield()
     {
         auto* self = current();
+        if (gThreaded)
+        {
+            tasking_unlock unlock;
+            std::this_thread::yield();
+            return;
+        }
         replenish(*self);
         if (self == &gEnvironment)
         {
@@ -664,6 +787,26 @@ namespace
         return 0;
     }
 
+    // (threads: no task can run (each one blocked on a condition that does not hold, none delayed and no interrupt handlers): a
+    // deadlock (as the scheduler finds when no task can run))
+    bool deadlocked()
+    {
+        if (gInterruptsAttached > 0 || gLogicalThreads > 0)
+            return false;
+        auto const waiting = [](task const& aTask)
+        {
+            if (!aTask.blocked || aTask.wake >= 0 || aTask.aborted || aTask.terminateRequested)
+                return false;
+            return !aTask.ready || !aTask.ready();
+        };
+        if (!waiting(gEnvironment))
+            return false;
+        for (auto const& [id, t] : gTasks)
+            if (t->started && !t->terminated && !waiting(*t))
+                return false;
+        return true;
+    }
+
     bool block_until(std::function<bool()> const& aCondition, std::int64_t aWake, std::function<bool()> const& aInterruptible)
     {
         auto* self = current();
@@ -698,7 +841,43 @@ namespace
         self->ready = self->atc.empty() ? aCondition : std::function<bool()>{ [aCondition, triggered]() { return aCondition() || triggered(); } };
         self->wake = wake;
         bool result = true;
-        if (self == &gEnvironment)
+        if (gThreaded)
+        {
+            // (threads: until the state changes (another task's primitive), or the wake time; interrupts are delivered meanwhile (in
+            // slices, as the scheduler's idle wait does); the environment task finds a deadlock (looking again from time to time))
+            constexpr std::int64_t InterruptSlice = 1000000;
+            constexpr std::int64_t DeadlockSlice = 100000000;
+            bool first = true;
+            while (!aCondition() && !expired() && !triggered() && !(self->aborted && self != &gEnvironment && interruptible()) && !self->terminateRequested)
+            {
+                auto until = wake;
+                if (gInterruptsAttached > 0)
+                {
+                    deliver_interrupts();
+                    if (aCondition() || triggered())
+                        break;
+                    auto const slice = monotonic_now() + InterruptSlice;
+                    until = until < 0 ? slice : std::min(until, slice);
+                }
+                else if (self == &gEnvironment && wake < 0)
+                {
+                    if (deadlocked())
+                    {
+                        result = false;
+                        break;
+                    }
+                    until = monotonic_now() + DeadlockSlice;
+                }
+                wait_changed(until, first);
+                first = false;
+            }
+            if (self->aborted && self != &gEnvironment && interruptible() && !aCondition())
+            {
+                set_pending(AbortSignal);
+                result = false;
+            }
+        }
+        else if (self == &gEnvironment)
         {
             while (!aCondition() && !expired() && !triggered())
                 if (deliver_interrupts(), !run_one() && !idle(wake))
@@ -755,12 +934,45 @@ namespace
         arguments[0].i64 = t.link;
         arguments[1].i64 = t.self;
         neos_rt_value result;
-        if (!t.aborted)
+        bool aborted;
+        {
+            tasking_lock lock;
+            aborted = t.aborted;
+        }
+        if (!aborted)
             host()->call(t.function, 2u, parameters, arguments, NEOS_RT_VOID, &result);
         // (an exception that the task body did not handle: the task completes)
+        tasking_lock lock;
         auto const failure = take_pending();
         finish(t);
         call_termination_handler(t, failure);
+    }
+
+    // (threads: a task's thread: attached to the program, its globals set (its stack, no exception pending), then its body; it is 
+    // terminated when that returns)
+    void thread_main(task* aTask, void* aProgram)
+    {
+        auto* const h = host();
+        h->thread_attach(aProgram);
+        thread_started();
+        gCurrent = aTask;
+        set_state(aTask->state);
+        auto& s = *aTask->state;
+        attach_globals(s);
+        if (s.spGlobal != nullptr)
+        {
+            *s.spGlobal = aTask->sp;
+            *s.limitGlobal = aTask->limit;
+            *s.excGlobal = 0u;
+        }
+        task_main(aTask);
+        {
+            tasking_lock lock;
+            aTask->terminated = true;
+        }
+        set_state(nullptr);
+        gCurrent = nullptr;
+        h->thread_attach(nullptr);
     }
 
     void finish(task& aTask)
@@ -808,6 +1020,7 @@ namespace
     // chain: the running task's))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_collection_create()
     {
+        tasking_lock lock;
         auto const id = gNextCollection++;
         gCollections[id];
         current()->state->finalization.push_back(execution_state::finalizable{ id, CollectionEntry, 0 });
@@ -818,6 +1031,7 @@ namespace
     // creator's), or in a collection (an allocator's: aCollection))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_create(std::int64_t aFunction, std::int64_t aLink, std::int64_t aSelf, std::int64_t aCollection)
     {
+        tasking_lock lock;
         auto* creator = current();
         if (gMaxTasks >= 0 && ++gTasksCreated > gMaxTasks)
         {
@@ -833,9 +1047,13 @@ namespace
         t->state = t->ownState.get();
         auto& s = *t->state;
         auto const& creatorState = *creator->state;
-        s.spGlobal = creatorState.spGlobal;
-        s.limitGlobal = creatorState.limitGlobal;
-        s.excGlobal = creatorState.excGlobal;
+        // (threads: its thread's own (see thread_main))
+        if (!gThreaded)
+        {
+            s.spGlobal = creatorState.spGlobal;
+            s.limitGlobal = creatorState.limitGlobal;
+            s.excGlobal = creatorState.excGlobal;
+        }
         auto const stack = allocate_segment(TaskStack);
         auto const secondary = allocate_segment(TaskSecondaryStack);
         if (stack == 0 || secondary == 0)
@@ -883,6 +1101,7 @@ namespace
     // together)
     NEOS_ADA_PRIMITIVE void neos_ada_task_activate_ranges(std::int64_t aFirst, std::int64_t aEnd, std::int64_t aFrom)
     {
+        tasking_lock lock;
         auto* self = current();
         auto const size = static_cast<std::int64_t>(self->pending.size());
         auto const from = std::clamp<std::int64_t>(aFrom, 0, size);
@@ -933,9 +1152,23 @@ namespace
                 finish(*t);
                 continue;
             }
-            t->coroutine = host()->coroutine_new(&task_main, t);
             t->started = true;
             t->activator = current();
+            if (gThreaded)
+            {
+                try
+                {
+                    t->thread = std::thread{ &thread_main, t, host()->thread_context() };
+                }
+                catch (...)
+                {
+                    t->started = false;
+                    t->terminated = true;
+                    finish(*t);
+                }
+            }
+            else
+                t->coroutine = host()->coroutine_new(&task_main, t);
         }
         block_until([pending]() { return std::all_of(pending.begin(), pending.end(), [](task* t) { return t->activated || t->completed || t->terminated; }); });
         for (auto* t : pending)
@@ -952,6 +1185,7 @@ namespace
     // (a protected object deallocated: finalized (its queued calls fail, 9.4(20.1/2)))
     NEOS_ADA_PRIMITIVE void neos_ada_po_finalize(std::int64_t aHandle)
     {
+        tasking_lock lock;
         protected_finalize(aHandle);
     }
 
@@ -959,6 +1193,7 @@ namespace
     // (see task_unregister))
     NEOS_ADA_PRIMITIVE void neos_ada_task_relocate(std::int64_t aTask, std::int64_t aSelf)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         if (t == nullptr)
             return;
@@ -971,6 +1206,7 @@ namespace
     // (a return object's task (not yet activated): no longer awaited by the function's master (the caller's will, see task_relocate))
     NEOS_ADA_PRIMITIVE void neos_ada_task_unregister(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto& chain = current()->state->finalization;
         for (auto i = chain.size(); i-- > 0u; )
             if (chain[i].object == aTask && chain[i].function == TaskEntry)
@@ -982,18 +1218,21 @@ namespace
 
     NEOS_ADA_PRIMITIVE void neos_ada_task_elaboration(std::int64_t aTask, std::int64_t aFlag)
     {
+        tasking_lock lock;
         if (auto* t = task_of(aTask))
             t->elaboration = aFlag;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_task_activate()
     {
+        tasking_lock lock;
         activate_from(0u);
     }
 
     // (the tasks that the running task has created and not activated: their number (an allocator's are those created after it))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_pending()
     {
+        tasking_lock lock;
         return static_cast<std::int64_t>(current()->pending.size());
     }
 
@@ -1001,6 +1240,7 @@ namespace
     // activated (9.2(3/2)))
     NEOS_ADA_PRIMITIVE void neos_ada_task_discard_from(std::int64_t aMark)
     {
+        tasking_lock lock;
         auto* self = current();
         auto const mark = static_cast<std::size_t>(aMark < 0 ? 0 : aMark);
         for (std::size_t i = mark; i < self->pending.size(); ++i)
@@ -1017,6 +1257,7 @@ namespace
     // (the tasks created after a mark (see task_pending): activated (an allocator's, 9.2(5)))
     NEOS_ADA_PRIMITIVE void neos_ada_task_activate_from(std::int64_t aMark)
     {
+        tasking_lock lock;
         activate_from(static_cast<std::size_t>(aMark < 0 ? 0 : aMark));
     }
 
@@ -1024,30 +1265,35 @@ namespace
     // (a dispatching point))
     NEOS_ADA_PRIMITIVE void neos_ada_task_activated()
     {
+        tasking_lock lock;
         current()->activated = true;
         dispatch();
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_callable(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         return t != nullptr && callable(*t) ? 1 : 0;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_terminated(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         return t == nullptr || t->terminated ? 1 : 0;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_current_task()
     {
+        tasking_lock lock;
         return current()->id;
     }
 
     // (abort statements: each task aborted (it completes at its next scheduling point; the running one now))
     NEOS_ADA_PRIMITIVE void neos_ada_task_abort(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         if (t == nullptr || t->terminated)
             return;
@@ -1073,6 +1319,7 @@ namespace
     // (a delay statement)
     NEOS_ADA_PRIMITIVE void neos_ada_delay(std::int64_t aKind, std::int64_t aValue)
     {
+        tasking_lock lock;
         auto const wake = clock_until(aKind, aValue);
         if (wake <= monotonic_now())
         {
@@ -1111,10 +1358,11 @@ namespace
         return true;
     }
 
-    void enqueue(std::deque<call_record*>& aQueue, call_record* aCall)
+    void enqueue(std::deque<call_record*>& aQueue, call_record* aCall, struct protected_object* aObject = nullptr)
     {
         aCall->sequence = ++gCallSequence;
         aCall->queue = &aQueue;
+        aCall->po = aObject;
         // (not the ceiling of the protected action that queues it (its own, or the entry body that requeues it))
         aCall->priority = aCall->caller != nullptr ? active_priority(*aCall->caller, 0, false) : 0;
         if (!gPriorityQueuing)
@@ -1182,11 +1430,13 @@ namespace
     // abort, or its asynchronous select's abortable part's, takes effect, if no exception is propagating))
     NEOS_ADA_PRIMITIVE void neos_ada_abort_defer()
     {
+        tasking_lock lock;
         abort_defer();
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_abort_undefer(std::int64_t aSignal)
     {
+        tasking_lock lock;
         abort_undefer(aSignal != 0);
     }
 
@@ -1194,6 +1444,7 @@ namespace
     // finalization): the task's pending abort (or its asynchronous select's) signalled)
     NEOS_ADA_PRIMITIVE void neos_ada_abort_check()
     {
+        tasking_lock lock;
         ++current()->deferAbort;
         abort_undefer(true);
     }
@@ -1202,6 +1453,7 @@ namespace
     // call was not accepted in time))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_entry_call(std::int64_t aTask, std::int64_t aEntry, std::int64_t aParams, std::int64_t aKind, std::int64_t aValue)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         if (t == nullptr || !callable(*t))
         {
@@ -1234,7 +1486,13 @@ namespace
                         break;
                     continue;
                 }
-                if (c.queue != nullptr)
+                // (threads: once a requeue has queued it (withdraw_queued waits for that))
+                if (gThreaded)
+                {
+                    if (withdraw_queued(c))
+                        return 0;
+                }
+                else if (c.queue != nullptr)
                     if (auto i = std::find(c.queue->begin(), c.queue->end(), &c); i != c.queue->end())
                     {
                         c.queue->erase(i);
@@ -1253,6 +1511,9 @@ namespace
         auto const cancellable = [&c]() { return !c.accepted && c.abortable; };
         auto const withdraw = [&c]()
         {
+            // (threads: once a requeue has queued it (withdraw_queued waits for that))
+            if (gThreaded)
+                return withdraw_queued(c);
             if (c.queue != nullptr)
                 if (auto i = std::find(c.queue->begin(), c.queue->end(), &c); i != c.queue->end())
                 {
@@ -1301,6 +1562,7 @@ namespace
     // (an accept statement: waits for a call of the entry; the call (its handle))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_accept(std::int64_t aEntry)
     {
+        tasking_lock lock;
         auto* self = current();
         auto& queue = self->entries[aEntry];
         self->awaiting = { aEntry };
@@ -1321,12 +1583,14 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_call_params(std::int64_t aCall)
     {
+        tasking_lock lock;
         return aCall != 0 ? reinterpret_cast<call_record*>(aCall)->params : 0;
     }
 
     // (an accept statement's end (normal: aFailed 0; else the exception that it propagates is propagated by the caller too))
     NEOS_ADA_PRIMITIVE void neos_ada_accept_done(std::int64_t aCall, std::int64_t aFailed)
     {
+        tasking_lock lock;
         if (aCall == 0)
             return;
         auto* self = current();
@@ -1342,13 +1606,24 @@ namespace
             if (static_cast<std::uint64_t>(c->exception.id) >= static_cast<std::uint64_t>(AtcSignalBase))
                 c->exception.id = 0;
         }
-        if (c->requeued && aFailed == 0)
+        bool const requeued = c->requeued && aFailed == 0;
+        if (requeued)
             c->requeued = false;    // (requeued: not done yet)
-        else
-            c->done = true;
         auto i = std::find(self->accepting.begin(), self->accepting.end(), c);
         if (i != self->accepting.end())
             self->accepting.erase(i);
+        if (gThreaded && requeued)
+        {
+            // (threads: queued now (not touched after that))
+            requeue_apply(*c);
+            requeue_pending();
+        }
+        else if (!requeued)
+        {
+            if (gThreaded)
+                requeue_discard(*c);
+            c->done = true;
+        }
         // (the rendezvous's end: the caller ready (a dispatching point))
         if (aFailed == 0)
             dispatch();
@@ -1361,6 +1636,7 @@ namespace
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_select(std::int64_t aEntries, std::int64_t aCount, std::int64_t aDelayKind, std::int64_t aDelay,
         std::int64_t aTerminate, std::int64_t aElse)
     {
+        tasking_lock lock;
         auto* self = current();
         std::vector<std::int64_t> open;
         for (std::int64_t i = 0; i < aCount; ++i)
@@ -1427,6 +1703,7 @@ namespace
     // (the call that an accept or a selective accept accepted most recently)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_accepted_call()
     {
+        tasking_lock lock;
         auto* self = current();
         return self->accepting.empty() ? 0 : reinterpret_cast<std::int64_t>(self->accepting.back());
     }
@@ -1435,6 +1712,7 @@ namespace
     // innermost one accepted; within a protected entry body (aEntry -1), the caller of the call it is for)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_entry_caller(std::int64_t aEntry)
     {
+        tasking_lock lock;
         if (aEntry < 0)
             return gProtectedCall != nullptr && gProtectedCall->caller != nullptr ? gProtectedCall->caller->id : 0;
         auto const* self = current();
@@ -1447,6 +1725,7 @@ namespace
     // (E'Count: the calls queued on an entry of the running task)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_entry_count(std::int64_t aEntry)
     {
+        tasking_lock lock;
         preempt_poll();
         auto* self = current();
         auto q = self->entries.find(aEntry);
@@ -1470,6 +1749,7 @@ namespace
     // (a protected object: its entries' barriers and bodies (aTable: aCount pairs of function indexes), their static link)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_create(std::int64_t aSelf, std::int64_t aTable, std::int64_t aCount, std::int64_t aLink, std::int64_t aMastered)
     {
+        tasking_lock lock;
         auto p = std::make_unique<protected_object>();
         auto const id = gNextProtected++;
         p->self = aSelf;
@@ -1496,7 +1776,10 @@ namespace
         arguments[2].i64 = aFamily;
         neos_rt_value result;
         result.i64 = 0;
-        host()->call(static_cast<unsigned>(function), 3u, parameters, arguments, NEOS_RT_I64, &result);
+        {
+            tasking_unlock unlock;
+            host()->call(static_cast<unsigned>(function), 3u, parameters, arguments, NEOS_RT_I64, &result);
+        }
         // (an exception raised by a barrier's evaluation: Program_Error for every call queued on the object's entries (9.5.3(7/3)))
         if (take_pending().id != 0)
         {
@@ -1533,7 +1816,10 @@ namespace
         ++gEntryBodies;
         auto* self = current();
         self->ceilings.push_back(aObject.ceiling);
-        host()->call(static_cast<unsigned>(function), 4u, parameters, arguments, NEOS_RT_VOID, &result);
+        {
+            tasking_unlock unlock;
+            host()->call(static_cast<unsigned>(function), 4u, parameters, arguments, NEOS_RT_VOID, &result);
+        }
         self->ceilings.pop_back();
         gProtectedCall = saved;
         auto const failure = take_pending();
@@ -1541,8 +1827,12 @@ namespace
         {
             // (requeued: not done yet)
             aCall.requeued = false;
+            if (gThreaded)
+                requeue_apply(aCall);
             return;
         }
+        if (gThreaded)
+            requeue_discard(aCall);
         if (failure.id != 0)
         {
             aCall.failed = true;
@@ -1552,7 +1842,92 @@ namespace
     }
 
     // (the protected objects that calls were requeued on by entry bodies (not yet served: after the requeuing protected action))
-    std::vector<protected_object*> gRequeueTargets;
+    thread_local std::vector<protected_object*> gRequeueTargets;
+
+    // (threads: the calls that entry bodies requeued on other objects (whose protected actions are other tasks' perhaps): queued
+    // there after the requeuing protected action ends)
+    struct pending_requeue
+    {
+        call_record* call;
+        task* target = nullptr;                 ///< (a task's entry)
+        protected_object* object = nullptr;     ///< (a protected object's entry)
+        bool failed = false;                    ///< (the task is not callable: the call fails (Tasking_Error))
+        bool ready = false;                     ///< (the requeue statement completed: to be queued (on the object, after the protected action))
+    };
+    thread_local std::vector<pending_requeue> tPendingRequeues;
+
+    // (threads: a protected object's protected action begun by the running task (its user), once no other task's is in progress; 
+    // ended)
+    void po_acquire(protected_object& aObject)
+    {
+        auto* self = current();
+        for (bool first = true; aObject.user != nullptr && aObject.user != self; first = false)
+            wait_changed(-1, first);
+        aObject.user = self;
+        ++aObject.uses;
+    }
+
+    void po_release(protected_object& aObject)
+    {
+        if (aObject.uses > 0 && --aObject.uses == 0)
+        {
+            aObject.user = nullptr;
+            if (aObject.priority >= 0)
+            {
+                aObject.ceiling = aObject.priority;
+                aObject.priority = -1;
+            }
+        }
+    }
+
+    // (threads: a requeue statement of a call completed (its accept statement or entry body has ended): the call queued (a task's
+    // entry, or the protected object that the running task is in: now; another protected object: once the running task's protected
+    // action ends, see requeue_pending), or failed; the call is not touched after that (its caller may take it))
+    void requeue_apply(call_record& aCall)
+    {
+        auto r = std::find_if(tPendingRequeues.begin(), tPendingRequeues.end(), [&aCall](pending_requeue const& p) { return p.call == &aCall; });
+        if (r == tPendingRequeues.end())
+            return;
+        if (r->failed || r->target != nullptr)
+        {
+            auto const pending = *r;
+            tPendingRequeues.erase(r);
+            aCall.limbo = false;
+            if (pending.target != nullptr)
+                --pending.target->incoming;
+            if (pending.failed || !callable(*pending.target))
+            {
+                aCall.failed = true;
+                aCall.exception = occurrence{};
+                aCall.done = true;
+            }
+            else
+                enqueue(pending.target->entries[aCall.entry], &aCall);
+            return;
+        }
+        if (r->object->user == current())
+        {
+            auto* const object = r->object;
+            tPendingRequeues.erase(r);
+            aCall.limbo = false;
+            enqueue(object->queues[aCall.entry], &aCall, object);
+            return;
+        }
+        r->ready = true;
+    }
+
+    // (threads: a call's requeue abandoned (its accept statement or entry body propagated an exception after it))
+    void requeue_discard(call_record& aCall)
+    {
+        auto r = std::find_if(tPendingRequeues.begin(), tPendingRequeues.end(), [&aCall](pending_requeue const& p) { return p.call == &aCall; });
+        if (r != tPendingRequeues.end())
+        {
+            if (r->target != nullptr)
+                --r->target->incoming;
+            tPendingRequeues.erase(r);
+            aCall.limbo = false;
+        }
+    }
 
     // (a queued call that can be cancelled (not requeued without abort) whose caller is aborted, or whose caller's asynchronous select's
     // triggering statement has completed: it is not served (its caller withdraws it, 9.8(15), 9.7.4(7)))
@@ -1612,8 +1987,9 @@ namespace
         {
             // (the calls failed (their queues are empty))
         }
-        // (the objects that its entry bodies requeued calls on: served now (their protected actions follow this one))
-        while (!gRequeueTargets.empty())
+        // (the objects that its entry bodies requeued calls on: served now (their protected actions follow this one); threads: after
+        // this object's protected action (see requeue_pending))
+        while (!gThreaded && !gRequeueTargets.empty())
         {
             auto* target = gRequeueTargets.back();
             gRequeueTargets.pop_back();
@@ -1631,6 +2007,10 @@ namespace
     bool protected_action_begin(protected_object& aObject)
     {
         auto* self = current();
+        // (threads: once another task's protected action on it has ended)
+        if (gThreaded)
+            for (bool first = true; aObject.user != nullptr && aObject.user != self; first = false)
+                wait_changed(-1, first);
         if ((gCeilingLocking && active_priority(*self) > aObject.ceiling) || (aObject.user != nullptr && aObject.user != self))
         {
             raise_predefined(1, "the caller's priority is above the protected object's ceiling");
@@ -1667,6 +2047,22 @@ namespace
     void protected_action_end(protected_object* aObject, std::uint64_t aEntryBodies)
     {
         auto* self = current();
+        if (gThreaded)
+        {
+            if (aObject != nullptr)
+                po_release(*aObject);
+            if (!self->ceilings.empty())
+                self->ceilings.pop_back();
+            if (!self->deadlineFloors.empty())
+                self->deadlineFloors.pop_back();
+            (void)aEntryBodies;
+            if (self->ceilings.empty() && gProtectedCall == nullptr)
+            {
+                requeue_pending();
+                preempt_poll();
+            }
+            return;
+        }
         if (aObject != nullptr && aObject->uses > 0 && --aObject->uses == 0)
         {
             aObject->user = nullptr;
@@ -1697,8 +2093,71 @@ namespace
             preempt_poll();
     }
 
+    // (threads: the calls that entry bodies requeued on other objects: queued there (each a protected action of its object), and the
+    // object's queued calls served)
+    void requeue_pending()
+    {
+        for (;;)
+        {
+            auto r = std::find_if(tPendingRequeues.begin(), tPendingRequeues.end(), [](pending_requeue const& p) { return p.ready; });
+            if (r == tPendingRequeues.end())
+                return;
+            auto const pending = *r;
+            tPendingRequeues.erase(r);
+            po_acquire(*pending.object);
+            pending.call->limbo = false;
+            enqueue(pending.object->queues[pending.call->entry], pending.call, pending.object);
+            service(*pending.object);
+            po_release(*pending.object);
+        }
+    }
+
+    // (threads: a call queued on a protected object withdrawn (its caller's timed call expired, or it is aborted, or its asynchronous
+    // select's abortable part ended): a protected action of the object (its queues serviced then: its entries' counts have changed,
+    // 9.5.3(20)); false: not queued (served meanwhile, or requeued without abort), true: withdrawn)
+    bool withdraw_queued(call_record& aCall)
+    {
+        for (;;)
+        {
+            for (bool first = true; aCall.limbo; first = false)
+                wait_changed(-1, first);
+            if (aCall.done || aCall.queue == nullptr || !aCall.abortable)
+                return false;
+            auto* const po = aCall.po;
+            if (po == nullptr)
+            {
+                auto i = std::find(aCall.queue->begin(), aCall.queue->end(), &aCall);
+                if (i == aCall.queue->end())
+                    return false;
+                aCall.queue->erase(i);
+                return true;
+            }
+            po_acquire(*po);
+            if (aCall.limbo || (!aCall.done && aCall.po != po))
+            {
+                // (requeued on another object meanwhile: withdrawn from that one)
+                po_release(*po);
+                requeue_pending();
+                continue;
+            }
+            bool withdrawn = false;
+            if (!aCall.done && aCall.abortable && aCall.queue != nullptr)
+                if (auto i = std::find(aCall.queue->begin(), aCall.queue->end(), &aCall); i != aCall.queue->end())
+                {
+                    aCall.queue->erase(i);
+                    withdrawn = true;
+                }
+            if (withdrawn)
+                service(*po);
+            po_release(*po);
+            requeue_pending();
+            return withdrawn;
+        }
+    }
+
     NEOS_ADA_PRIMITIVE void neos_ada_po_service(std::int64_t aSelf)
     {
+        tasking_lock lock;
         auto const entryBodies = gEntryBodies;
         auto* p = protected_of(aSelf);
         if (p != nullptr)
@@ -1709,6 +2168,7 @@ namespace
     // (an external call of a protected subprogram: its protected action begins)
     NEOS_ADA_PRIMITIVE void neos_ada_po_enter(std::int64_t aSelf)
     {
+        tasking_lock lock;
         if (auto* p = protected_of(aSelf))
             protected_action_begin(*p);
         else
@@ -1721,6 +2181,7 @@ namespace
     // (an external call of a protected function: its protected action ends)
     NEOS_ADA_PRIMITIVE void neos_ada_po_leave(std::int64_t aSelf)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         if (p != nullptr && p->uses > 0 && --p->uses == 0)
             p->user = nullptr;
@@ -1735,6 +2196,7 @@ namespace
     // (a protected object's ceiling priority (D.3(6)))
     NEOS_ADA_PRIMITIVE void neos_ada_po_ceiling(std::int64_t aId, std::int64_t aPriority)
     {
+        tasking_lock lock;
         if (aPriority < 0 || aPriority > 31)
         {
             raise_predefined(1, "ceiling priority out of range");
@@ -1748,6 +2210,7 @@ namespace
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_call(std::int64_t aSelf, std::int64_t aEntry, std::int64_t aFamily, std::int64_t aParams,
         std::int64_t aKind, std::int64_t aValue)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         if (p == nullptr)
         {
@@ -1761,9 +2224,20 @@ namespace
         c.params = aParams;
         // (its protected action: queued first (its entry's 'Count includes it), then the open barriers' calls served (this one perhaps))
         auto const entryBodies = gEntryBodies;
-        if (!enqueue_check(p->queues[aEntry]) || !protected_action_begin(*p))
+        if (gThreaded)
+        {
+            // (threads: its queue is the object's, once the protected action has begun)
+            if (!protected_action_begin(*p))
+                return 0;
+            if (!enqueue_check(p->queues[aEntry]))
+            {
+                protected_action_end(p, entryBodies);
+                return 0;
+            }
+        }
+        else if (!enqueue_check(p->queues[aEntry]) || !protected_action_begin(*p))
             return 0;
-        enqueue(p->queues[aEntry], &c);
+        enqueue(p->queues[aEntry], &c, p);
         service(*p);
         protected_action_end(p, entryBodies);
         if (c.done)
@@ -1774,6 +2248,14 @@ namespace
         // (withdrawn from the queue it is on (unless requeued without abort: it can't be, 9.5.4(13)))
         auto const withdraw = [&c]()
         {
+            if (gThreaded)
+            {
+                // (threads: unless it has been served meanwhile, or requeued without abort (then its end is awaited))
+                if (!withdraw_queued(c))
+                    for (bool first = true; !c.done; first = false)
+                        wait_changed(-1, first);
+                return;
+            }
             if (c.queue != nullptr)
                 if (auto i = std::find(c.queue->begin(), c.queue->end(), &c); i != c.queue->end())
                     c.queue->erase(i);
@@ -1781,6 +2263,11 @@ namespace
         if (aKind == 4 && c.abortable)
         {
             withdraw();
+            if (c.done)
+            {
+                complete_call(c, nullptr);
+                return 1;
+            }
             return 0;
         }
         auto const wake = aKind == 4 ? -1 : clock_until(aKind, aValue);
@@ -1805,6 +2292,13 @@ namespace
         if (!c.done)
         {
             withdraw();
+            if (c.done)
+            {
+                // (threads: served before it could be withdrawn)
+                if (state().excGlobal == nullptr || *state().excGlobal == 0u)
+                    complete_call(c, nullptr);
+                return 1;
+            }
             if (ok && wake >= 0)
                 return 0;
             if (state().excGlobal == nullptr || *state().excGlobal == 0u)
@@ -1841,6 +2335,7 @@ namespace
     // (a delay as the triggering statement: its depth)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_atc_delay(std::int64_t aKind, std::int64_t aValue)
     {
+        tasking_lock lock;
         auto f = std::make_unique<atc_frame>();
         f->deadline = clock_until(aKind, aValue);
         if (f->deadline < 0)
@@ -1851,6 +2346,7 @@ namespace
     // (a task entry call as the triggering statement (queued): its depth)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_atc_entry_call(std::int64_t aTask, std::int64_t aEntry, std::int64_t aParams)
     {
+        tasking_lock lock;
         auto* t = task_of(aTask);
         if (t == nullptr || !callable(*t))
         {
@@ -1879,14 +2375,22 @@ namespace
     // (a protected entry call as the triggering statement (queued, and served if its barrier is open): its depth)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_atc_po_call(std::int64_t aSelf, std::int64_t aEntry, std::int64_t aFamily, std::int64_t aParams)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         if (p == nullptr)
         {
             raise_predefined(1, "protected object not initialized");
             return 0;
         }
+        // (threads: its protected action (its queue is the object's))
+        if (gThreaded)
+            po_acquire(*p);
         if (!enqueue_check(p->queues[aEntry]))
+        {
+            if (gThreaded)
+                po_release(*p);
             return 0;
+        }
         auto f = std::make_unique<atc_frame>();
         f->call = std::make_unique<call_record>();
         f->call->caller = current();
@@ -1895,10 +2399,15 @@ namespace
         f->call->params = aParams;
         f->po = p;
         f->entry = aEntry;
-        enqueue(p->queues[aEntry], f->call.get());
+        enqueue(p->queues[aEntry], f->call.get(), p);
         auto* call = f->call.get();
         auto const depth = atc_push(std::move(f));
         service(*p);
+        if (gThreaded)
+        {
+            po_release(*p);
+            requeue_pending();
+        }
         (void)call;
         return depth;
     }
@@ -1906,6 +2415,7 @@ namespace
     // (whether an asynchronous select's triggering statement has completed (its abortable part is not run if it has))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_atc_triggered(std::int64_t aDepth)
     {
+        tasking_lock lock;
         auto* self = current();
         if (aDepth <= 0 || static_cast<std::size_t>(aDepth) > self->atc.size())
             return 0;
@@ -1918,6 +2428,7 @@ namespace
     // triggering statement cancelled (a call being accepted: awaited), 1 if it completed)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_atc_end(std::int64_t aDepth)
     {
+        tasking_lock lock;
         auto* self = current();
         if (aDepth <= 0 || static_cast<std::size_t>(aDepth) > self->atc.size())
             return 0;
@@ -1928,6 +2439,16 @@ namespace
             auto& inner = self->atc[i];
             if (inner->call != nullptr && !inner->call->done && !inner->call->accepted)
             {
+                if (gThreaded)
+                {
+                    // (threads: withdrawn, or (being served) awaited)
+                    if (!withdraw_queued(*inner->call))
+                        for (bool first = true; !inner->call->done && !inner->call->accepted; first = false)
+                            wait_changed(-1, first);
+                    for (bool first = true; inner->call->accepted && !inner->call->done; first = false)
+                        wait_changed(-1, first);
+                    continue;
+                }
                 auto& queue = inner->po != nullptr ? inner->po->queues[inner->entry] : inner->target->entries[inner->entry];
                 auto q = std::find(queue.begin(), queue.end(), inner->call.get());
                 if (q != queue.end())
@@ -1943,7 +2464,14 @@ namespace
         if (frame->call != nullptr)
         {
             auto& c = *frame->call;
-            if (!c.done && !c.accepted)
+            if (gThreaded)
+            {
+                // (threads: served, or being accepted, before it could be withdrawn: its end awaited (below))
+                if (!c.done && !c.accepted && !withdraw_queued(c))
+                    for (bool first = true; !c.done && !c.accepted; first = false)
+                        wait_changed(-1, first);
+            }
+            else if (!c.done && !c.accepted)
             {
                 // (not accepted: withdrawn)
                 auto& queue = frame->po != nullptr ? frame->po->queues[frame->entry] : frame->target->entries[frame->entry];
@@ -1976,6 +2504,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_count(std::int64_t aSelf, std::int64_t aEntry)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         if (p == nullptr)
             return 0;
@@ -1986,6 +2515,7 @@ namespace
     // (the number of calls queued on a member of a protected object's entry family (its index's offset))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_count_family(std::int64_t aSelf, std::int64_t aEntry, std::int64_t aFamily)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         if (p == nullptr)
             return 0;
@@ -2003,6 +2533,7 @@ namespace
     // running (1)) on an entry of a task (aKind 0: aTarget its id) or of a protected object (1: aTarget its address))
     NEOS_ADA_PRIMITIVE void neos_ada_requeue(std::int64_t aSource, std::int64_t aKind, std::int64_t aTarget, std::int64_t aEntry, std::int64_t aFamily)
     {
+        tasking_lock lock;
         auto* self = current();
         call_record* c = aSource == 0 ? (self->accepting.empty() ? nullptr : self->accepting.back()) : gProtectedCall;
         if (c == nullptr)
@@ -2015,7 +2546,7 @@ namespace
                 if (auto* t = task_of(aTarget); t != nullptr && callable(*t))
                     target = &t->entries[aEntry];
             }
-            else if (auto* p = protected_of(aTarget))
+            else if (auto* p = protected_of(aTarget); p != nullptr && (!gThreaded || p->user == self))
                 target = &p->queues[aEntry];
             if (target != nullptr && !enqueue_check(*target))
                 return;
@@ -2027,6 +2558,27 @@ namespace
         // (requeued without abort: no longer cancellable (9.5.4(13)); with abort: as an entry call is)
         c->abortable = (aKind & 2) != 0;
         aKind &= 1;
+        if (gThreaded)
+        {
+            // (threads: queued once the requeue statement has completed (its accept statement or entry body ended: see requeue_apply),
+            // so that the call is not completed (and its caller gone) meanwhile)
+            pending_requeue r{ c };
+            if (aKind == 0)
+            {
+                r.target = task_of(aTarget);
+                r.failed = r.target == nullptr || !callable(*r.target);
+                // (a call on its way to the task's queue: the task cannot be terminated meanwhile (see terminable))
+                if (r.target != nullptr)
+                    ++r.target->incoming;
+            }
+            else if ((r.object = protected_of(aTarget)) == nullptr)
+                return;
+            c->limbo = true;
+            c->queue = nullptr;
+            c->po = nullptr;
+            tPendingRequeues.push_back(r);
+            return;
+        }
         if (aKind == 0)
         {
             auto* t = task_of(aTarget);
@@ -2119,7 +2671,10 @@ namespace
             arguments[0].i64 = link;
             arguments[1].i64 = object;
             neos_rt_value result;
-            host()->call(static_cast<unsigned>(function), 2u, parameters, arguments, NEOS_RT_VOID, &result);
+            {
+                tasking_unlock unlock;
+                host()->call(static_cast<unsigned>(function), 2u, parameters, arguments, NEOS_RT_VOID, &result);
+            }
             take_pending();
             if (p != nullptr)
             {
@@ -2147,11 +2702,13 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_interrupt_reserved(std::int64_t aInterrupt)
     {
+        tasking_lock lock;
         return aInterrupt < 0 || aInterrupt >= static_cast<std::int64_t>(gInterrupts.size()) || interrupt_signal(aInterrupt) == 0 ? 1 : 0;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_interrupt_handler_register(std::int64_t aFunction)
     {
+        tasking_lock lock;
         gInterruptHandlerFunctions.insert(aFunction);
     }
 
@@ -2159,6 +2716,7 @@ namespace
     // the interrupt is reserved, its handler was attached statically, or the new handler is not an interrupt handler (C.3.2(15-17)))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_interrupt_attach(std::int64_t aInterrupt, std::int64_t aHandler)
     {
+        tasking_lock lock;
         if (neos_ada_interrupt_reserved(aInterrupt) != 0)
         {
             raise_predefined(1, "the interrupt is reserved");
@@ -2177,6 +2735,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_interrupt_handler(std::int64_t aInterrupt)
     {
+        tasking_lock lock;
         if (neos_ada_interrupt_reserved(aInterrupt) != 0)
         {
             raise_predefined(1, "the interrupt is reserved");
@@ -2189,6 +2748,7 @@ namespace
     // the interrupt is reserved, or its handler was attached statically)
     NEOS_ADA_PRIMITIVE void neos_ada_interrupt_attach_static(std::int64_t aInterrupt, std::int64_t aHandler)
     {
+        tasking_lock lock;
         if (neos_ada_interrupt_reserved(aInterrupt) != 0 || gInterrupts[static_cast<std::size_t>(aInterrupt)].attachedStatically)
         {
             raise_predefined(1, "the interrupt is reserved, or its handler was attached statically");
@@ -2219,6 +2779,7 @@ namespace
     // (ImpDef.Annex_C.Generate_Interrupt: an interrupt generated (its signal raised); handled now)
     NEOS_ADA_PRIMITIVE void neos_ada_interrupt_generate(std::int64_t aInterrupt)
     {
+        tasking_lock lock;
         if (auto const signal = interrupt_signal(aInterrupt); signal != 0)
         {
             std::raise(signal);
@@ -2265,7 +2826,10 @@ namespace
             arguments[4].i64 = occurrenceHandle;
             neos_rt_value result;
             aTask.aborted = false;      // (the handler runs (it is not aborted))
-            host()->call(static_cast<unsigned>(function), 5u, parameters, arguments, NEOS_RT_VOID, &result);
+            {
+                tasking_unlock unlock;
+                host()->call(static_cast<unsigned>(function), 5u, parameters, arguments, NEOS_RT_VOID, &result);
+            }
             if (p != nullptr)
             {
                 service(*p);
@@ -2280,6 +2844,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE void neos_ada_termination_handler_set(std::int64_t aTask, std::int64_t aKind, std::int64_t aHandler)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         if (t == nullptr)
             return;
@@ -2288,6 +2853,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_termination_handler(std::int64_t aTask, std::int64_t aKind)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         return t == nullptr ? 0 : aKind == 0 ? t->specificHandler : t->fallbackHandler;
     }
@@ -2303,6 +2869,7 @@ namespace
     // subprogram's))
     NEOS_ADA_PRIMITIVE void neos_ada_task_priority(std::int64_t aTask, std::int64_t aPriority)
     {
+        tasking_lock lock;
         if (!valid_priority(aPriority))
         {
             raise_predefined(0, "priority out of range");
@@ -2317,6 +2884,7 @@ namespace
     // (Ada.Dynamic_Priorities.Set_Priority: a task's base priority (a dispatching point; its queued call placed by it, D.5.1))
     NEOS_ADA_PRIMITIVE void neos_ada_set_priority(std::int64_t aTask, std::int64_t aPriority)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         if (t == nullptr || t->terminated)
             return;
@@ -2341,6 +2909,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_get_priority(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         return t != nullptr ? t->priority : DefaultPriority;
     }
@@ -2348,6 +2917,7 @@ namespace
     // (the partition's locking (Ceiling_Locking) and queuing (Priority_Queuing) policies)
     NEOS_ADA_PRIMITIVE void neos_ada_tasking_policies(std::int64_t aCeilingLocking, std::int64_t aPriorityQueuing)
     {
+        tasking_lock lock;
         gCeilingLocking = aCeilingLocking != 0;
         gPriorityQueuing = aPriorityQueuing != 0;
     }
@@ -2355,10 +2925,18 @@ namespace
     // (Ada.Asynchronous_Task_Control: a task held (it does not run until it is continued), continued (a dispatching point))
     NEOS_ADA_PRIMITIVE void neos_ada_task_hold(std::int64_t aTask, std::int64_t aHold)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         if (t == nullptr || t->terminated)
             return;
         t->held = aHold != 0;
+        if (gThreaded)
+        {
+            // (threads: the running task stops until it is continued)
+            if (t == current() && t->held && t != &gEnvironment)
+                block_until([t]() { return !t->held; });
+            return;
+        }
         if (t == current() && t->held && t != &gEnvironment)
         {
             // (the running task: it stops now)
@@ -2372,6 +2950,7 @@ namespace
     // (the main subprogram has returned: the environment task is complete (not callable), awaiting the library level's tasks)
     NEOS_ADA_PRIMITIVE void neos_ada_environment_completed()
     {
+        tasking_lock lock;
         current();
         gEnvironment.completed = true;
     }
@@ -2379,11 +2958,13 @@ namespace
     // (Ada.Dispatching.Non_Preemptive.Yield_To_Higher: a dispatching point)
     NEOS_ADA_PRIMITIVE void neos_ada_dispatch()
     {
+        tasking_lock lock;
         dispatch(true);
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_held(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = aTask == 1 ? &gEnvironment : task_of(aTask);
         return t != nullptr && t->held ? 1 : 0;
     }
@@ -2394,29 +2975,34 @@ namespace
     // (the partition's task dispatching policy for a range of priorities)
     NEOS_ADA_PRIMITIVE void neos_ada_dispatching_policy(std::int64_t aFirst, std::int64_t aLast, std::int64_t aPolicy)
     {
+        tasking_lock lock;
         for (auto p = std::max<std::int64_t>(aFirst, 0); p <= aLast && p < static_cast<std::int64_t>(gPolicies.size()); ++p)
             gPolicies[static_cast<std::size_t>(p)] = aPolicy;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_generate_deadlines()
     {
+        tasking_lock lock;
         gGenerateDeadlines = true;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_policy(std::int64_t aPriority)
     {
+        tasking_lock lock;
         return policy_of(aPriority);
     }
 
     // (Ada.Dispatching.Round_Robin: the quantum of a range of priorities, of a priority)
     NEOS_ADA_PRIMITIVE void neos_ada_quantum_set(std::int64_t aLow, std::int64_t aHigh, std::int64_t aQuantum)
     {
+        tasking_lock lock;
         for (auto p = std::max<std::int64_t>(aLow, 0); p <= aHigh && p < static_cast<std::int64_t>(gQuanta.size()); ++p)
             gQuanta[static_cast<std::size_t>(p)] = aQuantum;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_quantum(std::int64_t aPriority)
     {
+        tasking_lock lock;
         return aPriority >= 0 && aPriority < static_cast<std::int64_t>(gQuanta.size()) ? gQuanta[static_cast<std::size_t>(aPriority)] : DefaultQuantum;
     }
 
@@ -2437,6 +3023,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_execution_time(std::int64_t aTask)
     {
+        tasking_lock lock;
         return task_execution_time(aTask);
     }
 
@@ -2444,6 +3031,7 @@ namespace
     // point (D.2.6(19/5, 21.1/5)))
     NEOS_ADA_PRIMITIVE void neos_ada_deadline_set(std::int64_t aTask, std::int64_t aDeadline)
     {
+        tasking_lock lock;
         if (auto* t = task_or_environment(aTask); t != nullptr && !t->terminated)
         {
             t->deadline = aDeadline;
@@ -2453,24 +3041,28 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_deadline(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_or_environment(aTask);
         return t != nullptr ? t->deadline : TimeLast;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_relative_deadline_set(std::int64_t aTask, std::int64_t aRelativeDeadline)
     {
+        tasking_lock lock;
         if (auto* t = task_or_environment(aTask))
             t->relativeDeadline = aRelativeDeadline;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_relative_deadline(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_or_environment(aTask);
         return t != nullptr ? t->relativeDeadline : TimeLast;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_release_time(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_or_environment(aTask);
         return t != nullptr ? t->releaseTime : TimeFirst;
     }
@@ -2479,11 +3071,13 @@ namespace
     // not block) the deadline taken now if it is not yet)
     NEOS_ADA_PRIMITIVE void neos_ada_release_deadline(std::int64_t aDeadline)
     {
+        tasking_lock lock;
         current()->releaseDeadline = aDeadline;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_release_deadline_end()
     {
+        tasking_lock lock;
         auto* self = current();
         if (self->releaseDeadline != TimeFirst)
             self->deadline = self->releaseDeadline;
@@ -2499,6 +3093,7 @@ namespace
     // (Suspend_Until_True_And_Set_Deadline: the running task's deadline when it is next made ready: the clock then plus aOffset)
     NEOS_ADA_PRIMITIVE void neos_ada_release_offset(std::int64_t aOffset)
     {
+        tasking_lock lock;
         current()->releaseOffset = aOffset;
     }
 
@@ -2506,6 +3101,7 @@ namespace
     // it is created (the environment task's: its main subprogram's))
     NEOS_ADA_PRIMITIVE void neos_ada_task_deadline(std::int64_t aTask, std::int64_t aRelativeDeadline)
     {
+        tasking_lock lock;
         if (auto* t = task_or_environment(aTask))
         {
             t->relativeDeadline = aRelativeDeadline;
@@ -2516,12 +3112,14 @@ namespace
     // (a protected object's relative deadline (D.3(13.2/5)): its Relative_Deadline; its Relative_Deadline attribute (D.5.2))
     NEOS_ADA_PRIMITIVE void neos_ada_po_relative_deadline_set(std::int64_t aSelf, std::int64_t aRelativeDeadline)
     {
+        tasking_lock lock;
         if (auto* p = protected_of(aSelf))
             p->relativeDeadline = aRelativeDeadline;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_relative_deadline(std::int64_t aSelf)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         return p != nullptr ? p->relativeDeadline : 0;
     }
@@ -2530,12 +3128,14 @@ namespace
     // if the object has interrupt handlers (aHandlers) and it is not of Interrupt_Priority, D.5.2(6/3)))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_po_priority(std::int64_t aSelf)
     {
+        tasking_lock lock;
         auto* p = protected_of(aSelf);
         return p == nullptr ? PriorityLast : p->priority >= 0 ? p->priority : p->ceiling;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_po_priority_set(std::int64_t aSelf, std::int64_t aPriority, std::int64_t aHandlers)
     {
+        tasking_lock lock;
         if (!valid_priority(aPriority))
         {
             raise_predefined(0, "priority out of range");
@@ -2553,6 +3153,7 @@ namespace
     // (a task's processor (D.16, D.16.1): its CPU aspect (as it is created), Set_CPU; one that is not a processor fails its activation)
     NEOS_ADA_PRIMITIVE void neos_ada_task_cpu_set(std::int64_t aTask, std::int64_t aCpu)
     {
+        tasking_lock lock;
         auto* t = task_or_environment(aTask);
         if (t == nullptr)
             return;
@@ -2561,7 +3162,7 @@ namespace
             raise_predefined(1, "the partition's restriction No_Tasks_Unassigned_To_CPU is violated");
             return;
         }
-        if (aCpu < 0 || aCpu > NumberOfCpus)
+        if (aCpu < 0 || aCpu > number_of_cpus())
         {
             if (!t->started && t != &gEnvironment)
                 t->cpuFailed = true;
@@ -2572,6 +3173,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_task_cpu(std::int64_t aTask)
     {
+        tasking_lock lock;
         auto* t = task_or_environment(aTask);
         return t != nullptr ? t->cpu : 0;
     }
@@ -2580,6 +3182,7 @@ namespace
     // 4: No_Tasks_Unassigned_To_CPU, 5: No_Standard_Allocators_After_Elaboration)
     NEOS_ADA_PRIMITIVE void neos_ada_restriction(std::int64_t aKind, std::int64_t aValue)
     {
+        tasking_lock lock;
         switch (aKind)
         {
         case 1: gMaxEntryQueueLength = aValue; break;
@@ -2594,12 +3197,14 @@ namespace
     // (the partition's library items are elaborated (its main subprogram is called))
     NEOS_ADA_PRIMITIVE void neos_ada_elaborated()
     {
+        tasking_lock lock;
         gElaborated = true;
     }
 
     // (an allocator's storage from a standard storage pool, under No_Standard_Allocators_After_Elaboration (D.7(19.3/3)))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_allocate_standard(std::int64_t aSize)
     {
+        tasking_lock lock;
         if (gNoAllocatorsAfterElaboration && gElaborated)
         {
             raise_predefined(2, "the partition's restriction No_Standard_Allocators_After_Elaboration is violated");
@@ -2614,6 +3219,7 @@ namespace
     // (a protected object's processor (D.16(15/5)))
     NEOS_ADA_PRIMITIVE void neos_ada_po_cpu(std::int64_t aSelf, std::int64_t aCpu)
     {
+        tasking_lock lock;
         if (auto* p = protected_of(aSelf))
             p->cpu = aCpu;
     }
@@ -2621,6 +3227,7 @@ namespace
     // (the ceiling priority of a protected procedure's object (an access value's descriptor: -1 if it has none))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_handler_ceiling(std::int64_t aHandler)
     {
+        tasking_lock lock;
         if (aHandler == 0)
             return -1;
         auto const object = *at<std::int64_t>(aHandler + 16);
@@ -2630,6 +3237,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_ceiling_locking()
     {
+        tasking_lock lock;
         return gCeilingLocking ? 1 : 0;
     }
 
@@ -2641,6 +3249,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE void neos_ada_poll()
     {
+        tasking_lock lock;
         if ((++gPolls & 63u) != 0u)
             return;
         auto const now = monotonic_now();
@@ -2683,11 +3292,13 @@ namespace
 
     NEOS_ADA_PRIMITIVE void neos_ada_cpu_event_create(std::int64_t aKey, std::int64_t aKind)
     {
+        tasking_lock lock;
         gCpuEvents[aKey].kind = aKind;
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_cpu_event_delete(std::int64_t aKey)
     {
+        tasking_lock lock;
         gCpuEvents.erase(aKey);
     }
 
@@ -2695,6 +3306,7 @@ namespace
     // still counted: the limit less it))
     NEOS_ADA_PRIMITIVE void neos_ada_cpu_event_member(std::int64_t aKey, std::int64_t aTask, std::int64_t aAdd)
     {
+        tasking_lock lock;
         auto& e = gCpuEvents[aKey];
         auto i = std::find_if(e.members.begin(), e.members.end(), [aTask](auto const& m) { return m.first == aTask; });
         if (aAdd != 0)
@@ -2712,6 +3324,7 @@ namespace
     // (an event armed (its limit, as of its bases) or disarmed)
     NEOS_ADA_PRIMITIVE void neos_ada_cpu_event_arm(std::int64_t aKey, std::int64_t aLimit, std::int64_t aArmed)
     {
+        tasking_lock lock;
         auto& e = gCpuEvents[aKey];
         e.limit = aLimit;
         e.armed = aArmed != 0;
@@ -2720,23 +3333,27 @@ namespace
     // (whether an event of a kind can expire: armed, and a member task not terminated)
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_cpu_event_live(std::int64_t aKind)
     {
+        tasking_lock lock;
         return std::any_of(gCpuEvents.begin(), gCpuEvents.end(), [aKind](auto const& e) { return e.second.kind == aKind && cpu_event_live(e.second); }) ? 1 : 0;
     }
 
     // (a dispatching point of the running task (e.g. an execution-time event set, which may have expired))
     NEOS_ADA_PRIMITIVE void neos_ada_preempt()
     {
+        tasking_lock lock;
         dispatch();
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_cpu_event_consumed(std::int64_t aKey)
     {
+        tasking_lock lock;
         auto const e = gCpuEvents.find(aKey);
         return e != gCpuEvents.end() ? consumed(e->second) : 0;
     }
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_cpu_event_limit(std::int64_t aKey)
     {
+        tasking_lock lock;
         auto const e = gCpuEvents.find(aKey);
         return e != gCpuEvents.end() ? e->second.limit : 0;
     }
@@ -2744,6 +3361,7 @@ namespace
     // (an event's bases now its members' execution times, its limit less what they have consumed)
     NEOS_ADA_PRIMITIVE void neos_ada_cpu_event_rebase(std::int64_t aKey)
     {
+        tasking_lock lock;
         auto& e = gCpuEvents[aKey];
         e.limit = saturating_add(e.limit, -consumed(e));
         for (auto& m : e.members)
@@ -2754,6 +3372,7 @@ namespace
     // deadlock (no task can run))
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_cpu_event_wait(std::int64_t aKind)
     {
+        tasking_lock lock;
         auto const due = [aKind]() -> std::int64_t
         {
             for (auto const& [key, e] : gCpuEvents)
@@ -2773,10 +3392,225 @@ namespace
         return key;
     }
 
+    // --- parallel constructs (5.5, 5.6.1): their logical threads of control (a parallel block's sequences of statements, a parallel
+    // loop's chunks) are functions of the program (see the compiler's parallel_block, parallel_loop) that workers run: the calling
+    // thread and (threads) others, at most one for each processor, each running the units that are not yet run until none is left
+    // or they are abandoned (an exit from the loop, or an exception: the word in the caller's frame that the chunks' iterations look
+    // at); the workers other than the caller are threads attached to the program with their own stacks and runtime state (their task:
+    // the caller's, as Current_Task sees it); the exception that a unit propagates (the first unit's that does) is propagated
+
+    struct parallel_work
+    {
+        std::vector<std::int64_t> functions;    ///< (a block's: its sequences' functions; a loop's: its chunks' function)
+        std::int64_t link = 0;
+        bool loop = false;
+        std::int64_t low = 0;
+        std::uint64_t length = 0u;              ///< (a loop's: its range's number of values)
+        std::size_t count = 0u;                 ///< (the units: a block's sequences, or a loop's chunks)
+        std::int64_t abandon = 0;               ///< (a loop's: the address of the word that abandons its chunks (0: none))
+        std::atomic<std::size_t> next{ 0u };
+        std::atomic<bool> abandoned{ false };
+        std::mutex mutex;
+        std::size_t failedUnit = static_cast<std::size_t>(-1);
+        occurrence failure;
+    };
+
+    bool parallel_abandoned(parallel_work& aWork)
+    {
+        if (aWork.abandoned.load())
+            return true;
+        if (aWork.abandon != 0 && std::atomic_ref<std::int64_t>{ *at<std::int64_t>(aWork.abandon) }.load() != 0)
+            return true;
+        return false;
+    }
+
+    // (a unit run (on the calling thread, the mutex not held); its exception kept (not propagated by the thread))
+    void parallel_unit(parallel_work& aWork, std::size_t aUnit)
+    {
+        neos_rt_value result;
+        if (aWork.loop)
+        {
+            // (the chunk's range: the range's values divided as evenly as can be, in order)
+            auto const base = aWork.length / aWork.count;
+            auto const extra = aWork.length % aWork.count;
+            auto const first = static_cast<std::uint64_t>(aUnit) * base + std::min<std::uint64_t>(aUnit, extra);
+            auto const size = base + (aUnit < extra ? 1u : 0u);
+            neos_rt_type const parameters[4] = { NEOS_RT_I64, NEOS_RT_I64, NEOS_RT_I64, NEOS_RT_I64 };
+            neos_rt_value arguments[4];
+            arguments[0].i64 = aWork.link;
+            arguments[1].i64 = static_cast<std::int64_t>(static_cast<std::uint64_t>(aWork.low) + first);
+            arguments[2].i64 = static_cast<std::int64_t>(static_cast<std::uint64_t>(aWork.low) + first + size - 1u);
+            arguments[3].i64 = static_cast<std::int64_t>(aUnit);
+            host()->call(static_cast<unsigned>(aWork.functions[0]), 4u, parameters, arguments, NEOS_RT_VOID, &result);
+        }
+        else
+        {
+            neos_rt_type const parameters[1] = { NEOS_RT_I64 };
+            neos_rt_value arguments[1];
+            arguments[0].i64 = aWork.link;
+            host()->call(static_cast<unsigned>(aWork.functions[aUnit]), 1u, parameters, arguments, NEOS_RT_VOID, &result);
+        }
+        auto const failure = take_pending();
+        if (failure.id != 0)
+        {
+            std::lock_guard lock{ aWork.mutex };
+            if (aUnit < aWork.failedUnit)
+            {
+                aWork.failedUnit = aUnit;
+                aWork.failure = failure;
+            }
+            aWork.abandoned = true;
+            if (aWork.abandon != 0)
+                std::atomic_ref<std::int64_t>{ *at<std::int64_t>(aWork.abandon) }.store(1);
+        }
+    }
+
+    void parallel_units(parallel_work& aWork)
+    {
+        for (;;)
+        {
+            if (parallel_abandoned(aWork))
+                return;
+            auto const unit = aWork.next++;
+            if (unit >= aWork.count)
+                return;
+            parallel_unit(aWork, unit);
+        }
+    }
+
+    // (a worker other than the caller: its thread)
+    void parallel_worker(parallel_work* aWork, void* aProgram, task* aTask)
+    {
+        auto* const h = host();
+        h->thread_attach(aProgram);
+        thread_started();
+        // (its runtime state: its stacks; its task: the caller's (as Current_Task sees it))
+        task self;
+        self.id = aTask->id;
+        self.priority = aTask->priority;
+        self.started = true;
+        self.activated = true;
+        execution_state s;
+        self.state = &s;
+        auto const stack = allocate_segment(TaskStack);
+        auto const secondary = allocate_segment(TaskSecondaryStack);
+        if (stack != 0 && secondary != 0)
+        {
+            s.stackBase = static_cast<std::uint64_t>(stack);
+            s.ssBase = static_cast<std::uint64_t>(secondary);
+            s.ssTop = s.ssBase;
+            s.ssLimit = s.ssBase + TaskSecondaryStack;
+            gCurrent = &self;
+            set_state(&s);
+            attach_globals(s);
+            if (s.spGlobal != nullptr)
+            {
+                *s.spGlobal = static_cast<unsigned long long>(stack);
+                *s.limitGlobal = static_cast<unsigned long long>(stack) + TaskStack - 65536u;
+                *s.excGlobal = 0u;
+            }
+            parallel_units(*aWork);
+            set_state(nullptr);
+            gCurrent = nullptr;
+        }
+        if (stack != 0)
+            deallocate_segment(stack, TaskStack);
+        if (secondary != 0)
+            deallocate_segment(secondary, TaskSecondaryStack);
+        h->thread_attach(nullptr);
+    }
+
+    void parallel(parallel_work& aWork)
+    {
+        if (aWork.count == 0u)
+            return;
+        auto* self = current();
+        // (an exception pending (none should be): kept)
+        auto const pending = take_pending();
+        std::vector<std::thread> workers;
+        {
+            auto const others = std::min<std::size_t>(aWork.count, static_cast<std::size_t>(number_of_cpus())) - 1u;
+            if (gThreaded && others > 0u)
+            {
+                tasking_lock lock;
+                auto* const program = host()->thread_context();
+                for (std::size_t i = 0u; i < others; ++i)
+                {
+                    try
+                    {
+                        workers.emplace_back(&parallel_worker, &aWork, program, self);
+                        ++gLogicalThreads;
+                    }
+                    catch (...)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        parallel_units(aWork);
+        for (auto& w : workers)
+            w.join();
+        if (!workers.empty())
+        {
+            tasking_lock lock;
+            gLogicalThreads -= static_cast<std::int64_t>(workers.size());
+        }
+        if (aWork.failedUnit != static_cast<std::size_t>(-1))
+            raise_occurrence(aWork.failure);
+        else if (pending.id != 0)
+            raise_occurrence(pending);
+    }
+
+    // (a parallel block statement: its sequences' functions (aCount i64s at aTable), their static link)
+    NEOS_ADA_PRIMITIVE void neos_ada_parallel_block(std::int64_t aTable, std::int64_t aCount, std::int64_t aLink)
+    {
+        parallel_work work;
+        for (std::int64_t i = 0; i < aCount; ++i)
+            work.functions.push_back(*at<std::int64_t>(aTable + 8 * i));
+        work.link = aLink;
+        work.count = static_cast<std::size_t>(std::max<std::int64_t>(aCount, 0));
+        parallel(work);
+    }
+
+    // (a parallel loop: its chunks' function, its static link, its range (not null), its number of chunks (at most; 0: the runtime's
+    // choice: one for each processor), the address of the word that abandons them)
+    NEOS_ADA_PRIMITIVE void neos_ada_parallel_loop(std::int64_t aFunction, std::int64_t aLink, std::int64_t aLow, std::int64_t aHigh, std::int64_t aChunks,
+        std::int64_t aAbandon)
+    {
+        parallel_work work;
+        work.functions.push_back(aFunction);
+        work.link = aLink;
+        work.loop = true;
+        work.low = aLow;
+        work.length = static_cast<std::uint64_t>(aHigh) - static_cast<std::uint64_t>(aLow) + 1u;
+        auto chunks = aChunks > 0 ? static_cast<std::uint64_t>(aChunks) : static_cast<std::uint64_t>(number_of_cpus());
+        if (work.length != 0u)
+            chunks = std::min<std::uint64_t>(chunks, work.length);
+        work.count = static_cast<std::size_t>(std::max<std::uint64_t>(chunks, 1u));
+        work.abandon = aAbandon;
+        parallel(work);
+    }
+
+    // (the partition's tasks are threads (see gThreaded): before any task is created)
+    NEOS_ADA_PRIMITIVE void neos_ada_threaded()
+    {
+        gThreaded = true;
+    }
+
+    NEOS_ADA_PRIMITIVE std::int64_t neos_ada_number_of_cpus()
+    {
+        return number_of_cpus();
+    }
+
     constexpr auto I64 = NEOS_RT_I64;
     constexpr auto VOID = NEOS_RT_VOID;
 
     function_table const sTaskingFunctions{
+        { "threaded", NEOS_RT_FUNCTION(neos_ada_threaded), VOID, 0u, {}, 0u },
+        { "parallel_block", NEOS_RT_FUNCTION(neos_ada_parallel_block), VOID, 3u, { I64, I64, I64 }, 0u },
+        { "parallel_loop", NEOS_RT_FUNCTION(neos_ada_parallel_loop), VOID, 6u, { I64, I64, I64, I64, I64, I64 }, 0u },
+        { "number_of_cpus", NEOS_RT_FUNCTION(neos_ada_number_of_cpus), I64, 0u, {}, 0u },
         { "dispatching_policy", NEOS_RT_FUNCTION(neos_ada_dispatching_policy), VOID, 3u, { I64, I64, I64 }, 0u },
         { "generate_deadlines", NEOS_RT_FUNCTION(neos_ada_generate_deadlines), VOID, 0u, {}, 0u },
         { "policy", NEOS_RT_FUNCTION(neos_ada_policy), I64, 1u, { I64 }, 0u },
@@ -2880,11 +3714,13 @@ namespace neos::ada_runtime
 {
     void abort_defer()
     {
+        tasking_lock lock;
         ++current()->deferAbort;
     }
 
     void abort_undefer(bool aSignal)
     {
+        tasking_lock lock;
         auto* self = current();
         if (self->deferAbort > 0)
             --self->deferAbort;
@@ -2901,6 +3737,7 @@ namespace neos::ada_runtime
 
     void protected_finalize(std::int64_t aObject)
     {
+        tasking_lock lock;
         // (a protected object finalized: the calls queued on its entries fail (Program_Error), and their callers can run
         // (they are told before the object's components are finalized))
         auto existing = gProtected.find(aObject);
@@ -2922,7 +3759,7 @@ namespace neos::ada_runtime
             }
             queue.clear();
         }
-        if (!failed)
+        if (!failed || gThreaded)
             return;
         auto* self = current();
         if (self == &gEnvironment)
@@ -2934,21 +3771,11 @@ namespace neos::ada_runtime
         }
     }
 
-    std::vector<std::int64_t> collection_tasks(std::int64_t aCollection)
-    {
-        auto c = gCollections.find(aCollection);
-        if (c == gCollections.end())
-            return {};
-        auto result = std::move(c->second);
-        gCollections.erase(c);
-        return result;
-    }
-
     // (a task waiting at an open terminate alternative with no call queued, whose dependents are each terminated or likewise
     // (9.3(6/1)): it can be terminated)
     bool terminable(task const& aTask, int aDepth = 0)
     {
-        if (!aTask.atTerminate || aDepth > 64)
+        if (!aTask.atTerminate || aTask.incoming != 0 || aDepth > 64)
             return false;
         for (auto const& [entry, queue] : aTask.entries)
             if (!queue.empty())
@@ -2959,16 +3786,55 @@ namespace neos::ada_runtime
         return true;
     }
 
-    void await_tasks(std::vector<std::int64_t> const& aTasks)
+    void await_tasks(std::vector<std::int64_t> const& aTasks, std::vector<std::int64_t> const& aCollections)
     {
+        tasking_lock lock;
         // (a master's dependent tasks: until each is terminated, or waiting at a terminate alternative (with no call queued);
         // those then terminate)
         std::vector<task*> tasks;
         for (auto id : aTasks)
             if (auto* t = task_of(id); t != nullptr && t != &gEnvironment)
                 tasks.push_back(t);
-        auto const done = [&tasks](bool aTerminating)
+        // (its access types' collections: the tasks that their allocators create, including those that its dependents create while it
+        // waits (threads: they run meanwhile); such a task is awaited once it is activated, or once its creator is gone without
+        // activating it)
+        std::vector<task*> late;
+        auto const gather = [&](std::vector<task*>& aInto)
         {
+            for (auto collection : aCollections)
+                if (auto c = gCollections.find(collection); c != gCollections.end())
+                {
+                    for (auto id : c->second)
+                        if (auto* t = task_of(id); t != nullptr && t != &gEnvironment)
+                            aInto.push_back(t);
+                    c->second.clear();
+                }
+        };
+        gather(tasks);
+        // (the wait is not cut short by the task's abort (or an asynchronous select's): an aborted master still awaits its dependents
+        // (aborted too: they may be in an abort-deferred operation, e.g. a rendezvous, 9.8(4-11)))
+        auto* const self = current();
+        ++self->deferAbort;
+        struct undefer { task* t; ~undefer() { --t->deferAbort; } } const restore{ self };
+        auto const lateDone = [&late](bool aTerminating)
+        {
+            return std::all_of(late.begin(), late.end(), [aTerminating](task* t)
+                {
+                    if (t->terminated)
+                        return true;
+                    if (!t->started)
+                    {
+                        auto const* creator = task_of(t->master);
+                        return creator == nullptr || creator->terminated;
+                    }
+                    return aTerminating && terminable(*t);
+                });
+        };
+        auto const done = [&tasks, &late, &gather, &lateDone](bool aTerminating)
+        {
+            gather(late);
+            if (!lateDone(aTerminating))
+                return false;
             return std::all_of(tasks.begin(), tasks.end(), [aTerminating](task* t)
                 {
                     if (!t->started || t->terminated)
@@ -2985,9 +3851,35 @@ namespace neos::ada_runtime
         for (auto* t : tasks)
             if (!t->terminated && t->atTerminate)
                 t->terminateRequested = true;
+        for (auto* t : late)
+            if (!t->terminated && t->atTerminate)
+                t->terminateRequested = true;
         block_until([&]() { return done(false); });
+        for (auto* t : late)
+        {
+            if (!t->started)
+                t->terminated = true;
+            tasks.push_back(t);
+        }
+        for (auto collection : aCollections)
+            gCollections.erase(collection);
+        if (gThreaded)
+        {
+            // (threads: the threads of the tasks that have terminated joined (each has ended, or is about to))
+            std::vector<std::thread> threads;
+            for (auto* t : tasks)
+                if (t->terminated && t->thread.joinable())
+                    threads.push_back(std::move(t->thread));
+            if (!threads.empty())
+            {
+                tasking_unlock unlock;
+                for (auto& thread : threads)
+                    thread.join();
+            }
+        }
+        // (threads: not while a call requeued on one of its entries is on its way (its requeue refers to it))
         for (auto* t : tasks)
-            if (t->terminated && t->coroutine == nullptr)
+            if (t->terminated && t->coroutine == nullptr && !t->thread.joinable() && t->incoming == 0)
             {
                 // (its execution time, if an execution-time event needs it)
                 if (std::any_of(gCpuEvents.begin(), gCpuEvents.end(), [t](auto const& e)

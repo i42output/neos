@@ -40,6 +40,7 @@
 #include <limits>
 #include <string>
 #include <map>
+#include <mutex>
 #include <vector>
 #include "core.hpp"
 #include "exec.hpp"
@@ -49,6 +50,13 @@ using namespace neos::ada_runtime;
 
 namespace neos::ada_runtime
 {
+    // (the collections below: any task's (thread's) allocators and finalizations use them)
+    std::recursive_mutex& collections_mutex()
+    {
+        static std::recursive_mutex sMutex;
+        return sMutex;
+    }
+
     // (access types' collections of controlled objects (any task's allocators add to them), by id)
     std::map<std::int64_t, std::vector<execution_state::finalizable>>& object_collections()
     {
@@ -65,6 +73,7 @@ namespace neos::ada_runtime
 
     std::vector<execution_state::finalizable> collection_objects(std::int64_t aCollection)
     {
+        std::lock_guard lock{ collections_mutex() };
         auto& collections = object_collections();
         auto existing = collections.find(aCollection);
         if (existing == collections.end())
@@ -560,6 +569,7 @@ namespace
     NEOS_ADA_PRIMITIVE void neos_ada_tag_register_external(std::int64_t aTag)
     {
         static std::map<std::string, std::int64_t> sExternals;
+        std::lock_guard lock{ collections_mutex() };
         auto const name = string_at(external_of(aTag));
         auto const existing = sExternals.find(name);
         if (existing != sExternals.end() && existing->second != aTag)
@@ -708,6 +718,7 @@ namespace
     {
         // (a collection: finalized (its objects) when the master that declares its access type is left)
         static std::int64_t sNext = 0;
+        std::lock_guard lock{ collections_mutex() };
         auto const id = ++sNext;
         object_collections()[id];
         state().finalization.push_back({ id, ObjectsEntry, 0 });
@@ -716,6 +727,7 @@ namespace
 
     NEOS_ADA_PRIMITIVE void neos_ada_fin_collection_add(std::int64_t aCollection, std::int64_t aAddress, std::int64_t aFunction, std::int64_t aLink)
     {
+        std::lock_guard lock{ collections_mutex() };
         auto& collections = object_collections();
         if (auto existing = collections.find(aCollection); existing != collections.end())
             existing->second.push_back({ aAddress, aFunction, aLink });
@@ -725,6 +737,7 @@ namespace
         std::int64_t aSubpool)
     {
         // (allocated from a subpool: in its access type's collection, and finalized with the subpool if that is deallocated first)
+        std::lock_guard lock{ collections_mutex() };
         auto& collections = object_collections();
         if (auto existing = collections.find(aCollection); existing != collections.end())
         {
@@ -740,21 +753,25 @@ namespace
         auto& objects = subpool_objects();
         auto& s = state();
         auto const mark = s.finalization.size();
-        for (auto& [id, collection] : object_collections())
-            for (auto i = collection.begin(); i != collection.end();)
-                if (auto o = objects.find(i->object); o != objects.end() && o->second == aSubpool)
-                {
-                    s.finalization.push_back(*i);
-                    objects.erase(o);
-                    i = collection.erase(i);
-                }
-                else
-                    ++i;
+        {
+            std::lock_guard lock{ collections_mutex() };
+            for (auto& [id, collection] : object_collections())
+                for (auto i = collection.begin(); i != collection.end();)
+                    if (auto o = objects.find(i->object); o != objects.end() && o->second == aSubpool)
+                    {
+                        s.finalization.push_back(*i);
+                        objects.erase(o);
+                        i = collection.erase(i);
+                    }
+                    else
+                        ++i;
+        }
         finalize_to(mark);
     }
 
     NEOS_ADA_PRIMITIVE void neos_ada_fin_unregister(std::int64_t aAddress)
     {
+        std::lock_guard lock{ collections_mutex() };
         subpool_objects().erase(aAddress);
         auto& chain = state().finalization;
         for (auto i = chain.size(); i-- > 0u;)

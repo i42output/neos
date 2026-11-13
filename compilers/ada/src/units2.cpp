@@ -817,6 +817,50 @@ namespace neos::compilers::ada
             {
                 return u->name == "ada.execution_time.timers" || u->name == "ada.execution_time.group_budgets" || u->name == "ada.real_time.timing_events";
             });
+
+        // (the tasking mode: the partition's tasks (and the logical threads of its parallel constructs) are threads that run in
+        // parallel, unless it asks for Annex D's scheduling (a task dispatching policy, Ceiling_Locking (the profiles too),
+        // Generate_Deadlines, priorities, or one of Annex D's packages): then its tasks run one at a time (the runtime's scheduler,
+        // as one processor); NEOS_ADA_THREADS=0: the scheduler)
+        static std::string_view const sAnnexD[] = { "ada.dispatching", "ada.asynchronous_task_control", "ada.dynamic_priorities", "ada.execution_time",
+            "ada.real_time.timing_events", "ada.synchronous_task_control.edf", "system.multiprocessors.dispatching_domains" };
+        bool const annexD = std::any_of(iOrder.begin(), iOrder.end(), [](unit_info const* u)
+            {
+                return std::any_of(std::begin(sAnnexD), std::end(sAnnexD), [u](std::string_view aName)
+                    { return u->name == aName || (u->name.size() > aName.size() && u->name.starts_with(aName) && u->name[aName.size()] == '.'); });
+            });
+        std::function<bool(node const*)> const tasking = [&](node const* aNode)
+        {
+            if (aNode == nullptr)
+                return false;
+            if (aNode->is(construct::TaskType) || aNode->is(construct::TaskSingle) || aNode->is(construct::Parallel) ||
+                (aNode->is(construct::Flag) && name_text(aNode->source) == "parallel"))
+                return true;
+            if (aNode->is(construct::Attribute) && aNode->size() > 1u && name_text(aNode->child(1)->source) == "parallel_reduce")
+                return true;
+            return std::any_of(aNode->children.begin(), aNode->children.end(), tasking);
+        };
+        // (priorities (pragmas Priority and Interrupt_Priority, the aspects) in the program's own units (not the predefined library's):
+        // its tasks are scheduled by priority (D.1, D.2: e.g. a task of a higher priority preempts one of a lower), as one processor)
+        std::function<bool(node const*)> const prioritized = [&](node const* aNode)
+        {
+            if (aNode == nullptr)
+                return false;
+            if ((aNode->is(construct::Pragma) || aNode->is(construct::Aspect)) && aNode->size() > 0u && aNode->child(0)->is(construct::Word))
+                if (auto const name = name_text(aNode->child(0)->source); name == "priority" || name == "interrupt_priority")
+                    return true;
+            return std::any_of(aNode->children.begin(), aNode->children.end(), prioritized);
+        };
+        auto const own = [&](unit_info const* aUnit)
+        {
+            auto const& folder = iCompiler.packages_folder();
+            return !aUnit->replaced && aUnit->item != nullptr && aUnit->item->file != nullptr && !(folder && aUnit->item->file->path.starts_with(*folder)) &&
+                aUnit->name != "standard" && aUnit->name != compiler::ConfigurationUnit;
+        };
+        auto const* const threads = std::getenv("NEOS_ADA_THREADS");
+        iThreaded = (threads == nullptr || std::string_view{ threads } != "0") && iDispatchingPolicies.empty() && !iCeilingLocking && !iGenerateDeadlines &&
+            !annexD && std::any_of(iOrder.begin(), iOrder.end(), [&](unit_info const* u) { return !u->replaced && tasking(u->unit); }) &&
+            std::none_of(iOrder.begin(), iOrder.end(), [&](unit_info const* u) { return own(u) && prioritized(u->unit); });
     }
 
     void program::restrictions_check()

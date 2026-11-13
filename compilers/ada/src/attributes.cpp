@@ -298,9 +298,127 @@ namespace neos::compilers::ada
             return prefix_type();
         if (name == "input")
             return prefix_type();
-        if (name == "reduce")
+        if (name == "reduce" || name == "parallel_reduce")
             return nullptr;
         return nullptr;
+    }
+
+    ada_type* program::reduction(node* aAttribute, node* aPrefix, std::vector<node*> const& aArguments, ada_type* aExpected, region* aRegion, bool aParallel)
+    {
+        // (Prefix'Reduce (Reducer, Initial), Prefix'Parallel_Reduce (Reducer, Initial) (4.5.10): of the expected type (the initial
+        // value's); the prefix a value sequence ([for ... => Value]) or an iterable object (each of its elements a value); the reducer
+        // a function (an operator, a name) called with the accumulator and a value)
+        if (auto existing = iReductions.find(aAttribute); existing != iReductions.end() && aAttribute->type != nullptr)
+            return aAttribute->type;
+        auto& info = iReductions[aAttribute];
+        info = reduction_info{};
+        info.parallel = aParallel;
+        // (the reducer: an operator symbol or a name (the parser may give it without its reducer node))
+        auto* const reducerNode = aArguments.empty() ? nullptr : aArguments[0]->is(construct::Reducer) ?
+            (aArguments[0]->size() == 1u ? aArguments[0]->child(0) : nullptr) : aArguments[0];
+        if (aArguments.size() != 2u || reducerNode == nullptr)
+        {
+            error(aAttribute, "a reduction attribute has a reducer and an initial value (4.5.10(3/5))");
+            return aExpected;
+        }
+        info.initial = aArguments[1];
+        auto* accumulatorType = resolve(info.initial, aExpected != iVoid ? aExpected : nullptr, aRegion);
+        if (aExpected != nullptr && aExpected != iVoid)
+            accumulatorType = aExpected;
+        if (accumulatorType == nullptr)
+        {
+            error(aAttribute, "the type of a reduction expression cannot be determined from its context (4.5.10(10/5))");
+            return aExpected;
+        }
+        // (its region: parallel, a level of its own (its chunks are functions, see the code generator's reduction))
+        auto* r = new_region(nullptr, aRegion);
+        if (aParallel)
+            r->level = aRegion->level + 1;
+        info.scope = r;
+        auto const synthetic = [&](std::string const& aName) -> std::string_view
+        {
+            return iSyntheticNames.emplace_back("%" + aName + std::to_string(iSyntheticNames.size()));
+        };
+        auto const identifier = [&](std::string_view aName) -> node*
+        {
+            auto& n = iClones.emplace_back();
+            n.kind = construct::Identifier;
+            n.source = aName;
+            n.file = aAttribute->file;
+            return &n;
+        };
+        ada_type* elementType = nullptr;
+        if ((aPrefix->is(construct::AggregateBracket) || aPrefix->is(construct::Aggregate)) && aPrefix->size() == 1u && aPrefix->child(0)->is(construct::Iterated))
+        {
+            // (a value sequence: [for I in Range => Value], [for E of Iterable => Value])
+            auto* iterated = aPrefix->child(0);
+            for (auto* c : iterated->children)
+                if (c->is(construct::ForRange) || c->is(construct::ForIterator))
+                    info.specification = c;
+            info.value = iterated->children.back();
+            if (info.specification == nullptr || info.value == info.specification)
+            {
+                error(aPrefix, "a value sequence has an iterator specification and a value (4.5.10(2/5))");
+                return accumulatorType;
+            }
+            iterator_specification(info.specification, r);
+            elementType = resolve(info.value, nullptr, r);
+            if (elementType == nullptr || elementType->view()->kind == type_kind::UniversalInteger || elementType->view()->kind == type_kind::UniversalReal)
+                elementType = resolve(info.value, accumulatorType, r);
+        }
+        else
+        {
+            // (an iterable object: as [for E of Prefix => E])
+            auto& specification = iClones.emplace_back();
+            specification.kind = construct::ForIterator;
+            specification.source = aPrefix->source;
+            specification.file = aPrefix->file;
+            auto& defining = iClones.emplace_back();
+            defining.kind = construct::Defining;
+            defining.source = synthetic("reduce_element");
+            defining.file = aPrefix->file;
+            defining.parent = &specification;
+            specification.children = { &defining, aPrefix };
+            info.specification = &specification;
+            iterator_specification(info.specification, r);
+            info.value = identifier(defining.source);
+            elementType = resolve(info.value, nullptr, r);
+        }
+        // (the reducer's calls: of hidden objects (the accumulator, the value, a chunk's result))
+        auto const hidden = [&](std::string const& aName, ada_type* aType)
+        {
+            auto* e = new_entity(entity_kind::Variable, std::string{ synthetic(aName) }, nullptr, r);
+            e->type = aType;
+            r->add(e);
+            return e;
+        };
+        auto const call = [&](entity* aSecond) -> node*
+        {
+            auto& c = iClones.emplace_back();
+            c.kind = construct::Apply;
+            c.source = aAttribute->source;
+            c.file = aAttribute->file;
+            auto* reducer = clone_tree(reducerNode);
+            reducer->parent = &c;
+            auto* first = identifier(iSyntheticNames.emplace_back(info.accumulator->name));
+            auto* second = identifier(iSyntheticNames.emplace_back(aSecond->name));
+            first->parent = &c;
+            second->parent = &c;
+            c.children = { reducer, first, second };
+            c.parent = aAttribute;
+            resolve(&c, accumulatorType, r);
+            return &c;
+        };
+        info.accumulator = hidden("reduce_accumulator", accumulatorType);
+        info.element = hidden("reduce_value", elementType);
+        info.call = call(info.element);
+        if (aParallel)
+        {
+            info.part = hidden("reduce_part", accumulatorType);
+            info.combine = call(info.part);
+        }
+        aAttribute->type = accumulatorType;
+        return accumulatorType;
     }
 
     bool program::indexed_attribute(node* aAttribute)
@@ -511,6 +629,12 @@ namespace neos::compilers::ada
         auto* prefix = aAttribute->child(0);
         auto const arguments = arguments_of(aAttribute);
         set_meaning(aAttribute, meaning::Value);
+        // (a value sequence ([for ... => Value]) is the prefix only of a reduction attribute (4.5.10(2/5)))
+        if (prefix->is(construct::AggregateBracket) && name != "reduce" && name != "parallel_reduce")
+        {
+            error(aAttribute, "only 'Reduce and 'Parallel_Reduce can have a value sequence as their prefix (4.5.10(2/5))");
+            return aExpected;
+        }
         // (T'Base (X), T'Class (X): a conversion to the subtype T'Base (T'Class) (rewritten as one: Apply (T'Base, X)))
         if ((name == "base" || name == "class") && arguments.size() == 1u)
         {
@@ -1079,18 +1203,8 @@ namespace neos::compilers::ada
                     error(aAttribute, "'Result can be used only in a postcondition of the function");
             }
         }
-        else if (name == "reduce")
-        {
-            // (Prefix'Reduce (Reducer, Initial): of the expected type)
-            resolve(prefix, nullptr, aRegion);
-            if (arguments.size() == 2u)
-                resolve(arguments[1], aExpected, aRegion);
-            if (arguments.size() >= 1u && arguments[0]->is(construct::Reducer))
-                if (arguments[0]->size() == 1u && !arguments[0]->child(0)->is(construct::Operator))
-                    resolve_entity(arguments[0]->child(0), aRegion);
-            aAttribute->type = aExpected;
-            return aExpected;
-        }
+        else if (name == "reduce" || name == "parallel_reduce")
+            return reduction(aAttribute, prefix, arguments, aExpected, aRegion, name == "parallel_reduce");
         else
             prefixType = resolve(prefix, nullptr, aRegion);
             if (prefix->type == nullptr)

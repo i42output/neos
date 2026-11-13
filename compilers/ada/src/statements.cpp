@@ -794,6 +794,10 @@ namespace neos::compilers::ada
             {
                 auto* r = new_region(nullptr, aRegion);
                 iStatementRegions[aStatement] = r;
+                // (a parallel loop: its chunks are logical threads of control (5.5(9/5)), each a function of its own (see the code
+                // generator's parallel_loop): a level of their own, so that the objects outside that they name are in frames)
+                if (auto* f = aStatement->first(construct::For); f != nullptr && f->has_flag("parallel"))
+                    r->level = aRegion->level + 1;
                 if (auto* name = aStatement->first(construct::Word))
                 {
                     // (declared already (see statements), else now)
@@ -811,6 +815,27 @@ namespace neos::compilers::ada
                     recover([&]() { condition(w->child(0), r); });
                 if (auto* f = aStatement->first(construct::For))
                 {
+                    // (a chunk specification (5.5(8.1/5)): its number of chunks (an expression of any integer type, evaluated outside
+                    // the loop), or a chunk parameter of a discrete subtype (one chunk for each value))
+                    if (auto* chunk = f->first(construct::Chunk))
+                        recover([&]()
+                            {
+                                if (auto* defining = chunk->first(construct::Defining))
+                                {
+                                    node* range = nullptr;
+                                    for (auto* c : chunk->children)
+                                        if (c != defining)
+                                            range = c;
+                                    auto* e = declare(entity_kind::LoopParameter, defining, r);
+                                    e->type = range != nullptr ? discrete_range(range, nullptr, aRegion) : nullptr;
+                                }
+                                else if (auto* count = chunk->child(0))
+                                {
+                                    auto* t = resolve_in_class(count, aRegion, [](ada_type const* aType) { return const_cast<ada_type*>(aType)->view()->is_integer(); });
+                                    if (t == nullptr)
+                                        resolve(count, integer(), aRegion);
+                                }
+                            });
                     for (auto* c : f->children)
                         if (c->is(construct::ForRange) || c->is(construct::ForIterator))
                             iterator_specification(c, r);
@@ -1257,8 +1282,15 @@ namespace neos::compilers::ada
             }
             break;
         case construct::Parallel:
+            // (a parallel block statement (5.6.1): each sequence of statements is a logical thread of control, a function of its own
+            // (see the code generator's parallel_block): a level of its own, so that the objects outside that it names are in frames)
             for (auto* c : aStatement->children)
-                statements(c, aRegion);
+            {
+                auto* r = new_region(nullptr, aRegion);
+                r->level = aRegion->level + 1;
+                iStatementRegions[c] = r;
+                statements(c, r);
+            }
             break;
         default:
             break;

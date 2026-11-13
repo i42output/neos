@@ -38,6 +38,7 @@
 // Constraint_Error) and its prescribed results before calling them, so these never see an argument outside their domain.
 // Ada.Numerics.Float_Random and Discrete_Random import random_seed for their time-dependent Reset.
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <random>
@@ -72,7 +73,7 @@ namespace
     // that calls made at the same time give different seeds
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_random_seed()
     {
-        static std::uint64_t sCounter = 0u;
+        static std::atomic<std::uint64_t> sCounter{ 0u };
         std::uint64_t seed = static_cast<std::uint64_t>(std::chrono::high_resolution_clock::now().time_since_epoch().count());
         seed ^= (++sCounter) * 0x9E3779B97F4A7C15ull;
         try

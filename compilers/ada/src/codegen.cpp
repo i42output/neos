@@ -294,6 +294,25 @@ namespace neos::compilers::ada
         return index;
     }
 
+    std::uint32_t program::define_internal(std::string const& aName, std::vector<type> const& aParameters)
+    {
+        function_signature signature;
+        function_parameters parameters;
+        for (auto t : aParameters)
+        {
+            function_parameter p;
+            p.set_parameter_type(t);
+            parameters.push_back(p);
+        }
+        signature.set_parameters(parameters);
+        signature.set_return_type(type::Void);
+        auto const name = "%ada." + aName + "." + std::to_string(iFunctionCount++);
+        signature.set_name(neolib::string{ name });
+        auto const index = gen().define_function(neolib::string{ name }, signature, neolib::vector<type>{}, neolib::string{}, 1u);
+        note_function_type(index, aParameters, type::Void);
+        return index;
+    }
+
     void program::exports()
     {
         // Export (B.1) in a linked program (see i_code_generator::linked): functions named by the link names, that the code of the
@@ -382,6 +401,10 @@ namespace neos::compilers::ada
         iLimitGlobal = global("%ada.limit", type::I64);
         iExcGlobal = global("%ada.exc", type::I64);
         iDenotedGlobal = global("%ada.denoted", type::I64);
+        // (tasks that are threads: these globals are a task's state (each thread has its own))
+        if (iThreaded)
+            for (auto const* name : { "%ada.sp", "%ada.limit", "%ada.exc", "%ada.denoted" })
+                gen().thread_global(neolib::string{ name });
         // (the subprograms' functions)
         for (auto* s : iSubprogramsToGenerate)
             define_subprogram(s);
@@ -473,6 +496,8 @@ namespace neos::compilers::ada
         i32const(static_cast<std::int32_t>(iExcGlobal));
         call("init", { type::I64, type::I32, type::I32, type::I32 }, type::I64);
         put_op(code, opcode::Drop);
+        if (iThreaded)
+            call("threaded", {}, type::Void);
         for (auto const& [address, bytes] : iStaticBytes)
         {
             static char const sHex[] = "0123456789abcdef";
@@ -3273,6 +3298,11 @@ namespace neos::compilers::ada
             break;
         case construct::Return:
         case construct::ReturnExtended:
+            if (iLogicalThread)
+            {
+                iProgram.error(aStatement, "a return statement within a parallel construct is not supported");
+                break;
+            }
             if (iSubprogram != nullptr && iSubprogram->sub != nullptr && iSubprogram->sub->no_return && [&]()
                 {
                     // (a return from the nonreturning procedure itself, not from an accept statement in it)
@@ -3661,19 +3691,23 @@ namespace neos::compilers::ada
             auto* parameter = specification->first(construct::Defining)->ent;
             bool const reverse = specification->has_flag("reverse");
             auto* range = parameter->type;
-            auto const low = local(type::I64);
-            auto const high = local(type::I64);
-            compatibility_checks(specification, [&](node const* aNode)
-                {
-                    for (auto const* n = aNode; n != nullptr; n = n->parent)
-                        if (n == specification)
-                            return true;
-                    return false;
-                });
-            discrete_bounds(specification, range, low, high);
+            // (a parallel loop's chunk (its function, see parallel_loop): the chunk's range (the function's parameters))
+            bool const chunk = iChunk && iChunk->loop == aStatement;
+            auto const low = chunk ? 1u : local(type::I64);
+            auto const high = chunk ? 2u : local(type::I64);
+            if (!chunk)
+                compatibility_checks(specification, [&](node const* aNode)
+                    {
+                        for (auto const* n = aNode; n != nullptr; n = n->parent)
+                            if (n == specification)
+                                return true;
+                        return false;
+                    });
+            if (!chunk)
+                discrete_bounds(specification, range, low, high);
             release_temporaries();
             // (a subtype with static predicates: from its least to its greatest value that satisfies them)
-            if (std::int64_t least = 0, greatest = 0; range != nullptr && (range->predicate != nullptr || range->view()->predicate != nullptr) &&
+            if (std::int64_t least = 0, greatest = 0; !chunk && range != nullptr && (range->predicate != nullptr || range->view()->predicate != nullptr) &&
                 static_predicate_bounds(range, least, greatest))
             {
                 i64(least);
@@ -3691,10 +3725,19 @@ namespace neos::compilers::ada
                 op(opcode::Select);
                 set(high);
             }
+            // (a parallel loop: its chunks run as logical threads (see parallel_loop))
+            if (!chunk && forScheme->has_flag("parallel"))
+            {
+                parallel_loop(aStatement, specification, low, high);
+                return;
+            }
             parameter->where = storage::None;
             assign_storage(parameter);
             begin(control_kind::Breakable, {}, loopEntity);
             auto const exit = iControls.size() - 1u;
+            // (a chunk: an exit from the loop abandons the other chunks)
+            if (chunk)
+                iControls.back().onExit = &iAbandonOnExit;
             get(low);
             get(high);
             op(opcode::I64GtS);
@@ -3703,6 +3746,15 @@ namespace neos::compilers::ada
             store_object(parameter);
             begin(control_kind::Loop);
             auto const head = iControls.size() - 1u;
+            // (a chunk: not continued once the chunks are abandoned (another's exit, or exception))
+            if (chunk)
+            {
+                frame_of_level(iChunk->parentLevel);
+                load64(static_cast<std::uint32_t>(iChunk->abandon));
+                i64(0);
+                op(opcode::I64Ne);
+                branch(exit, true);
+            }
             // (a subtype with a predicate: only the values that satisfy it (5.5(9/5)))
             auto* predicate = range != nullptr ? (range->predicate != nullptr ? range->predicate : range->view()->predicate) : nullptr;
             if (predicate != nullptr)
@@ -3806,7 +3858,7 @@ namespace neos::compilers::ada
                 break;
             }
         if (target == iControls.size())
-            iProgram.error(aStatement, "exit statement not in a loop");
+            iProgram.error(aStatement, iLogicalThread ? "an exit statement that leaves a parallel construct is not supported" : "exit statement not in a loop");
         if (when != nullptr)
         {
             statement_condition(when);

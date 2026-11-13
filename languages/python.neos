@@ -74,11 +74,11 @@
 
 #{
     string literal ::= 
-        { ( '\"' , '\"' , '\"' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | other escape | ( '\"' , '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , '\"' , ( escaped character | other escape ) ) | ( '\"' , ( escaped character | other escape ) ) ) } $ string.utf8 , '\"' , '\"' , '\"' , [ S ] ) |
+        { [ ( 'b' .. 'b' | 'B' .. 'B' | 'f' .. 'f' | 'F' .. 'F' | 'r' .. 'r' | 'R' .. 'R' | 'u' .. 'u' | 'U' .. 'U' ) , [ 'b' .. 'b' | 'B' .. 'B' | 'f' .. 'f' | 'F' .. 'F' | 'r' .. 'r' | 'R' .. 'R' ] ] , ( ( '\"' , '\"' , '\"' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | other escape | ( '\"' , '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , ( U+0001 .. '!' | '#' .. '[' | ']' .. '\xFF' ) ) | ( '\"' , '\"' , ( escaped character | other escape ) ) | ( '\"' , ( escaped character | other escape ) ) ) } $ string.utf8 , '\"' , '\"' , '\"' , [ S ] ) |
           ( '\'' , '\'' , '\'' , { ( ( U+0001 .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | other escape | ( '\'' , '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) | ( '\'' , ( U+0001 .. '&' | '(' .. '[' | ']' .. '\xFF' ) ) | ( '\'' , '\'' , ( escaped character | other escape ) ) | ( '\'' , ( escaped character | other escape ) ) ) } $ string.utf8 , '\'' , '\'' , '\'' , [ S ] ) |
           ( empty string , [ S ] ) |
           ( '\"' , { ( ( ' ' .. '\xFF' - ( '\\' | '\"' ) ) | escaped character | other escape ) } $ string.utf8 , '\"' , [ S ] ) |
-          ( '\'' , { ( ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | other escape ) } $ string.utf8 , '\'' , [ S ] ) } + ;
+          ( '\'' , { ( ( ' ' .. '\xFF' - ( '\\' | '\'' ) ) | escaped character | other escape ) } $ string.utf8 , '\'' , [ S ] ) ) } + ;
     empty string $ string.utf8.empty ::= ( '\"' , '\"' ) | ( '\'' , '\'' ) ;
     escaped character $ string.utf8.character.LF ::= "\\n" ;
     escaped character $ string.utf8.character.CR ::= "\\r" ;

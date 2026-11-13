@@ -2229,6 +2229,11 @@ namespace neos::compilers::ada
     void function_generator::attribute(node* aAttribute)
     {
         auto const name = name_text(aAttribute->child(1)->source);
+        if (name == "reduce" || name == "parallel_reduce")
+        {
+            reduction(aAttribute);
+            return;
+        }
         auto* prefix = aAttribute->child(0);
         auto const arguments = attribute_arguments(aAttribute);
         auto* resultType = aAttribute->type;
@@ -4960,6 +4965,244 @@ namespace neos::compilers::ada
         iLoopBody = std::move(saved);
         end();
         get(result);
+    }
+
+    // --- reduction expressions (4.5.10)
+
+    void function_generator::sequence_iteration(node* aExpression, node* aSpecification, std::optional<std::pair<std::uint32_t, std::uint32_t>> aBounds)
+    {
+        // (the iterations of a value sequence (or of an iterable object), each one's value iLoopBody's (as a quantified expression's);
+        // aBounds: a discrete range's bounds (locals): a parallel reduction's chunk's)
+        if (aSpecification->is(construct::ForRange) && aSpecification->mark == 1u)
+            generalized_iterator_loop(aExpression, aSpecification, nullptr);
+        else if (aSpecification->is(construct::ForRange))
+        {
+            auto* parameter = aSpecification->first(construct::Defining)->ent;
+            bool const reverse = aSpecification->has_flag("reverse");
+            auto const low = aBounds ? aBounds->first : local(type::I64);
+            auto const high = aBounds ? aBounds->second : local(type::I64);
+            if (!aBounds)
+                discrete_bounds(aSpecification, parameter->type, low, high);
+            parameter->where = storage::None;
+            assign_storage(parameter);
+            begin(control_kind::Breakable);
+            auto const exit = iControls.size() - 1u;
+            get(low);
+            get(high);
+            op(opcode::I64GtS);
+            branch(exit, true);
+            get(reverse ? high : low);
+            store_object(parameter);
+            begin(control_kind::Loop);
+            auto const head = iControls.size() - 1u;
+            if (auto* filter = aSpecification->first(construct::Filter))
+            {
+                condition(filter->child(0));
+                begin_if();
+                loop_body(nullptr);
+                end();
+            }
+            else
+                loop_body(nullptr);
+            load_object(parameter);
+            get(reverse ? low : high);
+            op(opcode::I64Eq);
+            branch(exit, true);
+            load_object(parameter);
+            i64(reverse ? -1 : 1);
+            op(opcode::I64Add);
+            store_object(parameter);
+            branch(head);
+            end();
+            end();
+        }
+        else
+            iterator_loop(aExpression, aSpecification, nullptr);
+    }
+
+    void function_generator::reduction_step(program::reduction_info const& aInfo, ada_type* aAccumulatorType, std::uint32_t aAccumulator)
+    {
+        // (an iteration: its value, then the accumulator the reducer's result (of it and the value))
+        auto* t = aInfo.element->type;
+        auto const value = local(t != nullptr && t->view()->is_composite() ? type::I64 : wasm_of(t));
+        expression(aInfo.value, t);
+        set(value);
+        aInfo.element->where = t != nullptr && t->view()->is_composite() ? storage::Indirect : storage::Local;
+        aInfo.element->local = value;
+        aInfo.element->function_level = static_cast<std::uint32_t>(iLevel);
+        check();
+        expression(aInfo.call, aAccumulatorType);
+        set(aAccumulator);
+        release_temporaries();
+        check();
+    }
+
+    void function_generator::generate_reduction_chunk(program::reduction_info const& aInfo, ada_type* aAccumulatorType, int aParentLevel, std::uint64_t aSlots)
+    {
+        // (a parallel reduction's chunk's function (as a parallel loop's: the static link, the chunk's first and last values, its number):
+        // its accumulator (the initial value, in the caller's frame) reduced with the chunk's values, its result in the caller's frame
+        // (the slot after the initial value's for each chunk))
+        iParameters = { type::I64, type::I64, type::I64, type::I64 };
+        iWhere = aInfo.call;
+        iLogicalThread = true;
+        prologue();
+        begin(control_kind::Exit);
+        stack_check();
+        auto const kind = kind_of(aAccumulatorType);
+        auto const accumulator = local(wasm_of(aAccumulatorType));
+        aInfo.accumulator->where = storage::Local;
+        aInfo.accumulator->local = accumulator;
+        aInfo.accumulator->function_level = static_cast<std::uint32_t>(iLevel);
+        frame_of_level(aParentLevel);
+        load(kind, 8u, static_cast<std::uint32_t>(aSlots));
+        set(accumulator);
+        auto saved = std::move(iLoopBody);
+        iLoopBody = [&]() { reduction_step(aInfo, aAccumulatorType, accumulator); };
+        sequence_iteration(aInfo.call, aInfo.specification, std::pair<std::uint32_t, std::uint32_t>{ 1u, 2u });
+        iLoopBody = std::move(saved);
+        frame_of_level(aParentLevel);
+        get(3u);
+        i64(8);
+        op(opcode::I64Mul);
+        op(opcode::I64Add);
+        get(accumulator);
+        store(kind, 8u, static_cast<std::uint32_t>(aSlots + 8u));
+        end();
+        epilogue();
+        finish(iParameters);
+    }
+
+    void function_generator::reduction(node* aAttribute)
+    {
+        // (Prefix'Reduce (Reducer, Initial): the accumulator the initial value, then reduced with each value of the sequence in turn
+        // (4.5.10(24/5)); 'Parallel_Reduce: the values of a discrete range's sequence in chunks (as a parallel loop's, run by the
+        // runtime), each reduced from the initial value, their results combined in order (4.5.10(25/5)))
+        auto const found = iProgram.iReductions.find(aAttribute);
+        auto* accumulatorType = aAttribute->type;
+        if (found == iProgram.iReductions.end() || found->second.call == nullptr || accumulatorType == nullptr)
+        {
+            iProgram.error(aAttribute, "internal error: reduction expression not analysed");
+            return;
+        }
+        auto const& info = found->second;
+        if (accumulatorType->view()->is_composite())
+        {
+            iProgram.error(aAttribute, "a reduction expression of a composite type is not supported");
+            return;
+        }
+        auto const accumulator = local(wasm_of(accumulatorType));
+        auto const own = [&]()
+        {
+            info.accumulator->where = storage::Local;
+            info.accumulator->local = accumulator;
+            info.accumulator->function_level = static_cast<std::uint32_t>(iLevel);
+        };
+        own();
+        expression(info.initial, accumulatorType);
+        set(accumulator);
+        release_temporaries();
+        check();
+        bool const parallel = info.parallel && info.combine != nullptr && info.specification->is(construct::ForRange) && info.specification->mark != 1u;
+        if (!parallel)
+        {
+            auto saved = std::move(iLoopBody);
+            iLoopBody = [&]() { reduction_step(info, accumulatorType, accumulator); };
+            sequence_iteration(aAttribute, info.specification);
+            iLoopBody = std::move(saved);
+            get(accumulator);
+            return;
+        }
+        // (parallel: the range's bounds; the initial value and the chunks' results in the frame; at most MaxChunks chunks)
+        constexpr std::int64_t MaxChunks = 64;
+        auto* parameter = info.specification->first(construct::Defining)->ent;
+        auto const low = local(type::I64);
+        auto const high = local(type::I64);
+        discrete_bounds(info.specification, parameter->type, low, high);
+        release_temporaries();
+        check();
+        auto const kind = kind_of(accumulatorType);
+        iFrameSize = (iFrameSize + 7u) & ~std::uint64_t{ 7u };
+        auto const slots = iFrameSize;
+        iFrameSize += 8u * static_cast<std::uint64_t>(MaxChunks + 1);
+        get(iFrame);
+        get(accumulator);
+        store(kind, 8u, static_cast<std::uint32_t>(slots));
+        auto const index = iProgram.define_internal("parallel_reduce", { type::I64, type::I64, type::I64, type::I64 });
+        {
+            function_generator g{ iProgram, iSubprogram, index, iLevel + 1 };
+            g.generate_reduction_chunk(info, accumulatorType, iLevel, slots);
+        }
+        own();
+        get(low);
+        get(high);
+        op(opcode::I64LeS);
+        begin_if();
+        {
+            function_index(index);
+            op(opcode::I64UConvertI32);
+            get(iFrame);
+            get(low);
+            get(high);
+            i64(MaxChunks);
+            i64(0);
+            runtime("parallel_loop", { type::I64, type::I64, type::I64, type::I64, type::I64, type::I64 }, type::Void);
+            check();
+            // (the chunks: as many as the runtime's (at most MaxChunks, at most the values); the first one's result, combined with the
+            // others' in order)
+            auto const count = local(type::I64);
+            get(high);
+            get(low);
+            op(opcode::I64Sub);
+            i64(1);
+            op(opcode::I64Add);
+            set(count);
+            get(count);
+            i64(MaxChunks);
+            op(opcode::I64GtU);
+            begin_if();
+            i64(MaxChunks);
+            set(count);
+            end();
+            get(iFrame);
+            load(kind, 8u, static_cast<std::uint32_t>(slots + 8u));
+            set(accumulator);
+            auto const k = local(type::I64);
+            i64(1);
+            set(k);
+            auto* t = info.part->type;
+            auto const part = local(wasm_of(t));
+            info.part->where = storage::Local;
+            info.part->local = part;
+            info.part->function_level = static_cast<std::uint32_t>(iLevel);
+            begin(control_kind::Breakable);
+            auto const exit = iControls.size() - 1u;
+            begin(control_kind::Loop);
+            auto const head = iControls.size() - 1u;
+            get(k);
+            get(count);
+            op(opcode::I64GeS);
+            branch(exit, true);
+            get(iFrame);
+            get(k);
+            i64(8);
+            op(opcode::I64Mul);
+            op(opcode::I64Add);
+            load(kind, 8u, static_cast<std::uint32_t>(slots + 8u));
+            set(part);
+            expression(info.combine, accumulatorType);
+            set(accumulator);
+            release_temporaries();
+            check();
+            get(k);
+            i64(1);
+            op(opcode::I64Add);
+            set(k);
+            branch(head);
+            end();
+            end();
+        }
+        end();
+        get(accumulator);
     }
 
     void function_generator::iterator_loop(node* aLoop, node* aSpecification, node* aBody)

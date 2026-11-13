@@ -171,6 +171,7 @@ namespace neos::ada_runtime
         auto const current = s.current;
         // (the master's dependent tasks: awaited first (their entries removed))
         std::vector<std::int64_t> tasks;
+        std::vector<std::int64_t> collections;
         std::vector<std::int64_t> protectedObjects;
         for (auto i = s.finalization.size(); i-- > aMark;)
             if (s.finalization[i].function == ProtectedEntry)
@@ -183,15 +184,14 @@ namespace neos::ada_runtime
                 if (s.finalization[i].function == TaskEntry)
                     tasks.push_back(s.finalization[i].object);
                 else
-                    for (auto t : collection_tasks(s.finalization[i].object))
-                        tasks.push_back(t);
+                    collections.push_back(s.finalization[i].object);
                 s.finalization.erase(s.finalization.begin() + static_cast<std::ptrdiff_t>(i));
             }
-        if (!tasks.empty())
+        if (!tasks.empty() || !collections.empty())
         {
             if (s.excGlobal != nullptr)
                 *s.excGlobal = 0u;
-            await_tasks(tasks);
+            await_tasks(tasks, collections);
         }
         // (the protected objects: first, their queued calls fail (9.4(20)))
         for (auto p : protectedObjects)
@@ -272,17 +272,23 @@ namespace
         ::_exit(1);
     }
 
+    // (the calling thread's stack for the handler (a fault may be its stack's overflow))
+    void signal_stack()
+    {
+        thread_local std::vector<char> tStack(1u << 16u);
+        stack_t alternate{};
+        alternate.ss_sp = tStack.data();
+        alternate.ss_size = tStack.size();
+        ::sigaltstack(&alternate, nullptr);
+    }
+
     void handle_memory_faults()
     {
         static bool sInstalled = false;
         if (sInstalled)
             return;
         sInstalled = true;
-        static std::vector<char> sStack(1u << 16u);
-        stack_t alternate{};
-        alternate.ss_sp = sStack.data();
-        alternate.ss_size = sStack.size();
-        ::sigaltstack(&alternate, nullptr);
+        signal_stack();
         struct sigaction action{};
         action.sa_handler = &memory_fault;
         action.sa_flags = SA_ONSTACK;
@@ -291,12 +297,21 @@ namespace
         ::sigaction(SIGBUS, &action, nullptr);
     }
 #else
+    void signal_stack() {}
     void handle_memory_faults() {}
 #endif
+
+    // (the program's globals that the runtime keeps (the primary stack's pointer and limit, the pending exception): their indexes)
+    std::int32_t gSpGlobal = -1;
+    std::int32_t gLimitGlobal = -1;
+    std::int32_t gExcGlobal = -1;
 
     NEOS_ADA_PRIMITIVE std::int64_t neos_ada_init(std::int64_t aStaticSize, std::int32_t aSpGlobal, std::int32_t aLimitGlobal, std::int32_t aExcGlobal)
     {
         handle_memory_faults();
+        gSpGlobal = aSpGlobal;
+        gLimitGlobal = aLimitGlobal;
+        gExcGlobal = aExcGlobal;
         auto& s = state();
         auto const* h = host();
         // (static data first: at StaticBase)
@@ -1054,6 +1069,21 @@ namespace neos::ada_runtime
     void occurrence_release(std::int64_t aHandle)
     {
         neos_ada_release_occurrence(aHandle);
+    }
+
+    void attach_globals(execution_state& aState)
+    {
+        auto const* h = host();
+        if (h == nullptr || h->global == nullptr || gSpGlobal < 0)
+            return;
+        aState.spGlobal = h->global(static_cast<unsigned>(gSpGlobal));
+        aState.limitGlobal = h->global(static_cast<unsigned>(gLimitGlobal));
+        aState.excGlobal = h->global(static_cast<unsigned>(gExcGlobal));
+    }
+
+    void thread_started()
+    {
+        signal_stack();
     }
 }
 

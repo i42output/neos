@@ -384,6 +384,26 @@ namespace neos::compilers::ada
         void controlled_unregister(std::uint32_t aAddress);
         bool is_temporary_value(node* aExpression);
         bool tasking_statement(node* aStatement);
+        // --- parallel constructs (5.5, 5.6.1): each logical thread of control (a block's sequence of statements, a loop's chunk) is a
+        // function of its own (at the next level: the objects outside it that it names are in frames, see the analysis), that the
+        // runtime runs (in parallel, its tasks are threads: see the runtime's parallel)
+        void parallel_block(node* aStatement);
+        void parallel_loop(node* aStatement, node* aSpecification, std::uint32_t aLow, std::uint32_t aHigh);
+        void generate_logical_thread(node* aStatements, node* aLoop);
+        struct chunk_context
+        {
+            node* loop = nullptr;           ///< (the parallel loop whose chunk the function is: its range is the chunk's (its parameters 1 and 2))
+            int parentLevel = 0;            ///< (the function that runs the loop: its level)
+            std::uint64_t abandon = 0u;     ///< (... the offset in its frame of the word that abandons the chunks (an exit, an exception))
+        };
+        std::optional<chunk_context> iChunk;
+        // (reduction expressions (4.5.10): see the analysis's reduction_info)
+        void reduction(node* aAttribute);
+        void reduction_step(program::reduction_info const& aInfo, ada_type* aAccumulatorType, std::uint32_t aAccumulator);
+        void sequence_iteration(node* aExpression, node* aSpecification, std::optional<std::pair<std::uint32_t, std::uint32_t>> aBounds = {});
+        void generate_reduction_chunk(program::reduction_info const& aInfo, ada_type* aAccumulatorType, int aParentLevel, std::uint64_t aSlots);
+        bool iLogicalThread = false;            ///< (a parallel construct's logical thread's function: a transfer of control out of it is not supported)
+        std::function<void()> iAbandonOnExit;   ///< (a chunk's loop's: an exit abandons the other chunks)
         bool tasking_call(node* aCall, call_info const& aInfo, entity* aCallee, bool aStatement);
         void tasking_attribute(node* aAttribute, std::string const& aName);
     public:

@@ -65,13 +65,14 @@ namespace neos::ada_runtime
 
     execution_state& state();
     void set_state(execution_state* aState);   ///< (the running task's (tasking switches it))
+    void attach_globals(execution_state& aState);  ///< (the program's globals as the calling thread has them (a task's thread: its own))
+    void thread_started();                     ///< (a task's thread: its handling of memory faults (its own signal stack))
     void set_pending(std::int64_t aId);
-    void await_tasks(std::vector<std::int64_t> const& aTasks);     ///< (a master's dependent tasks: their termination awaited (tasking.cpp))
+    void await_tasks(std::vector<std::int64_t> const& aTasks, std::vector<std::int64_t> const& aCollections);  ///< (a master's dependent tasks (and its access types' collections' tasks): their termination awaited (tasking.cpp))
     constexpr std::int64_t AbortSignal = 0x7FFFFFFFFFFFFFFF;       ///< (the exception that aborts a task: no handler handles it)
     constexpr std::int64_t AtcSignalBase = AbortSignal - 1024;      ///< (+ depth: the exception that aborts an asynchronous select's abortable part)
     constexpr std::int64_t TaskEntry = -1;                         ///< (a finalization chain entry that is a dependent task)
     constexpr std::int64_t CollectionEntry = -2;                   ///< (... a collection: the tasks that an access type's allocators created)
-    std::vector<std::int64_t> collection_tasks(std::int64_t aCollection);   ///< (tasking.cpp)
     constexpr std::int64_t ProtectedEntry = -4;                    ///< (... a protected object: its queued calls fail (Program_Error) when it is finalized (9.4(20)))
     void protected_finalize(std::int64_t aObject);  ///< (tasking.cpp)
     std::int64_t predefined_id(int aKind);         ///< (the id of a predefined exception: see raise_predefined)
